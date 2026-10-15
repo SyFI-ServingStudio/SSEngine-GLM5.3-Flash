@@ -12,23 +12,24 @@ Node `cayenne`, recorded 2026-10-15. Measured values only; anything not yet meas
 
 ## Serving code and kernel libraries
 
-The engine (`pp-impl`, provenance in its `README.md`) reuses kernels and layers from the vLLM fork checkout
-`/raid/kanzhu/ServingStudio/wt-flash-dflash2/alignment/profiler/vllm`, commit `892da0822f`
-(`servingstudio-alignment` line), with its `.venv`:
+The engine (`pp-impl`, provenance in its `README.md`) and the correctness reference run in `pp-impl/.venv`,
+declared final by the model lane at `lane-model` 8ec9465. It holds the vLLM fork checkout
+`pp-impl/third_party/vllm`, commit `892da0822f` (`servingstudio-alignment` line, the same commit as
+`wt-flash-dflash2/alignment/profiler/vllm`):
 
 | Library | Version / commit |
 |---|---|
 | vLLM fork | `892da0822f` (`vllm 0.1.dev21920+g892da0822.precompiled`, editable) |
 | PyTorch | 2.13.0, CUDA 13.0 |
-| FlashInfer | `flashinfer-python` 0.7.0, git `4d75a33f19aaf48b44d5b1c5dbca33bc1eca5c58` (has `kda_prefill_cute`, `mm_fp4`) |
+| FlashInfer | `flashinfer-python` 0.7.2.dev20261008, git `73b63f88` (nightly; the fork venv pins 0.7.0 `4d75a33f`). JIT cache `~/.cache/flashinfer/0.7.2.dev20261008/100a` |
 | DeepGEMM | vendored `vllm/third_party/deep_gemm` 2.8.0, built from `vllm-project/DeepGEMM@e1f418c2a4f20818221f6b0e578b4c2f634d4c3f` (has `mega_mhc`) |
 | DeepSelect | `vllm/_deepselect_C.abi3.so`, `vllm-project/DeepSelect@d96d33afe1fab0d6066da49cdc91e64c2bee65ea` |
 | FlashKDA / FlashMLA | `vllm-project/FlashKDA@b59532f1`, `vllm-project/FlashMLA@0eee43b1` (built into the fork; not in the design's path) |
 | TileLang | 0.1.12 |
 | Triton | 3.7.1 |
-| CuTe DSL | `nvidia-cutlass-dsl` 4.7.1 |
+| CuTe DSL | `nvidia-cutlass-dsl` 4.8.0 (fork venv: 4.7.1) |
 | cuBLAS / cuDNN / NCCL | 13.1.1.3 / 9.20.0.48 / 2.29.7 (cu13) |
-| causal-conv1d (Dao-AILab) | **not installed in the fork venv**; the fork's `glm5next` KDA layer calls vLLM's own Triton `causal_conv1d_fn` |
+| causal-conv1d (Dao-AILab) | 1.7.0, on `PYTHONPATH` from `pp-impl/third_party/causal_conv1d_try/pkg` (not in the fork venv, whose `glm5next` KDA layer calls vLLM's Triton `causal_conv1d_fn`) |
 | transformers / safetensors | 5.19.0 / 0.8.0 |
 
 The kernel rows (`data/kernel_specs.jsonl`) were measured by the ServingStudioSim profiler in other environments:
@@ -97,3 +98,15 @@ A 16 GiB file read repeatedly for 15 s gave 50–94 GB/s for the parallel patter
 Writes (4 MiB, queue depth 16) ran at 17.6 GB/s. The array is shared: other users' I/O lowers what a run sees.
 The striped array meets 40 GB/s for the node only with deep queues (≥ 32 outstanding MiB-sized reads); one
 synchronous reader gets 3.8 GB/s.
+
+## Differences from `1_contract.md` §1 (for `issues.md`)
+
+| Item | Contract | Here | Affects |
+|---|---|---|---|
+| Local SSD capacity | 256 GB per GPU, 1 TB for the node | 469 GB free on the shared `/raid` | `7_offloading.md` runs that need the full SSD tier (`tiers`, `ssd_heavy`) |
+| Local SSD bandwidth | 10 GB/s per GPU, 40 GB/s for the node | 40.1 GB/s needs ≥ 32 outstanding 1 MiB reads; 103 GB/s with 4 × qd16 4 MiB; 3.8 GB/s for one synchronous reader; shared with other users | SSD-tier read times (`7_offloading.md`) unless the reader keeps deep queues |
+| Host DRAM bandwidth | 50 GB/s per GPU | 55.7 GB/s per GPU alone; 48.5–55.7 (sum 212.1) with 4 GPUs at once | none (meets it) |
+| GPUs | 4 × B200 in one NVLink domain | met: all pairs NV18; Slurm picks the 4 cards per job, which may span both NUMA nodes | none |
+| Kernel library versions | the rows' environments (above) | FlashInfer nightly 0.7.2.dev20261008 and CuTe DSL 4.8.0 instead of the fork's 0.7.0 / 4.7.1; Dao causal-conv1d added | kernel times: see `kernels.md` (re-measured in this env) and `kernels_nodecheck.md` |
+
+Not measured by this lane: usable HBM per GPU, the largest stage's weights and the KV pool (model lane).
