@@ -5,7 +5,7 @@
   ... --nsys [--nsys-mbs a:b|all]     the server under Nsight Systems -> trace.nsys-rep, trace.sqlite, trace.json
 
 Names: one_<L>, saturated_<L> (4_iteration.md), L in 1k..128k. Each run gets a fresh server; the server and the
-client run as concurrent steps of one job (port 20000 + job id % 10000). Everything goes to
+client run as concurrent steps of one job (port 20000 + job id % 120 * 100). Everything goes to
 measured/runs/<name>/ (with --fake: measured/runs/fake/<name>/): run.json, uptime.txt, server and client configs,
 server logs (microbatches.jsonl, server_requests.jsonl, worker*.log), requests.jsonl, metrics.json
 (handoff data/metrics.py), report.json (bench/report.py).
@@ -324,7 +324,8 @@ def main():
             raise SystemExit("--time is required to submit (run slurm-windows first)")
         return submit(args)
     job = os.environ.get("SLURM_JOB_ID")
-    port = args.port or (20000 + int(job) % 400 * 100 if job else 18500)   # 100 ports per job: runs use port + 10 i
+    # 100 ports per job (runs use port + 10 i), all below the ephemeral range (32768+): 7134 lost a bind to one there
+    port = args.port or (20000 + int(job) % 120 * 100 if job else 18500)
     if args.cpu and not (args.fake and args.inline):
         raise SystemExit("--cpu needs --fake --inline")
     out = Path(args.out_root) if args.out_root else \
