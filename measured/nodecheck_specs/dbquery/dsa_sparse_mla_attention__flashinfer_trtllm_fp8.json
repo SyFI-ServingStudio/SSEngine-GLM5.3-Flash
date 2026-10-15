@@ -1,0 +1,101 @@
+{
+  "backend": "flashinfer_trtllm_fp8",
+  "db_path": "/raid/kanzhu/ServingStudio/wt-pp-main/profiling/profile.db",
+  "gpu_name": "NVIDIA B200",
+  "missing_count": 0,
+  "mode": "query",
+  "ok": true,
+  "results": [
+    {
+      "index": 0,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 30.868433327476772,
+        "tflops": 2.9925941517004704,
+        "time_ms": 0.005606244999999999
+      },
+      "status": "ok"
+    },
+    {
+      "index": 1,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 3157.2003556439354,
+        "tflops": 613.1500828616083,
+        "time_ms": 0.018200226
+      },
+      "status": "ok"
+    },
+    {
+      "index": 2,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 5203.803445399007,
+        "tflops": 1208.3602395682176,
+        "time_ms": 7.284694733333334
+      },
+      "status": "ok"
+    }
+  ],
+  "spec_count": 3,
+  "specs": [
+    {
+      "cache_dtype": "fp8_e4m3",
+      "cache_layout": "hnd_paged_mqa_fp8_latent",
+      "index_distribution": "unique_scattered_pages",
+      "index_dtype": "int32",
+      "latent_dim": 512,
+      "num_cache_tokens": 128,
+      "num_heads": 64,
+      "num_kv_heads": 1,
+      "num_queries": 1,
+      "output_dtype": "bf16",
+      "q_dtype": "fp8_e4m3",
+      "rope_dim": 0,
+      "selected_k": 2176,
+      "softmax_scale": 0.0625,
+      "valid_counts": "u:128x1",
+      "value_dim": 512
+    },
+    {
+      "cache_dtype": "fp8_e4m3",
+      "cache_layout": "hnd_paged_mqa_fp8_latent",
+      "index_distribution": "unique_scattered_pages",
+      "index_dtype": "int32",
+      "latent_dim": 512,
+      "num_cache_tokens": 724,
+      "num_heads": 64,
+      "num_kv_heads": 1,
+      "num_queries": 129,
+      "output_dtype": "bf16",
+      "q_dtype": "fp8_e4m3",
+      "rope_dim": 0,
+      "selected_k": 2176,
+      "softmax_scale": 0.0625,
+      "valid_counts": "r:596..724",
+      "value_dim": 512
+    },
+    {
+      "cache_dtype": "fp8_e4m3",
+      "cache_layout": "hnd_paged_mqa_fp8_latent",
+      "index_distribution": "unique_scattered_pages",
+      "index_dtype": "int32",
+      "latent_dim": 512,
+      "num_cache_tokens": 1048576,
+      "num_heads": 64,
+      "num_kv_heads": 1,
+      "num_queries": 32768,
+      "output_dtype": "bf16",
+      "q_dtype": "fp8_e4m3",
+      "rope_dim": 0,
+      "selected_k": 2176,
+      "softmax_scale": 0.0625,
+      "valid_counts": "g:(2048,2049,2050,2051)x8192",
+      "value_dim": 512
+    }
+  ],
+  "table": "dsa_sparse_mla_attention"
+}

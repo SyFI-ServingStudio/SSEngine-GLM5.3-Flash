@@ -1,0 +1,68 @@
+{
+  "backend": "torch_mla_q_absorb_no_rope",
+  "db_path": "/raid/kanzhu/ServingStudio/wt-pp-main/profiling/profile.db",
+  "gpu_name": "NVIDIA B200",
+  "missing_count": 0,
+  "mode": "query",
+  "ok": true,
+  "results": [
+    {
+      "index": 0,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 4624.074973742914,
+        "tflops": 4.597138614672566,
+        "time_ms": 0.003649491
+      },
+      "status": "ok"
+    },
+    {
+      "index": 1,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 5152.369089899079,
+        "tflops": 837.9570623384102,
+        "time_ms": 0.069194546
+      },
+      "status": "ok"
+    },
+    {
+      "index": 2,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 4715.75793572901,
+        "tflops": 802.7322391582762,
+        "time_ms": 1.3697115602693604
+      },
+      "status": "ok"
+    }
+  ],
+  "spec_count": 3,
+  "specs": [
+    {
+      "dtype": "bf16",
+      "k": 256,
+      "m": 1,
+      "n": 512,
+      "num_batches": 64
+    },
+    {
+      "dtype": "bf16",
+      "k": 256,
+      "m": 3456,
+      "n": 512,
+      "num_batches": 64
+    },
+    {
+      "dtype": "bf16",
+      "k": 256,
+      "m": 65536,
+      "n": 512,
+      "num_batches": 64
+    }
+  ],
+  "table": "batched_gemm"
+}

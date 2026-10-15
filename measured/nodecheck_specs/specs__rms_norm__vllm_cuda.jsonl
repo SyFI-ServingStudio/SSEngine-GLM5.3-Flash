@@ -1,0 +1,3 @@
+{"m": 32, "hidden": 4096, "dtype": "bf16"}
+{"m": 3840, "hidden": 4096, "dtype": "bf16"}
+{"m": 65536, "hidden": 4096, "dtype": "bf16"}

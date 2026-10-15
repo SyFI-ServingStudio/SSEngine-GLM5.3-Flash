@@ -1,0 +1,71 @@
+{
+  "backend": "dao_channellast",
+  "db_path": "/raid/kanzhu/ServingStudio/wt-pp-main/profiling/profile.db",
+  "gpu_name": "NVIDIA B200",
+  "missing_count": 0,
+  "mode": "query",
+  "ok": true,
+  "results": [
+    {
+      "index": 0,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 117.06986078019933,
+        "tflops": 0.05853440110768225,
+        "time_ms": 0.0037787009999999998
+      },
+      "status": "ok"
+    },
+    {
+      "index": 1,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 3770.451967294087,
+        "tflops": 8.46904312750605,
+        "time_ms": 0.21394853004291844
+      },
+      "status": "ok"
+    },
+    {
+      "index": 2,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 3747.892972493228,
+        "tflops": 8.420360099401064,
+        "time_ms": 6.885935733333333
+      },
+      "status": "ok"
+    }
+  ],
+  "spec_count": 3,
+  "specs": [
+    {
+      "batch_size": 1,
+      "channels": 24576,
+      "dtype": "bf16",
+      "kernel_size": 4,
+      "sequence_length": 1,
+      "state_dtype": "bf16"
+    },
+    {
+      "batch_size": 8,
+      "channels": 24576,
+      "dtype": "bf16",
+      "kernel_size": 4,
+      "sequence_length": 1024,
+      "state_dtype": "bf16"
+    },
+    {
+      "batch_size": 256,
+      "channels": 24576,
+      "dtype": "bf16",
+      "kernel_size": 4,
+      "sequence_length": 1024,
+      "state_dtype": "bf16"
+    }
+  ],
+  "table": "gdn_causal_conv_prefill"
+}

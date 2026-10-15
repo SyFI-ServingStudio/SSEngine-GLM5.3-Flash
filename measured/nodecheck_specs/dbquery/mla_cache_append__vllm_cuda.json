@@ -1,0 +1,74 @@
+{
+  "backend": "vllm_cuda",
+  "db_path": "/raid/kanzhu/ServingStudio/wt-pp-main/profiling/profile.db",
+  "gpu_name": "NVIDIA B200",
+  "missing_count": 0,
+  "mode": "query",
+  "ok": true,
+  "results": [
+    {
+      "index": 0,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 1.9373974678817394,
+        "tflops": 0.0,
+        "time_ms": 0.0015938908
+      },
+      "status": "ok"
+    },
+    {
+      "index": 1,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 651.5920647881844,
+        "tflops": 0.0,
+        "time_ms": 0.008189271
+      },
+      "status": "ok"
+    },
+    {
+      "index": 2,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 596.6902380622413,
+        "tflops": 0.0,
+        "time_ms": 0.16958143027210884
+      },
+      "status": "ok"
+    }
+  ],
+  "spec_count": 3,
+  "specs": [
+    {
+      "block_size": 64,
+      "cache_format": "plain",
+      "input_dtype": "bf16",
+      "kv_dtype": "fp8_e4m3",
+      "kv_lora_rank": 512,
+      "num_tokens": 2,
+      "rope_dim": 0
+    },
+    {
+      "block_size": 64,
+      "cache_format": "plain",
+      "input_dtype": "bf16",
+      "kv_dtype": "fp8_e4m3",
+      "kv_lora_rank": 512,
+      "num_tokens": 3456,
+      "rope_dim": 0
+    },
+    {
+      "block_size": 64,
+      "cache_format": "plain",
+      "input_dtype": "bf16",
+      "kv_dtype": "fp8_e4m3",
+      "kv_lora_rank": 512,
+      "num_tokens": 65536,
+      "rope_dim": 0
+    }
+  ],
+  "table": "mla_cache_append"
+}

@@ -1,0 +1,71 @@
+{
+  "backend": "flashinfer_cute_persistent",
+  "db_path": "/raid/kanzhu/ServingStudio/wt-pp-main/profiling/profile.db",
+  "gpu_name": "NVIDIA B200",
+  "missing_count": 0,
+  "mode": "query",
+  "ok": true,
+  "results": [
+    {
+      "index": 0,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 739.5044949986694,
+        "tflops": 1.3664914110804147,
+        "time_ms": 0.023020474
+      },
+      "status": "ok"
+    },
+    {
+      "index": 1,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 1443.1274734529975,
+        "tflops": 115.39319582638029,
+        "time_ms": 0.37365673782771536
+      },
+      "status": "ok"
+    },
+    {
+      "index": 2,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 2371.1165021520533,
+        "tflops": 108.40875589747266,
+        "time_ms": 3.17565190625
+      },
+      "status": "ok"
+    }
+  ],
+  "spec_count": 3,
+  "specs": [
+    {
+      "dtype": "bf16",
+      "head_dim": 128,
+      "max_sequence_length": 2,
+      "num_decode_sequences": 1,
+      "num_heads": 64,
+      "num_tokens": 3
+    },
+    {
+      "dtype": "bf16",
+      "head_dim": 128,
+      "max_sequence_length": 512,
+      "num_decode_sequences": 16,
+      "num_heads": 64,
+      "num_tokens": 4112
+    },
+    {
+      "dtype": "bf16",
+      "head_dim": 128,
+      "max_sequence_length": 64,
+      "num_decode_sequences": 64,
+      "num_heads": 64,
+      "num_tokens": 32832
+    }
+  ],
+  "table": "kda_chunk_prefill"
+}

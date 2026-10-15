@@ -1,0 +1,62 @@
+{
+  "backend": "vllm_cuda",
+  "db_path": "/raid/kanzhu/ServingStudio/wt-pp-main/profiling/profile.db",
+  "gpu_name": "NVIDIA B200",
+  "missing_count": 0,
+  "mode": "query",
+  "ok": true,
+  "results": [
+    {
+      "index": 0,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 203.07246256099364,
+        "tflops": 0.19997267857719,
+        "time_ms": 0.0026221181999999997
+      },
+      "status": "ok"
+    },
+    {
+      "index": 1,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 3715.475738124742,
+        "tflops": 3.715445505442326,
+        "time_ms": 0.016935315
+      },
+      "status": "ok"
+    },
+    {
+      "index": 2,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 4701.092416915269,
+        "tflops": 4.701630410142354,
+        "time_ms": 0.22840436238532108
+      },
+      "status": "ok"
+    }
+  ],
+  "spec_count": 3,
+  "specs": [
+    {
+      "dtype": "bf16",
+      "hidden": 4096,
+      "m": 32
+    },
+    {
+      "dtype": "bf16",
+      "hidden": 4096,
+      "m": 3840
+    },
+    {
+      "dtype": "bf16",
+      "hidden": 4096,
+      "m": 65536
+    }
+  ],
+  "table": "rms_norm"
+}

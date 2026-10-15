@@ -1,0 +1,116 @@
+{
+  "backend": "flashinfer_cutedsl",
+  "db_path": "/raid/kanzhu/ServingStudio/wt-pp-main/profiling/profile.db",
+  "gpu_name": "NVIDIA B200",
+  "missing_count": 0,
+  "mode": "query",
+  "ok": true,
+  "results": [
+    {
+      "index": 0,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 4895.05964375263,
+        "tflops": 17.38885446509776,
+        "time_ms": 0.011577909999999999
+      },
+      "status": "ok"
+    },
+    {
+      "index": 1,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 1698.4602058573325,
+        "tflops": 5084.319845725697,
+        "time_ms": 0.141917607
+      },
+      "status": "ok"
+    },
+    {
+      "index": 2,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 977.7652140520987,
+        "tflops": 3762.4261911555727,
+        "time_ms": 3.5068168418367347
+      },
+      "status": "ok"
+    },
+    {
+      "index": 3,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 3245.1156818685804,
+        "tflops": 11.5320368361934,
+        "time_ms": 0.0087290127
+      },
+      "status": "ok"
+    },
+    {
+      "index": 4,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 1207.643331133422,
+        "tflops": 5218.293187856699,
+        "time_ms": 0.066667843
+      },
+      "status": "ok"
+    },
+    {
+      "index": 5,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 592.3859639225985,
+        "tflops": 3838.2803574012523,
+        "time_ms": 1.7187566181649676
+      },
+      "status": "ok"
+    }
+  ],
+  "spec_count": 6,
+  "specs": [
+    {
+      "dtype": "nvfp4_e2m1",
+      "k": 4096,
+      "m": 1,
+      "n": 24576
+    },
+    {
+      "dtype": "nvfp4_e2m1",
+      "k": 4096,
+      "m": 3584,
+      "n": 24576
+    },
+    {
+      "dtype": "nvfp4_e2m1",
+      "k": 4096,
+      "m": 65536,
+      "n": 24576
+    },
+    {
+      "dtype": "nvfp4_e2m1",
+      "k": 12288,
+      "m": 1,
+      "n": 4096
+    },
+    {
+      "dtype": "nvfp4_e2m1",
+      "k": 12288,
+      "m": 3456,
+      "n": 4096
+    },
+    {
+      "dtype": "nvfp4_e2m1",
+      "k": 12288,
+      "m": 65536,
+      "n": 4096
+    }
+  ],
+  "table": "single_gemm"
+}

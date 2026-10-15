@@ -1,0 +1,116 @@
+{
+  "backend": "torch_cublas",
+  "db_path": "/raid/kanzhu/ServingStudio/wt-pp-main/profiling/profile.db",
+  "gpu_name": "NVIDIA B200",
+  "missing_count": 0,
+  "mode": "query",
+  "ok": true,
+  "results": [
+    {
+      "index": 0,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 399.31536974578023,
+        "tflops": 3.096416026568877,
+        "time_ms": 0.006095553
+      },
+      "status": "ok"
+    },
+    {
+      "index": 1,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 3597.163429856023,
+        "tflops": 858.45360073481,
+        "time_ms": 0.011960642
+      },
+      "status": "ok"
+    },
+    {
+      "index": 2,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 4431.749530462068,
+        "tflops": 1114.6917846717522,
+        "time_ms": 0.1387099329
+      },
+      "status": "ok"
+    },
+    {
+      "index": 3,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 105.0972761965358,
+        "tflops": 0.050944194473492375,
+        "time_ms": 0.005145709
+      },
+      "status": "ok"
+    },
+    {
+      "index": 4,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 1125.483014335581,
+        "tflops": 17.711223373781436,
+        "time_ms": 0.053046821
+      },
+      "status": "ok"
+    },
+    {
+      "index": 5,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 2688.678441796297,
+        "tflops": 42.66470468802958,
+        "time_ms": 0.4026717004048583
+      },
+      "status": "ok"
+    }
+  ],
+  "spec_count": 6,
+  "specs": [
+    {
+      "input_dtype": "bf16",
+      "k": 4096,
+      "m": 8,
+      "n": 288
+    },
+    {
+      "input_dtype": "bf16",
+      "k": 4096,
+      "m": 4352,
+      "n": 288
+    },
+    {
+      "input_dtype": "bf16",
+      "k": 4096,
+      "m": 65536,
+      "n": 288
+    },
+    {
+      "input_dtype": "fp32",
+      "k": 4096,
+      "m": 1,
+      "n": 32
+    },
+    {
+      "input_dtype": "fp32",
+      "k": 4096,
+      "m": 3584,
+      "n": 32
+    },
+    {
+      "input_dtype": "fp32",
+      "k": 4096,
+      "m": 65536,
+      "n": 32
+    }
+  ],
+  "table": "gemm_fp32_output"
+}

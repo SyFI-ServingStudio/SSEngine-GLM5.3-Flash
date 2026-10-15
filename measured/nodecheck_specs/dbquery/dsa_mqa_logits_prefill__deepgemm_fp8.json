@@ -1,0 +1,89 @@
+{
+  "backend": "deepgemm_fp8",
+  "db_path": "/raid/kanzhu/ServingStudio/wt-pp-main/profiling/profile.db",
+  "gpu_name": "NVIDIA B200",
+  "missing_count": 0,
+  "mode": "query",
+  "ok": true,
+  "results": [
+    {
+      "index": 0,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0019208802132754958,
+        "memory_bandwidth_gbps": 5.5299127848355125,
+        "tflops": 2.5990738808927305,
+        "time_ms": 0.00322753734
+      },
+      "status": "ok"
+    },
+    {
+      "index": 1,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.004741973502397789,
+        "memory_bandwidth_gbps": 60.49645280502848,
+        "tflops": 13.209803679930351,
+        "time_ms": 0.02032092698
+      },
+      "status": "ok"
+    },
+    {
+      "index": 2,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 17.051241379310344,
+        "memory_bandwidth_gbps": 975.2740385750751,
+        "tflops": 1979.3839549191996,
+        "time_ms": 17.742867669565218
+      },
+      "status": "ok"
+    }
+  ],
+  "spec_count": 3,
+  "specs": [
+    {
+      "clean_logits": "0",
+      "head_dim": 128,
+      "k_dtype": "fp8_e4m3",
+      "k_scale_dtype": "fp32",
+      "num_heads": 32,
+      "num_keys": 8,
+      "num_queries": 3,
+      "num_sequences": 1,
+      "output_dtype": "fp32",
+      "q_dtype": "fp8_e4m3",
+      "span_mode": "single_causal_tail",
+      "weight_dtype": "fp32"
+    },
+    {
+      "clean_logits": "0",
+      "head_dim": 128,
+      "k_dtype": "fp8_e4m3",
+      "k_scale_dtype": "fp32",
+      "num_heads": 32,
+      "num_keys": 8192,
+      "num_queries": 4,
+      "num_sequences": 1,
+      "output_dtype": "fp32",
+      "q_dtype": "fp8_e4m3",
+      "span_mode": "single_causal_tail",
+      "weight_dtype": "fp32"
+    },
+    {
+      "clean_logits": "0",
+      "head_dim": 128,
+      "k_dtype": "fp8_e4m3",
+      "k_scale_dtype": "fp32",
+      "num_heads": 32,
+      "num_keys": 1048576,
+      "num_queries": 4096,
+      "num_sequences": 1,
+      "output_dtype": "fp32",
+      "q_dtype": "fp8_e4m3",
+      "span_mode": "single_causal_tail",
+      "weight_dtype": "fp32"
+    }
+  ],
+  "table": "dsa_mqa_logits_prefill"
+}

@@ -1,0 +1,68 @@
+{
+  "backend": "vllm_triton",
+  "db_path": "/raid/kanzhu/ServingStudio/wt-pp-main/profiling/profile.db",
+  "gpu_name": "NVIDIA B200",
+  "missing_count": 0,
+  "mode": "query",
+  "ok": true,
+  "results": [
+    {
+      "index": 0,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 12.543932858599375,
+        "tflops": 0.0,
+        "time_ms": 0.0016326618
+      },
+      "status": "ok"
+    },
+    {
+      "index": 1,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 2740.6147912551123,
+        "tflops": 0.0,
+        "time_ms": 0.010714466
+      },
+      "status": "ok"
+    },
+    {
+      "index": 2,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 3123.6085669049503,
+        "tflops": 0.0,
+        "time_ms": 0.17187653206239167
+      },
+      "status": "ok"
+    }
+  ],
+  "spec_count": 3,
+  "specs": [
+    {
+      "dtype": "bf16",
+      "kv_dim": 512,
+      "num_tokens": 2,
+      "q_dim": 1536,
+      "rms_eps": 1e-05
+    },
+    {
+      "dtype": "bf16",
+      "kv_dim": 512,
+      "num_tokens": 3584,
+      "q_dim": 1536,
+      "rms_eps": 1e-05
+    },
+    {
+      "dtype": "bf16",
+      "kv_dim": 512,
+      "num_tokens": 65536,
+      "q_dim": 1536,
+      "rms_eps": 1e-05
+    }
+  ],
+  "table": "q_kv_rms_norm"
+}

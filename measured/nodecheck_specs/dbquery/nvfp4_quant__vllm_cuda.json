@@ -1,0 +1,176 @@
+{
+  "backend": "vllm_cuda",
+  "db_path": "/raid/kanzhu/ServingStudio/wt-pp-main/profiling/profile.db",
+  "gpu_name": "NVIDIA B200",
+  "missing_count": 0,
+  "mode": "query",
+  "ok": true,
+  "results": [
+    {
+      "index": 0,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 65.2905902891987,
+        "tflops": 0.0,
+        "time_ms": 0.00197615
+      },
+      "status": "ok"
+    },
+    {
+      "index": 1,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 6160.72027801499,
+        "tflops": 0.0,
+        "time_ms": 0.018318149
+      },
+      "status": "ok"
+    },
+    {
+      "index": 2,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 6488.875256603179,
+        "tflops": 0.0,
+        "time_ms": 0.31802084126984126
+      },
+      "status": "ok"
+    },
+    {
+      "index": 3,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 6.760913212831563,
+        "tflops": 0.0,
+        "time_ms": 0.001552453
+      },
+      "status": "ok"
+    },
+    {
+      "index": 4,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 5190.8141446188265,
+        "tflops": 0.0,
+        "time_ms": 0.0072469679999999995
+      },
+      "status": "ok"
+    },
+    {
+      "index": 5,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 6054.001244174304,
+        "tflops": 0.0,
+        "time_ms": 0.11362169055745164
+      },
+      "status": "ok"
+    },
+    {
+      "index": 6,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 25.31411623374827,
+        "tflops": 0.0,
+        "time_ms": 0.001698973
+      },
+      "status": "ok"
+    },
+    {
+      "index": 7,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 5020.475389267821,
+        "tflops": 0.0,
+        "time_ms": 0.007492848999999999
+      },
+      "status": "ok"
+    },
+    {
+      "index": 8,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 5960.0048969126165,
+        "tflops": 0.0,
+        "time_ms": 0.11541363940092167
+      },
+      "status": "ok"
+    }
+  ],
+  "spec_count": 9,
+  "specs": [
+    {
+      "group_size": 16,
+      "hidden_size": 12288,
+      "input_dtype": "bf16",
+      "num_tokens": 1,
+      "scale_format": "swizzled_e4m3"
+    },
+    {
+      "group_size": 16,
+      "hidden_size": 12288,
+      "input_dtype": "bf16",
+      "num_tokens": 3584,
+      "scale_format": "swizzled_e4m3"
+    },
+    {
+      "group_size": 16,
+      "hidden_size": 12288,
+      "input_dtype": "bf16",
+      "num_tokens": 65536,
+      "scale_format": "swizzled_e4m3"
+    },
+    {
+      "group_size": 16,
+      "hidden_size": 4096,
+      "input_dtype": "bf16",
+      "num_tokens": 1,
+      "scale_format": "linear_e4m3"
+    },
+    {
+      "group_size": 16,
+      "hidden_size": 4096,
+      "input_dtype": "bf16",
+      "num_tokens": 3584,
+      "scale_format": "linear_e4m3"
+    },
+    {
+      "group_size": 16,
+      "hidden_size": 4096,
+      "input_dtype": "bf16",
+      "num_tokens": 65536,
+      "scale_format": "linear_e4m3"
+    },
+    {
+      "group_size": 16,
+      "hidden_size": 4096,
+      "input_dtype": "bf16",
+      "num_tokens": 1,
+      "scale_format": "swizzled_e4m3"
+    },
+    {
+      "group_size": 16,
+      "hidden_size": 4096,
+      "input_dtype": "bf16",
+      "num_tokens": 3584,
+      "scale_format": "swizzled_e4m3"
+    },
+    {
+      "group_size": 16,
+      "hidden_size": 4096,
+      "input_dtype": "bf16",
+      "num_tokens": 65536,
+      "scale_format": "swizzled_e4m3"
+    }
+  ],
+  "table": "nvfp4_quant"
+}
