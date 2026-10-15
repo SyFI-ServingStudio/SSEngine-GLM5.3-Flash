@@ -352,6 +352,8 @@ def bench(args) -> None:
     with torch.inference_mode():
         model.warmup()
     print(f"[host] warmup (autotune) {time.time() - t0:.0f} s", flush=True)
+    if args.cuda_graphs:
+        model.capture_graphs()
     cpm = lb.sleep_cycles_per_ms()
     tokens = lb.enwik9_tokens(CHECKPOINT, max(lengths))
     result = {}
@@ -398,7 +400,7 @@ def bench(args) -> None:
                 spy = spy_loop_marker(model, plan, args.spy_seconds,
                                       OUT / f"{args.tag or os.environ.get('SLURM_JOB_ID', 'local')}_spy_L{L}.txt")
         units = {k: v for k, v in idle.items() if not k.startswith("_") and k != "forward"}
-        result[L] = {"prompt_tokens": L, "autotune_memo": dict(pp_patch.AUTOTUNE_MEMO_STATS), "idle_us": idle,
+        result[L] = {"prompt_tokens": L, "cuda_graphs": model.graph_info, "autotune_memo": dict(pp_patch.AUTOTUNE_MEMO_STATS), "idle_us": idle,
                      "busy_us": busy, "busy_sleep_ms": round(busy_ms, 1), "idle_by_type": by_type(units),
                      "spy": spy}
     for L in lengths:
@@ -449,6 +451,8 @@ def main() -> None:
     ap.add_argument("--runs", type=int, default=5)
     ap.add_argument("--spy-seconds", type=float, default=0)
     ap.add_argument("--tag", default=None)
+    ap.add_argument("--cuda-graphs", action="store_true",
+                    help="capture the stage's CUDA graphs after warm-up: lengths up to the largest bucket replay")
     ap.add_argument("--check-trims", action="store_true",
                     help="build without the host trims, compare outputs before/after installing them, then time")
     ap.add_argument("--compare-metadata", type=Path, default=None,

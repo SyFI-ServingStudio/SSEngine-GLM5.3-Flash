@@ -1,0 +1,83 @@
+{
+ "stage": 1,
+ "mb_tokens": 32768,
+ "num_blocks": 7144,
+ "graph_info": {
+  "enabled": true,
+  "buckets": [
+   128,
+   256,
+   512,
+   1024,
+   2048,
+   4096,
+   8192
+  ],
+  "capture_s": 0.8,
+  "graph_memory_gib": 7.006,
+  "segments": {
+   "8192": [
+    14,
+    13
+   ],
+   "4096": [
+    14,
+    13
+   ],
+   "2048": [
+    14,
+    13
+   ],
+   "1024": [
+    14,
+    13
+   ],
+   "512": [
+    14,
+    13
+   ],
+   "256": [
+    14,
+    13
+   ],
+   "128": [
+    14,
+    13
+   ]
+  },
+  "free_after_gib": 53.97
+ },
+ "free_before_model_gib": 177.74,
+ "free_after_init_gib": 53.97,
+ "runs": [
+  {
+   "T": 32768,
+   "graph": false,
+   "free_gib": 39.33,
+   "reserved_gib": 138.16,
+   "peak_reserved_gib": 138.16
+  },
+  {
+   "T": 8192,
+   "graph": true,
+   "free_gib": 39.33,
+   "reserved_gib": 138.16,
+   "peak_reserved_gib": 138.16
+  },
+  {
+   "T": 32768,
+   "graph": false,
+   "free_gib": 39.33,
+   "reserved_gib": 138.16,
+   "peak_reserved_gib": 138.16
+  },
+  {
+   "T": 8192,
+   "graph": true,
+   "free_gib": 39.33,
+   "reserved_gib": 138.16,
+   "peak_reserved_gib": 138.16
+  }
+ ],
+ "min_free_gib": 39.33
+}

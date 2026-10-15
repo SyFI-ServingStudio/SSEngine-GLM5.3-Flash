@@ -42,10 +42,26 @@ class Batch:
     attn: dict                        # layer name -> metadata
     slots: dict                       # layer name -> slot mapping (MLA KV write)
     last_rows: torch.Tensor           # int64 rows whose token stage 3 returns, in plan chunk order of is_last chunks
+    bucket: int | None = None         # CUDA graph bucket (padded token count) when the plan runs as a graph replay
+    graph_rows: torch.Tensor | None = None   # int64 [2 or 3, bucket], device: `graph_rows` of this microbatch
 
 
 _NP = {torch.int32: np.int32, torch.int64: np.int64, torch.bool: np.bool_}
 PACK_ALIGN = 256          # every segment starts 256-byte aligned (the CUDA caching allocator's own granularity is 512)
+
+
+def graph_rows(positions, slots, token_ids, bucket: int) -> np.ndarray:
+    """What a captured stage graph reads of a microbatch, padded to its bucket: positions (pad 0), the g0 slot
+    mapping (pad -1: the padded rows write no KV) and, on stage 0, the token ids (pad 0). Rows of one int64 array,
+    copied into the graph's static buffer with one device copy before replay."""
+    T = len(positions)
+    assert T <= bucket, (T, bucket)
+    rows = [positions, slots] + ([token_ids] if token_ids is not None else [])
+    out = np.zeros((len(rows), bucket), dtype=np.int64)
+    out[1, :] = PAD_SLOT_ID
+    for i, r in enumerate(rows):
+        out[i, :T] = r
+    return out
 
 
 class Pack:
@@ -135,7 +151,7 @@ class StageMetadata:
             self._plans.move_to_end(offsets)
         return plan
 
-    def build(self, plan, with_tokens: bool) -> Batch:
+    def build(self, plan, with_tokens: bool, bucket: int | None = None) -> Batch:
         from vllm.v1.attention.backend import CommonAttentionMetadata
 
         chunks = plan.chunks
@@ -179,10 +195,10 @@ class StageMetadata:
         h_tail = cm_arrays(tail_table, np.full(T, PAD_SLOT_ID, dtype=np.int64))
         h_kda = [pk.add([chunks[i].state_blocks[g] for i in order], torch.int64)
                  for g in range(len(self.kv.kda_groups))]
-        h_tok = None
-        if with_tokens:
-            h_tok = pk.add(np.concatenate([np.asarray(chunks[i].token_ids, dtype=np.int64) for i in order]),
-                           torch.int64)
+        tok = (np.concatenate([np.asarray(chunks[i].token_ids, dtype=np.int64) for i in order]) if with_tokens
+               else None)
+        h_tok = None if tok is None else pk.add(tok, torch.int64)
+        h_graph = None if bucket is None else pk.add(graph_rows(positions, slots, tok, bucket), torch.int64)
         row_end = {i: int(qsl[r + 1]) - 1 for r, i in enumerate(order)}
         h_last = pk.add([row_end[i] for i, c in enumerate(chunks) if c.is_last], torch.int64)
         pk.copy(self.device)
@@ -225,4 +241,5 @@ class StageMetadata:
 
         token_ids = None if h_tok is None else pk.dev(h_tok)
         last_rows = pk.dev(h_last)
-        return Batch(T, order, pos_dev, token_ids, attn, slot_map, last_rows)
+        return Batch(T, order, pos_dev, token_ids, attn, slot_map, last_rows, bucket,
+                     None if h_graph is None else pk.dev(h_graph))

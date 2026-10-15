@@ -1,0 +1,224 @@
+{
+ "stage": 2,
+ "graph_info": {
+  "enabled": true,
+  "buckets": [
+   128,
+   256,
+   512,
+   1024,
+   2048,
+   4096,
+   8192
+  ],
+  "capture_s": 1.4,
+  "graph_memory_gib": 6.566,
+  "segments": {
+   "8192": [
+    15,
+    14
+   ],
+   "4096": [
+    15,
+    14
+   ],
+   "2048": [
+    15,
+    14
+   ],
+   "1024": [
+    15,
+    14
+   ],
+   "512": [
+    15,
+    14
+   ],
+   "256": [
+    15,
+    14
+   ],
+   "128": [
+    15,
+    14
+   ]
+  },
+  "free_after_gib": 121.85
+ },
+ "cases": [
+  {
+   "bucket": 128,
+   "kind": "exact",
+   "T": 128,
+   "replay_eq_eager_padded": true,
+   "eager_repeat_eq": true,
+   "replay_vs_eager_unpadded_rel": [
+    0.0
+   ],
+   "replay_eq_eager_unpadded": true,
+   "finite": true
+  },
+  {
+   "bucket": 128,
+   "kind": "padded",
+   "T": 107,
+   "replay_eq_eager_padded": true,
+   "eager_repeat_eq": true,
+   "replay_vs_eager_unpadded_rel": [
+    0.08119083195924759
+   ],
+   "replay_eq_eager_unpadded": false,
+   "finite": true
+  },
+  {
+   "bucket": 256,
+   "kind": "exact",
+   "T": 256,
+   "replay_eq_eager_padded": true,
+   "eager_repeat_eq": true,
+   "replay_vs_eager_unpadded_rel": [
+    0.0
+   ],
+   "replay_eq_eager_unpadded": true,
+   "finite": true
+  },
+  {
+   "bucket": 256,
+   "kind": "padded",
+   "T": 221,
+   "replay_eq_eager_padded": true,
+   "eager_repeat_eq": true,
+   "replay_vs_eager_unpadded_rel": [
+    0.08458105474710464
+   ],
+   "replay_eq_eager_unpadded": false,
+   "finite": true
+  },
+  {
+   "bucket": 512,
+   "kind": "exact",
+   "T": 512,
+   "replay_eq_eager_padded": true,
+   "eager_repeat_eq": true,
+   "replay_vs_eager_unpadded_rel": [
+    0.0
+   ],
+   "replay_eq_eager_unpadded": true,
+   "finite": true
+  },
+  {
+   "bucket": 512,
+   "kind": "padded",
+   "T": 445,
+   "replay_eq_eager_padded": true,
+   "eager_repeat_eq": true,
+   "replay_vs_eager_unpadded_rel": [
+    0.0877874344587326
+   ],
+   "replay_eq_eager_unpadded": false,
+   "finite": true
+  },
+  {
+   "bucket": 1024,
+   "kind": "exact",
+   "T": 1024,
+   "replay_eq_eager_padded": true,
+   "eager_repeat_eq": true,
+   "replay_vs_eager_unpadded_rel": [
+    0.0
+   ],
+   "replay_eq_eager_unpadded": true,
+   "finite": true
+  },
+  {
+   "bucket": 1024,
+   "kind": "padded",
+   "T": 893,
+   "replay_eq_eager_padded": true,
+   "eager_repeat_eq": true,
+   "replay_vs_eager_unpadded_rel": [
+    0.08758024126291275
+   ],
+   "replay_eq_eager_unpadded": false,
+   "finite": true
+  },
+  {
+   "bucket": 2048,
+   "kind": "exact",
+   "T": 2048,
+   "replay_eq_eager_padded": true,
+   "eager_repeat_eq": true,
+   "replay_vs_eager_unpadded_rel": [
+    0.0
+   ],
+   "replay_eq_eager_unpadded": true,
+   "finite": true
+  },
+  {
+   "bucket": 2048,
+   "kind": "padded",
+   "T": 1789,
+   "replay_eq_eager_padded": true,
+   "eager_repeat_eq": true,
+   "replay_vs_eager_unpadded_rel": [
+    0.08737536519765854
+   ],
+   "replay_eq_eager_unpadded": false,
+   "finite": true
+  },
+  {
+   "bucket": 4096,
+   "kind": "exact",
+   "T": 4096,
+   "replay_eq_eager_padded": true,
+   "eager_repeat_eq": true,
+   "replay_vs_eager_unpadded_rel": [
+    0.0
+   ],
+   "replay_eq_eager_unpadded": true,
+   "finite": true
+  },
+  {
+   "bucket": 4096,
+   "kind": "padded",
+   "T": 3581,
+   "replay_eq_eager_padded": true,
+   "eager_repeat_eq": true,
+   "replay_vs_eager_unpadded_rel": [
+    0.0
+   ],
+   "replay_eq_eager_unpadded": true,
+   "finite": true
+  },
+  {
+   "bucket": 8192,
+   "kind": "exact",
+   "T": 8192,
+   "replay_eq_eager_padded": true,
+   "eager_repeat_eq": true,
+   "replay_vs_eager_unpadded_rel": [
+    0.0
+   ],
+   "replay_eq_eager_unpadded": true,
+   "finite": true
+  },
+  {
+   "bucket": 8192,
+   "kind": "padded",
+   "T": 7165,
+   "replay_eq_eager_padded": true,
+   "eager_repeat_eq": true,
+   "replay_vs_eager_unpadded_rel": [
+    0.0
+   ],
+   "replay_eq_eager_unpadded": true,
+   "finite": true
+  }
+ ],
+ "pass": true,
+ "memory": {
+  "free_before_model_gib": 177.74,
+  "free_after_gib": 119.78,
+  "max_allocated_gib": 51.45
+ }
+}

@@ -1,0 +1,210 @@
+{
+ "stage": 1,
+ "graph_info": {
+  "enabled": true,
+  "buckets": [
+   128,
+   256,
+   512,
+   1024,
+   2048,
+   4096,
+   8192
+  ],
+  "capture_s": 0.6,
+  "graph_memory_gib": 7.006,
+  "segments": {
+   "8192": [
+    14,
+    13
+   ],
+   "4096": [
+    14,
+    13
+   ],
+   "2048": [
+    14,
+    13
+   ],
+   "1024": [
+    14,
+    13
+   ],
+   "512": [
+    14,
+    13
+   ],
+   "256": [
+    14,
+    13
+   ],
+   "128": [
+    14,
+    13
+   ]
+  },
+  "free_after_gib": 121.31
+ },
+ "cases": [
+  {
+   "bucket": 128,
+   "kind": "exact",
+   "T": 128,
+   "replay_eq_eager_padded": true,
+   "replay_vs_eager_unpadded_rel": [
+    0.0
+   ],
+   "replay_eq_eager_unpadded": true,
+   "finite": true
+  },
+  {
+   "bucket": 128,
+   "kind": "padded",
+   "T": 107,
+   "replay_eq_eager_padded": true,
+   "replay_vs_eager_unpadded_rel": [
+    0.02407686598598957
+   ],
+   "replay_eq_eager_unpadded": false,
+   "finite": true
+  },
+  {
+   "bucket": 256,
+   "kind": "exact",
+   "T": 256,
+   "replay_eq_eager_padded": true,
+   "replay_vs_eager_unpadded_rel": [
+    0.0
+   ],
+   "replay_eq_eager_unpadded": true,
+   "finite": true
+  },
+  {
+   "bucket": 256,
+   "kind": "padded",
+   "T": 221,
+   "replay_eq_eager_padded": true,
+   "replay_vs_eager_unpadded_rel": [
+    0.0256173238158226
+   ],
+   "replay_eq_eager_unpadded": false,
+   "finite": true
+  },
+  {
+   "bucket": 512,
+   "kind": "exact",
+   "T": 512,
+   "replay_eq_eager_padded": true,
+   "replay_vs_eager_unpadded_rel": [
+    0.0
+   ],
+   "replay_eq_eager_unpadded": true,
+   "finite": true
+  },
+  {
+   "bucket": 512,
+   "kind": "padded",
+   "T": 445,
+   "replay_eq_eager_padded": true,
+   "replay_vs_eager_unpadded_rel": [
+    0.03743543103337288
+   ],
+   "replay_eq_eager_unpadded": false,
+   "finite": true
+  },
+  {
+   "bucket": 1024,
+   "kind": "exact",
+   "T": 1024,
+   "replay_eq_eager_padded": true,
+   "replay_vs_eager_unpadded_rel": [
+    0.0
+   ],
+   "replay_eq_eager_unpadded": true,
+   "finite": true
+  },
+  {
+   "bucket": 1024,
+   "kind": "padded",
+   "T": 893,
+   "replay_eq_eager_padded": true,
+   "replay_vs_eager_unpadded_rel": [
+    0.0374898761510849
+   ],
+   "replay_eq_eager_unpadded": false,
+   "finite": true
+  },
+  {
+   "bucket": 2048,
+   "kind": "exact",
+   "T": 2048,
+   "replay_eq_eager_padded": true,
+   "replay_vs_eager_unpadded_rel": [
+    0.0
+   ],
+   "replay_eq_eager_unpadded": true,
+   "finite": true
+  },
+  {
+   "bucket": 2048,
+   "kind": "padded",
+   "T": 1789,
+   "replay_eq_eager_padded": true,
+   "replay_vs_eager_unpadded_rel": [
+    0.03797029331326485
+   ],
+   "replay_eq_eager_unpadded": false,
+   "finite": true
+  },
+  {
+   "bucket": 4096,
+   "kind": "exact",
+   "T": 4096,
+   "replay_eq_eager_padded": true,
+   "replay_vs_eager_unpadded_rel": [
+    0.0
+   ],
+   "replay_eq_eager_unpadded": true,
+   "finite": true
+  },
+  {
+   "bucket": 4096,
+   "kind": "padded",
+   "T": 3581,
+   "replay_eq_eager_padded": true,
+   "replay_vs_eager_unpadded_rel": [
+    0.0
+   ],
+   "replay_eq_eager_unpadded": true,
+   "finite": true
+  },
+  {
+   "bucket": 8192,
+   "kind": "exact",
+   "T": 8192,
+   "replay_eq_eager_padded": false,
+   "replay_vs_eager_unpadded_rel": [
+    0.007167442701756954
+   ],
+   "replay_eq_eager_unpadded": false,
+   "finite": true
+  },
+  {
+   "bucket": 8192,
+   "kind": "padded",
+   "T": 7165,
+   "replay_eq_eager_padded": true,
+   "replay_vs_eager_unpadded_rel": [
+    0.0
+   ],
+   "replay_eq_eager_unpadded": true,
+   "finite": true
+  }
+ ],
+ "pass": false,
+ "memory": {
+  "free_before_model_gib": 177.74,
+  "free_after_gib": 119.38,
+  "max_allocated_gib": 50.81
+ }
+}

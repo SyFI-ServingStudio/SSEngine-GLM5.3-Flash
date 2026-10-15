@@ -12,6 +12,13 @@ Construction:
    (`metadata`).
 
 Forward runs the layers inside vLLM's forward context; no host sync: plan -> metadata (host) -> GPU work.
+
+CUDA graphs (`cuda_graphs`): a microbatch of up to the largest bucket (`GRAPH_BUCKETS`, powers of 2) is padded to its
+bucket and replayed from the fork's breakable CUDA graph (`vllm.compilation.breakable_cudagraph`): one capture per
+bucket of the whole stage forward, cut at the ops the fork marks as eager breaks (MLA attention, the kpool indexer,
+our KDA prefill), which run eagerly on each replay with the microbatch's own metadata. The captured segments (mHC,
+norms, GEMMs, MoE, quantization, MLA KV write) read only static buffers: positions, the g0 slot mapping (padded rows
+-1), token ids or the received hidden rows. Larger microbatches run eagerly.
 """
 
 from __future__ import annotations
@@ -23,9 +30,13 @@ from pathlib import Path
 
 import torch
 
-from ppimpl import kernels
-from ppimpl.model import kv_tensors, pp_patch
-from ppimpl.model.metadata import StageMetadata
+# the fork resolves its eager-break decorators at import: set before any vLLM model module is imported. Outside a
+# capture the decorated ops run unchanged.
+os.environ.setdefault("VLLM_USE_BREAKABLE_CUDAGRAPH", "1")
+
+from ppimpl import kernels  # noqa: E402
+from ppimpl.model import kv_tensors, pp_patch  # noqa: E402
+from ppimpl.model.metadata import StageMetadata  # noqa: E402
 
 CHECKPOINT = "/raid/hf/hub/models--nvidia--GLM-5.3-Flash-NVFP4/snapshots/da920bb0b9f4a06727223a349e55468e38352348"
 HIDDEN_WIDTH = 4 * 4096
@@ -34,7 +45,13 @@ HIDDEN_WIDTH = 4 * 4096
 # The file's own metadata (FlashInfer/CUDA/cuBLAS/cuDNN versions, GPU) decides whether it is valid here.
 TACTICS = Path(os.environ.get("PPIMPL_FI_TACTICS",
                               Path(__file__).resolve().parents[1] / "data" / "flashinfer_tactics_b200.json"))
-RESERVE_GB = 13.6     # 1_contract.md §1: activations and workspace beside weights and KV
+RESERVE_GB = 13.6     # 1_contract.md §1: activations and workspace beside weights and KV (and the CUDA graph pool)
+GRAPH_BUCKETS = (128, 256, 512, 1024, 2048, 4096, 8192)   # token counts captured as CUDA graphs
+
+
+def graph_bucket(num_tokens: int, buckets) -> int | None:
+    """The smallest bucket that holds the microbatch, or None (run eagerly)."""
+    return next((b for b in sorted(buckets) if b >= num_tokens), None)
 MAX_MODEL_LEN = 1_048_576
 
 
@@ -84,15 +101,17 @@ def stage_settings(cfg) -> dict:
     """What StageModel reads of the run config (`ppimpl.config.RunConfig`; benches pass a namespace with the same
     fields). Read directly, so a missing field fails here instead of falling back silently."""
     return {"layer_split": tuple(cfg.layer_split), "checkpoint": cfg.checkpoint or CHECKPOINT,
-            "mb_tokens": int(cfg.scheduler.mb_tokens), "pool_tokens": cfg.pool_tokens}
+            "mb_tokens": int(cfg.scheduler.mb_tokens), "pool_tokens": cfg.pool_tokens,
+            "cuda_graphs": bool(cfg.cuda_graphs)}
 
 
-def bench_config(mb_tokens: int, checkpoint: str | None = None):
-    """A run-config stand-in for the benches (same fields as RunConfig's that StageModel reads)."""
+def bench_config(mb_tokens: int, checkpoint: str | None = None, cuda_graphs: bool = False):
+    """A run-config stand-in for the benches (same fields as RunConfig's that StageModel reads). Benches run eagerly
+    unless they ask for CUDA graphs."""
     from types import SimpleNamespace
 
     return SimpleNamespace(layer_split=list(kernels.SPLIT), checkpoint=checkpoint, pool_tokens=None,
-                           scheduler=SimpleNamespace(mb_tokens=mb_tokens))
+                           scheduler=SimpleNamespace(mb_tokens=mb_tokens), cuda_graphs=cuda_graphs)
 
 
 NINJA = "/usr/bin/ninja"
@@ -130,11 +149,27 @@ def check_ninja() -> bool:
     return True
 
 
+def json_dumps(x) -> str:
+    import json
+    return json.dumps(x)
+
+
+class GraphEntry:
+    """One captured bucket: its static buffers (`rows`: positions, g0 slot mapping, token ids; `hidden`: the received
+    rows), the forward context's slot mapping (static views), the capture and its outputs (graph pool)."""
+
+    def __init__(self, bucket: int, rows: torch.Tensor, hidden: torch.Tensor | None):
+        self.bucket, self.rows, self.hidden = bucket, rows, hidden
+        self.slots: dict = {}
+        self.capture = None
+        self.out: tuple = ()
+
+
 class StageModel:
     def __init__(self, cfg, stage: int, device: torch.device, *, layers: range | None = None,
                  first: bool | None = None, last: bool | None = None, num_blocks: int | None = None,
                  max_model_len: int | None = None, warmup: bool = True,
-                 host_trims: bool = True):
+                 host_trims: bool = True, cuda_graphs: bool | None = None):
         st = stage_settings(cfg)
         check_ninja()
         split = st["layer_split"]
@@ -213,8 +248,12 @@ class StageModel:
         self.num_blocks = num_blocks
         self.meta = StageMetadata(vc, self.kv, device)
         self.max_tokens = max_tokens
+        self.graphs: dict[int, GraphEntry] = {}
+        self.graph_info: dict = {"enabled": False}
         if warmup:
             self.warmup()
+            if st["cuda_graphs"] if cuda_graphs is None else cuda_graphs:
+                self.capture_graphs()
 
     def install_host_trims(self) -> dict:
         mods = [m for m in (*self.layers, self.embed, self.norm, self.lm_head) if m is not None]
@@ -298,6 +337,107 @@ class StageModel:
                          norm_weight=norm.weight.data, norm_eps=norm.variance_epsilon)
         self.mhc_pre_splits = sorted(first_T)
 
+    # ------------------------------------------------------------------------------------------------ CUDA graphs
+
+    def capture_graphs(self, buckets=GRAPH_BUCKETS) -> dict:
+        """Capture the stage forward once per bucket (largest first, one shared memory pool) after warm-up: a dummy
+        one-request plan of exactly the bucket, run once eagerly in PIECEWISE mode, then captured. Records what the
+        graphs cost in `graph_info` (device memory taken, capture time)."""
+        # Capture on a private side stream (the default stream cannot capture, and the caller's stream is not
+        # ours to choose). `torch.cuda.stream` goes through vLLM's patched set_stream, so the eager breaks recorded
+        # during capture see the same stream. Replays later run on whatever stream forward() is called on.
+        caller = torch.cuda.current_stream(self.device)
+        side = self._capture_stream = torch.cuda.Stream(self.device)
+        side.wait_stream(caller)
+        with torch.cuda.stream(side):
+            info = self._capture_graphs(buckets)
+        caller.wait_stream(side)
+        torch.cuda.synchronize(self.device)
+        return info
+
+    def _capture_graphs(self, buckets) -> dict:
+        import gc
+        import time
+        from types import SimpleNamespace as NS
+
+        B = self.kv.block_tokens
+        buckets = sorted((b for b in buckets if b <= min(self.max_tokens, B)), reverse=True)
+        t0 = time.perf_counter()
+        torch.cuda.synchronize(self.device)
+        gc.collect()
+        torch.cuda.empty_cache()
+        free0 = torch.cuda.mem_get_info(self.device)[0]
+        pool = torch.cuda.graph_pool_handle()
+        hidden = None if self.first else torch.zeros(buckets[0], self.hidden_width, dtype=torch.bfloat16,
+                                                     device=self.device)
+        with torch.inference_mode():
+            for Tb in buckets:
+                plan = NS(mb_id=-10, chunks=[NS(req_id="g", start=0, num_tokens=Tb, kv_blocks=[1], is_last=True,
+                                                state_blocks=list(range(2, 8)), token_ids=[1] * Tb)])
+                b = self.meta.build(plan, with_tokens=self.first, bucket=Tb)
+                e = GraphEntry(Tb, torch.empty_like(b.graph_rows), None if hidden is None else hidden[:Tb])
+                e.rows.copy_(b.graph_rows)
+                e.slots = {name: e.rows[1] for name in b.slots}
+                with self._graph_context(b, e):
+                    self._graph_body(e)                       # eager once at this shape, PIECEWISE paths
+                torch.cuda.synchronize(self.device)
+                from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
+
+                e.capture = BreakableCUDAGraphCapture(pool=pool)
+                with self._graph_context(b, e), e.capture:
+                    e.out = self._graph_body(e)
+                torch.cuda.synchronize(self.device)
+                self.graphs[Tb] = e
+        free1 = torch.cuda.mem_get_info(self.device)[0]
+        self.graph_info = {
+            "enabled": True, "buckets": sorted(self.graphs), "capture_s": round(time.perf_counter() - t0, 1),
+            "graph_memory_gib": round((free0 - free1) / 2**30, 3),
+            "segments": {Tb: [e.capture.num_graphs, e.capture.num_eager_breaks] for Tb, e in self.graphs.items()},
+            "free_after_gib": round(free1 / 2**30, 2)}
+        print(f"stage {self.stage}: CUDA graphs {json_dumps(self.graph_info)}", flush=True)
+        return self.graph_info
+
+    def _graph_context(self, b, e):
+        from vllm.config import CUDAGraphMode
+        from vllm.forward_context import BatchDescriptor, set_forward_context
+
+        return set_forward_context(b.attn, self.vc, num_tokens=e.bucket, slot_mapping=e.slots,
+                                   cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE,
+                                   batch_descriptor=BatchDescriptor(num_tokens=e.bucket))
+
+    def _graph_body(self, e) -> tuple:
+        """The stage forward on a graph's static buffers (what is captured, and its eager equivalent)."""
+        x = self.embed(e.rows[2]) if self.first else pp_patch.edge_recv(e.hidden)
+        residual = post = comb = None
+        for layer in self.layers:
+            x, residual, post, comb = layer(e.rows[0], x, residual, post, comb)
+        if not self.last:
+            return (pp_patch.edge_send(self.layers[-1], x, residual, post, comb),)
+        return (x, residual, post, comb)
+
+    def _run_graph(self, b, hidden_in, replay: bool = True, raw: bool = False):
+        """Pad to the bucket, replay (or, `replay=False`, run the same body eagerly on the same static buffers: the
+        exactness reference), then the output rows. A non-last stage returns a copy: the next replay of this bucket
+        overwrites the graph's output while the send of this one may still be queued. `raw`: copies of the body's
+        outputs' first T rows instead (tests)."""
+        e = self.graphs[b.bucket]
+        T = b.num_tokens
+        e.rows.copy_(b.graph_rows)
+        if not self.first:
+            e.hidden[:T].copy_(hidden_in)
+        with self._graph_context(b, e):
+            if replay:
+                e.capture.replay()
+                out = e.out
+            else:
+                out = self._graph_body(e)
+        if raw:
+            return tuple(None if t is None else t[:T].clone() for t in out)
+        if not self.last:
+            return out[0][:T].clone()
+        x, residual, post, comb = (None if t is None else t[:T] for t in out)
+        return self.output_head(b, x, residual, post, comb)
+
     # ------------------------------------------------------------------------------------------------ forward
 
     def forward(self, plan, hidden_in: torch.Tensor | None) -> torch.Tensor:
@@ -305,11 +445,16 @@ class StageModel:
 
     def prepare(self, plan):
         """Host side of one microbatch: metadata and its non-blocking copies (overlaps the previous compute)."""
-        return self.meta.build(plan, with_tokens=self.first)
+        bucket = None
+        if self.graphs:
+            bucket = graph_bucket(sum(c.num_tokens for c in plan.chunks), self.graphs)
+        return self.meta.build(plan, with_tokens=self.first, bucket=bucket)
 
     def run(self, b, hidden_in: torch.Tensor | None) -> torch.Tensor:
         from vllm.forward_context import set_forward_context
 
+        if b.bucket is not None:
+            return self._run_graph(b, hidden_in)
         with set_forward_context(b.attn, self.vc, num_tokens=b.num_tokens, slot_mapping=b.slots):
             x, residual, post, comb = self.run_layers(b, hidden_in)
             if not self.last:

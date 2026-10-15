@@ -80,6 +80,12 @@ class StageModel:
 - The last stage's output is copied to the host by the worker's reporter thread after the end event; `forward` must
   not overwrite that tensor in a later call before the copy is done (allocate a fresh output per call).
 - `Ready.num_blocks` counts the null block.
+- CUDA graphs (`RunConfig.cuda_graphs`, default on): after warm-up the stage captures one graph per power-of-2
+  bucket from 128 to 8,192 tokens, on a side stream of its own; `forward` pads a microbatch to the smallest bucket
+  that holds it and replays the graph on the caller's current stream, and runs eagerly above 8,192. Stages 0–2 return
+  a copy of the graph's output rows (the next replay overwrites the graph's buffer). The worker's info line reports
+  `cuda_graphs` (buckets, graph memory, capture time). The KV pool is sized before capture; the graphs fit in the
+  13.6 GB reserve (`measured/issues.md`, option (B)).
 - Extra message `WorkerError(stage, error)`: a failing stage sends its traceback; the controller stops the server.
 - Messages are msgspec structs in `ppimpl/runtime/transport.py`.
 

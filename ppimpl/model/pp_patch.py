@@ -30,7 +30,8 @@ from pathlib import Path
 
 import torch
 from torch import nn
-
+from ppimpl import kernels
+from ppimpl.model import topk_canon
 from ppimpl import kernels
 
 HIDDEN = 4096
@@ -237,7 +238,11 @@ def route_kda(attn) -> None:
         torch.bfloat16).contiguous()
     assert attn.q_conv1d.bias is None
     attn._pp_a_log = attn.A_log.detach().reshape(-1).contiguous()
-    attn._forward = types.MethodType(kda_prefill_forward, attn)
+    # an eager break of the fork's breakable CUDA graph capture, as the `_forward` it replaces: per-sequence host
+    # branches and launches (conv per sequence, KDA work plan) run eagerly between graph segments
+    from vllm.compilation.breakable_cudagraph import eager_break_during_capture
+
+    attn._forward = types.MethodType(eager_break_during_capture(kda_prefill_forward), attn)
 
 
 # ---------------------------------------------------------------- indexer top-k
@@ -258,6 +263,12 @@ def _deep_select(logits, row_ends, out, k):
 
 
 def _routed_top_k_per_row_prefill(logits, ks, ke, dst, num_rows, stride0, stride1, k):
+    _top_k_per_row_prefill(logits, ks, ke, dst, num_rows, stride0, stride1, k)
+    if logits.shape[1] > k:      # more keys than k: fix the kernel's set and order (topk_canon.py)
+        topk_canon.canonicalize(logits, ks, ke, dst[:num_rows], k)
+
+
+def _top_k_per_row_prefill(logits, ks, ke, dst, num_rows, stride0, stride1, k):
     segments = TOPK_SEGMENTS.get(ks.data_ptr())
     if segments is None or all(seg[3] == "vllm_cuda" for seg in segments):
         if TOPK_LOG is not None:

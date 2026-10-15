@@ -74,6 +74,8 @@ class RunConfig(msgspec.Struct, forbid_unknown_fields=True):
                                       # only when stage 0 is free); see ppimpl/runtime/dispatch.py
     form_lead_ms: float = 3.0         # the queued plan forms this long before the running one's predicted stage-0 end
     pool_tokens: int | None = None    # cap on the KV pool, in tokens (1_contract.md §2.3)
+    cuda_graphs: bool = True          # glm53: microbatches up to 8192 tokens replay a CUDA graph per power-of-2 bucket
+                                      # (padded to it); larger ones run eagerly (ppimpl/model/stage.py)
     profile_mbs: list[int] | None = None  # [a, b): cudaProfilerStart at mb a, Stop after mb b-1 (bench/run.py --nsys)
     keep_sessions: bool = False       # phase B: exact prefix cache (kept sessions, LRU eviction of whole sessions)
     scheduler: SchedulerConfig = msgspec.field(default_factory=SchedulerConfig)  # mb_tokens: one-request runs set it >= the prompt

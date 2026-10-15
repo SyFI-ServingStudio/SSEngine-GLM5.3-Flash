@@ -87,11 +87,22 @@ Open:
     outside ops is 30–45%. In py-spy --native the leaf frames are 37% Python, 29% torch C++, 13% CUDA/cuBLAS.
   - No single wrapper dominates. Option (A), done in M3: trim per-call wrapper Python (vLLM env cache, FlashInfer
     tactic memo, mm_fp4 skip_check, plain parameters; `pp_patch.install_host_trims`).
-  - **Follow-up (B), deferred:** piecewise CUDA graphs per token bucket (512/1k/1.5k/2k/3k/4k, eager above), using
-    vLLM's compile path with the DSA attention + indexer op and our KDA prefill as split points. They would capture
-    MoE, mHC, the linears, norms and quant, ~50–55% of host time (est. 1k: ~9 ms).
-    Trigger: M4/M5 session runs showing host-bound stage-0 microbatches, i.e. appends of < 2.5k tokens alone in a
-    microbatch.
+  - **Option (B), done in M3: CUDA graphs per token bucket** (`StageModel.capture_graphs`, `RunConfig.cuda_graphs`,
+    default on). Microbatches up to 8,192 tokens replay a graph of the smallest power-of-2 bucket from 128 that holds
+    them, input padded (positions 0, slots -1, token ids 0); above 8,192 the stage runs eagerly. The fork's
+    breakable CUDA graph (`vllm/compilation/breakable_cudagraph.py`) breaks at the DSA attention, the indexer and
+    our KDA prefill, as vLLM's runtime capture does; everything else (MoE, mHC, linears, norms, quant, KV writes)
+    is captured. Stage-0 host time (`bench/host.py`, 7303 eager vs 7304 graphs, medians): 17.1 → 4.7 ms at 1k,
+    16.9 → 4.7 at 2k, 17.5 → 5.4 at 4k, 18.2 → 5.6 at 8k.
+    - Exact: every bucket's replay is bitwise equal to the same body run eagerly at the same padded T, and an
+      unpadded microbatch (T = bucket) to the eager forward (`bench/graphs.py`, 7323, all 4 stages).
+    - Graph memory (one pool per stage, 7 buckets): 7.76 / 7.01 / 6.57 / 6.95 GiB on stages 0–3; capture 0.6–1.4 s.
+      With the full pool and 32k microbatches (7291) every stage still reports 7,144 blocks, and after an eager 32k
+      forward and an 8k replay the lowest free HBM is 10.4 / 39.3 / 10.7 / 7.4 GiB.
+    - Padding changes the numerics of the real rows like any change of T (the saturated-1k section below): mHC's
+      split count follows the padded T, and other kernels pick their tiling by T. Stage-output relative difference
+      to the unpadded eager forward: 0.02–0.11 (stages 0–2) and up to 0.46 on the random stage-3 inputs at buckets
+      128–2048, 0 at 4096/8192 where the split count is unchanged. Covered by the margin rule.
 - **128k host block: launch-queue back-pressure, not a sync** (7091). A 128k forward issues 1,245 kernels. The first
   launch over 1 ms is #1223, with 1,028 launched kernels still unfinished; every later block has 1,025–1,030 pending.
   So the queue is capped at ~1,024 pending kernels. M2's 1.6 s block equals its 1.69 s lead sleep.
@@ -242,3 +253,21 @@ logprobs. One-request runs keep judging nearly every request. The rejected optio
 of T: it gives the alone result in any batch, but mHC is slower at small T, and the TP-vs-PP difference to vLLM would
 still need the margin rule.
 Data: `measured/batchflip/{7170,7172}_s*.json`, `7174_s0.json`, `vllm_7173.json`, `measured/host/overlap_s1_716{4,5}.json`.
+
+## Indexer top-k was not deterministic — fixed (M3, found by the CUDA-graph check)
+
+Kind: run-to-run nondeterminism of the eager model, fixed. vLLM's prefill top-k (`top_k_per_row_prefill`, `vllm_cuda`)
+returns a valid top-k, but in rows with more than k = 512 keys (pools; prompt positions past 2,048):
+- the order of the indices varies run to run (2 runs at 4k/8k, stage 0: every such row, same set);
+- the set varies when keys tie at the 512th value. Stage 3 at 8k, 150 eager runs (probe jobs 7313/7315): 5–8 runs flip
+  row 5,820 of layer 39's indexer (v[511] = v[512] exactly); the attention of that row changes and, through the KDA
+  recurrence, every later row.
+
+The sparse attention sums in the index order, so either case changed the bits of the same input. This also broke the
+CUDA-graph exactness check (7283: buckets 4096/8192; 7287: one stage-1 8k case). Fix: `ppimpl/model/topk_canon.py`
+rewrites the kernel's answer in place, after the kernel: every key above the k-th value plus the lowest indices among
+the keys equal to it, in ascending order. It is a Triton kernel, one program per row, and costs 0.06 ms per call at
+8k rows × 2k pools and 0.6 ms at 32k × 8k (3 calls per stage). Rows of at most 512 keys are unchanged (the kernel
+already returns all of them in order). After the fix: 0 of 150 stage-3 8k runs differ. vLLM keeps the
+nondeterministic order; this is a tie-break choice, not a parity change.
+

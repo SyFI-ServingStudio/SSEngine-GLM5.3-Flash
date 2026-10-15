@@ -138,7 +138,8 @@ def run_worker(cfg: RunConfig, stage: int):   # makes inference tensors, which a
         pipe = Pipe(stage, n, device, cfg.dist_init_method())
         model = build_model(cfg, stage, device)
         # which FlashInfer tactics the stage runs with (StageModel.tactics: source file|tuned_in_process, file, sha256)
-        info = {"stage": stage, "tactics": getattr(model, "tactics", None)}
+        info = {"stage": stage, "tactics": getattr(model, "tactics", None),
+                "cuda_graphs": getattr(model, "graph_info", None)}
         print(f"stage {stage}: {json.dumps(info)}", flush=True)
         (Path(cfg.run_dir) / f"stage{stage}.json").write_text(json.dumps(info) + "\n")
         clock = Clock(device)
