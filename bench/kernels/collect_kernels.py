@@ -57,7 +57,8 @@ def main(queue, measured):
             t = r["metrics"]["time_ms"] if ok else None
             key = canon(spec)
             rows_out.append({
-                "config": row["config"], "kind": row["kind"], "backend": row["backend"], "spec": row["spec"],
+                "config": row["config"], "kind": row["kind"], "backend": row["backend"],
+                "fixed": CONFIGS[row["config"]][2], "spec": row["spec"],
                 "db_time_ms": row["db_time_ms"], "real_time_ms": t,
                 "ratio": t / row["db_time_ms"] if t else None,
                 "kernels": sorted(names.get(key, [])) or None,
@@ -79,10 +80,11 @@ def main(queue, measured):
         "Every row of the configurations below, measured by the ServingStudioSim profiler's own runner",
         "(`launcher kernel-profile run --fresh`, cold L2 as the rows, nothing written to any DB) with the worker",
         "executing in `pp-impl/.venv` (`bench/kernels/ppimpl_profile.py`). Ratio = real ÷ `db_time_ms`.",
-        "How it was run: `kernels_run.md`. Per row: `kernels.jsonl`.",
+        "Per row: `kernels.jsonl` (with the CUPTI kernel names and the tactic note where the runner gives one).",
+        "Smallest / median / largest: the rows of the configuration ordered by `db_time_ms`, as DB ms → ratio.",
         "",
-        "| # | Kind / backend | Fixed configuration | Rows | Measured | Median ratio | Min ratio | Max ratio | Rows > 1.10 | Rows < 0.90 |",
-        "|---|---|---|---|---|---|---|---|---|---|",
+        "| # | Kind / backend | Fixed configuration | Rows | Measured | Smallest | Median row | Largest | Median ratio | Min | Max | > 1.10 | < 0.90 |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     slow = []
     for c in sorted(by):
@@ -92,11 +94,14 @@ def main(queue, measured):
         hi = [o for o in os_ if o["ratio"] is not None and o["ratio"] > 1 + TOL]
         lo = [o for o in os_ if o["ratio"] is not None and o["ratio"] < 1 - TOL]
         fx = ", ".join(f"{k} {v}" for k, v in fixed.items()) or "—"
+        srt = sorted(os_, key=lambda o: o["db_time_ms"])
+        pick = lambda o: f"{o['db_time_ms']:.4g} → " + (f"{o['ratio']:.3f}" if o["ratio"] is not None else o["status"])
+        sml = " | ".join(pick(o) for o in (srt[0], srt[len(srt) // 2], srt[-1]))
         if rs:
-            lines.append(f"| {c} | `{kind}` / `{backend}` | {fx} | {len(os_)} | {len(rs)} | "
+            lines.append(f"| {c} | `{kind}` / `{backend}` | {fx} | {len(os_)} | {len(rs)} | {sml} | "
                          f"{statistics.median(rs):.3f} | {min(rs):.3f} | {max(rs):.3f} | {len(hi)} | {len(lo)} |")
         else:
-            lines.append(f"| {c} | `{kind}` / `{backend}` | {fx} | {len(os_)} | 0 | — | — | — | — | — |")
+            lines.append(f"| {c} | `{kind}` / `{backend}` | {fx} | {len(os_)} | 0 | {sml} | — | — | — | — | — |")
         if hi:
             slow.append((c, kind, backend, hi))
     lines += ["", "## Rows above 1.10", ""]
@@ -108,6 +113,15 @@ def main(queue, measured):
             s = {k: v for k, v in o["spec"].items() if k != "per_expert_batches"}
             lines.append(f"- {o['ratio']:.3f}: DB {o['db_time_ms']:.4g} ms, real {o['real_time_ms']:.4g} ms, `{json.dumps(s)}`")
         lines.append("")
+    lines += ["## How it was run", "",
+              "Slurm jobs on the `priority` partition (`bench/kernels/run_queue.sbatch`), 2 GPUs each, one lane per GPU",
+              "taking chunks of one (kind, backend) from `kernels_runs/queue` (`bench/kernels/make_queue.py`: <= 50 rows,",
+              "<= 12 for the NVFP4 MoE, strided over sizes). Each chunk is one call of",
+              "`uv run --no-sync python bench/kernels/ppimpl_profile.py run <kind> --backend <b> --specs <chunk> --fresh",
+              "--gpu-name \"NVIDIA B200\" --json` in `wt-pp-main`, under `bench/kernels/run_call.sh` (own session, killed",
+              "only by session on timeout). The wrapper re-registers every profiling env on `pp-impl/.venv`'s Python and",
+              "pins FlashInfer's JIT to `/usr/bin/ninja`; FlashInfer autotune tactics persist per pass in",
+              "`kernels_runs/queue/autotune`. Logs per job: `kernels_runs/logs/<job>/` (`env.txt` with `uptime`).", ""]
     missing = [o for o in rows_out if o["ratio"] is None]
     if missing:
         lines += ["## Not measured", ""]

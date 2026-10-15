@@ -9,7 +9,9 @@ node-check rows of that configuration (measured/kernels_nodecheck.jsonl). Then, 
   uncovered the time in kernels with no node-check row (kinds outside the 35 configurations, e.g. elementwise).
 Prints a markdown table.
 
-usage: python stage_bound.py <handoff data dir> <kernels_nodecheck.jsonl> [lengths, default 8192,131072]
+usage: python stage_bound.py <handoff data dir> <rows.jsonl>[,<more rows.jsonl>] [lengths, default 8192,131072]
+  rows files: kernels_nodecheck.jsonl (3 sampled rows per configuration) and/or kernels.jsonl (every row of the
+  re-measured configurations); a configuration found in a later file replaces the earlier file's rows.
 """
 
 import json
@@ -29,12 +31,15 @@ def main(data, nodecheck, lengths="8192,131072"):
         row = json.loads(line)
         for p in row.get("positions", []):
             pos_cfg[(row["kind"], row["backend"], p)] = config_key(row)
-    samples = defaultdict(list)
-    for line in open(nodecheck):
-        r = json.loads(line)
-        if r["ratio"] is not None:
-            fixed = tuple(r["config"].items())
-            samples[(r["kind"], r["backend"], fixed)].append((r["db_time_ms"], r["ratio"]))
+    samples = {}
+    for path in nodecheck.split(","):
+        found = defaultdict(list)
+        for line in open(path):
+            r = json.loads(line)
+            if r["ratio"] is not None:
+                fixed = r["fixed"] if "fixed" in r else r["config"]
+                found[(r["kind"], r["backend"], tuple(fixed.items()))].append((r["db_time_ms"], r["ratio"]))
+        samples.update(found)
     targets = [json.loads(l) for l in open(data / "layer_targets.jsonl")]
     print("| Prompt | Stage | Stage ms | Estimate ms (%) | From misses ms (%) | Worst-ratio bound ms (%) | Uncovered ms (%) | Largest estimate term |")
     print("|---|---|---|---|---|---|---|---|")
