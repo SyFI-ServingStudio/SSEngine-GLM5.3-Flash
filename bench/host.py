@@ -305,6 +305,7 @@ def compare_metadata(model, tokens, lengths, old_path: Path) -> dict:
 
     spec = importlib.util.spec_from_file_location("ppimpl_old_metadata", old_path)
     old = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = old          # dataclasses resolve annotations through sys.modules
     spec.loader.exec_module(old)
     old_meta = old.StageMetadata(model.vc, model.kv, model.device)
     new_meta = model.meta
