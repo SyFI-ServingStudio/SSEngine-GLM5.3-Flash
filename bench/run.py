@@ -51,7 +51,7 @@ def trace_for(kind: str, length: int) -> Path:
 def server_config(kind: str, length: int, use_fake: bool, run_dir: Path, device: str = "cuda", **extra) -> dict:
     cfg = {"model": "fake" if use_fake else "glm53", "device": device, "run_dir": str(run_dir),
            # one request is one microbatch: the budget holds the whole prompt (4_iteration.md §2)
-           "mb_tokens": max(8192, length) if kind == "one" else 8192}
+           "scheduler": {"mb_tokens": max(8192, length) if kind == "one" else 8192}}
     if not use_fake:
         cfg["checkpoint"] = str(CHECKPOINT)
     cfg.update(extra)

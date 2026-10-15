@@ -67,7 +67,7 @@ def test_req_frontend_cpu(tmp_path, monkeypatch):
     run_dir = tmp_path / "runs" / "saturated_tiny"
     port = free_port_block()
     meta = bench_run.execute(
-        run_dir, {"model": "fake", "mb_tokens": 8192, **CPU},
+        run_dir, {"model": "fake", "scheduler": {"mb_tokens": 8192}, **CPU},
         bench_run.client_config(trace, port, run_dir, token_pool_limit=200_000),
         port=port, meta={"name": "saturated_tiny", "kind": "saturated", "prompt_tokens": length, "fake": True,
                          "trace": str(trace)},

@@ -78,7 +78,7 @@ class Controller:
                 p.kill()
             raise
         num_blocks = pool_size([r.num_blocks for r in ready], cfg.pool_tokens)
-        self.sched = PlainScheduler(KvManager(num_blocks), cfg.mb_tokens, cfg.max_in_flight, cfg.dispatch_ahead)
+        self.sched = PlainScheduler(KvManager(num_blocks), cfg.scheduler.mb_tokens, cfg.max_in_flight, cfg.dispatch_ahead)
         self.mb_log = open(self.run_dir / "microbatches.jsonl", "w")
         self.req_log = open(self.run_dir / "server_requests.jsonl", "w")
         (self.run_dir / "pool.json").write_text(json.dumps(
