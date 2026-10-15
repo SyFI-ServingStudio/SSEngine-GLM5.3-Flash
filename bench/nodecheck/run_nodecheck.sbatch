@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH -p priority
+#SBATCH -p main
 #SBATCH --gres=gpu:4
 #SBATCH --time=00:30:00
 #SBATCH -J pp-nodecheck

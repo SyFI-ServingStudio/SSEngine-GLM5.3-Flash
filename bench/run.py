@@ -1,6 +1,6 @@
 """Run handoff workloads against `python -m ppimpl serve` with req-frontend: one entry per run name.
 
-  python bench/run.py one_8k saturated_8k [--fake] --time 00:20:00 [--partition priority]   submit one Slurm job
+  python bench/run.py one_8k saturated_8k [--fake] --time 00:20:00 [--partition main]   submit one Slurm job
   python bench/run.py one_8k --fake --inline                                                 run here (no Slurm)
   ... --nsys [--nsys-mbs a:b|all]     the server under Nsight Systems -> trace.nsys-rep, trace.sqlite, trace.json
 

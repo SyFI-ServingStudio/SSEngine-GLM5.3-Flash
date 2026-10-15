@@ -5,7 +5,6 @@ Workers -> controller: one PULL socket at the controller. Activations go worker 
 every worker handles plans in mb_id order, so sends and receives match without tags.
 """
 
-import os
 from collections import deque
 
 import msgspec
@@ -104,11 +103,6 @@ def report_socket(ctx: zmq.Context, report_addr: str) -> zmq.Socket:
 
 # --- activations ----------------------------------------------------------------------------------------------------
 
-# Diagnosis (M3 saturated runs: stages 1-3 slow only while the host runs ahead): a receive posted early spins on SMs
-# for as long as the sender has not sent, beside this stage's compute.
-RECV_AFTER_COMPUTE = os.environ.get("PPIMPL_RECV_AFTER_COMPUTE") == "1"
-
-
 class Pipe:
     """Point-to-point activations between neighbouring stages.
 
@@ -147,8 +141,6 @@ class Pipe:
             dist.recv(buf, src)
             return buf
         with torch.cuda.stream(self.recv_stream):
-            if RECV_AFTER_COMPUTE:   # the NCCL receive kernel starts only once the queued compute has finished
-                self.recv_stream.wait_stream(torch.cuda.current_stream(self.device))
             buf = torch.empty(num_tokens, width, dtype=torch.bfloat16, device=self.device)
             work = dist.irecv(buf, src)
         work.wait()                                   # current (compute) stream waits on the receive; host goes on

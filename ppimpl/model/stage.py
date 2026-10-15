@@ -472,6 +472,8 @@ class StageModel:
         return x, residual, post, comb
 
     def output_head(self, b, x, residual, post, comb) -> torch.Tensor:
+        if b.last_rows.shape[0] == 0:   # no request ends in this microbatch (chunks of longer prompts): no head
+            return torch.empty(0, dtype=torch.int64, device=x.device)
         return self.head_logits(b, x, residual, post, comb, fp32=False).argmax(dim=-1)
 
     def head_logits(self, b, x, residual, post, comb, fp32: bool = True) -> torch.Tensor:

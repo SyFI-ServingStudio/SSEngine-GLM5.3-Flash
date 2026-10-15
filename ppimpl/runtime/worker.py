@@ -108,6 +108,18 @@ class Reporter(threading.Thread):
         sock.close()
 
 
+def limit_persistent_grids(device: torch.device, sms: int):
+    """Persistent kernels that hand work between their CTAs by spinning (DeepGEMM mega_mhc split barriers, FlashInfer
+    persistent KDA split chains) need every CTA resident at once; an NCCL send/recv kernel running beside them holds
+    SMs, so they stall until it ends (nsys 7167: mega_mhc 0.19 ms -> up to 199 ms). Size their grids to `sms`; the
+    controller keeps NCCL's channels (one CTA each) within the rest (RunConfig.compute_sms, nccl_channels)."""
+    from flashinfer.kda_kernels.persistent import forward as kda
+    from vllm.utils.deep_gemm import set_num_sms
+
+    set_num_sms(sms)
+    kda._SMS[device.index] = sms
+
+
 def build_model(cfg: RunConfig, stage: int, device: torch.device):
     if cfg.model == "fake":
         from ppimpl.model.fake import FakeStageModel
@@ -136,6 +148,8 @@ def run_worker(cfg: RunConfig, stage: int):   # makes inference tensors, which a
     sync_each_mb = cuda and os.environ.get("PPIMPL_SYNC_EACH_MB") == "1"
     try:
         pipe = Pipe(stage, n, device, cfg.dist_init_method())
+        if cuda and cfg.model != "fake" and cfg.compute_sms:
+            limit_persistent_grids(device, cfg.compute_sms)
         model = build_model(cfg, stage, device)
         # which FlashInfer tactics the stage runs with (StageModel.tactics: source file|tuned_in_process, file, sha256)
         info = {"stage": stage, "tactics": getattr(model, "tactics", None),

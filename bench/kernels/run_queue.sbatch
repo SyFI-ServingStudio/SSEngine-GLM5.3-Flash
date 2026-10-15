@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH -p priority
+#SBATCH -p main
 #SBATCH --gres=gpu:2
 #SBATCH --time=00:25:00
 #SBATCH -J pp-remeasure

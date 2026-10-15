@@ -393,9 +393,11 @@ def token_summary(run_dir: Path) -> dict | None:
                "reference_token": r.get("reference_token"),
                "reference_margin": refs.get(r.get("reference_id"), {}).get("margin"),
                "rank_in_reference_top5": r.get("engine_token_rank_in_reference_top5")}
-              for r in tc["requests"] if r["verdict"] in ("fail", "no_token")]
+              for r in tc["requests"] if r["verdict"] in ("fail", "no_token")
+              or (r["verdict"] == "near_tie" and not r.get("matches"))]
     s = tc["summary"]
-    return {k: s[k] for k in ("pass", "fail", "no_token", "no_reference", "ok")} | {"misses": misses}
+    return {k: s.get(k, 0) for k in ("pass", "fail", "no_token", "near_tie", "no_reference", "ok")} \
+        | {"min_margin": s.get("min_margin"), "misses": misses}
 
 
 def tactics_note(tactics: list | None) -> str:
@@ -411,13 +413,16 @@ def tactics_note(tactics: list | None) -> str:
 def runs_md(runs: list[dict]) -> str:
     """Per run: tokens against the reference (misses with the reference margin) and the FlashInfer tactics used."""
     out = ["## Runs: tokens and tactics", "",
-           "| Run | Tokens pass / fail / no token / not in reference | Misses (token vs reference, reference margin) "
+           "| Run | Tokens pass / fail / no token / near tie (not judged) / not in reference "
+           "| Misses (token vs reference, reference margin) "
            "| Tactics |", "|---|---|---|---|"]
     size = lambda r: int(m.group(1)) if (m := re.search(r"_(\d+)k$", r["name"])) else 0   # noqa: E731
     for r in sorted(runs, key=lambda r: (r["kind"], size(r), r["name"])):
         t = r.get("tokens")
-        cell = "—" if t is None else f"{t['pass']} / {t['fail']} / {t['no_token']} / {t['no_reference']}"
-        miss = "; ".join(f"{m['id']}: {m['token']} vs {m['reference_token']} (margin {m['reference_margin']})"
+        cell = "—" if t is None else \
+            f"{t['pass']} / {t['fail']} / {t['no_token']} / {t.get('near_tie', 0)} / {t['no_reference']}"
+        miss = "; ".join(f"{m['id']}: {m['token']} vs {m['reference_token']} (margin {m['reference_margin']}"
+                         + (", near tie)" if m.get("verdict") == "near_tie" else ")")
                          for m in (t or {}).get("misses", [])) or "—"
         out.append(f"| {r['name']} | {cell} | {miss} | {tactics_note(r.get('tactics'))} |")
     return "\n".join(out) + "\n"

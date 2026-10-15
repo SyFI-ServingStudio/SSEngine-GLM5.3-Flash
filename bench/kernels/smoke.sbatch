@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH -p priority
+#SBATCH -p main
 #SBATCH --gres=gpu:1
 #SBATCH --time=00:10:00
 #SBATCH -J pp-remeasure-smoke
