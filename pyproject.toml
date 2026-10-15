@@ -1,0 +1,21 @@
+[project]
+name = "ppimpl"
+version = "0.1.0"
+description = "GLM-5.3-Flash NVFP4 as a 4-stage pipeline on 4xB200 (handoff glm53_flash_pp4_b200_v1)"
+requires-python = ">=3.12"
+# torch and the vLLM fork come from the shared env (.venv); see README.md, Provenance.
+dependencies = ["fastapi", "uvicorn", "msgspec", "pyzmq", "pyyaml", "numpy"]
+
+[project.optional-dependencies]
+test = ["pytest", "httpx"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["ppimpl*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["gpu: needs 4 GPUs (run through Slurm)"]
