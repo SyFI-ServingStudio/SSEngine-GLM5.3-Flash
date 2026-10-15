@@ -21,6 +21,7 @@ export MOESIM_CUPTI_BUILD_DIR=/raid/kanzhu/ServingStudio/tmp/moesim_cupti_ext_pp
 export VIBESIM_AUTOTUNE_CACHE_DIR=$Q/autotune
 mkdir -p "$VIBESIM_AUTOTUNE_CACHE_DIR"
 START=$(date +%s); DEADLINE=$((START + LIMIT_S))
+NEED_S=${NEED_S:-240}; NEED_MOE_S=${NEED_MOE_S:-360}
 {
   echo "job=$SLURM_JOB_ID cvd=$CUDA_VISIBLE_DEVICES start=$(date -Is) limit_s=$LIMIT_S"
   echo "uptime: $(uptime)"
@@ -34,9 +35,22 @@ lane() {
   while :; do
     (( fails >= 2 )) && { echo "$(date -Is) dev$dev stop: 2 chunks in a row returned no results" >> "$LOG/progress.log"; return; }
     local left=$(( DEADLINE - $(date +%s) ))
-    (( left < 480 )) && { echo "$(date -Is) dev$dev stop: ${left}s left" >> "$LOG/progress.log"; return; }
-    local f; f=$(ls "$Q/todo" 2>/dev/null | grep -v '\.rows\.jsonl$' | sort | head -1)
-    [ -z "$f" ] && { echo "$(date -Is) dev$dev queue empty" >> "$LOG/progress.log"; return; }
+    # A chunk needs NEED_S seconds of job left to start (MoE chunks autotune first: NEED_MOE_S);
+    # take the first chunk in queue order that fits, else stop.
+    (( left < NEED_S )) && { echo "$(date -Is) dev$dev stop: ${left}s left" >> "$LOG/progress.log"; return; }
+    local f="" c
+    for c in $(ls "$Q/todo" 2>/dev/null | grep -v '\.rows\.jsonl$' | sort); do
+      case "$c" in *__nvfp4_fused_moe__*) (( left < NEED_MOE_S )) && continue;; esac
+      f=$c; break
+    done
+    if [ -z "$f" ]; then
+      if ls "$Q/todo" 2>/dev/null | grep -q .; then
+        echo "$(date -Is) dev$dev stop: ${left}s left, too little for the remaining chunks" >> "$LOG/progress.log"
+      else
+        echo "$(date -Is) dev$dev queue empty" >> "$LOG/progress.log"
+      fi
+      return
+    fi
     local stem=${f%.jsonl}
     mv "$Q/todo/$f" "$Q/claimed/$f" 2>/dev/null || continue   # another lane took it
     mv "$Q/todo/$stem.rows.jsonl" "$Q/claimed/" 2>/dev/null
@@ -46,7 +60,7 @@ lane() {
     mkdir -p "$Q/knames/$stem"
     # run_call.sh: own session; on timeout it kills that session only (never by GPU or user).
     ( cd "$SIM" && CUDA_VISIBLE_DEVICES=$dev PPM_KNAMES_DIR="$Q/knames/$stem" \
-        "$LANE/bench/kernels/run_call.sh" $(( left - 120 )) "$Q/out/$stem.json" "$Q/out/$stem.err" \
+        "$LANE/bench/kernels/run_call.sh" $(( left - 100 )) "$Q/out/$stem.json" "$Q/out/$stem.err" \
         uv run --no-sync python "$LANE/bench/kernels/ppimpl_profile.py" run "$kind" \
         --backend "$backend" --specs "$Q/claimed/$f" --fresh --gpu-name "NVIDIA B200" --json )
     local rc=$?
