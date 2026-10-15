@@ -74,7 +74,7 @@ class RunConfig(msgspec.Struct, forbid_unknown_fields=True):
                                       # only when stage 0 is free); see ppimpl/runtime/dispatch.py
     form_lead_ms: float = 3.0         # the queued plan forms this long before the running one's predicted stage-0 end
     pool_tokens: int | None = None    # cap on the KV pool, in tokens (1_contract.md §2.3)
-    transport: str = "nccl"           # activations: "nccl" p2p, or "ce": copy engine into the receiver's ring (CePipe)
+    transport: str = "ce"             # activations: "ce" copy engine into the receiver's ring (CePipe), or "nccl" p2p
     # transport "nccl" only: persistent kernels with spin handoffs between CTAs (DeepGEMM mega_mhc, FlashInfer
     # persistent KDA) run on this many SMs, and NCCL p2p on at most nccl_channels CTAs per kernel (a send and a receive:
     # 2 x 8 of the 148), so an NCCL kernel beside them never keeps one of their CTAs from running (M3 saturated: 2.7x
