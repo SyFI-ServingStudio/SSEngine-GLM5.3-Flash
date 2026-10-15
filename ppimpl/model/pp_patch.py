@@ -300,12 +300,16 @@ def install_topk_router() -> None:
 # ---------------------------------------------------------------- forced routing (M2)
 
 
-def force_routing(gate, logits: torch.Tensor) -> None:
-    """The MoE gate still runs its GEMM, then hands the experts `logits` (FP32 [T, 288]) instead of its output."""
+def force_routing(gate, source) -> None:
+    """The MoE gate still runs its GEMM, then hands the experts `source()` (FP32 [>= T, 288] logits) instead of
+    its output; when `source()` is None the real router output goes through."""
     orig = gate.forward
 
     def forward(x):
         out = orig(x)
+        logits = source()
+        if logits is None:
+            return out
         forced = logits[: x.shape[0]]
         return (forced, out[1]) if isinstance(out, tuple) else forced
 

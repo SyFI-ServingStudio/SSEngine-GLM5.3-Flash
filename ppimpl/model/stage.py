@@ -103,6 +103,11 @@ class StageModel:
         self.norm = self.inner.norm if self.last else None
         self.lm_head = lm.lm_head if self.last else None
 
+        if self.last and self.layers and self.layers[-1].layer_idx == self.layers[-1].num_hidden_layers - 1:
+            # layer 44 defers its final mHC post + stream mean to output_head, which applies them to the rows whose
+            # token is returned only (both are per token)
+            self.layers[-1].num_hidden_layers += 1
+
         # design kernel routing
         pp_patch.route_mhc_boundaries(self.layers)
         for layer in self.layers:
@@ -131,9 +136,15 @@ class StageModel:
     # ------------------------------------------------------------------------------------------------ forward
 
     def forward(self, plan, hidden_in: torch.Tensor | None) -> torch.Tensor:
+        return self.run(self.prepare(plan), hidden_in)
+
+    def prepare(self, plan):
+        """Host side of one microbatch: metadata and its non-blocking copies (overlaps the previous compute)."""
+        return self.meta.build(plan, with_tokens=self.first)
+
+    def run(self, b, hidden_in: torch.Tensor | None) -> torch.Tensor:
         from vllm.forward_context import set_forward_context
 
-        b = self.meta.build(plan, with_tokens=self.first)
         with set_forward_context(b.attn, self.vc, num_tokens=b.num_tokens, slot_mapping=b.slots):
             x, residual, post, comb = self.run_layers(b, hidden_in)
             if not self.last:
@@ -151,11 +162,16 @@ class StageModel:
         return x, residual, post, comb
 
     def output_head(self, b, x, residual, post, comb) -> torch.Tensor:
-        """Final mHC post + mean of the 4 streams (layer 44 does both), final norm and lm_head on the rows whose
-        token is returned, greedy token."""
-        if post is not None:          # the stage does not end the model (layer benches)
-            x = self.layers[-1].hc_post(x, residual, post, comb).mean(dim=1)
-        rows = x.index_select(0, b.last_rows)
-        h = self.norm(rows)
-        logits = torch.nn.functional.linear(h, self.lm_head.weight)
-        return logits.argmax(dim=-1)
+        return self.head_logits(b, x, residual, post, comb).argmax(dim=-1)
+
+    def head_logits(self, b, x, residual, post, comb) -> torch.Tensor:
+        """The rows whose token is returned, then on those rows only: the last layer's deferred mHC post and the
+        mean of the 4 streams (both per token), final norm, lm_head -> FP32 logits [rows, vocab]."""
+        rows = b.last_rows
+        if post is not None:
+            x = self.layers[-1].hc_post(x.index_select(0, rows), residual.index_select(0, rows),
+                                        post.index_select(0, rows), comb.index_select(0, rows)).mean(dim=1)
+        else:
+            x = x.index_select(0, rows)
+        h = self.norm(x)
+        return torch.nn.functional.linear(h, self.lm_head.weight).float()
