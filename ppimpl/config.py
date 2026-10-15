@@ -81,6 +81,8 @@ class RunConfig(msgspec.Struct, forbid_unknown_fields=True):
     # slower stages). "ce" uses no SMs for transport, and the kernels keep all 148.
     compute_sms: int | None = 132
     nccl_channels: int | None = 8
+    intake_procs: int = 0             # 0: HTTP in the controller process; N: N intake processes on the port
+                                      # (SO_REUSEPORT) that parse requests and pass them on over zmq (ppimpl/intake.py)
     profile_mbs: list[int] | None = None  # [a, b): cudaProfilerStart at mb a, Stop after mb b-1 (bench/run.py --nsys)
     keep_sessions: bool = False       # phase B: exact prefix cache (kept sessions, LRU eviction of whole sessions)
     scheduler: SchedulerConfig = msgspec.field(default_factory=SchedulerConfig)  # mb_tokens: one-request runs set it >= the prompt
@@ -95,7 +97,8 @@ class RunConfig(msgspec.Struct, forbid_unknown_fields=True):
     def base_port(self) -> int:
         return self.control_port if self.control_port is not None else self.port + 1
 
-    # Port layout: base = controller PULL (reports), base+1+s = worker s PULL (plans), base+1+N = torch.distributed.
+    # Port layout: base = controller PULL (reports), base+1+s = worker s PULL (plans), base+1+N = torch.distributed,
+    # base+2+N = controller ROUTER for intake processes.
     def report_addr(self) -> str:
         return f"tcp://127.0.0.1:{self.base_port}"
 
@@ -104,6 +107,9 @@ class RunConfig(msgspec.Struct, forbid_unknown_fields=True):
 
     def dist_init_method(self) -> str:
         return f"tcp://127.0.0.1:{self.base_port + 1 + self.num_stages}"
+
+    def intake_addr(self) -> str:   # controller ROUTER <- intake DEALERs (intake_procs > 0)
+        return f"tcp://127.0.0.1:{self.base_port + 2 + self.num_stages}"
 
 
 def load_config(path: str | Path, **overrides) -> RunConfig:

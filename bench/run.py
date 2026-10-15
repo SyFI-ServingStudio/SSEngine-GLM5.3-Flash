@@ -267,6 +267,8 @@ def run_named(name: str, fake: bool, port: int, out_root: Path, args) -> dict:
         extra["fake"] = {"us_per_token": args.us_per_token}
     if args.transport:
         extra["transport"] = args.transport
+    if args.intake_procs is not None:
+        extra["intake_procs"] = args.intake_procs
     if args.cpu:    # harness check without GPUs: gloo, small activations
         extra["fake"] = {**extra.get("fake", {}), "hidden_width": 64}
     return execute(run_dir, server_config(kind, length, fake, run_dir, device="cpu" if args.cpu else "cuda", **extra),
@@ -288,6 +290,8 @@ def submit(args) -> None:
         inner.append("--nsys")
     if args.transport:
         inner += ["--transport", args.transport]
+    if args.intake_procs is not None:
+        inner += ["--intake-procs", str(args.intake_procs)]
     if args.nsys_mbs:
         inner += ["--nsys-mbs", args.nsys_mbs]
     if args.out_root:
@@ -320,6 +324,7 @@ def main():
     ap.add_argument("--port", type=int)
     ap.add_argument("--us-per-token", type=float, help="FakeStageModel stage time per token")
     ap.add_argument("--transport", choices=["nccl", "ce"], help="RunConfig.transport (default: the config's)")
+    ap.add_argument("--intake-procs", type=int, help="RunConfig.intake_procs (0: HTTP in the controller process)")
     ap.add_argument("--client-timeout", type=float, default=1200)
     ap.add_argument("--nsys", action="store_true", help="run the server under Nsight Systems (bench/nsys_trace.py parses it)")
     ap.add_argument("--nsys-mbs", help="microbatches to trace, a:b or all (default: one-request all, saturated the "

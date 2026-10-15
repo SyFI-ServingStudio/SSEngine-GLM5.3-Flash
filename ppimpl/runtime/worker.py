@@ -17,7 +17,7 @@ import torch
 import zmq
 
 from ppimpl.config import HIDDEN_WIDTH, RunConfig
-from ppimpl.runtime.cpus import pin_process, threads, worker_cpus
+from ppimpl.runtime.cpus import cpu_list, pin_process, threads, worker_cpus
 from ppimpl.runtime.transport import (open_pipe, Plan, Ready, Shutdown, StageDone, WorkerError, decode_to_worker,
                                       encode, report_socket, worker_sockets)
 
@@ -164,7 +164,7 @@ def run_worker(cfg: RunConfig, stage: int):   # makes inference tensors, which a
         (Path(cfg.run_dir) / f"stage{stage}.json").write_text(json.dumps(info) + "\n")
         clock = Clock(device)
         window = ProfileWindow(cfg.profile_mbs if cuda else None)
-        print(f"stage {stage} cpus: {sorted(cpus) if cpus else 'not pinned'}, threads {threads()}", flush=True)
+        print(f"stage {stage} cpus: {cpu_list(cpus) if cpus else 'not pinned'}, threads {threads()}", flush=True)
         reporter.q.put(Ready(stage, model.num_blocks))
         while True:
             while not plans.poll(1000):

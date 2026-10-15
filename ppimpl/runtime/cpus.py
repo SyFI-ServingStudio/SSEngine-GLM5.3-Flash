@@ -1,5 +1,6 @@
-"""CPU sets: each worker on a few whole cores of its GPU's NUMA node, the controller on the rest of the job's CPUs,
-so other processes on a loaded host (and our own threads) do not preempt the stage that launches the kernels.
+"""CPU sets: each worker on a few whole cores of its GPU's NUMA node, the controller and the intake processes on the
+rest of the job's CPUs, so other processes on a loaded host (and our own threads) do not preempt the stage that
+launches the kernels.
 
 Every worker computes the same assignment from the affinity it inherits from the controller (the job's CPUs), so no
 messages are needed; the controller then reads the workers' sets back and takes what is left."""
@@ -9,6 +10,7 @@ import os
 from pathlib import Path
 
 WORKER_CORES = 2   # physical cores per worker, both hyperthreads: main thread, reporter, gloo/NCCL, zmq, CUDA driver
+CONTROLLER_CORES = 2   # with intake processes: the controller's own, the intakes get the rest
 
 
 def _siblings(cpu: int) -> tuple[int, ...]:
@@ -55,6 +57,13 @@ def worker_cpus(stage: int, num_stages: int) -> set[int] | None:
     return None
 
 
+def split_cores(cpus: set[int], k: int) -> tuple[set[int], set[int]]:
+    """The first k whole cores of `cpus`, and the rest (or the same k cores when nothing is left)."""
+    cores = sorted({tuple(c for c in _siblings(cpu) if c in cpus) for cpu in cpus})
+    first = {cpu for c in cores[:k] for cpu in c}
+    return first, (cpus - first) or first
+
+
 def pin_process(cpus: set[int]):
     """Every thread of this process (os.sched_setaffinity(0) moves only the calling one); later threads inherit."""
     for tid in os.listdir("/proc/self/task"):
@@ -62,6 +71,21 @@ def pin_process(cpus: set[int]):
             os.sched_setaffinity(int(tid), cpus)
         except ProcessLookupError:
             pass
+
+
+def cpu_list(cpus) -> str:
+    """{0, 1, 2, 112, 113} -> "0-2,112-113" (the kernel's cpulist format)."""
+    out, run = [], []
+    for c in sorted(cpus):
+        if run and c == run[-1] + 1:
+            run.append(c)
+            continue
+        if run:
+            out.append(f"{run[0]}-{run[-1]}" if len(run) > 1 else str(run[0]))
+        run = [c]
+    if run:
+        out.append(f"{run[0]}-{run[-1]}" if len(run) > 1 else str(run[0]))
+    return ",".join(out)
 
 
 def threads(pid: int | str = "self") -> int:

@@ -17,12 +17,13 @@ CPU = {"device": "cpu", "fake": {"us_per_token": 2.0, "hidden_width": 64, "num_b
 ONE_1K_0_SHA256 = "bf4c22dedc655d529f3c205732200a134076384f6cc1df3545d8cb2952ea3abb"
 
 
-def test_serve_http_cpu(tmp_path):
+@pytest.mark.parametrize("intake_procs", [0, 2])
+def test_serve_http_cpu(tmp_path, intake_procs):
     lengths = [1, 100, 1000, 5000, 8191, 8192, 8193, 20000, 3000, 12000, 7, 16384] * 2
     prompts = {f"req{i}": n for i, n in enumerate(lengths)}
     assert max(blocks_per_request(n) for n in lengths) <= 29 < sum(blocks_per_request(n) for n in lengths)
     port = free_port_block()
-    srv = Server(tmp_path / "run", port, **CPU)
+    srv = Server(tmp_path / "run", port, intake_procs=intake_procs, **CPU)
     try:
         srv.wait_ready()
         res = asyncio.run(send_all(port, prompts))
@@ -45,9 +46,10 @@ def test_serve_http_cpu(tmp_path):
     assert pool["num_blocks"] == 29
 
 
-def test_rejects_what_it_cannot_serve(tmp_path):
+@pytest.mark.parametrize("intake_procs", [0, 2])
+def test_rejects_what_it_cannot_serve(tmp_path, intake_procs):
     port = free_port_block()
-    srv = Server(tmp_path / "run", port, **CPU)
+    srv = Server(tmp_path / "run", port, intake_procs=intake_procs, **CPU)
     try:
         srv.wait_ready()
         import httpx
