@@ -114,7 +114,8 @@ def build_model(cfg: RunConfig, stage: int, device: torch.device):
     return StageModel(cfg, stage, device)
 
 
-def run_worker(cfg: RunConfig, stage: int):
+@torch.inference_mode()   # all of it: model construction, warm-up, receive, forward, send (StageModel's warm-up
+def run_worker(cfg: RunConfig, stage: int):   # makes inference tensors, which autograd-tracked code may not use)
     signal.signal(signal.SIGINT, signal.SIG_IGN)   # the controller stops us (Shutdown), or we see it is gone
     parent = os.getppid()
     n = cfg.num_stages

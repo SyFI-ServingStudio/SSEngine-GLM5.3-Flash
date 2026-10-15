@@ -89,14 +89,19 @@ def one_request(run_dir: Path, meta: dict) -> list[dict]:
     sreq = {r["id"]: r for r in read_jsonl(run_dir / "server_requests.jsonl")}
     t0 = json.loads((run_dir / "t0.json").read_text())["t0_unix_ns"] / 1e6 if (run_dir / "t0.json").exists() else None
     client = client_rows(run_dir)
-    nstages = 1 + max((m["stage"] for m in mbs), default=0)
+    pool = run_dir / "pool.json"
+    nstages = (len(json.loads(pool.read_text())["ready_blocks"]) if pool.exists()
+               else 1 + max((m["stage"] for m in mbs), default=0))
     lines = []
     for i, tid in enumerate(trace_ids(Path(meta["trace"])), 1):
         rid = client_id(tid)
         mine = [m for m in mbs if any(q["id"] == rid for q in m["requests"])]
         c = client.get(rid)
-        if not mine or c is None:
-            lines.append({"prompt_tokens": meta["prompt_tokens"], "run": i, "id": rid, "missing": True})
+        why = ("no client record" if c is None else "client: no token" if not c["ok"]
+               else "stages missing" if {m["stage"] for m in mine} != set(range(nstages)) else None)
+        if why:   # a failed request is a result, not a crash: it is listed and counted in the tables
+            lines.append({"prompt_tokens": meta["prompt_tokens"], "run": i, "id": rid, "failed": why,
+                          "stages_done": sorted({m["stage"] for m in mine})})
             continue
         stages = []
         for s in range(nstages):
@@ -236,7 +241,11 @@ def iteration_md(one: list[dict], sat: list[dict], title: str) -> str:
                 "| Client TTFT | Host |",
                 "|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
         for L in sorted({r["prompt_tokens"] for r in one}):
-            rs = [r for r in one if r["prompt_tokens"] == L and not r.get("missing")]
+            failed = [r for r in one if r["prompt_tokens"] == L and r.get("failed")]
+            if failed:
+                out.append(f"| {L // 1024}k | {len(failed)} failed | " + "; ".join(
+                    f"#{r['run']}: {r['failed']} (stages done {r['stages_done']})" for r in failed) + " |")
+            rs = [r for r in one if r["prompt_tokens"] == L and not r.get("failed")]
             if not rs:
                 continue
             t = it_t.get(L)
@@ -393,7 +402,9 @@ def main():
                   + (f", TTFT p50 {s['ttft_s']['p50']:.3f} s" if s["ttft_s"] else ""))
         else:
             for r in rep["requests"]:
-                if not r.get("missing"):
+                if r.get("failed"):
+                    print(f"{d.name} #{r['run']}: FAILED ({r['failed']}, stages done {r['stages_done']})")
+                else:
                     print(f"{d.name} #{r['run']}: span {r['gpu_span_ms']:.3f} ms, TTFT {r['client_ttft_ms']:.3f} ms, "
                           "stages " + " ".join(f"{s['compute_ms']:.3f}" for s in r["stages"]))
     for root in {d.parent for d in dirs}:
