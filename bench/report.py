@@ -537,6 +537,7 @@ def summarize(runs_root: Path, out: Path | None = None) -> Path:
         if rep.get("kernels"):
             kern.append(kernels_md(rep["name"], rep["kernels"]))
     out = out or (runs_root.parent if runs_root.name == "runs" else runs_root)
+    out.mkdir(parents=True, exist_ok=True)
     one.sort(key=lambda r: (r["prompt_tokens"], r["run"]))
     sat.sort(key=lambda r: r["prompt_tokens"])
     (out / "iteration.jsonl").write_text("".join(json.dumps(r) + "\n" for r in one))
