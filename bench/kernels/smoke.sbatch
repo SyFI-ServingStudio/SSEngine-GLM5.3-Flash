@@ -19,7 +19,7 @@ echo "job=$SLURM_JOB_ID cvd=$CUDA_VISIBLE_DEVICES start=$(date -Is) uptime: $(up
 bad=0
 for f in $(ls "$Q/todo" | grep -v rows | awk -F'__' '!seen[$2"__"$3]++'); do
   stem=${f%.jsonl}; kind=$(echo "$stem" | awk -F'__' '{print $2}'); backend=$(echo "$stem" | awk -F'__' '{print $3}')
-  python3 -c "import json,sys; rows=[json.loads(l) for l in open('$Q/todo/$stem.rows.jsonl')]; print(json.dumps(min(zip([r['db_time_ms'] for r in rows], open('$Q/todo/$f').read().splitlines()))[1]))" > "$OUT/$kind.$backend.spec.jsonl"
+  python3 "$LANE/bench/kernels/smallest_spec.py" "$Q/todo/$stem.rows.jsonl" > "$OUT/$kind.$backend.spec.jsonl"
   t0=$(date +%s)
   ( cd "$SIM" && PPM_KNAMES_DIR="$OUT/knames_$kind.$backend" timeout 240 uv run --no-sync python "$LANE/bench/kernels/ppimpl_profile.py" run "$kind" \
       --backend "$backend" --specs "$OUT/$kind.$backend.spec.jsonl" --fresh --gpu-name "NVIDIA B200" --json \

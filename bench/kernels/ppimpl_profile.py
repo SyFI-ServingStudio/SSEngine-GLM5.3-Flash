@@ -34,7 +34,27 @@ def main():
     for name in ENV_NAMES:
         register_profile_env(name, VENV_PY, additional_python_paths=extra,
                              additional_library_paths=(TORCH_LIB,), isolated_site_packages=True)
+    if os.environ.get("PPM_CPU_DRYRUN"):
+        _cpu_dryrun()
     return cli_main(sys.argv[1:])
+
+
+def _cpu_dryrun():
+    """Exercise the whole CLI path without a GPU: spec parsing, chunking, worker launch in
+    pp-impl/.venv, spec coercion and runner load in the worker. The pool is told GPU 0 is
+    idle, and the worker gets CUDA_VISIBLE_DEVICES="" so it touches no device; every spec
+    then ends in the runner's device error, which is the expected outcome."""
+    import profiling.exec.local as local
+
+    local.find_idle_gpus = lambda *args, **kwargs: [0]
+    original = local._host_worker_command
+
+    def host_worker_command(*args, **kwargs):
+        cmd, env = original(*args, **kwargs)
+        env["CUDA_VISIBLE_DEVICES"] = ""
+        return cmd, env
+
+    local._host_worker_command = host_worker_command
 
 
 if __name__ == "__main__":
