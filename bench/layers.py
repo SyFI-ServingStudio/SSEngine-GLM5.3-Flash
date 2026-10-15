@@ -73,7 +73,8 @@ NUM_BLOCKS = 1 + KV_BLOCKS + 6
 
 # ================================================================ kernel -> position rules
 
-GEMM = r"(?i)nvjet|gemm|cutlass|xmma|gemv|splitK"
+GEMM = r"(?i)^(?!.*(splitKreduce|flash_fwd)).*(nvjet|gemm|cutlass|xmma|gemv)"
+SPLITK_REDUCE = re.compile(r"splitKreduce")
 QUANT = r"(?i)cvt_fp16_to_fp4|fp4_quant|scaled_fp4|quantize_with_block_size|fp4_kernel"
 
 # (position, scope regex, kernel regex, group, nth). The scope is the module path below the unit (layer / head), each
@@ -118,18 +119,19 @@ DSA_RULES = [
     ("dsa.indexer.head_weights", r"indexer#\d+$", GEMM, "idx_gemm", 0),
     ("dsa.indexer.kpool_gate_score", r"indexer#\d+$", GEMM, "idx_gemm", 1),
     ("dsa.indexer.q_fwht_quant", r"indexer#", r"(?i)fwht"),
-    ("dsa.indexer.weight_scale", r"indexer#", r"(?i)weight_scale"),
+    ("dsa.indexer.weight_scale", r"indexer#", r"(?i)weight_scale|fused_mul_unsqueeze"),
     ("dsa.indexer.k_norm", r"indexer#", r"(?i)k_norm|layer_?norm"),
     ("dsa.indexer.mqa_logits_prefill", r"indexer#", r"(?i)mqa_logits|mqa"),
     ("dsa.indexer.topk_prefill", r"indexer#", r"(?i)top_?k|deep_?select|radix|select"),
+    ("dsa.indexer.expand_pools", r"indexer#", r"(?i)expand"),
     ("dsa.indexer.prefill_gather", r"indexer#", r"(?i)gather"),
     ("dsa.indexer.kpool_tail_seed", r"indexer#", r"(?i)tail"),
-    ("dsa.indexer.expand_pools", r"indexer#", r"(?i)expand"),
     ("dsa.indexer.kpool_prefill_write", r"indexer#", r"(?i)kpool|compress|cache|write"),
     ("dsa.o_proj", r"o_proj", None),
-    ("dsa.sparse_mla.prefill", r"^self_attn#", r"(?i)fmha|trtllm|sparse_?mla|mla_?sparse"),
-    ("dsa.sparse_mla.mla_cache_append", r"^self_attn#", r"(?i)concat_and_cache|cache_mla|reshape_and_cache"),
     ("dsa.sparse_mla.index_remap", r"^self_attn#", r"(?i)remap|req_index|global_index|physical"),
+    ("dsa.sparse_mla.prefill", r"^self_attn#", r"(?i)fmha|trtllm|sparse_?mla|mla_?sparse|flash_fwd"),
+    ("dsa.sparse_mla.mla_cache_append", r"^self_attn#", r"(?i)concat_and_cache|cache_mla|reshape_and_cache"),
+    ("dsa.q_kv_a_norm", r"mla_attn#\d+$", r"^Kernel$"),
     ("dsa.q_absorb", r"mla_attn#\d+$", GEMM, "mla_bmm", 0),
     ("dsa.v_up", r"mla_attn#\d+$", GEMM, "mla_bmm", 1),
     ("dsa.q_fp8_quant", r"mla_attn#", r"(?i)quant|fp8|scaled"),
@@ -145,7 +147,7 @@ RULES = {
     "dsa_moe": MHC + DSA_RULES + MOE_RULES,
     "input_head": [("embedding", r"^embed", None), ("hc_expand", r"^hc_expand", None)],
     "output_head": [("final_mhc_post", r"mhc_post_op", None), ("final_norm", r"(^|/)norm#", None),
-                    ("hc_contract_mean", r"", r"(?i)reduce|mean"), ("lm_head", r"", GEMM)],
+                    ("lm_head", r"", GEMM), ("hc_contract_mean", r"", r"MeanOps")],
 }
 _rx = {}
 
@@ -177,6 +179,11 @@ def assign_positions(layer_type: str, kernels: list[dict]) -> None:
                 k["position"] = None if pos is None else prefix + pos
                 k["rule"] = True
                 break
+    prev = None
+    for k in kernels:
+        if SPLITK_REDUCE.search(k["name"]) and prev is not None:
+            k["position"] = prev
+        prev = k["position"]
     if layer_type in MOE_TYPES:
         _moe_glue(layer_type, kernels)
 
@@ -335,6 +342,8 @@ def summarize_run(kernels: list[dict]) -> dict:
         if k["unit"] is None:
             continue
         key = "input_head" if k["unit"] in ("embed", "hc_expand") else k["unit"]
+        if key == "input_head" and not k["scope"].startswith(k["unit"]):
+            k["scope"] = f"{k['unit']}#0" + (f"/{k['scope']}" if k["scope"] else "")
         units[key].append(k)
     out = {}
     for key, ks in units.items():
@@ -624,13 +633,20 @@ def bench(args) -> None:
                         launch.append((time.perf_counter() - h0) * 1e3)
                         torch.cuda.synchronize()
                     lead = 1.5 * max(launch) + 5
+                    stats0 = torch.cuda.memory_stats()
+                    torch.cuda.reset_peak_memory_stats()
                     syncs = host_syncs(model, plan)
+                    stats1 = torch.cuda.memory_stats()
+                    mem = {"alloc_retries": stats1.get("num_alloc_retries", 0) - stats0.get("num_alloc_retries", 0),
+                           "cuda_mallocs": stats1.get("num_device_alloc", 0) - stats0.get("num_device_alloc", 0),
+                           "cuda_frees": stats1.get("num_device_free", 0) - stats0.get("num_device_free", 0),
+                           "peak_gib": round(stats1.get("allocated_bytes.all.peak", 0) / 2**30, 1)}
                     parsed, tok = profile_runs(model, plan, args.runs, lead, cpm, trace_dir, f"L{L}_{routing}")
                     Scopes.on = False
                     gap_parsed, _ = profile_runs(model, plan, 3, 0, cpm, trace_dir, f"L{L}_{routing}_eager")
                     Scopes.on = True
                 extra = dict(extra_common, host_launch_ms=round(max(launch), 2), lead_ms=round(lead, 1),
-                             host_syncs=syncs,
+                             host_syncs=syncs, memory=mem,
                              gaps=host_gaps(gap_parsed), token=int(tok[0]))
                 lines = aggregate(L, routing, parsed, targets, extra)
                 if routing == routings[0]:
@@ -642,7 +658,7 @@ def bench(args) -> None:
                 raw_dump(L, routing, parsed)
                 summary = " ".join(f"{x['layer_type']}={x['real_ms']:.3f}({x['ratio']})" for x in lines)
                 print(f"[layers] L={L} {routing}: {summary}; launch {max(launch):.1f} ms; "
-                      f"eager gap {extra['gaps']['eager_gap_ms']} ms; host syncs {len(syncs)}", flush=True)
+                      f"eager gap {extra['gaps']['eager_gap_ms']} ms; host syncs {len(syncs)}; memory {mem}", flush=True)
                 for sync in syncs:
                     print(f"[layers]   sync x{sync['count']}: {sync['message'][:80]} @ {sync['where']}", flush=True)
         except Exception as e:  # noqa: BLE001 - record and go on to the next length

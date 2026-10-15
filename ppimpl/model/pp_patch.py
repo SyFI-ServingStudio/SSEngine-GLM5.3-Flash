@@ -142,6 +142,21 @@ def edge_recv(hidden: torch.Tensor) -> torch.Tensor:
     return hidden.view(hidden.shape[0], HC, HIDDEN)
 
 
+# ---------------------------------------------------------------- input head
+
+
+def hc_expand_cat(x: torch.Tensor, n: int) -> torch.Tensor:
+    """`mhc.hc_expand` ([T, H] -> [T, n, H] by replication) as one vectorized concatenation; the fork's broadcast
+    `expand().contiguous()` copy ran at ~1 TB/s (M2: input_head x3.3 at 16k)."""
+    return torch.cat([x] * n, dim=1).view(x.shape[0], n, x.shape[1])
+
+
+def route_hc_expand() -> None:
+    import vllm.models.glm5next.common.model as glm_model
+
+    glm_model.hc_expand = hc_expand_cat
+
+
 # ---------------------------------------------------------------- KDA prefill
 
 
@@ -179,18 +194,21 @@ def kda_prefill_forward(self, qkv_proj_states, g1, beta, core_attn_out) -> None:
     conv_state, rec_state = self.kv_cache   # bound by vLLM: [blocks, W-1, C] bf16 (SD layout), [blocks, H, D, D] fp32
     T = meta.num_tokens
     qkv = qkv_proj_states[:T]
-    C = qkv.shape[1]
-    y = torch.empty(T, C, dtype=qkv.dtype, device=qkv.device)
-    w = self._pp_conv_weight
-    for s, e, slot, has_init in meta.seqs:
-        init = conv_state[slot].clone().t().unsqueeze(0) if has_init else None
-        causal_conv1d_cuda.causal_conv1d_fwd(qkv[s:e].t().unsqueeze(0), w, None, None, init,
-                                             y[s:e].t().unsqueeze(0), conv_state[slot].t().unsqueeze(0), True)
     H, D = self.local_num_heads, self.head_dim
     P = H * D
-    q = y[:, :P].contiguous().view(1, T, H, D)
-    k = y[:, P:2 * P].contiguous().view(1, T, H, D)
-    v = y[:, 2 * P:].contiguous().view(1, T, H, D)
+    # q, k, v convolved into three contiguous [T, H*D] buffers (FlashInfer takes contiguous q/k/v): one launch per
+    # sequence and per q/k/v instead of one over the packed q|k|v plus three copies (M2: 3 x 0.3 ms at 16k)
+    q, k, v = (torch.empty(T, P, dtype=qkv.dtype, device=qkv.device) for _ in range(3))
+    w = self._pp_conv_weight
+    for s, e, slot, has_init in meta.seqs:
+        state = conv_state[slot]                        # [W-1, 3P], SD layout
+        init_all = state.clone() if has_init else None
+        for j, out in enumerate((q, k, v)):
+            cols = slice(j * P, (j + 1) * P)
+            init = None if init_all is None else init_all[:, cols].t().unsqueeze(0)
+            causal_conv1d_cuda.causal_conv1d_fwd(qkv[s:e, cols].t().unsqueeze(0), w[cols], None, None, init,
+                                                 out[s:e].t().unsqueeze(0), state[:, cols].t().unsqueeze(0), True)
+    q, k, v = (t.view(1, T, H, D) for t in (q, k, v))
     g = g1[:, :T]
     b = beta[:, :T].contiguous()
     if meta.any_initial:
@@ -326,3 +344,41 @@ def forced_routing_logits(per_expert_batches: list[int], num_tokens: int, top_k:
     logits = torch.full((num_tokens, len(per_expert_batches)), -30.0, dtype=torch.float32, device=device)
     logits.scatter_(1, torch.tensor(ids, dtype=torch.int64, device=device), 30.0)
     return logits
+
+
+# ---------------------------------------------------------------- sparse MLA launch size
+
+SPARSE_MLA_MAX_ROWS = 32768
+_ORIG_TRTLLM_MLA = None
+
+
+def install_sparse_mla_split(max_rows: int = SPARSE_MLA_MAX_ROWS) -> None:
+    """TRTLLM sparse MLA (config 25) at more than 32,768 query rows: on B200 a 65,536-row launch returns without
+    doing the work (M2: 0.72 ms at 64k vs 11.7 ms target), and the target splits at 32,768 rows (3_layers.md §6).
+    The fork's backend imports `flashinfer.decode.trtllm_batch_decode_with_kv_cache_mla` at call time, so the split
+    wraps it there: launches of <= `max_rows` rows writing into one output, no extra copy."""
+    global _ORIG_TRTLLM_MLA
+    import flashinfer.decode as fd
+
+    if _ORIG_TRTLLM_MLA is not None:
+        return
+    _ORIG_TRTLLM_MLA = orig = fd.trtllm_batch_decode_with_kv_cache_mla
+
+    def split(query, kv_cache, workspace_buffer, qk_nope_head_dim, kv_lora_rank, qk_rope_head_dim, block_tables,
+              seq_lens, max_seq_len, *args, **kw):
+        B = query.shape[0]
+        if B <= max_rows or args or kw.get("return_lse") or kw.get("out") is not None:
+            return orig(query, kv_cache, workspace_buffer, qk_nope_head_dim, kv_lora_rank, qk_rope_head_dim,
+                        block_tables, seq_lens, max_seq_len, *args, **kw)
+        out = torch.empty(B, query.shape[1], query.shape[2], kv_lora_rank, dtype=torch.bfloat16,
+                          device=query.device)
+        lens = kw.pop("sparse_mla_top_k_lens", None)
+        for a in range(0, B, max_rows):
+            b = min(B, a + max_rows)
+            extra = {} if lens is None else {"sparse_mla_top_k_lens": lens[a:b]}
+            orig(query[a:b], kv_cache, workspace_buffer, qk_nope_head_dim, kv_lora_rank, qk_rope_head_dim,
+                 block_tables[a:b], None if seq_lens is None else seq_lens[a:b], max_seq_len, out=out[a:b],
+                 **kw, **extra)
+        return out
+
+    fd.trtllm_batch_decode_with_kv_cache_mla = split

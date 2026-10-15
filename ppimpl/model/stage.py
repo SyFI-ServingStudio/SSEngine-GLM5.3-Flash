@@ -40,7 +40,11 @@ def build_vllm_config(checkpoint: str, max_num_batched_tokens: int, max_model_le
                       max_model_len=max_model_len, max_num_batched_tokens=max_num_batched_tokens,
                       max_num_seqs=max(64, max_num_batched_tokens // 128), enforce_eager=True,
                       distributed_executor_backend="external_launcher")
-    return args.create_engine_config()
+    vc = args.create_engine_config()
+    # sparse MLA through TRTLLM's MQA kernel for every prefill (config 25), as the targets price it: the fork's dense
+    # MHA prefill for prompts within the top-k (<= 2,048 pools) is slower (M2: DSA layer x1.11 at 2k)
+    vc.attention_config.sparse_mla_force_mqa = True
+    return vc
 
 
 def init_vllm_distributed(device: torch.device) -> None:
@@ -105,6 +109,10 @@ class StageModel:
         self.vc = vc = build_vllm_config(ckpt, max_tokens, max_model_len or MAX_MODEL_LEN)
         self._vc_ctx = set_current_vllm_config(vc)
         self._vc_ctx.__enter__()      # the stage process runs inside this config for good
+        # as vLLM's WorkerBase: IR op priorities (rms_norm etc. -> their CUDA kernels) and torch-wrap state
+        import vllm.ir
+        vc.kernel_config.ir_op_priority.set_default()
+        vllm.ir.set_default_torch_wrap(vc.compilation_config.ir_enable_torch_wrap)
         init_vllm_distributed(device)
         init_workspace_manager(device)
 
@@ -128,10 +136,12 @@ class StageModel:
 
         # design kernel routing
         pp_patch.route_mhc_boundaries(self.layers)
+        pp_patch.route_hc_expand()
         for layer in self.layers:
             if layer.layer_kind == "kda":
                 pp_patch.route_kda(layer.self_attn)
         pp_patch.install_topk_router()
+        pp_patch.install_sparse_mla_split()
 
         # KV: vLLM's block size, then this stage's tensors
         current_platform.update_block_size_for_backend(vc)
@@ -219,9 +229,9 @@ class StageModel:
         return x, residual, post, comb
 
     def output_head(self, b, x, residual, post, comb) -> torch.Tensor:
-        return self.head_logits(b, x, residual, post, comb).argmax(dim=-1)
+        return self.head_logits(b, x, residual, post, comb, fp32=False).argmax(dim=-1)
 
-    def head_logits(self, b, x, residual, post, comb) -> torch.Tensor:
+    def head_logits(self, b, x, residual, post, comb, fp32: bool = True) -> torch.Tensor:
         """The rows whose token is returned, then on those rows only: the last layer's deferred mHC post and the
         mean of the 4 streams (both per token), final norm, lm_head -> FP32 logits [rows, vocab]."""
         rows = b.last_rows
@@ -231,4 +241,5 @@ class StageModel:
         else:
             x = x.index_select(0, rows)
         h = self.norm(x)
-        return torch.nn.functional.linear(h, self.lm_head.weight).float()
+        logits = torch.nn.functional.linear(h, self.lm_head.weight)
+        return logits.float() if fp32 else logits
