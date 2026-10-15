@@ -131,6 +131,9 @@ def run_worker(cfg: RunConfig, stage: int):   # makes inference tensors, which a
     reporter = Reporter(ctx, cfg.report_addr(), device)
     reporter.start()
     pipe, ok = None, False
+    # Diagnosis only: the host waits for each microbatch's GPU work before taking the next plan, so nothing built on
+    # the host for microbatch k+1 can overwrite what microbatch k's queued copies still read.
+    sync_each_mb = cuda and os.environ.get("PPIMPL_SYNC_EACH_MB") == "1"
     try:
         pipe = Pipe(stage, n, device, cfg.dist_init_method())
         model = build_model(cfg, stage, device)
@@ -148,6 +151,11 @@ def run_worker(cfg: RunConfig, stage: int):   # makes inference tensors, which a
             msg = decode_to_worker(plans.recv())
             if isinstance(msg, Shutdown):
                 ok = True
+                if cuda:   # allocator retries (cache flush + cudaMalloc) stall the device; logged per run
+                    m = torch.cuda.memory_stats(device)
+                    print(f"stage {stage} allocator: " + json.dumps({k: m.get(k) for k in (
+                        "num_alloc_retries", "num_device_alloc", "num_device_free", "num_ooms")}
+                        | {"peak_reserved_gb": round(m.get("reserved_bytes.all.peak", 0) / 1e9, 2)}), flush=True)
                 break
             plan: Plan = msg
             window.before(plan.mb_id)
@@ -159,6 +167,8 @@ def run_worker(cfg: RunConfig, stage: int):   # makes inference tensors, which a
             out = model.forward(plan, hidden_in)
             end = clock.mark()
             del hidden_in
+            if sync_each_mb:
+                torch.cuda.current_stream(device).synchronize()
             anchor = clock.anchor if cuda else None
             wait = end if cuda else None
             if not last:

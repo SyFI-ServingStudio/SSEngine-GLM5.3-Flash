@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "GLM-5.3-Flash NVFP4 as a 4-stage pipeline on 4xB200 (handoff glm53_flash_pp4_b200_v1)"
 requires-python = ">=3.12"
 # torch and the vLLM fork come from the shared env (.venv); see README.md, Provenance.
-dependencies = ["fastapi", "uvicorn", "msgspec", "pyzmq", "pyyaml", "numpy"]
+dependencies = ["uvicorn", "uvloop", "httptools", "msgspec", "pyzmq", "pyyaml", "numpy"]
 
 [project.optional-dependencies]
 test = ["pytest", "httpx"]

@@ -179,9 +179,36 @@ Kind: setup difference, open. `1_contract.md` §1 gives the node 1 TB of local S
 the SSD tier runs (`tiers`, `ssd_heavy`) cannot hold the contract's 1 TB. Before M6, free or reserve the space, or
 record the smaller SSD tier each run actually had.
 
+## Implementation gap: NCCL p2p sends slower than the targets' send (M3) — deferred, with trigger
+
+- Measured (job 7128, `bench/p2p.py`, 2 B200s, NCCL 2.29.7, 32 KiB per token, p50):
+
+  | tokens | NCCL send/recv | peer copy (copy engine) | target |
+  | ---: | ---: | ---: | ---: |
+  | 1k | 0.134 ms | 0.061 ms | 0.068 ms |
+  | 2k | 0.187 ms | 0.104 ms | |
+  | 4k | 0.31 ms | 0.19 ms | |
+  | 8k | 0.543 ms | 0.361 ms | 0.482 ms |
+  | 16k | 0.848 ms | 0.705 ms | |
+
+- NCCL settings change nothing (32 P2P channels, 2 MB NVLink chunk, Simple protocol). A peer copy meets the targets.
+- Effect on one-request runs: 3 sends × ~0.07 ms excess, < 0.5% of TTFT at 1k and 0.1% at 8k.
+- Deferred: a copy-engine transport (CUDA IPC buffers and events, a host-side handshake per microbatch). Revisit if
+  the saturated runs show sends, or receives posted early, costing stage time.
+
+## Setup difference: one-request runs of 64k and 128k cap the KV pool (M3)
+
+- One request is one microbatch (`4_iteration.md` §3), so a 64k or 128k prompt runs as a single forward. Its
+  activations outgrow the contract's 13.6 GB reserve beside the full 61.3M-token pool. In job 7117 (full pool),
+  one_64k ran once, then ran out of memory in requests 2–5 (174.6 of 178.4 GiB in use, ~37 GB above weights and KV).
+  one_128k ran out of memory in warm-up.
+- `bench/run.py` caps the pool at 2,097,152 tokens for these two runs. Stage times do not depend on the pool size.
+- Affects: the one_64k and one_128k rows of `iteration_targets.json` only. Saturated runs use 8k microbatches and the
+  full pool.
+
 ## Saturated 1k: one wrong token is batch numerics, not a race or stale state — decided (M3 token check)
 
-Kind: numerics of the model as served, open. In 7140 (saturated_1k, no per-microbatch sync) and 7162 (same, sync after
+Kind: numerics of the model as served, decided. In 7140 (saturated_1k, no per-microbatch sync) and 7162 (same, sync after
 every microbatch), uni_1k_3 (the one_1k_3 prompt) returns 11490 where the one-request reference gives 2669. The
 reference has 2669 at −0.19 and 11490 at −2.19, a margin of 2.0. The cause is that the model's output depends on the
 microbatch's total token count:

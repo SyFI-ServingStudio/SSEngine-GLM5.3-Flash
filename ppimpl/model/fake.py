@@ -43,6 +43,7 @@ class FakeStageModel:
         hidden = torch.empty(2, self.hidden_width, dtype=torch.bfloat16, device=self.device)
         hidden[:, 0] = torch.arange(2, device=self.device) % 128
         self._check([1], [0], hidden)
+        self._inference_tensor * self._param   # forward's first call of this op cost mb0 ~1 ms (job 7112)
         torch.cuda.synchronize(self.device)
 
     def _calibrate(self) -> float:

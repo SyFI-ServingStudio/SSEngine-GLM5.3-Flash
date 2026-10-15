@@ -5,7 +5,7 @@
   ... --nsys [--nsys-mbs a:b|all]     the server under Nsight Systems -> trace.nsys-rep, trace.sqlite, trace.json
 
 Names: one_<L>, saturated_<L> (4_iteration.md), L in 1k..128k. Each run gets a fresh server; the server and the
-client run as concurrent steps of one job (port 20000 + job id % 10000). Everything goes to
+client run as concurrent steps of one job (port 20000 + job id % 120 * 100). Everything goes to
 measured/runs/<name>/ (with --fake: measured/runs/fake/<name>/): run.json, uptime.txt, server and client configs,
 server logs (microbatches.jsonl, server_requests.jsonl, worker*.log), requests.jsonl, metrics.json
 (handoff data/metrics.py), report.json (bench/report.py).
@@ -21,6 +21,7 @@ import signal
 import subprocess
 import sys
 import time
+import traceback
 import urllib.request
 from pathlib import Path
 
@@ -48,6 +49,12 @@ def parse_name(name: str) -> tuple[str, int]:
 # eager forward at <= 8k (model lane, M2), plus margin. Recorded in each run's server_config.yaml.
 REAL_FORM_LEAD_MS = 35.0
 
+# One request of 64k or more is one microbatch, and its activations outgrow the contract's 13.6 GB reserve beside the
+# full KV pool (job 7117: one_64k needs ~37 GB, one_128k ran out of memory in warm-up). These runs need a few blocks of
+# KV only, so they cap the pool (a setup difference in measured/issues.md); stage times do not depend on the pool size.
+ONE_LONG_FROM = 65536
+ONE_LONG_POOL_TOKENS = 2 * 1024 * 1024
+
 
 def trace_for(kind: str, length: int) -> Path:
     return HANDOFF / "data/bringup" / f"{'one' if kind == 'one' else 'uni'}_{length // 1024}k.csv"
@@ -60,6 +67,8 @@ def server_config(kind: str, length: int, use_fake: bool, run_dir: Path, device:
     if not use_fake:
         cfg["checkpoint"] = str(CHECKPOINT)
         cfg["form_lead_ms"] = REAL_FORM_LEAD_MS
+        if kind == "one" and length >= ONE_LONG_FROM:
+            cfg["pool_tokens"] = ONE_LONG_POOL_TOKENS
     cfg.update(extra)
     return cfg
 
@@ -174,7 +183,8 @@ def execute(run_dir: Path, server_cfg: dict, client_cfg: dict, *, port: int, met
             nsys: bool = False) -> dict:
     """One run: fresh server, req-frontend, metrics and report. Returns run.json's content."""
     run_dir.mkdir(parents=True, exist_ok=True)
-    for f in ("microbatches.jsonl", "server_requests.jsonl", "requests.jsonl", "trace.nsys-rep", "trace.sqlite",
+    for f in ("run.json", "report.json", "pool.json", "metrics.json", "summary.json",   # a failed run leaves none
+              "microbatches.jsonl", "server_requests.jsonl", "requests.jsonl", "trace.nsys-rep", "trace.sqlite",
               "trace.json", "token_check.json", *(f"stage{s}.json" for s in range(8))):
         (run_dir / f).unlink(missing_ok=True)
     server_cfg = {**server_cfg, "port": port, "run_dir": str(run_dir)}
@@ -316,18 +326,38 @@ def main():
             raise SystemExit("--time is required to submit (run slurm-windows first)")
         return submit(args)
     job = os.environ.get("SLURM_JOB_ID")
-    port = args.port or (20000 + int(job) % 10000 if job else 18500)
+    # 100 ports per job (runs use port + 10 i), all below the ephemeral range (32768+): 7134 lost a bind to one there
+    port = args.port or (20000 + int(job) % 120 * 100 if job else 18500)
     if args.cpu and not (args.fake and args.inline):
         raise SystemExit("--cpu needs --fake --inline")
     out = Path(args.out_root) if args.out_root else \
         ROOT / "measured/runs" / ("fake_cpu" if args.cpu else "fake" if args.fake else "")
-    failed = []
-    for i, name in enumerate(args.names):
-        meta = run_named(name, args.fake, port + 10 * i, out, args)   # fresh ports per run
-        if meta.get("client_returncode") != 0:
-            failed.append(name)
+    failed = {}
+    for i, name in enumerate(args.names):   # a failed run does not stop the later ones; the exit status reports it
+        try:
+            meta = run_named(name, args.fake, port + 10 * i, out, args)   # fresh ports per run
+        except Exception as e:
+            traceback.print_exc()
+            failed[name] = f"{type(e).__name__}: {e}"
+            continue
+        if why := run_failure(meta, out / name):
+            failed[name] = why
+    for name, why in failed.items():
+        print(f"FAILED {name}: {why}", flush=True)
     if failed:
-        raise SystemExit(f"failed: {failed}")
+        raise SystemExit(1)
+
+
+def run_failure(meta: dict, run_dir: Path) -> str | None:
+    """Why a finished run counts as failed (the job's exit status), or None."""
+    if meta.get("client_returncode") != 0:
+        return f"client exited with {meta.get('client_returncode')}"
+    tc = run_dir / "token_check.json"
+    if tc.exists():
+        s = json.loads(tc.read_text())["summary"]
+        if s["no_token"] or not s["ok"]:
+            return f"tokens: {s['pass']} pass, {s['fail']} fail, {s['no_token']} without a token"
+    return None
 
 
 if __name__ == "__main__":
