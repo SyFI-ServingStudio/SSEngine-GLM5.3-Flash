@@ -1,0 +1,312 @@
+{
+ "sync_packs": [
+  {
+   "host_changed": false,
+   "dev_equals_snapshot": true
+  },
+  {
+   "host_changed": false,
+   "dev_equals_snapshot": true
+  },
+  {
+   "host_changed": false,
+   "dev_equals_snapshot": true
+  },
+  {
+   "host_changed": false,
+   "dev_equals_snapshot": true
+  },
+  {
+   "host_changed": false,
+   "dev_equals_snapshot": true
+  }
+ ],
+ "unsynced_0": {
+  "host_ms": 2169.4,
+  "host_ms_each": [
+   24.1,
+   1970.3,
+   56.8,
+   59.4,
+   58.6
+  ],
+  "plans": [
+   {
+    "plan": 0,
+    "equal": true,
+    "max_abs": 0.0,
+    "rows_differing": 0
+   },
+   {
+    "plan": 1,
+    "equal": true,
+    "max_abs": 0.0,
+    "rows_differing": 0
+   },
+   {
+    "plan": 2,
+    "equal": true,
+    "max_abs": 0.0,
+    "rows_differing": 0
+   },
+   {
+    "plan": 3,
+    "equal": true,
+    "max_abs": 0.0,
+    "rows_differing": 0
+   },
+   {
+    "plan": 4,
+    "equal": true,
+    "max_abs": 0.0,
+    "rows_differing": 0
+   }
+  ],
+  "packs": [
+   {
+    "host_changed": false,
+    "dev_equals_snapshot": true
+   },
+   {
+    "host_changed": false,
+    "dev_equals_snapshot": true
+   },
+   {
+    "host_changed": false,
+    "dev_equals_snapshot": true
+   },
+   {
+    "host_changed": false,
+    "dev_equals_snapshot": true
+   },
+   {
+    "host_changed": false,
+    "dev_equals_snapshot": true
+   }
+  ]
+ },
+ "unsynced_1": {
+  "host_ms": 2169.8,
+  "host_ms_each": [
+   23.1,
+   1971.3,
+   57.9,
+   59.1,
+   58.3
+  ],
+  "plans": [
+   {
+    "plan": 0,
+    "equal": true,
+    "max_abs": 0.0,
+    "rows_differing": 0
+   },
+   {
+    "plan": 1,
+    "equal": true,
+    "max_abs": 0.0,
+    "rows_differing": 0
+   },
+   {
+    "plan": 2,
+    "equal": true,
+    "max_abs": 0.0,
+    "rows_differing": 0
+   },
+   {
+    "plan": 3,
+    "equal": true,
+    "max_abs": 0.0,
+    "rows_differing": 0
+   },
+   {
+    "plan": 4,
+    "equal": true,
+    "max_abs": 0.0,
+    "rows_differing": 0
+   }
+  ],
+  "packs": [
+   {
+    "host_changed": false,
+    "dev_equals_snapshot": true
+   },
+   {
+    "host_changed": false,
+    "dev_equals_snapshot": true
+   },
+   {
+    "host_changed": false,
+    "dev_equals_snapshot": true
+   },
+   {
+    "host_changed": false,
+    "dev_equals_snapshot": true
+   },
+   {
+    "host_changed": false,
+    "dev_equals_snapshot": true
+   }
+  ]
+ },
+ "prepared_then_unsynced": {
+  "plans": [
+   {
+    "plan": 0,
+    "equal": true,
+    "max_abs": 0.0,
+    "rows_differing": 0
+   },
+   {
+    "plan": 1,
+    "equal": true,
+    "max_abs": 0.0,
+    "rows_differing": 0
+   },
+   {
+    "plan": 2,
+    "equal": true,
+    "max_abs": 0.0,
+    "rows_differing": 0
+   },
+   {
+    "plan": 3,
+    "equal": true,
+    "max_abs": 0.0,
+    "rows_differing": 0
+   },
+   {
+    "plan": 4,
+    "equal": true,
+    "max_abs": 0.0,
+    "rows_differing": 0
+   }
+  ],
+  "packs": [
+   {
+    "host_changed": false,
+    "dev_equals_snapshot": true
+   },
+   {
+    "host_changed": false,
+    "dev_equals_snapshot": true
+   },
+   {
+    "host_changed": false,
+    "dev_equals_snapshot": true
+   },
+   {
+    "host_changed": false,
+    "dev_equals_snapshot": true
+   },
+   {
+    "host_changed": false,
+    "dev_equals_snapshot": true
+   }
+  ]
+ },
+ "queued_prepares_synced_runs": {
+  "plans": [
+   {
+    "plan": 0,
+    "equal": true,
+    "max_abs": 0.0,
+    "rows_differing": 0
+   },
+   {
+    "plan": 1,
+    "equal": true,
+    "max_abs": 0.0,
+    "rows_differing": 0
+   },
+   {
+    "plan": 2,
+    "equal": true,
+    "max_abs": 0.0,
+    "rows_differing": 0
+   },
+   {
+    "plan": 3,
+    "equal": true,
+    "max_abs": 0.0,
+    "rows_differing": 0
+   },
+   {
+    "plan": 4,
+    "equal": true,
+    "max_abs": 0.0,
+    "rows_differing": 0
+   }
+  ],
+  "packs": [
+   {
+    "host_changed": false,
+    "dev_equals_snapshot": true
+   },
+   {
+    "host_changed": false,
+    "dev_equals_snapshot": true
+   },
+   {
+    "host_changed": false,
+    "dev_equals_snapshot": true
+   },
+   {
+    "host_changed": false,
+    "dev_equals_snapshot": true
+   },
+   {
+    "host_changed": false,
+    "dev_equals_snapshot": true
+   }
+  ]
+ },
+ "host_blocked_at": {
+  "host_ms": 2170.4,
+  "samples": 86,
+  "top_stacks": [
+   [
+    8,
+    "core.py:3582:run_selected_tactic <- core.py:3656:trtllm_fp4_block_scale_moe_op <- core.py:6425:trtllm_fp4_block_scale_moe <- api_logging.py:2369:_auto_dump_wrapper <- trtllm_nvfp4_moe.py:548:apply <- modular_kernel.py:1550:apply <- modular_kernel.py:1678:apply_monolithic <- modelopt.py:1082:apply_monolithic"
+   ],
+   [
+    8,
+    "pp_patch.py:223:kda_prefill_forward <- kda.py:438:forward <- module.py:1789:_call_impl <- module.py:1778:_wrapped_call_impl <- model.py:521:forward <- module.py:1789:_call_impl <- module.py:1778:_wrapped_call_impl <- stage.py:326:run_layers"
+   ],
+   [
+    5,
+    "overlap.py:144:traced_copy <- metadata.py:188:build <- stage.py:308:prepare <- stage.py:304:forward <- overlap.py:98:blocked_at <- overlap.py:219:main <- overlap.py:237:<module>"
+   ],
+   [
+    5,
+    "pp_patch.py:214:kda_prefill_forward <- kda.py:438:forward <- module.py:1789:_call_impl <- module.py:1778:_wrapped_call_impl <- model.py:521:forward <- module.py:1789:_call_impl <- module.py:1778:_wrapped_call_impl <- stage.py:326:run_layers"
+   ],
+   [
+    5,
+    "pp_patch.py:215:kda_prefill_forward <- kda.py:438:forward <- module.py:1789:_call_impl <- module.py:1778:_wrapped_call_impl <- model.py:521:forward <- module.py:1789:_call_impl <- module.py:1778:_wrapped_call_impl <- stage.py:326:run_layers"
+   ],
+   [
+    5,
+    "pp_patch.py:218:kda_prefill_forward <- kda.py:438:forward <- module.py:1789:_call_impl <- module.py:1778:_wrapped_call_impl <- model.py:521:forward <- module.py:1789:_call_impl <- module.py:1778:_wrapped_call_impl <- stage.py:326:run_layers"
+   ]
+  ],
+  "sync_calls": [
+   [
+    55,
+    "Calling a trtllm-gen block-scale MoE op with a `hidden_states_scale` but without | warnings.py:110:_showwarnmsg <- validation.py:117:resolve_moe_act_sf_layout <- sm100_runner.py:169:_make_tuning_config <- core.py:3533:trtllm_fp4_block_scale_moe_op <- core.py:6425:trtllm_fp4_block_scale_moe <- api_logging.py:2369:_auto_dump_wrapper <- trtllm_nvfp4_moe.py:548:apply <- modular_kernel.py:1550:apply"
+   ],
+   [
+    1,
+    "Synchronization debug mode is a prototype feature and does not yet detect all sy | warnings.py:110:_showwarnmsg <- __init__.py:1333:set_sync_debug_mode <- overlap.py:91:blocked_at <- overlap.py:219:main <- overlap.py:237:<module>"
+   ]
+  ]
+ },
+ "sync_repeat_equal": [
+  true,
+  true,
+  true,
+  true,
+  true
+ ],
+ "pass": true
+}

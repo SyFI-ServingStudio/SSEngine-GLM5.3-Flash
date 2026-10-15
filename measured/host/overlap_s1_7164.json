@@ -1,0 +1,258 @@
+{
+ "sync_packs": [
+  {
+   "host_changed": false,
+   "dev_equals_snapshot": true
+  },
+  {
+   "host_changed": false,
+   "dev_equals_snapshot": true
+  },
+  {
+   "host_changed": false,
+   "dev_equals_snapshot": true
+  },
+  {
+   "host_changed": false,
+   "dev_equals_snapshot": true
+  },
+  {
+   "host_changed": false,
+   "dev_equals_snapshot": true
+  }
+ ],
+ "unsynced_0": {
+  "host_ms": 2164.8,
+  "plans": [
+   {
+    "plan": 0,
+    "equal": true,
+    "max_abs": 0.0,
+    "rows_differing": 0
+   },
+   {
+    "plan": 1,
+    "equal": true,
+    "max_abs": 0.0,
+    "rows_differing": 0
+   },
+   {
+    "plan": 2,
+    "equal": true,
+    "max_abs": 0.0,
+    "rows_differing": 0
+   },
+   {
+    "plan": 3,
+    "equal": true,
+    "max_abs": 0.0,
+    "rows_differing": 0
+   },
+   {
+    "plan": 4,
+    "equal": true,
+    "max_abs": 0.0,
+    "rows_differing": 0
+   }
+  ],
+  "packs": [
+   {
+    "host_changed": false,
+    "dev_equals_snapshot": true
+   },
+   {
+    "host_changed": false,
+    "dev_equals_snapshot": true
+   },
+   {
+    "host_changed": false,
+    "dev_equals_snapshot": true
+   },
+   {
+    "host_changed": false,
+    "dev_equals_snapshot": true
+   },
+   {
+    "host_changed": false,
+    "dev_equals_snapshot": true
+   }
+  ]
+ },
+ "unsynced_1": {
+  "host_ms": 2165.6,
+  "plans": [
+   {
+    "plan": 0,
+    "equal": true,
+    "max_abs": 0.0,
+    "rows_differing": 0
+   },
+   {
+    "plan": 1,
+    "equal": true,
+    "max_abs": 0.0,
+    "rows_differing": 0
+   },
+   {
+    "plan": 2,
+    "equal": true,
+    "max_abs": 0.0,
+    "rows_differing": 0
+   },
+   {
+    "plan": 3,
+    "equal": true,
+    "max_abs": 0.0,
+    "rows_differing": 0
+   },
+   {
+    "plan": 4,
+    "equal": true,
+    "max_abs": 0.0,
+    "rows_differing": 0
+   }
+  ],
+  "packs": [
+   {
+    "host_changed": false,
+    "dev_equals_snapshot": true
+   },
+   {
+    "host_changed": false,
+    "dev_equals_snapshot": true
+   },
+   {
+    "host_changed": false,
+    "dev_equals_snapshot": true
+   },
+   {
+    "host_changed": false,
+    "dev_equals_snapshot": true
+   },
+   {
+    "host_changed": false,
+    "dev_equals_snapshot": true
+   }
+  ]
+ },
+ "prepared_then_unsynced": {
+  "plans": [
+   {
+    "plan": 0,
+    "equal": true,
+    "max_abs": 0.0,
+    "rows_differing": 0
+   },
+   {
+    "plan": 1,
+    "equal": true,
+    "max_abs": 0.0,
+    "rows_differing": 0
+   },
+   {
+    "plan": 2,
+    "equal": true,
+    "max_abs": 0.0,
+    "rows_differing": 0
+   },
+   {
+    "plan": 3,
+    "equal": true,
+    "max_abs": 0.0,
+    "rows_differing": 0
+   },
+   {
+    "plan": 4,
+    "equal": true,
+    "max_abs": 0.0,
+    "rows_differing": 0
+   }
+  ],
+  "packs": [
+   {
+    "host_changed": false,
+    "dev_equals_snapshot": true
+   },
+   {
+    "host_changed": false,
+    "dev_equals_snapshot": true
+   },
+   {
+    "host_changed": false,
+    "dev_equals_snapshot": true
+   },
+   {
+    "host_changed": false,
+    "dev_equals_snapshot": true
+   },
+   {
+    "host_changed": false,
+    "dev_equals_snapshot": true
+   }
+  ]
+ },
+ "queued_prepares_synced_runs": {
+  "plans": [
+   {
+    "plan": 0,
+    "equal": true,
+    "max_abs": 0.0,
+    "rows_differing": 0
+   },
+   {
+    "plan": 1,
+    "equal": true,
+    "max_abs": 0.0,
+    "rows_differing": 0
+   },
+   {
+    "plan": 2,
+    "equal": true,
+    "max_abs": 0.0,
+    "rows_differing": 0
+   },
+   {
+    "plan": 3,
+    "equal": true,
+    "max_abs": 0.0,
+    "rows_differing": 0
+   },
+   {
+    "plan": 4,
+    "equal": true,
+    "max_abs": 0.0,
+    "rows_differing": 0
+   }
+  ],
+  "packs": [
+   {
+    "host_changed": false,
+    "dev_equals_snapshot": true
+   },
+   {
+    "host_changed": false,
+    "dev_equals_snapshot": true
+   },
+   {
+    "host_changed": false,
+    "dev_equals_snapshot": true
+   },
+   {
+    "host_changed": false,
+    "dev_equals_snapshot": true
+   },
+   {
+    "host_changed": false,
+    "dev_equals_snapshot": true
+   }
+  ]
+ },
+ "sync_repeat_equal": [
+  true,
+  true,
+  true,
+  true,
+  true
+ ],
+ "pass": true
+}
