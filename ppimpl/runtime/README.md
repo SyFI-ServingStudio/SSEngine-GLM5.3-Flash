@@ -93,6 +93,12 @@ For each plan: (stage > 0) receive `[T, hidden_width]` from stage s-1 → record
 event → (stage < 3) send to stage s+1 on a separate stream so the next plan's compute is not blocked by the send →
 report `StageDone` once the end event has completed (a reporter thread, not a sync on the compute stream).
 
+Limit on how far ahead a stage host can launch: CUDA holds at most ~1,024 launched-but-unfinished kernels per
+context (measured, job 7091: every blocking launch had 1,025–1,030 kernels pending). After that the host blocks
+inside the next launch until the GPU retires one (back-pressure, not a sync). A stage-0 forward is ~390 kernels at
+≤ 8k tokens (1,245 at 128k), so a stage host runs at most ~2.6 microbatches ahead of its GPU. The thread that
+launches should not also be the one that services messages or sends, or it stalls with the launch.
+
 ## Controller
 
 - Scheduler (`engine/scheduler.py`, phase A: plain): fills a microbatch to 8,192 tokens in arrival order, cutting a

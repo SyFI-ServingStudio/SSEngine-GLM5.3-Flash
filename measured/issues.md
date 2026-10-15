@@ -85,7 +85,13 @@ Open:
     390 kernels per forward, ~47 µs of host per kernel.
   - CUDA runtime calls are 7–8% of it. Torch ops, including the Python inside vLLM custom ops, are 55–62%; Python
     outside ops is 30–45%. In py-spy --native the leaf frames are 37% Python, 29% torch C++, 13% CUDA/cuBLAS.
-  - No single wrapper dominates. Piecewise CUDA graphs per token bucket are proposed (not done).
+  - No single wrapper dominates. Option (A), done in M3: trim per-call wrapper Python (vLLM env cache, FlashInfer
+    tactic memo, mm_fp4 skip_check, plain parameters; `pp_patch.install_host_trims`).
+  - **Follow-up (B), deferred:** piecewise CUDA graphs per token bucket (512/1k/1.5k/2k/3k/4k, eager above), using
+    vLLM's compile path with the DSA attention + indexer op and our KDA prefill as split points. They would capture
+    MoE, mHC, the linears, norms and quant, ~50–55% of host time (est. 1k: ~9 ms).
+    Trigger: M4/M5 session runs showing host-bound stage-0 microbatches, i.e. appends of < 2.5k tokens alone in a
+    microbatch.
 - **128k host block: launch-queue back-pressure, not a sync** (7091). A 128k forward issues 1,245 kernels. The first
   launch over 1 ms is #1223, with 1,028 launched kernels still unfinished; every later block has 1,025–1,030 pending.
   So the queue is capped at ~1,024 pending kernels. M2's 1.6 s block equals its 1.69 s lead sleep.
