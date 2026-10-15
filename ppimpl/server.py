@@ -125,3 +125,5 @@ async def _serve_controller(cfg: RunConfig):
         await stop.wait()
     finally:
         await ctl.stop()
+    if ctl.failed:
+        raise SystemExit(1)

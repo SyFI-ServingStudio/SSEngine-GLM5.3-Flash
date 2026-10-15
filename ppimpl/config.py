@@ -81,7 +81,7 @@ class RunConfig(msgspec.Struct, forbid_unknown_fields=True):
     # slower stages). "ce" uses no SMs for transport, and the kernels keep all 148.
     compute_sms: int | None = 132
     nccl_channels: int | None = 8
-    intake_procs: int = 0             # 0: HTTP in the controller process; N: N intake processes on the port
+    intake_procs: int = 4             # N intake processes on the port; 0: HTTP in the controller process
                                       # (SO_REUSEPORT) that parse requests and pass them on over zmq (ppimpl/intake.py)
     profile_mbs: list[int] | None = None  # [a, b): cudaProfilerStart at mb a, Stop after mb b-1 (bench/run.py --nsys)
     keep_sessions: bool = False       # phase B: exact prefix cache (kept sessions, LRU eviction of whole sessions)

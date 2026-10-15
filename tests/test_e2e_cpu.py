@@ -137,7 +137,8 @@ def test_worker_failure_stops_server(tmp_path):
     port = free_port_block()
     srv = Server(tmp_path / "run", port, **CPU)
     srv.wait_ready()
-    workers = subprocess.run(["pgrep", "-P", str(srv.proc.pid)], capture_output=True, text=True).stdout.split()
+    workers = subprocess.run(["pgrep", "-P", str(srv.proc.pid), "-f", "ppimpl worker"], capture_output=True,
+                             text=True).stdout.split()
     assert len(workers) == 4
     subprocess.run(["kill", "-9", workers[2]])
     srv.proc.wait(30)                                       # the control thread notices and stops the server

@@ -6,12 +6,17 @@ A change to it goes through the orchestrator.
 
 ## Processes
 
-- `python -m ppimpl serve --config <yaml>` starts one **controller** process (HTTP server + scheduler loop + KV
-  allocator) and four **worker** processes, worker s on GPU s running stage s.
+- `python -m ppimpl serve --config <yaml>` starts one **controller** process (scheduler loop + KV allocator) and four
+  **worker** processes, worker s on GPU s running stage s. HTTP is served by `intake_procs` **intake** processes on
+  the same port (SO_REUSEPORT; default 4) that parse requests and pass them to the controller's control thread over
+  zmq ROUTER/DEALER, answers coming back the same way; with `intake_procs: 0` the controller serves HTTP itself.
 - Control: controller → each worker one zmq PUSH socket (plans, in order); workers → controller one zmq PULL socket
   (reports). Messages are msgspec structs (below), msgpack-encoded.
-- Activations: worker s → worker s+1 by NCCL point-to-point (`torch.distributed`, world size 4, rank = stage).
-  Every worker processes plans in `mb_id` order, so sends and receives match without tags.
+- Activations: worker s → worker s+1 by copy engine into a K-slot ring on the receiver (CUDA IPC; ordered by
+  cuStreamWaitValue32 / cuStreamWriteValue32 flags; `transport: ce`, the default), or by NCCL point-to-point
+  (`transport: nccl`; gloo on CPU). Start-up barriers and the IPC handle exchange use `torch.distributed` (gloo for
+  ce; world size 4, rank = stage). Every worker processes plans in `mb_id` order, so sends and receives match without
+  tags.
 
 ## Block-id space
 

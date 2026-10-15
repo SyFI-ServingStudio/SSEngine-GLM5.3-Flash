@@ -95,3 +95,26 @@ def test_one_request_stages_sends_span_host(tmp_path):
     md = (tmp_path / "iteration.md").read_text()
     assert "| 8k | mean of 3 | measured | 57.000 | 54.000 | 55.000 | 56.000 | 0.500 |" in md
     assert len((tmp_path / "iteration.jsonl").read_text().splitlines()) == 3
+
+
+def test_misses_follow_the_pass_rule():
+    it_t, sat_t = report._targets()
+    t = it_t[8192]
+
+    def req(scale_stage0=1.0, send_extra=0.0):
+        return {"prompt_tokens": 8192, "run": 1, "gpu_span_ms": t["ttft_ms"], "client_ttft_ms": t["ttft_ms"],
+                "stages": [{"compute_ms": s["compute_ms"] * (scale_stage0 if i == 0 else 0.9)}
+                           for i, s in enumerate(t["stages"])],
+                "sends": [{"ms": s["ms"] + send_extra} for s in t["sends"]]}
+
+    st = sat_t[8192]
+    sat = [{"prompt_tokens": 8192, "tokens_per_s": 0.95 * st["tokens_per_s"],
+            "ttft_s": {q: st["ttft_s"][q] * (1.2 if q == "p99" else 1.0) for q in ("p50", "p90", "p99")}}]
+    runs = [{"name": "saturated_8k", "tokens": {"fail": 1, "no_token": 0}}]
+    ms = report.misses([req(1.05, 0.04), req(1.2, 0.06)], sat, runs)
+    got = {(m["run"], m["what"], m["count"]) for m in ms}
+    assert ("one_8k", "stage 0", "1 of 2 requests") in got           # +20% misses, +5% does not
+    assert ("one_8k", "send 0→1", "1 of 2 requests") in got          # +0.06 ms > max(10%, 0.05 ms) = 0.05
+    assert ("saturated_8k", "TTFT p99", "") in got and not any(m["what"] == "tokens/s" for m in ms)
+    assert ("saturated_8k", "output", "1 wrong, 0 without a token") in got
+    assert len(ms) == 6                                             # stage 0, three sends, TTFT p99, output
