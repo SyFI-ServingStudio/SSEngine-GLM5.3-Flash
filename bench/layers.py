@@ -575,15 +575,16 @@ def trace_check(parsed: dict) -> dict:
 def bench(args) -> None:
     import torch
     from ppimpl.model import pp_patch
-    from ppimpl.model.stage import CHECKPOINT, StageModel
+    from ppimpl.model.stage import CHECKPOINT, StageModel, bench_config
 
     targets = load_targets()
     lengths = [int(x) for x in args.lengths.split(",")]
     routings = args.routing.split(",")
     dev = torch.device("cuda", 0)
     t0 = time.time()
-    cfg = SimpleNamespace(mb_tokens=max(lengths), checkpoint=CHECKPOINT, pool_tokens=None, warmup=False)
-    model = StageModel(cfg, 0, dev, last=True, num_blocks=NUM_BLOCKS, max_model_len=max(max(lengths), 8192) + 8576)
+    cfg = bench_config(max(lengths))
+    model = StageModel(cfg, 0, dev, warmup=False, last=True, num_blocks=NUM_BLOCKS,
+                       max_model_len=max(max(lengths), 8192) + 8576)
     print(f"[layers] model built in {time.time() - t0:.0f} s; layers {model.layer_range}; "
           f"mem {torch.cuda.memory_allocated() / 2**30:.1f} GiB", flush=True)
     for layer in model.layers:

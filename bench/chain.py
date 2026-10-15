@@ -50,13 +50,13 @@ def split(L: int) -> None:
     import torch
     from layers import NUM_BLOCKS, one_request_plan
     from ppimpl.model import pp_patch
-    from ppimpl.model.stage import CHECKPOINT, StageModel
+    from ppimpl.model.stage import CHECKPOINT, StageModel, bench_config
     from vllm.forward_context import set_forward_context
 
     dev = torch.device("cuda", 0)
-    cfg = SimpleNamespace(mb_tokens=max(L, 8192), checkpoint=CHECKPOINT, pool_tokens=None, warmup=False)
+    cfg = bench_config(max(L, 8192))
     t0 = time.time()
-    m = StageModel(cfg, 0, dev, layers=range(0, 23), first=True, last=False, num_blocks=NUM_BLOCKS,
+    m = StageModel(cfg, 0, dev, layers=range(0, 23), first=True, last=False, num_blocks=NUM_BLOCKS, warmup=False,
                    max_model_len=max(L, 8192) + 8576)
     print(f"[chain] split model built in {time.time() - t0:.0f} s", flush=True)
     plan = one_request_plan(_prompt(L))
@@ -108,13 +108,13 @@ def edge(L: int) -> None:
     import torch
     from layers import NUM_BLOCKS, one_request_plan
     from ppimpl.model import pp_patch
-    from ppimpl.model.stage import CHECKPOINT, StageModel
+    from ppimpl.model.stage import CHECKPOINT, StageModel, bench_config
     from vllm.forward_context import set_forward_context
     from vllm.model_executor.layers.mhc import MHCFusedPostPreOp
 
     dev = torch.device("cuda", 0)
-    cfg = SimpleNamespace(mb_tokens=max(L, 8192), checkpoint=CHECKPOINT, pool_tokens=None, warmup=False)
-    m = StageModel(cfg, 0, dev, layers=range(0, 23), first=True, last=False, num_blocks=NUM_BLOCKS,
+    cfg = bench_config(max(L, 8192))
+    m = StageModel(cfg, 0, dev, layers=range(0, 23), first=True, last=False, num_blocks=NUM_BLOCKS, warmup=False,
                    max_model_len=max(L, 8192) + 8576)
     plan = one_request_plan(_prompt(L))
     fork_op = MHCFusedPostPreOp()
@@ -179,14 +179,13 @@ def _chain_worker(rank: int, L: int, port: int, profile: bool) -> None:
     import torch.distributed as dist
     from layers import NUM_BLOCKS, one_request_plan
     from ppimpl import kernels as km
-    from ppimpl.model.stage import CHECKPOINT, HIDDEN_WIDTH, StageModel
+    from ppimpl.model.stage import HIDDEN_WIDTH, StageModel, bench_config
 
     dev = torch.device("cuda", rank)
     torch.cuda.set_device(dev)
     dist.init_process_group("nccl", init_method=f"tcp://127.0.0.1:{port}", rank=rank, world_size=4,
                             device_id=dev)
-    cfg = SimpleNamespace(mb_tokens=max(L, 8192), checkpoint=CHECKPOINT, pool_tokens=None,
-                          layer_split=km.SPLIT)
+    cfg = bench_config(max(L, 8192))
     t0 = time.time()
     m = StageModel(cfg, rank, dev, num_blocks=NUM_BLOCKS, max_model_len=max(L, 8192) + 8576)
     print(f"[chain] rank {rank} layers {m.layer_range} built in {time.time() - t0:.0f} s, "

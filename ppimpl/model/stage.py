@@ -64,19 +64,36 @@ def init_vllm_distributed(device: torch.device) -> None:
     ps.initialize_model_parallel(1, 1)
 
 
+def stage_settings(cfg) -> dict:
+    """What StageModel reads of the run config (`ppimpl.config.RunConfig`; benches pass a namespace with the same
+    fields). Read directly, so a missing field fails here instead of falling back silently."""
+    return {"layer_split": tuple(cfg.layer_split), "checkpoint": cfg.checkpoint or CHECKPOINT,
+            "mb_tokens": int(cfg.scheduler.mb_tokens), "pool_tokens": cfg.pool_tokens}
+
+
+def bench_config(mb_tokens: int, checkpoint: str | None = None):
+    """A run-config stand-in for the benches (same fields as RunConfig's that StageModel reads)."""
+    from types import SimpleNamespace
+
+    return SimpleNamespace(layer_split=list(kernels.SPLIT), checkpoint=checkpoint, pool_tokens=None,
+                           scheduler=SimpleNamespace(mb_tokens=mb_tokens))
+
+
 class StageModel:
     def __init__(self, cfg, stage: int, device: torch.device, *, layers: range | None = None,
                  first: bool | None = None, last: bool | None = None, num_blocks: int | None = None,
-                 max_model_len: int | None = None):
-        split = tuple(getattr(cfg, "layer_split", kernels.SPLIT))
+                 max_model_len: int | None = None, warmup: bool = True):
+        st = stage_settings(cfg)
+        split = st["layer_split"]
         self.stage, self.device = stage, device
         self.layer_range = layers if layers is not None else kernels.stage_layers(stage, split)
         self.first = stage == 0 if first is None else first
         self.last = stage == len(split) - 1 if last is None else last
         self.hidden_width = HIDDEN_WIDTH
         torch.cuda.set_device(device)
-        ckpt = getattr(cfg, "checkpoint", None) or CHECKPOINT
-        max_tokens = max(int(getattr(cfg, "mb_tokens", 8192)), 8192)
+        ckpt = st["checkpoint"]
+        # one-request runs set mb_tokens >= the prompt, so the whole prompt is one call; at least 8192
+        max_tokens = max(st["mb_tokens"], 8192)
         os.environ.setdefault("VLLM_SSM_CONV_STATE_LAYOUT", "SD")
 
         from vllm.config import set_current_vllm_config
@@ -128,13 +145,13 @@ class StageModel:
         if num_blocks is None:
             free, _ = torch.cuda.mem_get_info(device)
             num_blocks = kv_tensors.blocks_that_fit(per_block, free, int(RESERVE_GB * 1e9),
-                                                    getattr(cfg, "pool_tokens", None))
+                                                    st["pool_tokens"])
         self.kv = kv_tensors.allocate(vc, vc.compilation_config.static_forward_context, local_spec, num_blocks,
                                       device)
         self.num_blocks = num_blocks
         self.meta = StageMetadata(vc, self.kv, device)
         self.max_tokens = max_tokens
-        if getattr(cfg, "warmup", True):
+        if warmup:
             self.warmup()
 
     def warmup(self, autotune: bool = True) -> None:

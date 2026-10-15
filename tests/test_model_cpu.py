@@ -125,3 +125,18 @@ def test_kda_state_block_index_is_global():
                 index[int(n.split(".")[3])] = g
     assert sorted(index) == [i for i in range(45) if i not in K.DSA_LAYERS]
     assert [i for i in sorted(index) if index[i] == 0] == [0, 6, 13, 20, 26, 33, 40]
+
+
+def test_stage_reads_only_run_config_fields():
+    """Every run-config field StageModel reads exists on RunConfig(model="glm53") (a misspelled field fails here
+    instead of falling back), and the bench stand-in has the same fields."""
+    from ppimpl.config import RunConfig
+    from ppimpl.model.stage import bench_config, stage_settings
+
+    cfg = RunConfig(model="glm53")
+    st = stage_settings(cfg)
+    assert st["mb_tokens"] == cfg.scheduler.mb_tokens and st["layer_split"] == (12, 11, 11, 11)
+    one = RunConfig(model="glm53")
+    one.scheduler.mb_tokens = 131072
+    assert stage_settings(one)["mb_tokens"] == 131072
+    assert stage_settings(bench_config(131072)).keys() == st.keys()
