@@ -4,7 +4,10 @@ It runs in the server process's event loop (ppimpl/server.py). Microbatches go t
 workers report `StageDone`; the last stage's report carries the tokens. Logs, in `run_dir` (times in ms from t0, the
 first request's arrival at the server):
 - `microbatches.jsonl`: one line per (microbatch, stage), 1_contract.md §3;
-- `server_requests.jsonl`: one line per request: scheduler order (seq), arrival, first dispatch, token, response.
+- `server_requests.jsonl`: one line per request: scheduler order (seq), arrival, first dispatch, token, response;
+- `plans.jsonl`: one line per microbatch at dispatch: tokens, dispatch time, whether it was queued behind a running
+  stage-0 plan, and that plan's predicted stage-0 end.
+When a microbatch forms is `DispatchRule`'s decision (ppimpl/runtime/dispatch.py); what it holds is the scheduler's.
 """
 
 import asyncio
@@ -21,6 +24,7 @@ import zmq.asyncio
 from ppimpl.config import BLOCK_TOKENS, RunConfig, dump_config
 from ppimpl.engine.kv import KvManager, kv_blocks_for, pool_size
 from ppimpl.engine.scheduler import ChunkSpec, PlainScheduler, Request
+from ppimpl.runtime.dispatch import NOW, WAIT, DispatchRule
 from ppimpl.runtime.transport import (Chunk, Plan, Ready, Shutdown, StageDone, WorkerError, decode_to_controller,
                                       encode, for_stage)
 
@@ -78,8 +82,13 @@ class Controller:
                 p.kill()
             raise
         num_blocks = pool_size([r.num_blocks for r in ready], cfg.pool_tokens)
-        self.sched = PlainScheduler(KvManager(num_blocks), cfg.scheduler.mb_tokens, cfg.max_in_flight, cfg.dispatch_ahead)
+        self.rule = DispatchRule(cfg.max_in_flight, cfg.dispatch_ahead >= 1, cfg.form_lead_ms)
+        # the scheduler's own cap is not the binding one: the rule admits the extra queued plan
+        self.sched = PlainScheduler(KvManager(num_blocks), cfg.scheduler.mb_tokens, self.rule.cap, 1)
+        self._timer: asyncio.TimerHandle | None = None
+        self._timer_at = None
         self.mb_log = open(self.run_dir / "microbatches.jsonl", "w")
+        self.plan_log = open(self.run_dir / "plans.jsonl", "w")
         self.req_log = open(self.run_dir / "server_requests.jsonl", "w")
         (self.run_dir / "pool.json").write_text(json.dumps(
             {"ready_blocks": [r.num_blocks for r in ready], "num_blocks": num_blocks,
@@ -120,7 +129,9 @@ class Controller:
         for sock in self.plans:
             sock.close(linger=0)
         self.reports.close(linger=0)
-        for f in ("mb_log", "req_log"):
+        if self._timer is not None:
+            self._timer.cancel()
+        for f in ("mb_log", "req_log", "plan_log"):
             if hasattr(self, f):
                 getattr(self, f).close()
 
@@ -134,6 +145,7 @@ class Controller:
                 return
             self.mb_log.flush()
             self.req_log.flush()
+            self.plan_log.flush()
 
     def _fail(self, why: str):
         self.failed = why
@@ -171,13 +183,42 @@ class Controller:
         return fut
 
     def _pump(self):
-        """Dispatch microbatches while the scheduler forms them."""
-        while (chunks := self.sched.next_microbatch()) is not None:
-            self._dispatch(chunks)
+        """Form and dispatch microbatches while the dispatch rule allows and the scheduler has work."""
+        while True:
+            now = time.time_ns()
+            verdict, at = self.rule.decide(self.sched.in_flight, now)
+            if verdict == WAIT:
+                self._arm(at, now)
+                return
+            if verdict != NOW:
+                return
+            chunks = self.sched.next_microbatch(now)
+            if chunks is None:
+                return
+            self._dispatch(chunks, now)
 
-    def _dispatch(self, specs: list[ChunkSpec]):
+    def _arm(self, at_ns: int, now_ns: int):
+        if self._timer is not None:
+            if self._timer_at == at_ns:
+                return
+            self._timer.cancel()
+        self._timer_at = at_ns
+        self._timer = asyncio.get_running_loop().call_later((at_ns - now_ns) / 1e9, self._on_timer)
+
+    def _on_timer(self):
+        self._timer = self._timer_at = None
+        if not self.failed:
+            self._pump()
+
+    def _dispatch(self, specs: list[ChunkSpec], now: int):
         mb_id, self.next_mb = self.next_mb, self.next_mb + 1
-        now = time.time_ns()
+        queued = len(self.rule.on_stage0) > 0
+        pred = self.rule.predicted_end_ns() if queued else None
+        tokens = sum(c.num_tokens for c in specs)
+        self.rule.dispatched(mb_id, now, tokens)
+        self.plan_log.write(json.dumps({"index": mb_id, "tokens": tokens, "dispatch_ms": round(self._ms(now), 4),
+                                        "queued": queued, "in_flight": self.sched.in_flight,
+                                        "predicted_s0_end_ms": round(self._ms(pred), 4) if pred else None}) + "\n")
         chunks = []
         for c in specs:
             r = c.req
@@ -212,6 +253,8 @@ class Controller:
         else:
             self.inflight_plans[d.mb_id] = (reqs, left - 1)
         self.sched.stage_done(d.stage, self.n - 1)
+        if d.stage == 0:
+            self.rule.stage0_done(d.mb_id, d.start_ns, d.end_ns)
         if d.tokens:
             now = time.time_ns()
             for req_id, tok in d.tokens:

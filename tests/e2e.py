@@ -124,7 +124,14 @@ def check_microbatches(run_dir: Path, prompts: dict[str, int], *, stages=4, mb_t
     for _, d in sorted(ev, key=lambda e: (e[0], e[1])):
         cur += d
         peak = max(peak, cur)
-    assert peak <= max_in_flight
+    assert peak <= max_in_flight + 1      # a queued 5th may start as soon as stage 0 frees
+    # the dispatch rule: <= 4 in flight, a 5th only queued behind a running stage-0 plan (plans.jsonl, controller view)
+    plans = [json.loads(x) for x in (run_dir / "plans.jsonl").read_text().splitlines()]
+    assert [p["index"] for p in plans] == sorted(by_mb)
+    for p in plans:
+        assert p["in_flight"] <= max_in_flight + 1
+        if p["in_flight"] == max_in_flight + 1:
+            assert p["queued"], p
     return by_mb, peak
 
 
