@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import warnings
 from pathlib import Path
 
 import torch
@@ -28,6 +29,11 @@ from ppimpl.model.metadata import StageMetadata
 
 CHECKPOINT = "/raid/hf/hub/models--nvidia--GLM-5.3-Flash-NVFP4/snapshots/da920bb0b9f4a06727223a349e55468e38352348"
 HIDDEN_WIDTH = 4 * 4096
+# FlashInfer tactics, tuned once (bench/tune_tactics.py) and loaded at warm-up with tuning off, as vLLM loads its
+# persisted configs: start-up skips ~150 s of MoE profiling and every stage, run and test uses the same tactics.
+# The file's own metadata (FlashInfer/CUDA/cuBLAS/cuDNN versions, GPU) decides whether it is valid here.
+TACTICS = Path(os.environ.get("PPIMPL_FI_TACTICS",
+                              Path(__file__).resolve().parents[1] / "data" / "flashinfer_tactics_b200.json"))
 RESERVE_GB = 13.6     # 1_contract.md §1: activations and workspace beside weights and KV
 MAX_MODEL_LEN = 1_048_576
 
@@ -84,6 +90,23 @@ def bench_config(mb_tokens: int, checkpoint: str | None = None):
 
 
 NINJA = "/usr/bin/ninja"
+
+
+def load_tactics(path: Path | None = None) -> dict:
+    """Load the persisted FlashInfer tactics into the autotuner (lookup only, no profiling). Returns what a run
+    records: source "file" with path and sha256, or source "missing"/"invalid" with the reason."""
+    import hashlib
+
+    from flashinfer.autotuner import AutoTuner
+
+    path = Path(path or TACTICS)
+    if not path.is_file():
+        return {"source": "missing", "file": str(path), "reason": f"{path} does not exist"}
+    sha = hashlib.sha256(path.read_bytes()).hexdigest()
+    if not AutoTuner.get().load_configs(str(path)):
+        return {"source": "invalid", "file": str(path), "sha256": sha,
+                "reason": f"{path} was tuned in another environment (FlashInfer/CUDA/GPU metadata)"}
+    return {"source": "file", "file": str(path), "sha256": sha}
 
 
 def check_ninja() -> bool:
@@ -191,11 +214,13 @@ class StageModel:
         mods = [m for m in (*self.layers, self.embed, self.norm, self.lm_head) if m is not None]
         return pp_patch.install_host_trims(mods)
 
-    def warmup(self, autotune: bool = True) -> None:
-        """Before `Ready`: run every kernel once (first launches load modules) and tune FlashInfer's kernels as vLLM's
-        `kernel_warmup` does (one autotuned pass at the microbatch budget, then plain passes). Shapes: one request at
-        the full budget (indexer and both top-k paths), then two requests, one continuing a cached prefix (conv and
-        KDA initial state, chunk start > 0). Uses blocks 1.. before any request holds them."""
+    def warmup(self, tune: str = "auto") -> None:
+        """Before `Ready`: run every kernel once (first launches load modules) with FlashInfer's tactics settled.
+        `tune`: "auto" loads `TACTICS` (tuning off) and tunes in this process, loudly, only when the file is missing
+        or invalid here; "force" tunes in this process (bench/tune_tactics.py); "off" uses neither. Tuning is one
+        autotuned pass at the microbatch budget, as vLLM's `kernel_warmup` does. Shapes: one request at the full
+        budget (indexer and both top-k paths), then two requests, one continuing a cached prefix (conv and KDA initial
+        state, chunk start > 0). Uses blocks 1.. before any request holds them. `self.tactics` records the source."""
         from types import SimpleNamespace as NS
 
         B = self.kv.block_tokens
@@ -210,13 +235,18 @@ class StageModel:
             yield NS(mb_id=-1, chunks=[chunk("w0", 0, T, 1)])
             yield NS(mb_id=-2, chunks=[chunk("w1", 0, 512, 1), chunk("w2", 1024, 1024, 1 + 1 + 6)])
 
+        self.tactics = load_tactics() if tune == "auto" else {"source": tune}
         ctx = contextlib.nullcontext()
-        if autotune:
-            try:
-                from flashinfer.autotuner import autotune as fi_autotune
-                ctx = fi_autotune(True)
-            except ImportError:
-                pass
+        if tune == "force" or (tune == "auto" and self.tactics["source"] != "file"):
+            from flashinfer.autotuner import autotune as fi_autotune
+
+            if tune == "auto":
+                msg = (f"FlashInfer tactics not loaded ({self.tactics['reason']}): tuning in this process (~150 s, "
+                       f"tactics may differ per process). Run bench/tune_tactics.py to write {TACTICS}.")
+                warnings.warn(msg, stacklevel=2)
+                print(f"WARNING: {msg}", flush=True)
+                self.tactics["source"] = "tuned_in_process"
+            ctx = fi_autotune(True)
         with torch.inference_mode():
             for i, plan in enumerate(plans()):
                 T_p = sum(c.num_tokens for c in plan.chunks)
