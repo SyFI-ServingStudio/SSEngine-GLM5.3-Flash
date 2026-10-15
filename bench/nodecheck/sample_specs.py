@@ -27,8 +27,9 @@ def cli_spec(spec):
     out = dict(spec)
     if isinstance(out.get("per_expert_batches"), str):
         out["per_expert_batches"] = json.loads(out["per_expert_batches"])
-    if out.get("clean_logits") in ("0", "1"):  # stored as text in the DB, a bool in the CLI
-        out["clean_logits"] = out["clean_logits"] == "1"
+    for flag in ("clean_logits", "return_valid_counts"):  # text "0"/"1" in the DB, a bool in the CLI
+        if out.get(flag) in ("0", "1"):
+            out[flag] = out[flag] == "1"
     return out
 
 
