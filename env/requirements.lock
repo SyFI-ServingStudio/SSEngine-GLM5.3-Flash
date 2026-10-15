@@ -38,7 +38,7 @@ fastapi-cloud-cli==0.26.0
 fastar==0.12.0
 fastsafetensors==0.4.0
 filelock==4.1.0
-flashinfer-python==0.7.0
+flashinfer-python @ file:///raid/kanzhu/ServingStudio/pp-impl/third_party/wheels/flashinfer_python-0.7.2.dev20261008-py3-none-any.whl
 frozenlist==1.8.0
 fsspec==2026.9.0
 googleapis-common-protos==1.75.5
@@ -54,6 +54,7 @@ huggingface-hub==2.2.0
 humming-kernels==0.1.16
 idna==3.20
 ijson==3.5.1
+iniconfig==2.3.1
 instanttensor==0.2.1
 interegular==0.3.3
 jinja2==3.1.6
@@ -99,11 +100,11 @@ nvidia-curand==10.4.0.35
 nvidia-cusolver==12.0.4.66
 nvidia-cusparse==12.6.3.3
 nvidia-cusparselt-cu13==0.8.1
-nvidia-cutlass-dsl==4.7.1
-nvidia-cutlass-dsl-libs-base==4.7.1
-nvidia-cutlass-dsl-libs-core==4.7.1
-nvidia-cutlass-dsl-libs-cu12==4.7.1
-nvidia-cutlass-dsl-libs-cu13==4.7.1
+nvidia-cutlass-dsl==4.8.0
+nvidia-cutlass-dsl-libs-base==4.8.0
+nvidia-cutlass-dsl-libs-core==4.8.0
+nvidia-cutlass-dsl-libs-cu12==4.8.0
+nvidia-cutlass-dsl-libs-cu13==4.8.0
 nvidia-ml-py==13.615.71
 nvidia-nccl-cu13==2.29.7
 nvidia-nvjitlink==13.4.92
@@ -129,6 +130,7 @@ outlines-core==0.2.14
 packaging==26.3
 partial-json-parser==0.2.1.1.post7
 pillow==12.3.0
+pluggy==1.6.0
 prometheus-client==0.26.0
 prometheus-fastapi-instrumentator==8.1.0
 propcache==0.5.4
@@ -145,6 +147,7 @@ pydantic-settings==2.15.0
 pygments==2.21.0
 pyjwt==2.15.1
 pynvvideocodec==2.0.4
+pytest==9.1.1
 python-dotenv==1.2.4
 python-json-logger==4.2.0
 python-multipart==0.0.32

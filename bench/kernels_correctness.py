@@ -721,8 +721,14 @@ def check_conv(spec: dict, config: dict) -> list[dict]:
 
 
 def check_kda(spec: dict, config: dict) -> list[dict]:
-    """The fork's FlashKDA call (`_flashkda_prefill`) on the row's shape; the row's own callable is FlashInfer
-    `recurrent_kda(backend="cute-dsl-persistent")`, checked by `--kda-flashinfer` in its profile env."""
+    """The row's callable, FlashInfer `recurrent_kda(backend="cute-dsl-persistent")` (pp-impl's choice), and the
+    fork's FlashKDA call (`_flashkda_prefill`), on the row's shape."""
+    results = check_kda_flashinfer(spec, config)
+    torch.cuda.empty_cache()
+    return results + _check_flashkda(spec, config)
+
+
+def _check_flashkda(spec: dict, config: dict) -> list[dict]:
     import vllm._flashkda_C  # noqa: F401
 
     from profiling.runners.attention import kda_chunk_prefill_flashkda as mod
@@ -747,7 +753,7 @@ def check_kda(spec: dict, config: dict) -> list[dict]:
 
 
 def check_kda_flashinfer(spec: dict, config: dict) -> list[dict]:
-    """Runs in profile_envs/flashinfer_kda (FlashInfer nightly), not in pp-impl/.venv."""
+    """FlashInfer nightly 0.7.2.dev20261008 (pp-impl/.venv, or profile_envs/flashinfer_kda with --kda-flashinfer)."""
     from profiling.runners.attention import kda_chunk_prefill_flashinfer as mod
     from profiling.runners.attention.kda_chunk_prefill_reference import kda_chunk_prefill_reference, rmse_ratio
 

@@ -20,7 +20,7 @@ evidence with file:line is in `identity_notes/`:
 | row image `cu130` | vLLM 0.23.0+vibesim.0b8edfb · torch 2.11.0 · cuBLAS 13.1.0.3 · FlashInfer 0.6.12 · Triton 3.6.0 · TileLang 0.1.9 · cutlass-dsl 4.5.2 |
 | row image `cu130-3f667d7e` | vLLM 0.28.1rc0+vibesim.3f667d7 · torch 2.13.0 · cuBLAS 13.1.1.3 · FlashInfer 0.6.18 · Triton 3.7.1 · TileLang 0.1.12 · cutlass-dsl 4.6.2 |
 | `vllm_upstream_fork_env` (rows 7, 20) | the fork at `892da0822f` |
-| **ours** (`pp-impl/.venv`, `ENV.md`) | fork 0.1.dev21920+g892da0822 · torch 2.13.0+cu130 · cuBLAS 13.1.1.3 · FlashInfer 0.7.0 · Triton 3.7.1 · TileLang 0.1.12 · cutlass-dsl 4.7.1 · DeepGEMM (vendored, 2.8.0) · DeepSelect · FlashKDA b59532f1 (`_flashkda_C`) |
+| **ours** (`pp-impl/.venv`, `ENV.md`) | fork 0.1.dev21920+g892da0822 · torch 2.13.0+cu130 · cuBLAS 13.1.1.3 · FlashInfer 0.7.0 → **0.7.2.dev20261008** (Decision 1) · Triton 3.7.1 · TileLang 0.1.12 · cutlass-dsl 4.7.1 → **4.8.0** · Dao causal-conv1d 1.7.0 (source build) · DeepGEMM (vendored, 2.8.0) · DeepSelect · FlashKDA b59532f1 (`_flashkda_C`) |
 
 ## Table
 
@@ -99,3 +99,34 @@ callable and arguments the fork uses.
 - **mHC stage edge.** The fork drops `post`/`comb` at the PP edge. See `issues.md`.
 - **"-dirty" provenance.** Rows of configs 4 and 7 carry `92bf581bad…-dirty`. The runner source was reconstructed from
   the next commits (`2de7cdcc`, `9741a317`), which are byte-identical to HEAD. The exact dirty tree is unverified.
+
+## Decisions (orchestrator review of 56f44d5)
+
+1. **DIFF configurations follow the design, not the fork.** `ppimpl/model/` routes each position to the row's
+   callable. The calls are listed in `ppimpl/kernels.py`; `kernels_patched/` is used only if a kernel itself must
+   change.
+   - 4: Dao `causal_conv1d_fn`, channel-last, one launch per sequence, BF16 weight, keeping the conv-state write.
+   - 5: FlashInfer `recurrent_kda(backend="cute-dsl-persistent")`. The venv now carries the rows' FlashInfer nightly
+     0.7.2.dev20261008 (73b63f88) with cutlass-dsl 4.8.0 (`ENV.md`). MoE (30), `mm_fp4` (9, 11) and sparse MLA (25)
+     run on that FlashInfer too, so they are checked against their rows in this env; 25 is no longer counted as
+     covered by the cubin-hash argument.
+   - 7: every mHC boundary runs DeepGEMM `mega_mhc`, non-shifted, one launch. The rows' environment was the fork at
+     `892da0822f`, whose vendored DeepGEMM 2.8.0 is ours.
+   - 20/21: indexer top-k picks the faster of DeepSelect and `top_k_per_row_prefill` per shape, by the rows (table in
+     `kernels.py`).
+   - 33: the final mHC post runs as the row (`mhc_fused_post_pre_tilelang` post path) unless the fork's
+     `mhc_post_tilelang` + mean is at least as fast; the choice is recorded at M2.
+   - A fork kernel measured faster than the design's row at the same shapes may be kept, with the measurement
+     recorded.
+2. **Short prefills (≤ 2,048).** The fork runs dense-MHA prefill and skips the indexer. The targets price sparse MLA
+   with q-absorb/V-up and skip the indexer at 1k/2k (`3_layers.md` §3). pp-impl takes whichever matches the target
+   structure or is faster, recorded at M2.
+3. **Router `gate_recompute`.** One router GEMM per MoE layer (the fork's, and faster). Recorded in `issues.md` as a
+   target over-count.
+4. **Sparse MLA above 32,768 rows.** Test a 65,536-query launch at M2 (64k/128k); split at 32,768 if TRTLLM rejects
+   it, as the target does.
+5. **Re-measurement.**
+   - Version-only configurations (1, 9, 11, 12, 15, 16, 18, 31, 32, 34, plus 25 and 30 on the FlashInfer nightly)
+     are re-measured by the measure lane through the profiler runner in `pp-impl/.venv` once the env is final.
+   - ARGS configurations (3, 19, 22, 24, 28, 30) are judged per kernel in the M2 layer traces against
+     `layer_targets.jsonl` per-launch times.

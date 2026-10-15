@@ -11,3 +11,9 @@ Two kinds (`1_contract.md` §6): **setup difference** (names the targets it affe
 - pp-impl applies the deferred `hc_post` (TileLang) on the sender and runs a standalone `hc_pre` (TileLang) on the
   receiver. From the targets' own rows: +0.092 − 0.062 = +0.030 ms per edge at 8k, +1.307 − 0.986 = +0.32 ms at 128k
   (< 0.06% of a stage). Sending `x`/`post`/`comb` too (~40 KiB per token) would add ~25% to every send instead.
+
+## Target over-count: router `gate_recompute` (M2/M3)
+
+- The targets price two router GEMMs per MoE layer (`gate` + `gate_recompute`, `gemm_fp32_output` n=288). The fork at
+  `892da0822f` runs the router once (commit 1768273c13, "no duplicate router GEMM"), and pp-impl keeps one.
+- Effect: real is faster than the target by one router GEMM per MoE layer (42 MoE layers). Per-stage size at M2.

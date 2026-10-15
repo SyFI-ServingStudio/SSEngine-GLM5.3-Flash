@@ -68,6 +68,16 @@ def rows() -> list[tuple[str, str, bool]]:
 
         return f"{version('causal-conv1d')} at {Path(causal_conv1d.__file__).parent}"
 
+    def kda_persistent():
+        import typing
+
+        from flashinfer.kda import recurrent_kda
+
+        backends = typing.get_args(typing.get_type_hints(recurrent_kda)["backend"])
+        if "cute-dsl-persistent" not in backends:
+            raise RuntimeError(f"backends {backends}")
+        return "recurrent_kda backend available"
+
     out += [
         check("vllm (fork)", vllm_info),
         check("flashinfer-python", lambda: importlib.import_module("flashinfer").__version__),
@@ -78,7 +88,8 @@ def rows() -> list[tuple[str, str, bool]]:
         check("DeepSelect", lambda: ext("vllm._deepselect_C", "deep_select", "topk")),
         check("FlashKDA", lambda: ext("vllm._flashkda_C", "_flashkda_C", "fwd")),
         check("vLLM _C", lambda: ext("vllm._custom_ops", "_C", "top_k_per_row_prefill")),
-        check("causal-conv1d (Dao; optional, profiler row 4 only)", causal_conv1d),
+        check("causal-conv1d (Dao; KDA short conv)", causal_conv1d),
+        check("FlashInfer KDA cute-dsl-persistent", kda_persistent),
     ]
     return out
 
@@ -92,7 +103,7 @@ def main() -> int:
     else:
         for name, value, ok in table:
             print(f"{'ok ' if ok else 'BAD'} {name}: {value}")
-    required_ok = all(ok for name, _, ok in table if "optional" not in name)
+    required_ok = all(ok for _, _, ok in table)
     return 0 if required_ok else 1
 
 

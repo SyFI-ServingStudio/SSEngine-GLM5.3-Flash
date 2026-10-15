@@ -16,9 +16,18 @@ if [ ! -e "$ROOT/third_party/vllm/.git" ]; then
 fi
 rsync -a --files-from="$HERE/build_outputs.txt" "$REF/" "$ROOT/third_party/vllm/"
 
-# 2. Venv: the reference venv's pinned packages (offline, from the uv cache), minus the editable vllm.
+# 2. Venv: the reference venv's pinned packages minus the editable vllm, with FlashInfer replaced by the nightly
+#    the KDA rows used (0.7.2.dev20261008, main at 73b63f88) and cutlass-dsl 4.8.0 (design decision, ENV.md).
+FI=flashinfer_python-0.7.2.dev20261008-py3-none-any.whl
+mkdir -p "$ROOT/third_party/wheels"
+if [ ! -f "$ROOT/third_party/wheels/$FI" ]; then
+  curl -fsSL -o "$ROOT/third_party/wheels/$FI" \
+    "https://github.com/flashinfer-ai/whl/releases/download/nightly-v0.7.2-20261008/$FI"
+fi
+echo "35b41bb54be1531de35b41a4668c97c9955fb8676eb66ac857ec44334fc60b84  $ROOT/third_party/wheels/$FI" | sha256sum -c -
 uv venv --python /usr/bin/python3.12 "$ROOT/.venv"
-uv pip install --python "$ROOT/.venv/bin/python" --offline -r "$HERE/requirements.lock"
+sed "s#file://.*/third_party/wheels/#file://$ROOT/third_party/wheels/#" "$HERE/requirements.lock" > "$ROOT/.venv/requirements.lock"
+uv pip install --python "$ROOT/.venv/bin/python" -r "$ROOT/.venv/requirements.lock"
 
 # 3. Editable vllm: copy the reference venv's finder and dist-info and point them at our checkout.
 SP_REF="$REF/.venv/lib/python3.12/site-packages"
