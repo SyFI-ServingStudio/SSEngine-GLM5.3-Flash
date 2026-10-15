@@ -15,6 +15,42 @@ MAX_IN_FLIGHT = 4
 LAYER_SPLIT = [12, 11, 11, 11]
 
 
+class SchedulerConfig(msgspec.Struct, forbid_unknown_fields=True):
+    """The scheduler of 6_scheduler.md §2, one switch per step. `SCHEDULER_STEPS` names the handoff's settings."""
+    order: str = "fifo"                   # "fifo": started first, then arrival order (step 0); "srpt": (b), (c)
+    mb_tokens: int = MB_TOKENS            # largest microbatch (step 0-1: the fixed budget; 2-4: 32,768)
+    load_budget: bool = False             # step 2: 4,096 tokens up to a 1M backlog, mb_tokens at 3M, linear between
+    load_budget_low: int = 4096
+    backlog_lo: int = 1_000_000
+    backlog_hi: int = 3_000_000
+    even_split: bool = False              # step 3: also at most ceil(B / depth), at least even_min
+    even_min: int = 512
+    depth: int = MAX_IN_FLIGHT
+    force_after_ms: float | None = None   # step 4: a request waiting this long goes first
+
+
+SCHEDULER_STEPS = {
+    "plain": SchedulerConfig(),
+    "srpt8k": SchedulerConfig(order="srpt"),
+    "budget": SchedulerConfig(order="srpt", mb_tokens=32768, load_budget=True),
+    "even": SchedulerConfig(order="srpt", mb_tokens=32768, load_budget=True, even_split=True),
+    "good": SchedulerConfig(order="srpt", mb_tokens=32768, load_budget=True, even_split=True, force_after_ms=60_000.0),
+}
+
+
+class TierConfig(msgspec.Struct, forbid_unknown_fields=True):
+    """DRAM and SSD behind the HBM prefix cache (7_offloading.md §2), per GPU. Own-stage storage: every GPU keeps its
+    own stage's bytes, so the stage with the most bytes (stage 0) sets the size and the read time."""
+    dram_gb: float | None = 150.0         # None: no DRAM tier
+    dram_read_gb_s: float = 50.0
+    ssd_gb: float | None = 256.0          # None: no SSD tier
+    ssd_read_gb_s: float = 10.0
+    ssd_writes: str = "dram-evictions"    # "dram-evictions": SSD is written only with what DRAM evicts; "every-context"
+    bytes_per_token: int = 1635           # own stage (stage 0); balanced storage: 1,499
+    state_bytes: int = 39_100_000         # one KDA state per context, own stage (stage 0); balanced: 36.9 MB
+    max_read_wait_ms: float | None = 1000.0   # a read that would wait longer for its tier is passed over
+
+
 class FakeConfig(msgspec.Struct, forbid_unknown_fields=True):
     """FakeStageModel: no weights, a per-token delay, deterministic tokens."""
     us_per_token: float = 7.0         # stage time per token (57 ms per 8k microbatch ~ stage 0's target)
@@ -37,6 +73,9 @@ class RunConfig(msgspec.Struct, forbid_unknown_fields=True):
     max_in_flight: int = MAX_IN_FLIGHT
     dispatch_ahead: int = 1           # plans queued on stage 0 behind the running one (0: form when stage 0 is free)
     pool_tokens: int | None = None    # cap on the KV pool, in tokens (1_contract.md §2.3)
+    keep_sessions: bool = False       # phase B: exact prefix cache (kept sessions, LRU eviction of whole sessions)
+    scheduler: SchedulerConfig = msgspec.field(default_factory=SchedulerConfig)
+    tiers: TierConfig | None = None   # phase D: DRAM / SSD behind HBM
     fake: FakeConfig = msgspec.field(default_factory=FakeConfig)
 
     @property
