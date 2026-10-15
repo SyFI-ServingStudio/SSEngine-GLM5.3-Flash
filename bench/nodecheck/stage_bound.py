@@ -37,8 +37,7 @@ def main(data, nodecheck, lengths="8192,131072"):
         for line in open(path):
             r = json.loads(line)
             if r["ratio"] is not None:
-                fixed = r["fixed"] if "fixed" in r else r["config"]
-                found[(r["kind"], r["backend"], tuple(fixed.items()))].append((r["db_time_ms"], r["ratio"]))
+                found[config_key(r)].append((r["db_time_ms"], r["ratio"]))
         samples.update(found)
     targets = [json.loads(l) for l in open(data / "layer_targets.jsonl")]
     print("| Prompt | Stage | Stage ms | Estimate ms (%) | From misses ms (%) | Worst-ratio bound ms (%) | Uncovered ms (%) | Largest estimate term |")
