@@ -235,7 +235,8 @@ def stage_outputs(model, plan):
 
 def kernel_sequence(model, plan) -> list[tuple]:
     """Names of the GPU activities (kernels, copies, fills) of one forward's `run` (the metadata is built outside the
-    profiled region), in start order: a different tactic or code path shows as a different name or count."""
+    profiled region), in start order; compared as a multiset (kernels on vLLM's aux stream race with the main
+    stream in start order, 7106 at 2k): a different tactic or code path shows as a different name or count."""
     import torch
     from torch.profiler import ProfilerActivity, profile
 
@@ -281,7 +282,7 @@ def check_trims(model, tokens, lengths) -> dict:
     ok = True
     for L in plans:
         base, trim = _same(before[L], again[L]), _same(before[L], after[L])
-        seq_equal = seq_before[L] == seq_after[L]
+        seq_equal = sorted(seq_before[L]) == sorted(seq_after[L])
         deterministic = base["hidden_equal"] and base["logits_equal"]
         passed = seq_equal and (not deterministic or (trim["hidden_equal"] and trim["logits_equal"]))
         res[L] = {"repeat": base, "trimmed": trim, "kernel_sequence_equal": seq_equal,
@@ -328,8 +329,9 @@ def compare_metadata(model, tokens, lengths, old_path: Path) -> dict:
             torch.cuda.synchronize()
             base, new = _same(a, a2), _same(a, b)
             deterministic = base["hidden_equal"] and base["logits_equal"]
-            res[name] = {"repeat": base, "packed": new, "kernel_sequence_equal": seq_a == seq_b,
-                         "pass": seq_a == seq_b and (not deterministic or (new["hidden_equal"] and new["logits_equal"]))}
+            same_kernels = sorted(seq_a) == sorted(seq_b)   # as a multiset: aux-stream kernels race in start order
+            res[name] = {"repeat": base, "packed": new, "kernel_sequence_equal": same_kernels,
+                         "pass": same_kernels and (not deterministic or (new["hidden_equal"] and new["logits_equal"]))}
     model.meta = new_meta
     res["pass"] = all(v["pass"] for v in res.values())
     return res
@@ -359,6 +361,14 @@ def bench(args) -> None:
     if args.compare_metadata:
         result["metadata_check"] = compare_metadata(model, tokens, lengths, args.compare_metadata)
         print(f"[host] metadata check: {result['metadata_check']}", flush=True)
+    if args.check_trims or args.compare_metadata:
+        # checks only: the profiler they use leaves CUPTI attached, which adds launch overhead to any later timing
+        # (7106: +1.7 ms per 1k forward); time in a separate process
+        out = OUT / f"{args.tag or os.environ.get('SLURM_JOB_ID', 'local')}_checks.json"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(result, indent=1, default=str))
+        print(f"[host] wrote {out}", flush=True)
+        return
     trace_dir = Path(tempfile.mkdtemp(prefix="pph-", dir=os.environ.get("TMPDIR")))
     OUT.mkdir(parents=True, exist_ok=True)
     out_path = OUT / f"{args.tag or os.environ.get('SLURM_JOB_ID', 'local')}.json"
