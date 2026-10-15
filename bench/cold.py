@@ -48,8 +48,23 @@ def instrument(model) -> None:
 
         setattr(obj, attr, call)
 
+    seen = set()
     for layer in model.layers:
         unit(layer, "forward", f"L{layer.layer_idx}")
+        kind = (layer.layer_kind, type(getattr(layer, "mlp", None)).__name__)
+        if kind in seen:
+            continue
+        seen.add(kind)       # the first layer of each kind: every submodule, timed the same way
+        for name, mod in layer.named_modules():
+            if name and name.count(".") <= 2:
+                unit(mod, "forward", f"L{layer.layer_idx}.{name}")
+        if layer.layer_kind == "kda":
+            unit(layer.self_attn, "_forward", f"L{layer.layer_idx}.self_attn._forward")
+    import causal_conv1d_cuda
+    import flashinfer.kda_kernels.persistent.forward as kda_fwd
+
+    unit(kda_fwd, "fwd", "kda.flashinfer_fwd")
+    unit(causal_conv1d_cuda, "causal_conv1d_fwd", "kda.conv")
     if model.embed is not None:
         unit(model.embed, "forward", "embed")
     unit(model, "output_head", "output_head")
@@ -99,7 +114,7 @@ def main() -> None:
     from ppimpl.model.stage import CHECKPOINT, StageModel, bench_config
 
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--lengths", default="1024,2048,4096,8192")
+    ap.add_argument("--lengths", default="1024,1000,1100,2048,3000,4096,6000,8192")
     ap.add_argument("--budget", type=int, default=131072)
     a = ap.parse_args()
     lengths = [int(x) for x in a.lengths.split(",")]

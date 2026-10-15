@@ -62,15 +62,21 @@ def init_vllm_distributed(device: torch.device) -> None:
     if ps._TP is not None:
         return
     if dist.is_initialized():
-        world, rank, method = dist.get_world_size(), dist.get_rank(), None
+        ps.init_distributed_environment(world_size=dist.get_world_size(), rank=dist.get_rank(),
+                                        distributed_init_method="env://", local_rank=device.index, backend="nccl")
     else:
         import socket
-        with socket.socket() as s:
-            s.bind(("127.0.0.1", 0))
-            port = s.getsockname()[1]
-        world, rank, method = 1, 0, f"tcp://127.0.0.1:{port}"
-    ps.init_distributed_environment(world_size=world, rank=rank, distributed_init_method=method or "env://",
-                                    local_rank=device.index, backend="nccl")
+        for attempt in range(5):     # the free port can be taken between probe and listen (7114: EADDRINUSE)
+            with socket.socket() as s:
+                s.bind(("127.0.0.1", 0))
+                port = s.getsockname()[1]
+            try:
+                ps.init_distributed_environment(world_size=1, rank=0, distributed_init_method=f"tcp://127.0.0.1:{port}",
+                                                local_rank=device.index, backend="nccl")
+                break
+            except dist.DistNetworkError:
+                if attempt == 4:
+                    raise
     ps.initialize_model_parallel(1, 1)
 
 
