@@ -183,7 +183,7 @@ class Controller:
         req = Request(req_id, len(token_ids), arrival_ns, token_ids)
         fut = asyncio.get_running_loop().create_future()
         self.reqs[req_id] = (req, fut, {"id": req_id, "seq": self.next_seq, "prompt_tokens": len(token_ids),
-                                        "arrival_ms": self._ms(arrival_ns), "prompt_sha256": prompt_sha256(token_ids)})
+                                        "arrival_ms": self._ms(arrival_ns), "_prompt": token_ids})
         self.next_seq += 1
         self.sched.add(req)
         self._pump()
@@ -275,4 +275,5 @@ class Controller:
 
     def log_response(self, info: dict):
         info["response_ms"] = self._ms(time.time_ns())
+        info["prompt_sha256"] = prompt_sha256(info.pop("_prompt"))   # here, not in submit: intake bursts are the hot path
         self.req_log.write(json.dumps(info) + "\n")
