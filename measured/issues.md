@@ -205,3 +205,40 @@ record the smaller SSD tier each run actually had.
 - `bench/run.py` caps the pool at 2,097,152 tokens for these two runs. Stage times do not depend on the pool size.
 - Affects: the one_64k and one_128k rows of `iteration_targets.json` only. Saturated runs use 8k microbatches and the
   full pool.
+
+## Saturated 1k: one wrong token is batch numerics, not a race or stale state — decided (M3 token check)
+
+Kind: numerics of the model as served, decided. In 7140 (saturated_1k, no per-microbatch sync) and 7162 (same, sync after
+every microbatch), uni_1k_3 (the one_1k_3 prompt) returns 11490 where the one-request reference gives 2669. The
+reference has 2669 at −0.19 and 11490 at −2.19, a margin of 2.0. The cause is that the model's output depends on the
+microbatch's total token count:
+
+- No race. `bench/overlap.py` (7164/7165) enqueues 5 microbatches back to back behind a GPU sleep. The outputs are
+  bitwise equal to a synced run. So are three variants: all prepares then all runs, queued prepares with synced runs,
+  and the synced repeat. Every pinned staging buffer is unchanged after its copy, and the device copy equals the host
+  snapshot. The host gets at most about 1.7 forwards ahead: the CUDA launch queue (~1,024 kernels) blocks it.
+- No stale state. `bench/batchflip.py` (7170) runs the target in fresh blocks, in blocks a previous request used in
+  the same roles, in blocks a previous 8 × 1k batch used in mixed roles, and with every cache tensor filled with
+  random values. All are bitwise equal in all 45 layers.
+- No cross-request leak. The target's rows are bitwise equal in three 8 × 1k batches: 7140 mb 114 (target at
+  position 0), 7162 mb 206 (position 3), and mb 114's shape with the 7 partners replaced.
+- Attention and MoE do not depend on T. 7172 replaces the target rows of every attention and MoE input in the
+  8 × 1k batch with the alone run's rows, and every KDA, MLA + indexer and MoE output is bitwise equal to the alone
+  run (token 2669, same logprobs). 7174 runs each stage-0 MoE on the same rows at T = 1024 and T = 8192, and the
+  router logits, expert sets, shared expert and output are bitwise equal.
+- All the T dependence is in the mHC glue. Standalone `hc_pre`, and the post + split-K pre-norm GEMM for T > 32
+  (`vllm/model_executor/kernels/mhc/tilelang_kernels.py`), split K into `compute_num_split` = 148 // ceil(T/64)
+  pieces. That is 9 at T = 1024 and 1 at T = 8192, a different TF32 summation order. The ~1e-3 difference is
+  amplified by NVFP4 activation quantization: relative 8e-2 after layer 0, 0.2 by the end of stage 0, 0.4–0.5 in
+  stage 3. Alone gives 2669 (−0.13; 11490 −2.26). Every 8 × 1k batch gives 11490 (−0.47; 2669 −1.35).
+- vLLM does the same (7173, TP4+EP, the 8 prompts scheduled as one 8,192-token step). Alone gives 2669 (−0.19).
+  b114 gives 2669 (−0.17). b206 gives 11490 (−0.47; 2669 −1.22), nearly our batched numbers. vLLM runs mHC
+  sequence-parallel (T/4 per rank) under the same split rule, so its result also depends on the batch and the
+  request's position.
+
+Decision (coordinator, 2026-10-15): no batch-invariant mode. Every run's token check judges only requests whose
+reference top-1 margin is at least 3 nats. Below that, it reports the request as "near tie, not judged" with both
+logprobs. One-request runs keep judging nearly every request. The rejected option was an mHC split count independent
+of T: it gives the alone result in any batch, but mHC is slower at small T, and the TP-vs-PP difference to vLLM would
+still need the margin rule.
+Data: `measured/batchflip/{7170,7172}_s*.json`, `7174_s0.json`, `vllm_7173.json`, `measured/host/overlap_s1_716{4,5}.json`.

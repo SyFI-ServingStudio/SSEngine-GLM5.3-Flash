@@ -3,7 +3,9 @@
 (b) one stage vs the same layers unsplit (`edge` mode: with the fork's fused mHC op at the boundaries the split is
 bitwise equal to unsplit; mega_mhc's ~4e-4 per-boundary difference is checked at the edge only, since NVFP4 layers
 amplify it to ~0.3 over 23 layers whether or not the model is split), (c) the 4 chained stages vs vLLM TP4 on a 1k prompt, (d) the manifest
-check on every traced stage. Each test runs `bench/chain.py` and reads its result file.
+check on every traced stage. Each test runs `bench/chain.py` and reads its result file. (e) microbatches enqueued back
+to back without a sync (the host several forwards ahead of the GPU, as in the pipeline) are bitwise equal to the same
+microbatches run one at a time, at 1k-token requests (`bench/overlap.py`).
 """
 
 import json
@@ -43,3 +45,9 @@ def test_chain_token_matches_vllm_and_manifest():
     for s in range(4):
         chk = _read(f"chain_1024_rank{s}")["trace_check"]
         assert chk["ok"], chk["summary"]
+
+
+def test_unsynced_forwards_match_synced():
+    subprocess.run([sys.executable, str(LANE / "bench" / "overlap.py"), "--stage", "1"], check=True, cwd=LANE)
+    r = json.loads((LANE / "measured" / "host" / f"overlap_s1_{JOB}.json").read_text())
+    assert r["pass"], r
