@@ -11,6 +11,7 @@ clock); req-frontend's requests.jsonl has unix-second submit/post times on the s
 """
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -371,8 +372,55 @@ def report_run(run_dir: Path) -> dict:
     tr = load_trace(run_dir)
     if tr:
         rep["kernels"] = [{k: v for k, v in a.items() if k != "demangled"} for a in tr["kernels"]]
+    rep["tactics"] = meta.get("tactics")
+    rep["tokens"] = token_summary(run_dir)
     (run_dir / "report.json").write_text(json.dumps(rep) + "\n")
     return rep
+
+
+def token_summary(run_dir: Path) -> dict | None:
+    """bench/check_tokens.py's verdicts, with each miss's reference top-1 margin: above 2k the forward is not
+    bitwise run to run (sparse-MLA summation order), so a miss with a small margin may be that, not a bug."""
+    f = run_dir / "token_check.json"
+    if not f.exists():
+        return None
+    tc = json.loads(f.read_text())
+    refs = {}
+    ref_file = Path(tc["summary"]["reference"])
+    if ref_file.exists():
+        refs = {r["id"]: r for r in read_jsonl(ref_file)}
+    misses = [{"id": r["id"], "verdict": r["verdict"], "token": r.get("token"),
+               "reference_token": r.get("reference_token"),
+               "reference_margin": refs.get(r.get("reference_id"), {}).get("margin"),
+               "rank_in_reference_top5": r.get("engine_token_rank_in_reference_top5")}
+              for r in tc["requests"] if r["verdict"] in ("fail", "no_token")]
+    s = tc["summary"]
+    return {k: s[k] for k in ("pass", "fail", "no_token", "no_reference", "ok")} | {"misses": misses}
+
+
+def tactics_note(tactics: list | None) -> str:
+    if not tactics:
+        return "not recorded"
+    src = [(t or {}).get("source", "none") for t in tactics]
+    tuned = [s for s, x in enumerate(src) if x == "tuned_in_process"]
+    files = {(t or {}).get("sha256", "")[:12] for t in tactics if t}
+    return ("**TUNED IN PROCESS on stages " + ", ".join(map(str, tuned)) + "**") if tuned \
+        else f"{'/'.join(sorted(set(src)))} ({', '.join(sorted(files)) or '—'})"
+
+
+def runs_md(runs: list[dict]) -> str:
+    """Per run: tokens against the reference (misses with the reference margin) and the FlashInfer tactics used."""
+    out = ["## Runs: tokens and tactics", "",
+           "| Run | Tokens pass / fail / no token / not in reference | Misses (token vs reference, reference margin) "
+           "| Tactics |", "|---|---|---|---|"]
+    size = lambda r: int(m.group(1)) if (m := re.search(r"_(\d+)k$", r["name"])) else 0   # noqa: E731
+    for r in sorted(runs, key=lambda r: (r["kind"], size(r), r["name"])):
+        t = r.get("tokens")
+        cell = "—" if t is None else f"{t['pass']} / {t['fail']} / {t['no_token']} / {t['no_reference']}"
+        miss = "; ".join(f"{m['id']}: {m['token']} vs {m['reference_token']} (margin {m['reference_margin']})"
+                         for m in (t or {}).get("misses", [])) or "—"
+        out.append(f"| {r['name']} | {cell} | {miss} | {tactics_note(r.get('tactics'))} |")
+    return "\n".join(out) + "\n"
 
 
 def kernels_md(name: str, kernels: list[dict], top: int = 12) -> str:
@@ -393,12 +441,13 @@ def kernels_md(name: str, kernels: list[dict], top: int = 12) -> str:
 
 
 def summarize(runs_root: Path) -> Path:
-    one, sat, kern = [], [], []
+    one, sat, kern, runs = [], [], [], []
     for d in sorted(runs_root.iterdir()):
         f = d / "report.json"
         if not f.exists():
             continue
         rep = json.loads(f.read_text())
+        runs.append(rep)
         one += rep.get("requests", [])
         if "saturated" in rep:
             sat.append(rep["saturated"])
@@ -411,6 +460,7 @@ def summarize(runs_root: Path) -> Path:
     (out / "saturated.jsonl").write_text("".join(json.dumps(r) + "\n" for r in sat))
     title = "M3 iteration: measured vs targets" + (f" ({runs_root.name} runs)" if out == runs_root else "")
     md = iteration_md(one, sat, title)
+    md += runs_md(runs)
     if kern:
         md += "\n## Kernels (nsys)\n\n" + "\n".join(kern)
     (out / "iteration.md").write_text(md)
