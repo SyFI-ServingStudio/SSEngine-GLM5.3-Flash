@@ -185,7 +185,7 @@ def execute(run_dir: Path, server_cfg: dict, client_cfg: dict, *, port: int, met
     run_dir.mkdir(parents=True, exist_ok=True)
     for f in ("run.json", "report.json", "pool.json", "metrics.json", "summary.json",   # a failed run leaves none
               "microbatches.jsonl", "server_requests.jsonl", "requests.jsonl", "trace.nsys-rep", "trace.sqlite",
-              "trace.json", "token_check.json", *(f"stage{s}.json" for s in range(8))):
+              "trace.json", "token_check.json", "cpus.json", *(f"stage{s}.json" for s in range(8))):
         (run_dir / f).unlink(missing_ok=True)
     server_cfg = {**server_cfg, "port": port, "run_dir": str(run_dir)}
     (run_dir / "server.yaml").write_text(yaml.safe_dump(server_cfg, sort_keys=False))
@@ -214,6 +214,8 @@ def execute(run_dir: Path, server_cfg: dict, client_cfg: dict, *, port: int, met
                                     timeout=client_timeout_s)
         meta["client_s"] = round(time.time() - t, 1)
         meta["client_returncode"] = client.returncode
+        meta["uptime_after"] = subprocess.run(["uptime"], capture_output=True, text=True).stdout.strip()
+        print(f"[{run_dir.name}] uptime after: {meta['uptime_after']}", flush=True)
     finally:
         stop(server, port, timeout_s=1800 if nsys else 90)
         # uvicorn re-raises the SIGTERM it handled once it has shut down: -15 (143 through nsys) is a clean stop
@@ -228,6 +230,8 @@ def execute(run_dir: Path, server_cfg: dict, client_cfg: dict, *, port: int, met
                             text=True)
         (run_dir / "trace.log").write_text(tr.stdout + tr.stderr)
         meta["nsys"]["export_and_parse_s"] = round(time.time() - t, 1)
+    if (run_dir / "cpus.json").exists():
+        meta["cpus"] = json.loads((run_dir / "cpus.json").read_text())
     pool = run_dir / "pool.json"
     if pool.exists():
         meta["pool"] = json.loads(pool.read_text())
@@ -261,6 +265,8 @@ def run_named(name: str, fake: bool, port: int, out_root: Path, args) -> dict:
             extra["profile_mbs"] = window
     if fake and args.us_per_token is not None:
         extra["fake"] = {"us_per_token": args.us_per_token}
+    if args.transport:
+        extra["transport"] = args.transport
     if args.cpu:    # harness check without GPUs: gloo, small activations
         extra["fake"] = {**extra.get("fake", {}), "hidden_width": 64}
     return execute(run_dir, server_config(kind, length, fake, run_dir, device="cpu" if args.cpu else "cuda", **extra),
@@ -280,6 +286,8 @@ def submit(args) -> None:
         inner += ["--us-per-token", str(args.us_per_token)]
     if args.nsys:
         inner.append("--nsys")
+    if args.transport:
+        inner += ["--transport", args.transport]
     if args.nsys_mbs:
         inner += ["--nsys-mbs", args.nsys_mbs]
     if args.out_root:
@@ -311,6 +319,7 @@ def main():
     ap.add_argument("--dependency", help="Slurm dependency, e.g. afterany:7034")
     ap.add_argument("--port", type=int)
     ap.add_argument("--us-per-token", type=float, help="FakeStageModel stage time per token")
+    ap.add_argument("--transport", choices=["nccl", "ce"], help="RunConfig.transport (default: the config's)")
     ap.add_argument("--client-timeout", type=float, default=1200)
     ap.add_argument("--nsys", action="store_true", help="run the server under Nsight Systems (bench/nsys_trace.py parses it)")
     ap.add_argument("--nsys-mbs", help="microbatches to trace, a:b or all (default: one-request all, saturated the "

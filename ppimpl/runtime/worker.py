@@ -16,8 +16,9 @@ from pathlib import Path
 import torch
 import zmq
 
-from ppimpl.config import RunConfig
-from ppimpl.runtime.transport import (Pipe, Plan, Ready, Shutdown, StageDone, WorkerError, decode_to_worker,
+from ppimpl.config import HIDDEN_WIDTH, RunConfig
+from ppimpl.runtime.cpus import pin_process, threads, worker_cpus
+from ppimpl.runtime.transport import (open_pipe, Plan, Ready, Shutdown, StageDone, WorkerError, decode_to_worker,
                                       encode, report_socket, worker_sockets)
 
 ANCHOR_EVERY_S = 2.0   # re-anchor CUDA events to the host clock (keeps elapsed_time short and float32-exact)
@@ -136,8 +137,13 @@ def run_worker(cfg: RunConfig, stage: int):   # makes inference tensors, which a
     last = stage == n - 1
     cuda = cfg.device == "cuda"
     device = torch.device("cuda", stage) if cuda else torch.device("cpu")
+    cpus = None
     if cuda:
         torch.cuda.set_device(device)
+        cpus = worker_cpus(stage, n)   # whole cores on the GPU's NUMA node, before our threads start (ppimpl/runtime/cpus.py)
+        if cpus:
+            pin_process(cpus)
+    torch.set_num_threads(1)           # the host side only launches kernels; CPU tensor work here is tiny
     ctx = zmq.Context()
     plans = worker_sockets(ctx, cfg.plan_addr(stage))
     reporter = Reporter(ctx, cfg.report_addr(), device)
@@ -147,8 +153,9 @@ def run_worker(cfg: RunConfig, stage: int):   # makes inference tensors, which a
     # the host for microbatch k+1 can overwrite what microbatch k's queued copies still read.
     sync_each_mb = cuda and os.environ.get("PPIMPL_SYNC_EACH_MB") == "1"
     try:
-        pipe = Pipe(stage, n, device, cfg.dist_init_method())
-        if cuda and cfg.model != "fake" and cfg.compute_sms:
+        width = cfg.fake.hidden_width if cfg.model == "fake" else HIDDEN_WIDTH
+        pipe = open_pipe(cfg, stage, device, width)   # before the model: its KV pool is sized from what is left
+        if cuda and cfg.model != "fake" and cfg.transport == "nccl" and cfg.compute_sms:
             limit_persistent_grids(device, cfg.compute_sms)
         model = build_model(cfg, stage, device)
         # which FlashInfer tactics the stage runs with (StageModel.tactics: source file|tuned_in_process, file, sha256)
@@ -157,6 +164,7 @@ def run_worker(cfg: RunConfig, stage: int):   # makes inference tensors, which a
         (Path(cfg.run_dir) / f"stage{stage}.json").write_text(json.dumps(info) + "\n")
         clock = Clock(device)
         window = ProfileWindow(cfg.profile_mbs if cuda else None)
+        print(f"stage {stage} cpus: {sorted(cpus) if cpus else 'not pinned'}, threads {threads()}", flush=True)
         reporter.q.put(Ready(stage, model.num_blocks))
         while True:
             while not plans.poll(1000):
@@ -169,7 +177,8 @@ def run_worker(cfg: RunConfig, stage: int):   # makes inference tensors, which a
                     m = torch.cuda.memory_stats(device)
                     print(f"stage {stage} allocator: " + json.dumps({k: m.get(k) for k in (
                         "num_alloc_retries", "num_device_alloc", "num_device_free", "num_ooms")}
-                        | {"peak_reserved_gb": round(m.get("reserved_bytes.all.peak", 0) / 1e9, 2)}), flush=True)
+                        | {"peak_reserved_gb": round(m.get("reserved_bytes.all.peak", 0) / 1e9, 2),
+                           "threads": threads()}), flush=True)
                 break
             plan: Plan = msg
             window.before(plan.mb_id)
@@ -180,6 +189,8 @@ def run_worker(cfg: RunConfig, stage: int):   # makes inference tensors, which a
             start = clock.mark()
             out = model.forward(plan, hidden_in)
             end = clock.mark()
+            if hidden_in is not None:
+                pipe.release()                        # CePipe: the sender may reuse the slot once this forward ran
             del hidden_in
             if sync_each_mb:
                 torch.cuda.current_stream(device).synchronize()

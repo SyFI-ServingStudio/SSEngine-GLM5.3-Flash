@@ -36,6 +36,7 @@ import zmq
 from ppimpl.config import BLOCK_TOKENS, RunConfig, dump_config
 from ppimpl.engine.kv import KvManager, kv_blocks_for, pool_size
 from ppimpl.engine.scheduler import ChunkSpec, PlainScheduler, Request
+from ppimpl.runtime.cpus import pin_process, threads
 from ppimpl.runtime.dispatch import NOW, WAIT, DispatchRule
 from ppimpl.runtime.transport import (Chunk, Plan, Ready, Shutdown, StageDone, WorkerError, decode_to_controller,
                                       encode, for_stage)
@@ -97,7 +98,9 @@ class Controller:
         pkg_root = str(Path(__file__).resolve().parents[2])
         env = {**os.environ, "PYTHONUNBUFFERED": "1",
                "PYTHONPATH": os.pathsep.join(filter(None, [pkg_root, os.environ.get("PYTHONPATH")]))}
-        if cfg.nccl_channels:   # see RunConfig.compute_sms
+        # a few threads per worker: its host side launches kernels (ppimpl/runtime/cpus.py pins it to 2 cores)
+        env |= {"OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1", "TORCHINDUCTOR_COMPILE_THREADS": "1"}
+        if cfg.transport == "nccl" and cfg.nccl_channels:   # see RunConfig.compute_sms
             env |= {"NCCL_MAX_NCHANNELS": str(cfg.nccl_channels), "NCCL_MAX_P2P_NCHANNELS": str(cfg.nccl_channels)}
         for s in range(self.n):
             log = open(self.run_dir / f"worker{s}.log", "w")
@@ -114,6 +117,7 @@ class Controller:
             for p in self.procs:
                 p.kill()
             raise
+        self._pin()
         num_blocks = pool_size([r.num_blocks for r in ready], cfg.pool_tokens)
         self.rule = DispatchRule(cfg.max_in_flight, cfg.dispatch_ahead >= 1, cfg.form_lead_ms)
         # the scheduler's own cap is not the binding one: the rule admits the extra queued plan
@@ -131,6 +135,18 @@ class Controller:
         self.thread = threading.Thread(target=self._control, name="control", daemon=True)
         self.thread.start()
         self.ready = True
+
+    def _pin(self):
+        """The controller takes the job's CPUs that the workers did not pin themselves to; cpus.json records both."""
+        allowed = os.sched_getaffinity(0)
+        workers = [os.sched_getaffinity(p.pid) for p in self.procs]
+        rest = allowed - set().union(*workers)
+        if rest and rest != allowed:
+            pin_process(rest)
+        info = {"job_cpus": len(allowed), "workers": [sorted(w) for w in workers], "controller_cpus": len(rest),
+                "threads": {"controller": threads(), "workers": [threads(p.pid) for p in self.procs]}}
+        (self.run_dir / "cpus.json").write_text(json.dumps(info) + "\n")
+        print("cpus: " + json.dumps(info), flush=True)
 
     def _wait_ready(self) -> list[Ready]:
         ready: dict[int, Ready] = {}
