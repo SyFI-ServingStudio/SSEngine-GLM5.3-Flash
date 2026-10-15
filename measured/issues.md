@@ -195,3 +195,13 @@ record the smaller SSD tier each run actually had.
 - Effect on one-request runs: 3 sends × ~0.07 ms excess, < 0.5% of TTFT at 1k and 0.1% at 8k.
 - Deferred: a copy-engine transport (CUDA IPC buffers and events, a host-side handshake per microbatch). Revisit if
   the saturated runs show sends, or receives posted early, costing stage time.
+
+## Setup difference: one-request runs of 64k and 128k cap the KV pool (M3)
+
+- One request is one microbatch (`4_iteration.md` §3), so a 64k or 128k prompt runs as a single forward. Its
+  activations outgrow the contract's 13.6 GB reserve beside the full 61.3M-token pool. In job 7117 (full pool),
+  one_64k ran once, then ran out of memory in requests 2–5 (174.6 of 178.4 GiB in use, ~37 GB above weights and KV).
+  one_128k ran out of memory in warm-up.
+- `bench/run.py` caps the pool at 2,097,152 tokens for these two runs. Stage times do not depend on the pool size.
+- Affects: the one_64k and one_128k rows of `iteration_targets.json` only. Saturated runs use 8k microbatches and the
+  full pool.

@@ -48,6 +48,12 @@ def parse_name(name: str) -> tuple[str, int]:
 # eager forward at <= 8k (model lane, M2), plus margin. Recorded in each run's server_config.yaml.
 REAL_FORM_LEAD_MS = 35.0
 
+# One request of 64k or more is one microbatch, and its activations outgrow the contract's 13.6 GB reserve beside the
+# full KV pool (job 7117: one_64k needs ~37 GB, one_128k ran out of memory in warm-up). These runs need a few blocks of
+# KV only, so they cap the pool (a setup difference in measured/issues.md); stage times do not depend on the pool size.
+ONE_LONG_FROM = 65536
+ONE_LONG_POOL_TOKENS = 2 * 1024 * 1024
+
 
 def trace_for(kind: str, length: int) -> Path:
     return HANDOFF / "data/bringup" / f"{'one' if kind == 'one' else 'uni'}_{length // 1024}k.csv"
@@ -60,6 +66,8 @@ def server_config(kind: str, length: int, use_fake: bool, run_dir: Path, device:
     if not use_fake:
         cfg["checkpoint"] = str(CHECKPOINT)
         cfg["form_lead_ms"] = REAL_FORM_LEAD_MS
+        if kind == "one" and length >= ONE_LONG_FROM:
+            cfg["pool_tokens"] = ONE_LONG_POOL_TOKENS
     cfg.update(extra)
     return cfg
 
