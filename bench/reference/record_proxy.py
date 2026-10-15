@@ -62,49 +62,56 @@ def main():
             if save and record["request_id"]:
                 np.save(save / f"{record['request_id']}.npy", np.asarray(ids, dtype=np.int32))
         headers = {k: v for k, v in request.headers.items() if k.lower() not in HOP}
-        async with request.app["session"].request(
-            request.method, args.upstream + request.path_qs, data=body, headers=headers
-        ) as up:
-            resp = web.StreamResponse(status=up.status, headers={
-                k: v for k, v in up.headers.items() if k.lower() not in HOP})
-            await resp.prepare(request)
-            buf = b""
-            async for chunk in up.content.iter_any():
-                await resp.write(chunk)
-                if record is not None:
-                    buf += chunk
-                    while b"\n" in buf:
-                        line, buf = buf.split(b"\n", 1)
-                        line = line.strip()
-                        if not line.startswith(b"data:"):
-                            continue
-                        data = line[5:].strip()
-                        if data == b"[DONE]":
-                            continue
-                        try:
-                            ev = json.loads(data)
-                        except json.JSONDecodeError:
-                            continue
+        status = None
+        try:
+            async with request.app["session"].request(
+                request.method, args.upstream + request.path_qs, data=body, headers=headers
+            ) as up:
+                status = up.status
+                resp = web.StreamResponse(status=up.status, headers={
+                    k: v for k, v in up.headers.items() if k.lower() not in HOP})
+                await resp.prepare(request)
+                buf = b""
+                async for chunk in up.content.iter_any():
+                    await resp.write(chunk)
+                    if record is not None:
+                        buf += chunk
+                        while b"\n" in buf:
+                            line, buf = buf.split(b"\n", 1)
+                            line = line.strip()
+                            if not line.startswith(b"data:"):
+                                continue
+                            data = line[5:].strip()
+                            if data == b"[DONE]":
+                                continue
+                            try:
+                                ev = json.loads(data)
+                            except json.JSONDecodeError:
+                                continue
+                            for ch in ev.get("choices") or []:
+                                toks = ch.get("token_ids") or []
+                                if toks and "t_first_token" not in record:
+                                    record["t_first_token"] = time.time()
+                                record["output_token_ids"].extend(toks)
+                            if ev.get("usage"):
+                                record["usage"] = ev["usage"]
+                if record is not None and buf.strip() and not record["output_token_ids"]:
+                    # Non-streamed response: one JSON body.
+                    try:
+                        ev = json.loads(buf)
                         for ch in ev.get("choices") or []:
-                            toks = ch.get("token_ids") or []
-                            if toks and "t_first_token" not in record:
-                                record["t_first_token"] = time.time()
-                            record["output_token_ids"].extend(toks)
-                        if ev.get("usage"):
-                            record["usage"] = ev["usage"]
-            if record is not None and buf.strip() and not record["output_token_ids"]:
-                # Non-streamed response: one JSON body.
-                try:
-                    ev = json.loads(buf)
-                    for ch in ev.get("choices") or []:
-                        record["output_token_ids"].extend(ch.get("token_ids") or [])
-                except json.JSONDecodeError:
-                    pass
-            await resp.write_eof()
-        if record is not None:
-            record["status"] = up.status
-            record["t_done"] = time.time()
-            log.write(json.dumps(record) + "\n")
+                            record["output_token_ids"].extend(ch.get("token_ids") or [])
+                    except json.JSONDecodeError:
+                        pass
+                await resp.write_eof()
+        except ConnectionResetError:
+            # The client may close as soon as it has its last event; what was recorded stands.
+            pass
+        finally:
+            if record is not None:
+                record["status"] = status
+                record["t_done"] = time.time()
+                log.write(json.dumps(record) + "\n")
         return resp
 
     app = web.Application(client_max_size=1 << 30)
