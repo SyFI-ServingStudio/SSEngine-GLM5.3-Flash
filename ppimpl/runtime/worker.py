@@ -145,7 +145,7 @@ def run_worker(cfg: RunConfig, stage: int):
             plan: Plan = msg
             window.before(plan.mb_id)
             if cuda:
-                torch.cuda.nvtx.range_push(f"stage {stage} mb {plan.mb_id}")   # bench/trace.py attributes kernels
+                torch.cuda.nvtx.range_push(f"stage {stage} mb {plan.mb_id}")   # bench/nsys_trace.py attributes kernels
             clock.maybe_reanchor()
             hidden_in = pipe.recv(plan.num_tokens, model.hidden_width) if stage > 0 else None
             start = clock.mark()

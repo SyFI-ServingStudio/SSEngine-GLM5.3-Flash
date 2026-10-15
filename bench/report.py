@@ -62,7 +62,7 @@ def load_trace(run_dir: Path) -> dict | None:
 
 
 def trace_request(tr: dict, mb_ids: list[int], nstages: int) -> dict | None:
-    """A request's stages, sends and span from the nsys trace (bench/trace.py), over its microbatches."""
+    """A request's stages, sends and span from the nsys trace (bench/nsys_trace.py), over its microbatches."""
     got = [tr["mbs"].get(str(i)) for i in sorted(set(mb_ids))]
     if not got or any(g is None for g in got):
         return None

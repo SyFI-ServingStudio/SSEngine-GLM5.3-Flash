@@ -1,6 +1,6 @@
 """Per-microbatch, per-stage GPU numbers from an Nsight Systems capture of `python -m ppimpl serve`.
 
-  python bench/trace.py <run dir>        reads <run dir>/trace.sqlite (`nsys export --type sqlite`), writes trace.json
+  python bench/nsys_trace.py <run dir>        reads <run dir>/trace.sqlite (`nsys export --type sqlite`), writes trace.json
 
 Attribution: each worker wraps a plan in the NVTX range `stage <s> mb <id>` (ppimpl/runtime/worker.py). A CUDA API
 call made inside that range on the worker's thread (kernel launch, graph launch, NCCL's launch) carries a correlation

@@ -208,7 +208,7 @@ def execute(run_dir: Path, server_cfg: dict, client_cfg: dict, *, port: int, met
         subprocess.run([NSYS, "export", "--type", "sqlite", "--force-overwrite", "true", "-o",
                         str(run_dir / "trace.sqlite"), str(run_dir / "trace.nsys-rep")],
                        stdout=subprocess.DEVNULL, stderr=open(run_dir / "nsys_export.log", "w"), check=False)
-        tr = subprocess.run([PYTHON, str(ROOT / "bench/trace.py"), str(run_dir)], cwd=ROOT, capture_output=True,
+        tr = subprocess.run([PYTHON, str(ROOT / "bench/nsys_trace.py"), str(run_dir)], cwd=ROOT, capture_output=True,
                             text=True)
         (run_dir / "trace.log").write_text(tr.stdout + tr.stderr)
         meta["nsys"]["export_and_parse_s"] = round(time.time() - t, 1)
@@ -289,7 +289,7 @@ def main():
     ap.add_argument("--port", type=int)
     ap.add_argument("--us-per-token", type=float, help="FakeStageModel stage time per token")
     ap.add_argument("--client-timeout", type=float, default=1200)
-    ap.add_argument("--nsys", action="store_true", help="run the server under Nsight Systems (bench/trace.py parses it)")
+    ap.add_argument("--nsys", action="store_true", help="run the server under Nsight Systems (bench/nsys_trace.py parses it)")
     ap.add_argument("--nsys-mbs", help="microbatches to trace, a:b or all (default: one-request all, saturated the "
                     "middle 80%% of the expected microbatches)")
     ap.add_argument("--out-root", help="runs root (default measured/runs, or measured/runs/fake[_cpu])")
