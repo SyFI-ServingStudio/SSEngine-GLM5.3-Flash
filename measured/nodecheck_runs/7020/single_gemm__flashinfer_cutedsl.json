@@ -1,0 +1,118 @@
+{
+  "backend": "flashinfer_cutedsl",
+  "db_path": "/raid/kanzhu/ServingStudio/pp-impl/lanes/measure/measured/nodecheck_runs/7020/scratch_profile.db",
+  "energy_measured": false,
+  "gpu_name": "NVIDIA B200",
+  "missing_count": 0,
+  "mode": "fresh",
+  "ok": true,
+  "persisted": false,
+  "results": [
+    {
+      "index": 0,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 4699.233067601076,
+        "tflops": 16.693214354268125,
+        "time_ms": 0.012060385
+      },
+      "status": "ok"
+    },
+    {
+      "index": 1,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 1796.5797425361384,
+        "tflops": 5378.039478289974,
+        "time_ms": 0.1341668295
+      },
+      "status": "ok"
+    },
+    {
+      "index": 2,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 996.7306705456523,
+        "tflops": 3835.4049893507445,
+        "time_ms": 3.4400903085714285
+      },
+      "status": "ok"
+    },
+    {
+      "index": 3,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 2944.7385811325194,
+        "tflops": 10.464598837051676,
+        "time_ms": 0.009619412800000001
+      },
+      "status": "ok"
+    },
+    {
+      "index": 4,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 1207.5205646838247,
+        "tflops": 5217.76270728258,
+        "time_ms": 0.066674621
+      },
+      "status": "ok"
+    },
+    {
+      "index": 5,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 598.1629093571511,
+        "tflops": 3875.711251341405,
+        "time_ms": 1.702157188405797
+      },
+      "status": "ok"
+    }
+  ],
+  "spec_count": 6,
+  "specs": [
+    {
+      "dtype": "nvfp4_e2m1",
+      "k": 4096,
+      "m": 1,
+      "n": 24576
+    },
+    {
+      "dtype": "nvfp4_e2m1",
+      "k": 4096,
+      "m": 3584,
+      "n": 24576
+    },
+    {
+      "dtype": "nvfp4_e2m1",
+      "k": 4096,
+      "m": 65536,
+      "n": 24576
+    },
+    {
+      "dtype": "nvfp4_e2m1",
+      "k": 12288,
+      "m": 1,
+      "n": 4096
+    },
+    {
+      "dtype": "nvfp4_e2m1",
+      "k": 12288,
+      "m": 3456,
+      "n": 4096
+    },
+    {
+      "dtype": "nvfp4_e2m1",
+      "k": 12288,
+      "m": 65536,
+      "n": 4096
+    }
+  ],
+  "table": "single_gemm"
+}

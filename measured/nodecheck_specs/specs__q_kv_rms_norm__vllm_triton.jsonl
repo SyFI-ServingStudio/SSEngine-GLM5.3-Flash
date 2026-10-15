@@ -1,0 +1,3 @@
+{"num_tokens": 2, "q_dim": 1536, "kv_dim": 512, "rms_eps": 1e-05, "dtype": "bf16"}
+{"num_tokens": 3584, "q_dim": 1536, "kv_dim": 512, "rms_eps": 1e-05, "dtype": "bf16"}
+{"num_tokens": 65536, "q_dim": 1536, "kv_dim": 512, "rms_eps": 1e-05, "dtype": "bf16"}

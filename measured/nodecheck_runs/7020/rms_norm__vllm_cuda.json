@@ -1,0 +1,64 @@
+{
+  "backend": "vllm_cuda",
+  "db_path": "/raid/kanzhu/ServingStudio/pp-impl/lanes/measure/measured/nodecheck_runs/7020/scratch_profile.db",
+  "energy_measured": false,
+  "gpu_name": "NVIDIA B200",
+  "missing_count": 0,
+  "mode": "fresh",
+  "ok": true,
+  "persisted": false,
+  "results": [
+    {
+      "index": 0,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 168.9889101027745,
+        "tflops": 0.16640939188365764,
+        "time_ms": 0.003150976
+      },
+      "status": "ok"
+    },
+    {
+      "index": 1,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 4092.1334905861304,
+        "tflops": 4.092100193054147,
+        "time_ms": 0.015376515
+      },
+      "status": "ok"
+    },
+    {
+      "index": 2,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 4889.680256737369,
+        "tflops": 4.890239831965304,
+        "time_ms": 0.21959513907284767
+      },
+      "status": "ok"
+    }
+  ],
+  "spec_count": 3,
+  "specs": [
+    {
+      "dtype": "bf16",
+      "hidden": 4096,
+      "m": 32
+    },
+    {
+      "dtype": "bf16",
+      "hidden": 4096,
+      "m": 3840
+    },
+    {
+      "dtype": "bf16",
+      "hidden": 4096,
+      "m": 65536
+    }
+  ],
+  "table": "rms_norm"
+}

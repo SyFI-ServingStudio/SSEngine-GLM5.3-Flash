@@ -1,0 +1,121 @@
+{
+  "backend": "deepgemm_fp8",
+  "db_path": "/raid/kanzhu/ServingStudio/pp-impl/lanes/measure/measured/nodecheck_runs/7020/scratch_profile.db",
+  "energy_measured": false,
+  "gpu_name": "NVIDIA B200",
+  "missing_count": 3,
+  "mode": "fresh",
+  "ok": false,
+  "persisted": false,
+  "results": [
+    {
+      "args": {
+        "clean_logits": "0",
+        "head_dim": 128,
+        "k_dtype": "fp8_e4m3",
+        "k_scale_dtype": "fp32",
+        "num_heads": 32,
+        "num_keys": 8,
+        "num_queries": 3,
+        "num_sequences": 1,
+        "output_dtype": "fp32",
+        "q_dtype": "fp8_e4m3",
+        "span_mode": "single_causal_tail",
+        "weight_dtype": "fp32"
+      },
+      "backend": "deepgemm_fp8",
+      "gpu_name": "NVIDIA B200",
+      "index": 0,
+      "kernel_kind": "dsa_mqa_logits_prefill",
+      "status": "missing"
+    },
+    {
+      "args": {
+        "clean_logits": "0",
+        "head_dim": 128,
+        "k_dtype": "fp8_e4m3",
+        "k_scale_dtype": "fp32",
+        "num_heads": 32,
+        "num_keys": 8192,
+        "num_queries": 4,
+        "num_sequences": 1,
+        "output_dtype": "fp32",
+        "q_dtype": "fp8_e4m3",
+        "span_mode": "single_causal_tail",
+        "weight_dtype": "fp32"
+      },
+      "backend": "deepgemm_fp8",
+      "gpu_name": "NVIDIA B200",
+      "index": 1,
+      "kernel_kind": "dsa_mqa_logits_prefill",
+      "status": "missing"
+    },
+    {
+      "args": {
+        "clean_logits": "0",
+        "head_dim": 128,
+        "k_dtype": "fp8_e4m3",
+        "k_scale_dtype": "fp32",
+        "num_heads": 32,
+        "num_keys": 1048576,
+        "num_queries": 4096,
+        "num_sequences": 1,
+        "output_dtype": "fp32",
+        "q_dtype": "fp8_e4m3",
+        "span_mode": "single_causal_tail",
+        "weight_dtype": "fp32"
+      },
+      "backend": "deepgemm_fp8",
+      "gpu_name": "NVIDIA B200",
+      "index": 2,
+      "kernel_kind": "dsa_mqa_logits_prefill",
+      "status": "missing"
+    }
+  ],
+  "spec_count": 3,
+  "specs": [
+    {
+      "clean_logits": "0",
+      "head_dim": 128,
+      "k_dtype": "fp8_e4m3",
+      "k_scale_dtype": "fp32",
+      "num_heads": 32,
+      "num_keys": 8,
+      "num_queries": 3,
+      "num_sequences": 1,
+      "output_dtype": "fp32",
+      "q_dtype": "fp8_e4m3",
+      "span_mode": "single_causal_tail",
+      "weight_dtype": "fp32"
+    },
+    {
+      "clean_logits": "0",
+      "head_dim": 128,
+      "k_dtype": "fp8_e4m3",
+      "k_scale_dtype": "fp32",
+      "num_heads": 32,
+      "num_keys": 8192,
+      "num_queries": 4,
+      "num_sequences": 1,
+      "output_dtype": "fp32",
+      "q_dtype": "fp8_e4m3",
+      "span_mode": "single_causal_tail",
+      "weight_dtype": "fp32"
+    },
+    {
+      "clean_logits": "0",
+      "head_dim": 128,
+      "k_dtype": "fp8_e4m3",
+      "k_scale_dtype": "fp32",
+      "num_heads": 32,
+      "num_keys": 1048576,
+      "num_queries": 4096,
+      "num_sequences": 1,
+      "output_dtype": "fp32",
+      "q_dtype": "fp8_e4m3",
+      "span_mode": "single_causal_tail",
+      "weight_dtype": "fp32"
+    }
+  ],
+  "table": "dsa_mqa_logits_prefill"
+}

@@ -1,0 +1,3 @@
+{"num_tokens": 3, "max_sequence_length": 2, "num_decode_sequences": 1, "num_heads": 64, "head_dim": 128, "dtype": "bf16"}
+{"num_tokens": 4112, "max_sequence_length": 512, "num_decode_sequences": 16, "num_heads": 64, "head_dim": 128, "dtype": "bf16"}
+{"num_tokens": 32832, "max_sequence_length": 64, "num_decode_sequences": 64, "num_heads": 64, "head_dim": 128, "dtype": "bf16"}

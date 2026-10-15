@@ -1,0 +1,3 @@
+{"num_queries": 2, "num_keys": 255, "num_sequences": 1, "top_k": 512, "logits_row_stride": 512, "logits_dtype": "fp32", "index_dtype": "int32", "span_mode": "single_causal_tail"}
+{"num_queries": 129, "num_keys": 8192, "num_sequences": 1, "top_k": 512, "logits_row_stride": 8448, "logits_dtype": "fp32", "index_dtype": "int32", "span_mode": "single_causal_tail"}
+{"num_queries": 32768, "num_keys": 131072, "num_sequences": 1, "top_k": 512, "logits_row_stride": 131328, "logits_dtype": "fp32", "index_dtype": "int32", "span_mode": "single_causal_tail"}

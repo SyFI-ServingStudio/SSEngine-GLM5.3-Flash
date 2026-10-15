@@ -1,0 +1,628 @@
+{
+  "backend": "torch_linear_vllm",
+  "db_path": "/raid/kanzhu/ServingStudio/pp-impl/lanes/measure/measured/nodecheck_runs/7020/scratch_profile.db",
+  "energy_measured": false,
+  "gpu_name": "NVIDIA B200",
+  "missing_count": 0,
+  "mode": "fresh",
+  "ok": true,
+  "persisted": false,
+  "results": [
+    {
+      "index": 0,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 185.49442483639763,
+        "tflops": 0.36510579727529296,
+        "time_ms": 0.005743957
+      },
+      "status": "ok"
+    },
+    {
+      "index": 1,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 2766.8880647840356,
+        "tflops": 329.5360187195631,
+        "time_ms": 0.00936774
+      },
+      "status": "ok"
+    },
+    {
+      "index": 2,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 5865.821729522699,
+        "tflops": 726.696583867674,
+        "time_ms": 0.094564194
+      },
+      "status": "ok"
+    },
+    {
+      "index": 3,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 6416.909467794078,
+        "tflops": 6.415301810888506,
+        "time_ms": 0.19777354166666666
+      },
+      "status": "ok"
+    },
+    {
+      "index": 4,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 777.215180158196,
+        "tflops": 1467.5094977168776,
+        "time_ms": 3.09864885488959
+      },
+      "status": "ok"
+    },
+    {
+      "index": 5,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 393.1732504283925,
+        "tflops": 1478.8953889332563,
+        "time_ms": 56.2247793
+      },
+      "status": "ok"
+    },
+    {
+      "index": 6,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 225.47995648620503,
+        "tflops": 0.44517781826255465,
+        "time_ms": 0.0058885234
+      },
+      "status": "ok"
+    },
+    {
+      "index": 7,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 3393.669174809948,
+        "tflops": 503.6401789862879,
+        "time_ms": 0.010659811
+      },
+      "status": "ok"
+    },
+    {
+      "index": 8,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 5839.989614976768,
+        "tflops": 897.1625865145745,
+        "time_ms": 0.09574557299999999
+      },
+      "status": "ok"
+    },
+    {
+      "index": 9,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 4528.517611181042,
+        "tflops": 9.044154956107862,
+        "time_ms": 0.0111302047
+      },
+      "status": "ok"
+    },
+    {
+      "index": 10,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 1471.0385332690435,
+        "tflops": 1484.2563105885047,
+        "time_ms": 0.1215346872
+      },
+      "status": "ok"
+    },
+    {
+      "index": 11,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 1034.0833101055293,
+        "tflops": 1421.7416184141812,
+        "time_ms": 2.3200663472222223
+      },
+      "status": "ok"
+    },
+    {
+      "index": 12,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 2090.189534983368,
+        "tflops": 127.78233336256531,
+        "time_ms": 0.0084028973
+      },
+      "status": "ok"
+    },
+    {
+      "index": 13,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 1371.6536438217136,
+        "tflops": 1356.139768126075,
+        "time_ms": 0.044338749999999996
+      },
+      "status": "ok"
+    },
+    {
+      "index": 14,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 1073.5217673886143,
+        "tflops": 1435.802500971025,
+        "time_ms": 0.7657819421768708
+      },
+      "status": "ok"
+    },
+    {
+      "index": 15,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 5717.126656179928,
+        "tflops": 181.29862583071653,
+        "time_ms": 0.0359977192
+      },
+      "status": "ok"
+    },
+    {
+      "index": 16,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 815.2129729001431,
+        "tflops": 1496.56044906591,
+        "time_ms": 0.5233069224626481
+      },
+      "status": "ok"
+    },
+    {
+      "index": 17,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 440.48214131034166,
+        "tflops": 1470.3984851936314,
+        "time_ms": 9.090010877828053
+      },
+      "status": "ok"
+    },
+    {
+      "index": 18,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 2367.271981721435,
+        "tflops": 37.341512338116814,
+        "time_ms": 0.0053914954
+      },
+      "status": "ok"
+    },
+    {
+      "index": 19,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 1826.112310841574,
+        "tflops": 1555.1967973202854,
+        "time_ms": 0.028997717000000003
+      },
+      "status": "ok"
+    },
+    {
+      "index": 20,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 1335.3817514899986,
+        "tflops": 1466.7415385304228,
+        "time_ms": 0.5622215633561644
+      },
+      "status": "ok"
+    },
+    {
+      "index": 21,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 5465.796690131232,
+        "tflops": 43.61987967418904,
+        "time_ms": 0.024615882300000003
+      },
+      "status": "ok"
+    },
+    {
+      "index": 22,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 758.9789541057339,
+        "tflops": 1299.1907207235583,
+        "time_ms": 0.37025844587628864
+      },
+      "status": "ok"
+    },
+    {
+      "index": 23,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 466.18029637728574,
+        "tflops": 1454.8377096848476,
+        "time_ms": 6.046099137829912
+      },
+      "status": "ok"
+    },
+    {
+      "index": 24,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 2103.09177333332,
+        "tflops": 65.75773972193343,
+        "time_ms": 0.008164376000000001
+      },
+      "status": "ok"
+    },
+    {
+      "index": 25,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 1607.5335329676216,
+        "tflops": 1589.3517743878497,
+        "time_ms": 0.0378327461
+      },
+      "status": "ok"
+    },
+    {
+      "index": 26,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 1104.3060093349807,
+        "tflops": 1476.9754821995366,
+        "time_ms": 0.7444345833951075
+      },
+      "status": "ok"
+    },
+    {
+      "index": 27,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 3411.478466363204,
+        "tflops": 27.185633848684212,
+        "time_ms": 0.0098741658
+      },
+      "status": "ok"
+    },
+    {
+      "index": 28,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 1149.435279323315,
+        "tflops": 1498.027651307186,
+        "time_ms": 0.08027828070000001
+      },
+      "status": "ok"
+    },
+    {
+      "index": 29,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 744.1808547585381,
+        "tflops": 1477.8980756804715,
+        "time_ms": 1.4879397244897958
+      },
+      "status": "ok"
+    },
+    {
+      "index": 30,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 4333.983316665676,
+        "tflops": 8.661622671413813,
+        "time_ms": 0.0154956794
+      },
+      "status": "ok"
+    },
+    {
+      "index": 31,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 893.4276181084823,
+        "tflops": 1384.6679279138598,
+        "time_ms": 0.1737009746
+      },
+      "status": "ok"
+    },
+    {
+      "index": 32,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 541.4906663684566,
+        "tflops": 1419.485292444927,
+        "time_ms": 3.09833890813253
+      },
+      "status": "ok"
+    },
+    {
+      "index": 33,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 735.3624664016609,
+        "tflops": 5.531762465346562,
+        "time_ms": 0.0030328879999999996
+      },
+      "status": "ok"
+    },
+    {
+      "index": 34,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 3923.112417046498,
+        "tflops": 476.39199539998157,
+        "time_ms": 0.014650376
+      },
+      "status": "ok"
+    },
+    {
+      "index": 35,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 4820.090664610411,
+        "tflops": 606.3137462493434,
+        "time_ms": 0.22667959339895774
+      },
+      "status": "ok"
+    }
+  ],
+  "spec_count": 36,
+  "specs": [
+    {
+      "dtype": "bf16",
+      "k": 4096,
+      "m": 2,
+      "n": 128
+    },
+    {
+      "dtype": "bf16",
+      "k": 4096,
+      "m": 2944,
+      "n": 128
+    },
+    {
+      "dtype": "bf16",
+      "k": 4096,
+      "m": 65536,
+      "n": 128
+    },
+    {
+      "dtype": "bf16",
+      "k": 4096,
+      "m": 1,
+      "n": 154880
+    },
+    {
+      "dtype": "bf16",
+      "k": 4096,
+      "m": 3584,
+      "n": 154880
+    },
+    {
+      "dtype": "bf16",
+      "k": 4096,
+      "m": 65536,
+      "n": 154880
+    },
+    {
+      "dtype": "bf16",
+      "k": 4096,
+      "m": 2,
+      "n": 160
+    },
+    {
+      "dtype": "bf16",
+      "k": 4096,
+      "m": 4096,
+      "n": 160
+    },
+    {
+      "dtype": "bf16",
+      "k": 4096,
+      "m": 65536,
+      "n": 160
+    },
+    {
+      "dtype": "bf16",
+      "k": 1536,
+      "m": 2,
+      "n": 16384
+    },
+    {
+      "dtype": "bf16",
+      "k": 1536,
+      "m": 3584,
+      "n": 16384
+    },
+    {
+      "dtype": "bf16",
+      "k": 1536,
+      "m": 65536,
+      "n": 16384
+    },
+    {
+      "dtype": "bf16",
+      "k": 4096,
+      "m": 64,
+      "n": 2048
+    },
+    {
+      "dtype": "bf16",
+      "k": 4096,
+      "m": 3584,
+      "n": 2048
+    },
+    {
+      "dtype": "bf16",
+      "k": 4096,
+      "m": 65536,
+      "n": 2048
+    },
+    {
+      "dtype": "bf16",
+      "k": 4096,
+      "m": 32,
+      "n": 24896
+    },
+    {
+      "dtype": "bf16",
+      "k": 4096,
+      "m": 3840,
+      "n": 24896
+    },
+    {
+      "dtype": "bf16",
+      "k": 4096,
+      "m": 65536,
+      "n": 24896
+    },
+    {
+      "dtype": "bf16",
+      "k": 1536,
+      "m": 16,
+      "n": 4096
+    },
+    {
+      "dtype": "bf16",
+      "k": 1536,
+      "m": 3584,
+      "n": 4096
+    },
+    {
+      "dtype": "bf16",
+      "k": 1536,
+      "m": 65536,
+      "n": 4096
+    },
+    {
+      "dtype": "bf16",
+      "k": 16384,
+      "m": 8,
+      "n": 4096
+    },
+    {
+      "dtype": "bf16",
+      "k": 16384,
+      "m": 3584,
+      "n": 4096
+    },
+    {
+      "dtype": "bf16",
+      "k": 16384,
+      "m": 65536,
+      "n": 4096
+    },
+    {
+      "dtype": "bf16",
+      "k": 2048,
+      "m": 32,
+      "n": 4096
+    },
+    {
+      "dtype": "bf16",
+      "k": 2048,
+      "m": 3584,
+      "n": 4096
+    },
+    {
+      "dtype": "bf16",
+      "k": 2048,
+      "m": 65536,
+      "n": 4096
+    },
+    {
+      "dtype": "bf16",
+      "k": 4096,
+      "m": 8,
+      "n": 4096
+    },
+    {
+      "dtype": "bf16",
+      "k": 4096,
+      "m": 3584,
+      "n": 4096
+    },
+    {
+      "dtype": "bf16",
+      "k": 4096,
+      "m": 65536,
+      "n": 4096
+    },
+    {
+      "dtype": "bf16",
+      "k": 8192,
+      "m": 2,
+      "n": 4096
+    },
+    {
+      "dtype": "bf16",
+      "k": 8192,
+      "m": 3584,
+      "n": 4096
+    },
+    {
+      "dtype": "bf16",
+      "k": 8192,
+      "m": 65536,
+      "n": 4096
+    },
+    {
+      "dtype": "bf16",
+      "k": 128,
+      "m": 8,
+      "n": 8192
+    },
+    {
+      "dtype": "bf16",
+      "k": 128,
+      "m": 3328,
+      "n": 8192
+    },
+    {
+      "dtype": "bf16",
+      "k": 128,
+      "m": 65536,
+      "n": 8192
+    }
+  ],
+  "table": "single_gemm"
+}

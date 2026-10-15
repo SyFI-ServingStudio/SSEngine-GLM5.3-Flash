@@ -1,0 +1,5 @@
+job=7073 cvd=0 start=2026-10-15T04:09:35-07:00 uptime:  04:09:35 up 11 days, 14:51, 43 users,  load average: 8.64, 13.25, 14.51
+rms_norm/vllm_cuda rc=0 6s: ok 0.0031547149999999998 
+nvfp4_fused_moe/flashinfer_trtllm_sm100 rc=124 430s: no-json
+run_call: timeout after 420s, killing process group 737757
+end 2026-10-15T04:16:51-07:00 bad=1
