@@ -75,7 +75,7 @@ def main(specs_dir, *run_dirs):
         "The ServingStudioSim profiler (`launcher kernel-profile run --fresh`, nothing written to any DB) re-measured on",
         "this node the smallest, median and largest row (by `db_time_ms`) of each of the 35 configurations in",
         "`data/kernel_specs.jsonl`. Ratio = fresh ÷ `db_time_ms`. Rows outside ±10% are marked **bold**.",
-        "Per-spec data: `kernels_nodecheck.jsonl`; how it was run: `kernels_nodecheck_run.md`.",
+        "Per-spec data: `kernels_nodecheck.jsonl`; how it was run: the last section.",
         "",
         "| Kind / backend | Fixed configuration | Rows | Smallest: DB ms / ratio | Median: DB ms / ratio | Largest: DB ms / ratio | Outside ±10% |",
         "|---|---|---|---|---|---|---|",
@@ -100,6 +100,13 @@ def main(specs_dir, *run_dirs):
     if ratios:
         lines += ["", f"{len(ratios)} of {len(out_rows)} specs measured; ratio median {statistics.median(ratios):.3f}, "
                       f"min {min(ratios):.3f}, max {max(ratios):.3f}; {len(flagged)} outside ±10%."]
+    by_rank = defaultdict(list)
+    for o in flagged:
+        by_rank[o["rank"]].append((o["fresh_ms"] - o["db_time_ms"]) * 1000)
+    if flagged:
+        lines += ["", "Outside ±10% by rank: " + "; ".join(
+            f"{rank} {len(by_rank[rank])} (fresh − DB {min(by_rank[rank]):+.2f} to {max(by_rank[rank]):+.2f} µs)"
+            for rank in ("smallest", "median", "largest") if by_rank[rank]) + "."]
     lines += ["", "## Outside ±10%", ""]
     if not flagged:
         lines.append("None.")
@@ -112,6 +119,16 @@ def main(specs_dir, *run_dirs):
         lines += ["", "## Not measured", ""]
         for o in notrun:
             lines.append(f"- `{o['kind']}` / `{o['backend']}` ({o['rank']}): {o['status']} {o['error'] or ''}")
+    jobs = sorted({str(o["job"]) for o in out_rows if o["job"]})
+    lines += ["", "## How it was run", "",
+              f"Slurm jobs {', '.join(jobs)} (`bench/nodecheck/run_nodecheck.sbatch`; later jobs re-ran single calls after a",
+              "spec fix), one profiler CLI call per (kind, backend), one GPU per lane:",
+              "`uv run --no-sync python -m launcher kernel-profile run <kind> --backend <b> --specs <file> --fresh",
+              "--gpu-name \"NVIDIA B200\" --db <scratch copy of profile.db> --json` in `wt-pp-main` (ServingStudioSim at the",
+              "handoff commit), each backend in its registered profiler environment (most in the `vllm_env` container",
+              "`vibesim-profiler-vllm:cu130-3f667d7e`), CUPTI timing with the profiler's cold-L2 clear. The samples come",
+              "from `bench/nodecheck/sample_specs.py` (`measured/nodecheck_specs/`); DB text flags `clean_logits` and",
+              "`return_valid_counts` are passed as booleans. `uptime`, GPUs and versions per job: `nodecheck_runs/<job>/env.txt`."]
     (measured / "kernels_nodecheck.md").write_text("\n".join(lines) + "\n")
     print(f"{len(out_rows)} rows, {len(ratios)} measured, {len(flagged)} outside ±10%")
 

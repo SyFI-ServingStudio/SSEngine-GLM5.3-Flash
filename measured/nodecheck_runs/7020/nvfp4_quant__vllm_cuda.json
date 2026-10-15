@@ -1,19 +1,21 @@
 {
   "backend": "vllm_cuda",
-  "db_path": "/raid/kanzhu/ServingStudio/wt-pp-main/profiling/profile.db",
+  "db_path": "/raid/kanzhu/ServingStudio/pp-impl/lanes/measure/measured/nodecheck_runs/7020/scratch_profile.db",
+  "energy_measured": false,
   "gpu_name": "NVIDIA B200",
   "missing_count": 0,
-  "mode": "query",
+  "mode": "fresh",
   "ok": true,
+  "persisted": false,
   "results": [
     {
       "index": 0,
       "metric_family": "compute",
       "metrics": {
         "energy_j": 0.0,
-        "memory_bandwidth_gbps": 65.2905902891987,
+        "memory_bandwidth_gbps": 53.4459825831645,
         "tflops": 0.0,
-        "time_ms": 0.00197615
+        "time_ms": 0.002414101
       },
       "status": "ok"
     },
@@ -22,9 +24,9 @@
       "metric_family": "compute",
       "metrics": {
         "energy_j": 0.0,
-        "memory_bandwidth_gbps": 6160.72027801499,
+        "memory_bandwidth_gbps": 6336.983361437684,
         "tflops": 0.0,
-        "time_ms": 0.018318149
+        "time_ms": 0.017808630000000002
       },
       "status": "ok"
     },
@@ -33,9 +35,9 @@
       "metric_family": "compute",
       "metrics": {
         "energy_j": 0.0,
-        "memory_bandwidth_gbps": 6488.875256603179,
+        "memory_bandwidth_gbps": 6588.221482596611,
         "tflops": 0.0,
-        "time_ms": 0.31802084126984126
+        "time_ms": 0.3132252875
       },
       "status": "ok"
     },
@@ -44,9 +46,9 @@
       "metric_family": "compute",
       "metrics": {
         "energy_j": 0.0,
-        "memory_bandwidth_gbps": 6.760913212831563,
+        "memory_bandwidth_gbps": 4.92117723786737,
         "tflops": 0.0,
-        "time_ms": 0.001552453
+        "time_ms": 0.0021328230000000003
       },
       "status": "ok"
     },
@@ -55,9 +57,9 @@
       "metric_family": "compute",
       "metrics": {
         "energy_j": 0.0,
-        "memory_bandwidth_gbps": 5190.8141446188265,
+        "memory_bandwidth_gbps": 4823.289446623308,
         "tflops": 0.0,
-        "time_ms": 0.0072469679999999995
+        "time_ms": 0.007799172
       },
       "status": "ok"
     },
@@ -66,9 +68,9 @@
       "metric_family": "compute",
       "metrics": {
         "energy_j": 0.0,
-        "memory_bandwidth_gbps": 6054.001244174304,
+        "memory_bandwidth_gbps": 6097.542612769469,
         "tflops": 0.0,
-        "time_ms": 0.11362169055745164
+        "time_ms": 0.11281034011299436
       },
       "status": "ok"
     },
@@ -77,9 +79,9 @@
       "metric_family": "compute",
       "metrics": {
         "energy_j": 0.0,
-        "memory_bandwidth_gbps": 25.31411623374827,
+        "memory_bandwidth_gbps": 19.277436775045476,
         "tflops": 0.0,
-        "time_ms": 0.001698973
+        "time_ms": 0.002231002
       },
       "status": "ok"
     },
@@ -88,9 +90,9 @@
       "metric_family": "compute",
       "metrics": {
         "energy_j": 0.0,
-        "memory_bandwidth_gbps": 5020.475389267821,
+        "memory_bandwidth_gbps": 4651.500826613875,
         "tflops": 0.0,
-        "time_ms": 0.007492848999999999
+        "time_ms": 0.008087210000000001
       },
       "status": "ok"
     },
@@ -99,9 +101,9 @@
       "metric_family": "compute",
       "metrics": {
         "energy_j": 0.0,
-        "memory_bandwidth_gbps": 5960.0048969126165,
+        "memory_bandwidth_gbps": 5990.838433691251,
         "tflops": 0.0,
-        "time_ms": 0.11541363940092167
+        "time_ms": 0.11481963060989644
       },
       "status": "ok"
     }

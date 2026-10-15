@@ -1,19 +1,21 @@
 {
   "backend": "deepgemm_fp8",
-  "db_path": "/raid/kanzhu/ServingStudio/wt-pp-main/profiling/profile.db",
+  "db_path": "/raid/kanzhu/ServingStudio/pp-impl/lanes/measure/measured/nodecheck_runs/7074/scratch_profile.db",
+  "energy_measured": false,
   "gpu_name": "NVIDIA B200",
   "missing_count": 0,
-  "mode": "query",
+  "mode": "fresh",
   "ok": true,
+  "persisted": false,
   "results": [
     {
       "index": 0,
       "metric_family": "compute",
       "metrics": {
-        "energy_j": 0.0019208802132754958,
-        "memory_bandwidth_gbps": 5.5299127848355125,
-        "tflops": 2.5990738808927305,
-        "time_ms": 0.00322753734
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 4.519265877567597,
+        "tflops": 2.1240671164663025,
+        "time_ms": 0.003949314000000001
       },
       "status": "ok"
     },
@@ -21,10 +23,10 @@
       "index": 1,
       "metric_family": "compute",
       "metrics": {
-        "energy_j": 0.004741973502397789,
-        "memory_bandwidth_gbps": 60.49645280502848,
-        "tflops": 13.209803679930351,
-        "time_ms": 0.02032092698
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 66.59797816576783,
+        "tflops": 14.542112409224702,
+        "time_ms": 0.018459179
       },
       "status": "ok"
     },
@@ -32,10 +34,10 @@
       "index": 2,
       "metric_family": "compute",
       "metrics": {
-        "energy_j": 17.051241379310344,
-        "memory_bandwidth_gbps": 975.2740385750751,
-        "tflops": 1979.3839549191996,
-        "time_ms": 17.742867669565218
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 1100.3514325266365,
+        "tflops": 2233.2368997515564,
+        "time_ms": 15.7260287
       },
       "status": "ok"
     }
@@ -43,7 +45,7 @@
   "spec_count": 3,
   "specs": [
     {
-      "clean_logits": "0",
+      "clean_logits": false,
       "head_dim": 128,
       "k_dtype": "fp8_e4m3",
       "k_scale_dtype": "fp32",
@@ -57,7 +59,7 @@
       "weight_dtype": "fp32"
     },
     {
-      "clean_logits": "0",
+      "clean_logits": false,
       "head_dim": 128,
       "k_dtype": "fp8_e4m3",
       "k_scale_dtype": "fp32",
@@ -71,7 +73,7 @@
       "weight_dtype": "fp32"
     },
     {
-      "clean_logits": "0",
+      "clean_logits": false,
       "head_dim": 128,
       "k_dtype": "fp8_e4m3",
       "k_scale_dtype": "fp32",

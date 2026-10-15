@@ -1,19 +1,21 @@
 {
   "backend": "torch_linear_vllm",
-  "db_path": "/raid/kanzhu/ServingStudio/wt-pp-main/profiling/profile.db",
+  "db_path": "/raid/kanzhu/ServingStudio/pp-impl/lanes/measure/measured/nodecheck_runs/7020/scratch_profile.db",
+  "energy_measured": false,
   "gpu_name": "NVIDIA B200",
   "missing_count": 0,
-  "mode": "query",
+  "mode": "fresh",
   "ok": true,
+  "persisted": false,
   "results": [
     {
       "index": 0,
       "metric_family": "compute",
       "metrics": {
         "energy_j": 0.0,
-        "memory_bandwidth_gbps": 232.58827453603365,
-        "tflops": 0.4577998906773637,
-        "time_ms": 0.004580936000000001
+        "memory_bandwidth_gbps": 185.49442483639763,
+        "tflops": 0.36510579727529296,
+        "time_ms": 0.005743957
       },
       "status": "ok"
     },
@@ -22,9 +24,9 @@
       "metric_family": "compute",
       "metrics": {
         "energy_j": 0.0,
-        "memory_bandwidth_gbps": 3053.8460722781415,
-        "tflops": 363.71268113423406,
-        "time_ms": 0.008487489999999999
+        "memory_bandwidth_gbps": 2766.8880647840356,
+        "tflops": 329.5360187195631,
+        "time_ms": 0.00936774
       },
       "status": "ok"
     },
@@ -33,9 +35,9 @@
       "metric_family": "compute",
       "metrics": {
         "energy_j": 0.0,
-        "memory_bandwidth_gbps": 6008.84782371931,
-        "tflops": 744.4155973067461,
-        "time_ms": 0.092313322
+        "memory_bandwidth_gbps": 5865.821729522699,
+        "tflops": 726.696583867674,
+        "time_ms": 0.094564194
       },
       "status": "ok"
     },
@@ -44,9 +46,9 @@
       "metric_family": "compute",
       "metrics": {
         "energy_j": 0.0,
-        "memory_bandwidth_gbps": 6363.805102067957,
-        "tflops": 6.362210749635621,
-        "time_ms": 0.1994239125248509
+        "memory_bandwidth_gbps": 6416.909467794078,
+        "tflops": 6.415301810888506,
+        "time_ms": 0.19777354166666666
       },
       "status": "ok"
     },
@@ -55,9 +57,9 @@
       "metric_family": "compute",
       "metrics": {
         "energy_j": 0.0,
-        "memory_bandwidth_gbps": 732.1512527068954,
-        "tflops": 1382.4214252917518,
-        "time_ms": 3.28937076744186
+        "memory_bandwidth_gbps": 777.215180158196,
+        "tflops": 1467.5094977168776,
+        "time_ms": 3.09864885488959
       },
       "status": "ok"
     },
@@ -66,9 +68,9 @@
       "metric_family": "compute",
       "metrics": {
         "energy_j": 0.0,
-        "memory_bandwidth_gbps": 387.54130303141693,
-        "tflops": 1457.7111882608385,
-        "time_ms": 57.0418664
+        "memory_bandwidth_gbps": 393.1732504283925,
+        "tflops": 1478.8953889332563,
+        "time_ms": 56.2247793
       },
       "status": "ok"
     },
@@ -77,9 +79,9 @@
       "metric_family": "compute",
       "metrics": {
         "energy_j": 0.0,
-        "memory_bandwidth_gbps": 269.47904406608626,
-        "tflops": 0.5320477029281256,
-        "time_ms": 0.004927076999999999
+        "memory_bandwidth_gbps": 225.47995648620503,
+        "tflops": 0.44517781826255465,
+        "time_ms": 0.0058885234
       },
       "status": "ok"
     },
@@ -88,9 +90,9 @@
       "metric_family": "compute",
       "metrics": {
         "energy_j": 0.0,
-        "memory_bandwidth_gbps": 4063.2624891906344,
-        "tflops": 603.011708540755,
-        "time_ms": 0.008903159
+        "memory_bandwidth_gbps": 3393.669174809948,
+        "tflops": 503.6401789862879,
+        "time_ms": 0.010659811
       },
       "status": "ok"
     },
@@ -99,9 +101,9 @@
       "metric_family": "compute",
       "metrics": {
         "energy_j": 0.0,
-        "memory_bandwidth_gbps": 5542.138051479039,
-        "tflops": 851.4054368066813,
-        "time_ms": 0.1008912349
+        "memory_bandwidth_gbps": 5839.989614976768,
+        "tflops": 897.1625865145745,
+        "time_ms": 0.09574557299999999
       },
       "status": "ok"
     },
@@ -110,9 +112,9 @@
       "metric_family": "compute",
       "metrics": {
         "energy_j": 0.0,
-        "memory_bandwidth_gbps": 5032.073155123181,
-        "tflops": 10.049833802796092,
-        "time_ms": 0.010016414
+        "memory_bandwidth_gbps": 4528.517611181042,
+        "tflops": 9.044154956107862,
+        "time_ms": 0.0111302047
       },
       "status": "ok"
     },
@@ -121,9 +123,9 @@
       "metric_family": "compute",
       "metrics": {
         "energy_j": 0.0,
-        "memory_bandwidth_gbps": 1363.3831729240974,
-        "tflops": 1375.6336305247994,
-        "time_ms": 0.1311313001
+        "memory_bandwidth_gbps": 1471.0385332690435,
+        "tflops": 1484.2563105885047,
+        "time_ms": 0.1215346872
       },
       "status": "ok"
     },
@@ -132,9 +134,9 @@
       "metric_family": "compute",
       "metrics": {
         "energy_j": 0.0,
-        "memory_bandwidth_gbps": 1019.7037374135863,
-        "tflops": 1401.9714154224503,
-        "time_ms": 2.352783264367816
+        "memory_bandwidth_gbps": 1034.0833101055293,
+        "tflops": 1421.7416184141812,
+        "time_ms": 2.3200663472222223
       },
       "status": "ok"
     },
@@ -143,9 +145,9 @@
       "metric_family": "compute",
       "metrics": {
         "energy_j": 0.0,
-        "memory_bandwidth_gbps": 2302.7886931386042,
-        "tflops": 140.77944010590627,
-        "time_ms": 0.007627121
+        "memory_bandwidth_gbps": 2090.189534983368,
+        "tflops": 127.78233336256531,
+        "time_ms": 0.0084028973
       },
       "status": "ok"
     },
@@ -154,9 +156,9 @@
       "metric_family": "compute",
       "metrics": {
         "energy_j": 0.0,
-        "memory_bandwidth_gbps": 1369.5729400847554,
-        "tflops": 1354.0825978658656,
-        "time_ms": 0.044406111000000005
+        "memory_bandwidth_gbps": 1371.6536438217136,
+        "tflops": 1356.139768126075,
+        "time_ms": 0.044338749999999996
       },
       "status": "ok"
     },
@@ -165,9 +167,9 @@
       "metric_family": "compute",
       "metrics": {
         "energy_j": 0.0,
-        "memory_bandwidth_gbps": 1074.2753263222696,
-        "tflops": 1436.8103629766583,
-        "time_ms": 0.7652447783701447
+        "memory_bandwidth_gbps": 1073.5217673886143,
+        "tflops": 1435.802500971025,
+        "time_ms": 0.7657819421768708
       },
       "status": "ok"
     },
@@ -176,9 +178,9 @@
       "metric_family": "compute",
       "metrics": {
         "energy_j": 0.0,
-        "memory_bandwidth_gbps": 5811.454344380328,
-        "tflops": 184.28989771902337,
-        "time_ms": 0.035413428000000004
+        "memory_bandwidth_gbps": 5717.126656179928,
+        "tflops": 181.29862583071653,
+        "time_ms": 0.0359977192
       },
       "status": "ok"
     },
@@ -187,9 +189,9 @@
       "metric_family": "compute",
       "metrics": {
         "energy_j": 0.0,
-        "memory_bandwidth_gbps": 845.1540703785884,
-        "tflops": 1551.5260393808683,
-        "time_ms": 0.5047678369565217
+        "memory_bandwidth_gbps": 815.2129729001431,
+        "tflops": 1496.56044906591,
+        "time_ms": 0.5233069224626481
       },
       "status": "ok"
     },
@@ -198,9 +200,9 @@
       "metric_family": "compute",
       "metrics": {
         "energy_j": 0.0,
-        "memory_bandwidth_gbps": 426.4708203330152,
-        "tflops": 1423.6264978450968,
-        "time_ms": 9.388655132075472
+        "memory_bandwidth_gbps": 440.48214131034166,
+        "tflops": 1470.3984851936314,
+        "time_ms": 9.090010877828053
       },
       "status": "ok"
     },
@@ -209,9 +211,9 @@
       "metric_family": "compute",
       "metrics": {
         "energy_j": 0.0,
-        "memory_bandwidth_gbps": 2924.9800905008483,
-        "tflops": 46.138838706128915,
-        "time_ms": 0.004363495
+        "memory_bandwidth_gbps": 2367.271981721435,
+        "tflops": 37.341512338116814,
+        "time_ms": 0.0053914954
       },
       "status": "ok"
     },
@@ -220,9 +222,9 @@
       "metric_family": "compute",
       "metrics": {
         "energy_j": 0.0,
-        "memory_bandwidth_gbps": 1818.9707829527276,
-        "tflops": 1549.1147610540775,
-        "time_ms": 0.029111566
+        "memory_bandwidth_gbps": 1826.112310841574,
+        "tflops": 1555.1967973202854,
+        "time_ms": 0.028997717000000003
       },
       "status": "ok"
     },
@@ -231,9 +233,9 @@
       "metric_family": "compute",
       "metrics": {
         "energy_j": 0.0,
-        "memory_bandwidth_gbps": 1316.2578076586735,
-        "tflops": 1445.7363969170754,
-        "time_ms": 0.5703900950342466
+        "memory_bandwidth_gbps": 1335.3817514899986,
+        "tflops": 1466.7415385304228,
+        "time_ms": 0.5622215633561644
       },
       "status": "ok"
     },
@@ -242,9 +244,9 @@
       "metric_family": "compute",
       "metrics": {
         "energy_j": 0.0,
-        "memory_bandwidth_gbps": 5398.156323264268,
-        "tflops": 43.08007462267987,
-        "time_ms": 0.024924326
+        "memory_bandwidth_gbps": 5465.796690131232,
+        "tflops": 43.61987967418904,
+        "time_ms": 0.024615882300000003
       },
       "status": "ok"
     },
@@ -253,9 +255,9 @@
       "metric_family": "compute",
       "metrics": {
         "energy_j": 0.0,
-        "memory_bandwidth_gbps": 740.4280990255041,
-        "tflops": 1267.4360868811498,
-        "time_ms": 0.379534985733058
+        "memory_bandwidth_gbps": 758.9789541057339,
+        "tflops": 1299.1907207235583,
+        "time_ms": 0.37025844587628864
       },
       "status": "ok"
     },
@@ -264,9 +266,9 @@
       "metric_family": "compute",
       "metrics": {
         "energy_j": 0.0,
-        "memory_bandwidth_gbps": 456.5765342177524,
-        "tflops": 1424.866654594982,
-        "time_ms": 6.173274526315789
+        "memory_bandwidth_gbps": 466.18029637728574,
+        "tflops": 1454.8377096848476,
+        "time_ms": 6.046099137829912
       },
       "status": "ok"
     },
@@ -275,9 +277,9 @@
       "metric_family": "compute",
       "metrics": {
         "energy_j": 0.0,
-        "memory_bandwidth_gbps": 3438.1117412266285,
-        "tflops": 107.5000434508723,
-        "time_ms": 0.004994146
+        "memory_bandwidth_gbps": 2103.09177333332,
+        "tflops": 65.75773972193343,
+        "time_ms": 0.008164376000000001
       },
       "status": "ok"
     },
@@ -286,9 +288,9 @@
       "metric_family": "compute",
       "metrics": {
         "energy_j": 0.0,
-        "memory_bandwidth_gbps": 1485.5064134257987,
-        "tflops": 1468.704823646362,
-        "time_ms": 0.040940522
+        "memory_bandwidth_gbps": 1607.5335329676216,
+        "tflops": 1589.3517743878497,
+        "time_ms": 0.0378327461
       },
       "status": "ok"
     },
@@ -297,9 +299,9 @@
       "metric_family": "compute",
       "metrics": {
         "energy_j": 0.0,
-        "memory_bandwidth_gbps": 1079.7587360857322,
-        "tflops": 1444.144255675807,
-        "time_ms": 0.7613585855115759
+        "memory_bandwidth_gbps": 1104.3060093349807,
+        "tflops": 1476.9754821995366,
+        "time_ms": 0.7444345833951075
       },
       "status": "ok"
     },
@@ -308,9 +310,9 @@
       "metric_family": "compute",
       "metrics": {
         "energy_j": 0.0,
-        "memory_bandwidth_gbps": 4410.443029149339,
-        "tflops": 35.14625417781263,
-        "time_ms": 0.007637669
+        "memory_bandwidth_gbps": 3411.478466363204,
+        "tflops": 27.185633848684212,
+        "time_ms": 0.0098741658
       },
       "status": "ok"
     },
@@ -319,9 +321,9 @@
       "metric_family": "compute",
       "metrics": {
         "energy_j": 0.0,
-        "memory_bandwidth_gbps": 1074.6176253289257,
-        "tflops": 1400.5198433377707,
-        "time_ms": 0.0858674619
+        "memory_bandwidth_gbps": 1149.435279323315,
+        "tflops": 1498.027651307186,
+        "time_ms": 0.08027828070000001
       },
       "status": "ok"
     },
@@ -330,9 +332,9 @@
       "metric_family": "compute",
       "metrics": {
         "energy_j": 0.0,
-        "memory_bandwidth_gbps": 738.4963195213182,
-        "tflops": 1466.6089332166398,
-        "time_ms": 1.4993930595588236
+        "memory_bandwidth_gbps": 744.1808547585381,
+        "tflops": 1477.8980756804715,
+        "time_ms": 1.4879397244897958
       },
       "status": "ok"
     },
@@ -341,9 +343,9 @@
       "metric_family": "compute",
       "metrics": {
         "energy_j": 0.0,
-        "memory_bandwidth_gbps": 4502.5093716775755,
-        "tflops": 8.998428097775724,
-        "time_ms": 0.014915686000000001
+        "memory_bandwidth_gbps": 4333.983316665676,
+        "tflops": 8.661622671413813,
+        "time_ms": 0.0154956794
       },
       "status": "ok"
     },
@@ -352,9 +354,9 @@
       "metric_family": "compute",
       "metrics": {
         "energy_j": 0.0,
-        "memory_bandwidth_gbps": 836.3637537331199,
-        "tflops": 1296.2281917316766,
-        "time_ms": 0.18555233570000002
+        "memory_bandwidth_gbps": 893.4276181084823,
+        "tflops": 1384.6679279138598,
+        "time_ms": 0.1737009746
       },
       "status": "ok"
     },
@@ -363,9 +365,9 @@
       "metric_family": "compute",
       "metrics": {
         "energy_j": 0.0,
-        "memory_bandwidth_gbps": 524.9307466766126,
-        "tflops": 1376.0744565679393,
-        "time_ms": 3.1960817891156466
+        "memory_bandwidth_gbps": 541.4906663684566,
+        "tflops": 1419.485292444927,
+        "time_ms": 3.09833890813253
       },
       "status": "ok"
     },
@@ -374,9 +376,9 @@
       "metric_family": "compute",
       "metrics": {
         "energy_j": 0.0,
-        "memory_bandwidth_gbps": 923.6920479813992,
-        "tflops": 6.948471310434915,
-        "time_ms": 0.002414519
+        "memory_bandwidth_gbps": 735.3624664016609,
+        "tflops": 5.531762465346562,
+        "time_ms": 0.0030328879999999996
       },
       "status": "ok"
     },
@@ -385,9 +387,9 @@
       "metric_family": "compute",
       "metrics": {
         "energy_j": 0.0,
-        "memory_bandwidth_gbps": 3909.581077093509,
-        "tflops": 474.7488556284497,
-        "time_ms": 0.014701081999999999
+        "memory_bandwidth_gbps": 3923.112417046498,
+        "tflops": 476.39199539998157,
+        "time_ms": 0.014650376
       },
       "status": "ok"
     },
@@ -396,9 +398,9 @@
       "metric_family": "compute",
       "metrics": {
         "energy_j": 0.0,
-        "memory_bandwidth_gbps": 4589.511210890715,
-        "tflops": 577.3094178827906,
-        "time_ms": 0.23806809522706213
+        "memory_bandwidth_gbps": 4820.090664610411,
+        "tflops": 606.3137462493434,
+        "time_ms": 0.22667959339895774
       },
       "status": "ok"
     }

@@ -1,19 +1,21 @@
 {
   "backend": "vllm_tilelang",
-  "db_path": "/raid/kanzhu/ServingStudio/wt-pp-main/profiling/profile.db",
+  "db_path": "/raid/kanzhu/ServingStudio/pp-impl/lanes/measure/measured/nodecheck_runs/7020/scratch_profile.db",
+  "energy_measured": false,
   "gpu_name": "NVIDIA B200",
   "missing_count": 0,
-  "mode": "query",
+  "mode": "fresh",
   "ok": true,
+  "persisted": false,
   "results": [
     {
       "index": 0,
       "metric_family": "compute",
       "metrics": {
         "energy_j": 0.0,
-        "memory_bandwidth_gbps": 195.67293919401814,
+        "memory_bandwidth_gbps": 175.7727230272101,
         "tflops": 0.0,
-        "time_ms": 0.008290385
+        "time_ms": 0.009228986000000002
       },
       "status": "ok"
     },
@@ -22,9 +24,9 @@
       "metric_family": "compute",
       "metrics": {
         "energy_j": 0.0,
-        "memory_bandwidth_gbps": 2670.705834749759,
+        "memory_bandwidth_gbps": 2690.151856331765,
         "tflops": 0.0,
-        "time_ms": 0.057633319999999995
+        "time_ms": 0.057216712
       },
       "status": "ok"
     },
@@ -33,9 +35,9 @@
       "metric_family": "compute",
       "metrics": {
         "energy_j": 0.0,
-        "memory_bandwidth_gbps": 2997.213209890362,
+        "memory_bandwidth_gbps": 3028.6037604281387,
         "tflops": 0.0,
-        "time_ms": 0.8978936150152771
+        "time_ms": 0.8885872226545612
       },
       "status": "ok"
     }

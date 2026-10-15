@@ -1,19 +1,21 @@
 {
   "backend": "flashinfer_cutedsl",
-  "db_path": "/raid/kanzhu/ServingStudio/wt-pp-main/profiling/profile.db",
+  "db_path": "/raid/kanzhu/ServingStudio/pp-impl/lanes/measure/measured/nodecheck_runs/7020/scratch_profile.db",
+  "energy_measured": false,
   "gpu_name": "NVIDIA B200",
   "missing_count": 0,
-  "mode": "query",
+  "mode": "fresh",
   "ok": true,
+  "persisted": false,
   "results": [
     {
       "index": 0,
       "metric_family": "compute",
       "metrics": {
         "energy_j": 0.0,
-        "memory_bandwidth_gbps": 4895.05964375263,
-        "tflops": 17.38885446509776,
-        "time_ms": 0.011577909999999999
+        "memory_bandwidth_gbps": 4699.233067601076,
+        "tflops": 16.693214354268125,
+        "time_ms": 0.012060385
       },
       "status": "ok"
     },
@@ -22,9 +24,9 @@
       "metric_family": "compute",
       "metrics": {
         "energy_j": 0.0,
-        "memory_bandwidth_gbps": 1698.4602058573325,
-        "tflops": 5084.319845725697,
-        "time_ms": 0.141917607
+        "memory_bandwidth_gbps": 1796.5797425361384,
+        "tflops": 5378.039478289974,
+        "time_ms": 0.1341668295
       },
       "status": "ok"
     },
@@ -33,9 +35,9 @@
       "metric_family": "compute",
       "metrics": {
         "energy_j": 0.0,
-        "memory_bandwidth_gbps": 977.7652140520987,
-        "tflops": 3762.4261911555727,
-        "time_ms": 3.5068168418367347
+        "memory_bandwidth_gbps": 996.7306705456523,
+        "tflops": 3835.4049893507445,
+        "time_ms": 3.4400903085714285
       },
       "status": "ok"
     },
@@ -44,9 +46,9 @@
       "metric_family": "compute",
       "metrics": {
         "energy_j": 0.0,
-        "memory_bandwidth_gbps": 3245.1156818685804,
-        "tflops": 11.5320368361934,
-        "time_ms": 0.0087290127
+        "memory_bandwidth_gbps": 2944.7385811325194,
+        "tflops": 10.464598837051676,
+        "time_ms": 0.009619412800000001
       },
       "status": "ok"
     },
@@ -55,9 +57,9 @@
       "metric_family": "compute",
       "metrics": {
         "energy_j": 0.0,
-        "memory_bandwidth_gbps": 1207.643331133422,
-        "tflops": 5218.293187856699,
-        "time_ms": 0.066667843
+        "memory_bandwidth_gbps": 1207.5205646838247,
+        "tflops": 5217.76270728258,
+        "time_ms": 0.066674621
       },
       "status": "ok"
     },
@@ -66,9 +68,9 @@
       "metric_family": "compute",
       "metrics": {
         "energy_j": 0.0,
-        "memory_bandwidth_gbps": 592.3859639225985,
-        "tflops": 3838.2803574012523,
-        "time_ms": 1.7187566181649676
+        "memory_bandwidth_gbps": 598.1629093571511,
+        "tflops": 3875.711251341405,
+        "time_ms": 1.702157188405797
       },
       "status": "ok"
     }

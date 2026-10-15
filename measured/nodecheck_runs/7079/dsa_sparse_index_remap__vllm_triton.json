@@ -1,19 +1,21 @@
 {
   "backend": "vllm_triton",
-  "db_path": "/raid/kanzhu/ServingStudio/wt-pp-main/profiling/profile.db",
+  "db_path": "/raid/kanzhu/ServingStudio/pp-impl/lanes/measure/measured/nodecheck_runs/7079/scratch_profile.db",
+  "energy_measured": false,
   "gpu_name": "NVIDIA B200",
   "missing_count": 0,
-  "mode": "query",
+  "mode": "fresh",
   "ok": true,
+  "persisted": false,
   "results": [
     {
       "index": 0,
       "metric_family": "compute",
       "metrics": {
         "energy_j": 0.0,
-        "memory_bandwidth_gbps": 3.3725460842122024,
+        "memory_bandwidth_gbps": 3.2602250396412473,
         "tflops": 0.0,
-        "time_ms": 0.005263678999999999
+        "time_ms": 0.0054450229
       },
       "status": "ok"
     },
@@ -22,9 +24,9 @@
       "metric_family": "compute",
       "metrics": {
         "energy_j": 0.0,
-        "memory_bandwidth_gbps": 1082.0447487784795,
+        "memory_bandwidth_gbps": 1065.1609232909132,
         "tflops": 0.0,
-        "time_ms": 0.037332371
+        "time_ms": 0.037924125
       },
       "status": "ok"
     },
@@ -33,9 +35,9 @@
       "metric_family": "compute",
       "metrics": {
         "energy_j": 0.0,
-        "memory_bandwidth_gbps": 1307.1747328644994,
+        "memory_bandwidth_gbps": 1308.8869375438667,
         "tflops": 0.0,
-        "time_ms": 0.27341453825136613
+        "time_ms": 0.2730568743169399
       },
       "status": "ok"
     }
@@ -52,7 +54,7 @@
       "num_requests": 1,
       "page_table_mapping": "interleaved_requests",
       "request_row_counts": "u:1x1",
-      "return_valid_counts": "1",
+      "return_valid_counts": true,
       "selected_k": 2176,
       "valid_counts": "u:64x1",
       "workspace_partition": "suffix:0@1"
@@ -67,7 +69,7 @@
       "num_requests": 2,
       "page_table_mapping": "interleaved_requests",
       "request_row_counts": "g:(2040,8)x1",
-      "return_valid_counts": "1",
+      "return_valid_counts": true,
       "selected_k": 2176,
       "valid_counts": "u:512x2048",
       "workspace_partition": "suffix:1@1"
@@ -82,7 +84,7 @@
       "num_requests": 2,
       "page_table_mapping": "interleaved_requests",
       "request_row_counts": "u:8192x2",
-      "return_valid_counts": "1",
+      "return_valid_counts": true,
       "selected_k": 2176,
       "valid_counts": "u:2048x16384",
       "workspace_partition": "suffix:1@1"
