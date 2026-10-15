@@ -240,6 +240,7 @@ def install_scopes(model) -> None:
 
 
 GPU_CATS = {"kernel", "gpu_memcpy", "gpu_memset"}
+BLOCKING: list[dict] = []      # host-blocking runtime calls (> 1 ms) of the last parsed trace
 LAUNCH_CATS = {"cuda_runtime", "cuda_driver"}
 UNIT = re.compile(r"^(L\d+|embed|hc_expand|output_head)$")
 RUN = re.compile(r"^run(\d+)$")
@@ -250,6 +251,7 @@ def parse_trace(path: Path) -> dict[int, list[dict]]:
     events = json.loads(path.read_text())["traceEvents"]
     anns = collections.defaultdict(list)       # tid -> [(ts, end, name, id)]
     launches = {}                               # correlation -> (tid, ts)
+    blocking = []
     gpu = []
     for e in events:
         cat, ph = e.get("cat"), e.get("ph")
@@ -259,6 +261,8 @@ def parse_trace(path: Path) -> dict[int, list[dict]]:
             anns[e["tid"]].append((e["ts"], e["ts"] + e["dur"], e["name"]))
         elif cat in LAUNCH_CATS and "correlation" in e.get("args", {}):
             launches[e["args"]["correlation"]] = (e["tid"], e["ts"])
+            if e.get("dur", 0) > 1000:      # a runtime/driver call that blocked the host > 1 ms
+                blocking.append((e["tid"], e["ts"], e["dur"], e["name"], e["args"]["correlation"]))
         elif cat in GPU_CATS:
             gpu.append(e)
     # per launch: the annotation stack (outermost first) open at its timestamp, with per-unit call ordinals
@@ -293,6 +297,11 @@ def parse_trace(path: Path) -> dict[int, list[dict]]:
             else:
                 stacks[ref] = list(open_)
     runs: dict[int, list[dict]] = collections.defaultdict(list)
+    BLOCKING.clear()
+    for tid, ts, dur, name, corr in blocking:
+        stack = stacks.get(corr, [])
+        BLOCKING.append({"call": name, "ms": round(dur / 1e3, 2),
+                         "scope": "/".join(f"{n}#{o}" for n, o in stack if not RUN.match(n))})
     for e in gpu:
         corr = e.get("args", {}).get("correlation")
         stack = stacks.get(corr)
@@ -642,11 +651,12 @@ def bench(args) -> None:
                            "cuda_frees": stats1.get("num_device_free", 0) - stats0.get("num_device_free", 0),
                            "peak_gib": round(stats1.get("allocated_bytes.all.peak", 0) / 2**30, 1)}
                     parsed, tok = profile_runs(model, plan, args.runs, lead, cpm, trace_dir, f"L{L}_{routing}")
+                    blocking = list(BLOCKING)
                     Scopes.on = False
                     gap_parsed, _ = profile_runs(model, plan, 3, 0, cpm, trace_dir, f"L{L}_{routing}_eager")
                     Scopes.on = True
                 extra = dict(extra_common, host_launch_ms=round(max(launch), 2), lead_ms=round(lead, 1),
-                             host_syncs=syncs, memory=mem,
+                             host_syncs=syncs, memory=mem, blocking_calls=blocking[:20],
                              gaps=host_gaps(gap_parsed), token=int(tok[0]))
                 lines = aggregate(L, routing, parsed, targets, extra)
                 if routing == routings[0]:
@@ -659,6 +669,8 @@ def bench(args) -> None:
                 summary = " ".join(f"{x['layer_type']}={x['real_ms']:.3f}({x['ratio']})" for x in lines)
                 print(f"[layers] L={L} {routing}: {summary}; launch {max(launch):.1f} ms; "
                       f"eager gap {extra['gaps']['eager_gap_ms']} ms; host syncs {len(syncs)}; memory {mem}", flush=True)
+                for blk in blocking[:6]:
+                    print(f"[layers]   blocking {blk['call']} {blk['ms']} ms @ {blk['scope'][-160:]}", flush=True)
                 for sync in syncs:
                     print(f"[layers]   sync x{sync['count']}: {sync['message'][:80]} @ {sync['where']}", flush=True)
         except Exception as e:  # noqa: BLE001 - record and go on to the next length

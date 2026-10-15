@@ -148,7 +148,12 @@ def edge_recv(hidden: torch.Tensor) -> torch.Tensor:
 def hc_expand_cat(x: torch.Tensor, n: int) -> torch.Tensor:
     """`mhc.hc_expand` ([T, H] -> [T, n, H] by replication) as one vectorized concatenation; the fork's broadcast
     `expand().contiguous()` copy ran at ~1 TB/s (M2: input_head x3.3 at 16k)."""
-    return torch.cat([x] * n, dim=1).view(x.shape[0], n, x.shape[1])
+    T, H = x.shape
+    out = torch.empty(T, n * H, dtype=x.dtype, device=x.device)
+    step = max(1, (1 << 30) // (n * H))     # < 2^31 elements per launch: 32-bit indexing (M2: x3.3 at 128k)
+    for a in range(0, T, step):
+        torch.cat([x[a:a + step]] * n, dim=1, out=out[a:a + step])
+    return out.view(T, n, H)
 
 
 def route_hc_expand() -> None:
