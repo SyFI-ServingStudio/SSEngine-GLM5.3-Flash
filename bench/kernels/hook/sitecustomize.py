@@ -14,6 +14,7 @@ _DIR = os.environ.get("PPM_KNAMES_DIR")
 
 
 def _install():
+    os.makedirs(_DIR, exist_ok=True)
     path = os.path.join(_DIR, f"{os.getpid()}.jsonl")
 
     def write(record):

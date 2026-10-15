@@ -30,8 +30,9 @@ START=$(date +%s); DEADLINE=$((START + LIMIT_S))
 } > "$LOG/env.txt" 2>&1
 
 lane() {
-  local dev=$1
+  local dev=$1 fails=0
   while :; do
+    (( fails >= 2 )) && { echo "$(date -Is) dev$dev stop: 2 chunks in a row returned no results" >> "$LOG/progress.log"; return; }
     local left=$(( DEADLINE - $(date +%s) ))
     (( left < 480 )) && { echo "$(date -Is) dev$dev stop: ${left}s left" >> "$LOG/progress.log"; return; }
     local f; f=$(ls "$Q/todo" 2>/dev/null | grep -v '\.rows\.jsonl$' | sort | head -1)
@@ -49,11 +50,14 @@ lane() {
         > "$Q/out/$stem.json" 2> "$Q/out/$stem.err" )
     local rc=$?
     if [ $rc -eq 0 ] || grep -q '"results"' "$Q/out/$stem.json"; then
+      fails=0
       mv "$Q/claimed/$f" "$Q/claimed/$stem.rows.jsonl" "$Q/done/"
     elif [ $rc -eq 124 ]; then
       mv "$Q/claimed/$f" "$Q/claimed/$stem.rows.jsonl" "$Q/todo/"   # out of time: back to the queue
     else
+      fails=$((fails + 1))
       mv "$Q/claimed/$f" "$Q/claimed/$stem.rows.jsonl" "$Q/failed/"
+      { echo "--- $stem rc=$rc stderr tail ($Q/out/$stem.err):"; tail -20 "$Q/out/$stem.err"; } >> "$LOG/errors.log"
     fi
     echo "$(date -Is) dev$dev end $stem rc=$rc" >> "$LOG/progress.log"
   done

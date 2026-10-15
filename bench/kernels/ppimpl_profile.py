@@ -19,10 +19,14 @@ VENV_PY = PPI / ".venv" / "bin" / "python"
 TORCH_LIB = PPI / ".venv" / "lib" / "python3.12" / "site-packages" / "torch" / "lib"
 PATHS = [PPI / "third_party" / "vllm", PPI / "third_party" / "causal_conv1d_try" / "pkg"]
 HOOK = Path(__file__).resolve().parent / "hook"
+# The profiler package is the ServingStudioSim checkout itself (not installed into its venv);
+# running this file as a script puts only its own directory on sys.path.
+SIM = Path(os.environ.get("PPM_SIM_ROOT", "/raid/kanzhu/ServingStudio/wt-pp-main"))
 ENV_NAMES = ("vllm_env", "vllm_upstream_fork_env", "flashinfer_kda_env", "causal_conv1d_env")
 
 
 def main():
+    sys.path.insert(0, str(SIM))
     from profiling.cli import main as cli_main
     from profiling.exec.env import register_profile_env
 
