@@ -1,3 +1,4 @@
+import random
 import socket
 import sys
 from pathlib import Path
@@ -8,16 +9,14 @@ sys.path.insert(0, str(ROOT / "bench"))
 
 
 def free_port_block(n: int = 8) -> int:
-    """A base port with n free consecutive ports (HTTP, zmq, torch.distributed)."""
+    """A base port with n free consecutive ports (HTTP, zmq, torch.distributed), below the ephemeral range so
+    client connections in TIME_WAIT never hold them, and clear of the 63xxx service ports."""
     for _ in range(200):
-        with socket.socket() as s:
-            s.bind(("127.0.0.1", 0))
-            base = s.getsockname()[1]
-        if base + n > 65000 or (base + n > 63000 and base < 63200):   # keep clear of the service ports
-            continue
+        base = random.randrange(18000, 30000)
         ok = True
         for p in range(base, base + n):
             with socket.socket() as s:
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 try:
                     s.bind(("127.0.0.1", p))
                 except OSError:

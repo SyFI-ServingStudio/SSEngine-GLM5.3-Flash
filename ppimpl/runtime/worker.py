@@ -62,13 +62,17 @@ class Clock:
 class Reporter(threading.Thread):
     """Owns the worker's report socket. Items: a message to send as is, or a finished-microbatch record."""
 
-    def __init__(self, ctx: zmq.Context, addr: str):
+    def __init__(self, ctx: zmq.Context, addr: str, device: torch.device):
         super().__init__(daemon=True)
-        self.ctx, self.addr = ctx, addr
+        self.ctx, self.addr, self.device = ctx, addr, device
         self.q: queue.Queue = queue.Queue()
 
     def run(self):
         sock = report_socket(self.ctx, self.addr)
+        copy_stream = None
+        if self.device.type == "cuda":
+            torch.cuda.set_device(self.device)
+            copy_stream = torch.cuda.Stream(self.device)   # the token copy must not queue behind later plans
         while (item := self.q.get()) is not None:
             if not isinstance(item, tuple):
                 sock.send(encode(item))
@@ -78,6 +82,10 @@ class Reporter(threading.Thread):
                 wait.synchronize()
             toks = None
             if tok_ids is not None:
+                if copy_stream is not None:
+                    with torch.cuda.stream(copy_stream):
+                        copy_stream.wait_event(wait)
+                        tokens = tokens.cpu()
                 toks = list(zip(tok_ids, tokens.tolist()))
             sock.send(encode(StageDone(stage, mb_id, Clock.to_ns(start, anchor), Clock.to_ns(end, anchor), toks)))
         sock.close()
@@ -102,7 +110,7 @@ def run_worker(cfg: RunConfig, stage: int):
         torch.cuda.set_device(device)
     ctx = zmq.Context()
     plans = worker_sockets(ctx, cfg.plan_addr(stage))
-    reporter = Reporter(ctx, cfg.report_addr())
+    reporter = Reporter(ctx, cfg.report_addr(), device)
     reporter.start()
     pipe, ok = None, False
     try:
@@ -116,6 +124,7 @@ def run_worker(cfg: RunConfig, stage: int):
                     raise RuntimeError("controller is gone")
             msg = decode_to_worker(plans.recv())
             if isinstance(msg, Shutdown):
+                ok = True
                 break
             plan: Plan = msg
             clock.maybe_reanchor()
@@ -130,15 +139,7 @@ def run_worker(cfg: RunConfig, stage: int):
                 reporter.q.put((stage, plan.mb_id, start, end, anchor, end if cuda else None, None, None))
                 continue
             tok_ids = [c.req_id for c in plan.chunks if c.is_last]
-            if cuda:
-                host = torch.empty(out.shape, dtype=out.dtype, pin_memory=True)
-                host.copy_(out, non_blocking=True)
-                done = torch.cuda.Event(blocking=True)
-                done.record()
-                out = host
-            else:
-                done = None
-            reporter.q.put((stage, plan.mb_id, start, end, anchor, done, out, tok_ids))
+            reporter.q.put((stage, plan.mb_id, start, end, anchor, end if cuda else None, out, tok_ids))
     except BaseException:
         reporter.q.put(WorkerError(stage, traceback.format_exc()))
         raise
