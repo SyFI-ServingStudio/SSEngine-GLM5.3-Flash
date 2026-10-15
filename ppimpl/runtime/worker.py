@@ -151,6 +151,11 @@ def run_worker(cfg: RunConfig, stage: int):   # makes inference tensors, which a
             msg = decode_to_worker(plans.recv())
             if isinstance(msg, Shutdown):
                 ok = True
+                if cuda:   # allocator retries (cache flush + cudaMalloc) stall the device; logged per run
+                    m = torch.cuda.memory_stats(device)
+                    print(f"stage {stage} allocator: " + json.dumps({k: m.get(k) for k in (
+                        "num_alloc_retries", "num_device_alloc", "num_device_free", "num_ooms")}
+                        | {"peak_reserved_gb": round(m.get("reserved_bytes.all.peak", 0) / 1e9, 2)}), flush=True)
                 break
             plan: Plan = msg
             window.before(plan.mb_id)
