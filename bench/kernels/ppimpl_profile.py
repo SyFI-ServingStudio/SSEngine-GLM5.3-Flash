@@ -22,10 +22,17 @@ HOOK = Path(__file__).resolve().parent / "hook"
 # The profiler package is the ServingStudioSim checkout itself (not installed into its venv);
 # running this file as a script puts only its own directory on sys.path.
 SIM = Path(os.environ.get("PPM_SIM_ROOT", "/raid/kanzhu/ServingStudio/wt-pp-main"))
+# FlashInfer JITs through whichever `ninja` is first on PATH. `uv run` from the SIM checkout puts
+# its venv's ninja 1.13 first, while every process started as `.venv/bin/python` (engine, vLLM,
+# the model lane's benches) gets /usr/bin/ninja 1.11.1. The two hash build commands differently,
+# so each switch rebuilds every object in the shared JIT cache (~5 min for fused_moe_trtllm_sm100).
+# Pin the workers to /usr/bin/ninja through a directory that holds only that symlink.
+NINJA_DIR = Path(__file__).resolve().parent / "ninja-system"
 ENV_NAMES = ("vllm_env", "vllm_upstream_fork_env", "flashinfer_kda_env", "causal_conv1d_env")
 
 
 def main():
+    os.environ["PATH"] = f"{NINJA_DIR}:{os.environ.get('PATH', '')}"
     sys.path.insert(0, str(SIM))
     from profiling.cli import main as cli_main
     from profiling.exec.env import register_profile_env
