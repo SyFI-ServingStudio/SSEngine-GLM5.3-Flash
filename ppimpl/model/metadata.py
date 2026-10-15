@@ -13,8 +13,8 @@ vLLM's own builder classes build the MLA, indexer and kpool-tail metadata (as `G
 - KDA (g2..g6): `pp_patch.KdaPrefillMeta`, read by our KDA prefill forward (the fork's GDN metadata is not built:
   the `_forward` that reads it is replaced).
 
-Everything is built on the host and copied with non-blocking H2D copies from pinned memory on the compute stream,
-so building microbatch k+1 never waits for the GPU work of microbatch k.
+Everything is built on the host, packed into one pinned staging buffer and copied with one non-blocking H2D copy
+on the compute stream (`Pack`), so building microbatch k+1 never waits for the GPU work of microbatch k.
 """
 
 from __future__ import annotations
@@ -44,8 +44,44 @@ class Batch:
     last_rows: torch.Tensor           # int64 rows whose token stage 3 returns, in plan chunk order of is_last chunks
 
 
-def _pinned(a: np.ndarray, dtype) -> torch.Tensor:
-    return torch.from_numpy(a).to(dtype).pin_memory()
+_NP = {torch.int32: np.int32, torch.int64: np.int64, torch.bool: np.bool_}
+PACK_ALIGN = 256          # every segment starts 256-byte aligned (the CUDA caching allocator's own granularity is 512)
+
+
+class Pack:
+    """All of one microbatch's host arrays in one pinned staging buffer, copied to the device in one non-blocking H2D
+    copy; each array is a typed view of the staging buffer (host side) and of the device buffer (device side).
+    `add` returns a handle; `copy` stages and issues the copy; `host(h)` / `dev(h)` return the views. The views
+    keep both buffers alive (the caching host allocator holds the pinned block until the copy has completed)."""
+
+    def __init__(self):
+        self.items: list[tuple[int, np.ndarray, torch.dtype, tuple]] = []
+        self.size = 0
+        self.host_buf = self.dev_buf = None
+
+    def add(self, a, dtype: torch.dtype) -> int:
+        arr = np.ascontiguousarray(a, dtype=_NP[dtype])
+        off = -(-self.size // PACK_ALIGN) * PACK_ALIGN
+        self.items.append((off, arr, dtype, arr.shape))
+        self.size = off + arr.nbytes
+        return len(self.items) - 1
+
+    def copy(self, device: torch.device, pin: bool = True) -> None:
+        self.host_buf = torch.empty(max(self.size, 1), dtype=torch.uint8, pin_memory=pin)
+        hv = self.host_buf.numpy()
+        for off, arr, _, _ in self.items:
+            hv[off:off + arr.nbytes] = arr.reshape(-1).view(np.uint8)
+        self.dev_buf = self.host_buf.to(device, non_blocking=True)
+
+    def _view(self, buf: torch.Tensor, h: int) -> torch.Tensor:
+        off, arr, dtype, shape = self.items[h]
+        return buf[off:off + arr.nbytes].view(dtype).view(shape)
+
+    def host(self, h: int) -> torch.Tensor:
+        return self._view(self.host_buf, h)
+
+    def dev(self, h: int) -> torch.Tensor:
+        return self._view(self.dev_buf, h)
 
 
 class StageMetadata:
@@ -129,26 +165,43 @@ class StageMetadata:
             slots[qsl[r]:qsl[r + 1]] = blocks[pos // B] * B + pos % B
         tail_table = np.array([[chunks[i].state_blocks[kv_tensors.TAIL_STATE]] for i in order], dtype=np.int64)
 
-        dev, nb = self.device, True
-        qsl_cpu = _pinned(qsl, torch.int32)
-        seq_cpu = _pinned(seq_lens, torch.int32)
-        pos_dev = _pinned(positions, torch.int64).to(dev, non_blocking=nb)
+        # every host array of this microbatch -> one pinned buffer -> one H2D copy (M3: was 16 pinned allocations,
+        # 16 copies and 2 fills per build)
+        pk = Pack()
+        h_pos = pk.add(positions, torch.int64)
 
-        def common(block_table: np.ndarray, slot_mapping: np.ndarray) -> CommonAttentionMetadata:
+        def cm_arrays(block_table: np.ndarray, slot_mapping: np.ndarray) -> dict:
+            return {"qsl": pk.add(qsl, torch.int32), "seq": pk.add(seq_lens, torch.int32),
+                    "table": pk.add(block_table, torch.int32), "slots": pk.add(slot_mapping, torch.int64),
+                    "prefill": pk.add(np.ones(R, dtype=np.bool_), torch.bool)}
+
+        h_g0 = cm_arrays(table, slots)
+        h_tail = cm_arrays(tail_table, np.full(T, PAD_SLOT_ID, dtype=np.int64))
+        h_kda = [pk.add([chunks[i].state_blocks[g] for i in order], torch.int64)
+                 for g in range(len(self.kv.kda_groups))]
+        h_tok = None
+        if with_tokens:
+            h_tok = pk.add(np.concatenate([np.asarray(chunks[i].token_ids, dtype=np.int64) for i in order]),
+                           torch.int64)
+        row_end = {i: int(qsl[r + 1]) - 1 for r, i in enumerate(order)}
+        h_last = pk.add([row_end[i] for i, c in enumerate(chunks) if c.is_last], torch.int64)
+        pk.copy(self.device)
+        pos_dev = pk.dev(h_pos)
+
+        def common(h: dict) -> CommonAttentionMetadata:
+            seq_cpu = pk.host(h["seq"])
             return CommonAttentionMetadata(
-                query_start_loc=qsl_cpu.to(dev, non_blocking=nb), query_start_loc_cpu=qsl_cpu,
-                seq_lens=seq_cpu.to(dev, non_blocking=nb), num_reqs=R, num_actual_tokens=T,
+                query_start_loc=pk.dev(h["qsl"]), query_start_loc_cpu=pk.host(h["qsl"]),
+                seq_lens=pk.dev(h["seq"]), num_reqs=R, num_actual_tokens=T,
                 max_query_len=int(q_lens.max()), max_seq_len=int(seq_lens.max()),
-                block_table_tensor=_pinned(block_table, torch.int32).to(dev, non_blocking=nb),
-                slot_mapping=_pinned(slot_mapping, torch.int64).to(dev, non_blocking=nb), causal=True,
-                positions=pos_dev, is_prefilling=torch.ones(R, dtype=torch.bool, device=dev),
-                seq_lens_cpu_upper_bound=seq_cpu)
+                block_table_tensor=pk.dev(h["table"]), slot_mapping=pk.dev(h["slots"]), causal=True,
+                positions=pos_dev, is_prefilling=pk.dev(h["prefill"]), seq_lens_cpu_upper_bound=seq_cpu)
 
         TOPK_SEGMENTS.clear()
         attn: dict = {}
         slot_map: dict = {}
-        cm_g0 = common(table, slots)
-        cm_tail = common(tail_table, np.full(T, PAD_SLOT_ID, dtype=np.int64))
+        cm_g0 = common(h_g0)
+        cm_tail = common(h_tail)
         for kind, ag in self.groups:
             cm = cm_g0 if kind == "g0" else cm_tail
             md = ag.get_metadata_builder().build(common_prefix_len=0, common_attn_metadata=cm)
@@ -166,16 +219,10 @@ class StageMetadata:
             meta = KdaPrefillMeta(
                 num_tokens=T,
                 seqs=[(int(qsl[r]), int(qsl[r + 1]), blocks[r], bool(starts[r] > 0)) for r in range(R)],
-                slots=_pinned(np.asarray(blocks, dtype=np.int64), torch.int64).to(dev, non_blocking=nb),
-                plan=kda_plan, any_initial=any_initial)
+                slots=pk.dev(h_kda[g]), plan=kda_plan, any_initial=any_initial)
             for name in names:
                 attn[name] = meta
 
-        token_ids = None
-        if with_tokens:
-            ids = np.concatenate([np.asarray(chunks[i].token_ids, dtype=np.int64) for i in order])
-            token_ids = _pinned(ids, torch.int64).to(dev, non_blocking=nb)
-        row_end = {i: int(qsl[r + 1]) - 1 for r, i in enumerate(order)}
-        last = [row_end[i] for i, c in enumerate(chunks) if c.is_last]
-        last_rows = _pinned(np.asarray(last, dtype=np.int64), torch.int64).to(dev, non_blocking=nb)
+        token_ids = None if h_tok is None else pk.dev(h_tok)
+        last_rows = pk.dev(h_last)
         return Batch(T, order, pos_dev, token_ids, attn, slot_map, last_rows)

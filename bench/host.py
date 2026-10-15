@@ -254,6 +254,40 @@ def check_trims(model, tokens, lengths) -> dict:
     return res
 
 
+def compare_metadata(model, tokens, lengths, old_path: Path) -> dict:
+    """Stage-0 outputs with this tree's StageMetadata vs the StageMetadata module at `old_path` (a previous commit's
+    metadata.py), on the same model and KV: one request per length <= 8k, plus a two-request plan whose short
+    request is reordered first (decode class). All requests start at 0, so re-running a plan is idempotent."""
+    import importlib.util
+    from types import SimpleNamespace as NS
+
+    import torch
+
+    spec = importlib.util.spec_from_file_location("ppimpl_old_metadata", old_path)
+    old = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(old)
+    old_meta = old.StageMetadata(model.vc, model.kv, model.device)
+    new_meta = model.meta
+    plans = {str(L): lb.one_request_plan(tokens[:L]) for L in lengths if L <= 8192}
+    plans["two_requests"] = NS(mb_id=0, chunks=[
+        NS(req_id="a", start=0, num_tokens=1000, kv_blocks=[1], state_blocks=list(range(2, 8)), is_last=True,
+           token_ids=tokens[:1000]),
+        NS(req_id="b", start=0, num_tokens=128, kv_blocks=[8], state_blocks=list(range(9, 15)), is_last=True,
+           token_ids=tokens[2000:2128])])
+    res = {}
+    with torch.inference_mode():
+        for name, plan in plans.items():
+            model.meta = old_meta
+            a = stage_outputs(model, plan)
+            model.meta = new_meta
+            b = stage_outputs(model, plan)
+            torch.cuda.synchronize()
+            res[name] = {"hidden_equal": bool(torch.equal(a[0], b[0])), "logits_equal": bool(torch.equal(a[1], b[1]))}
+    model.meta = new_meta
+    res["pass"] = all(v["hidden_equal"] and v["logits_equal"] for v in res.values())
+    return res
+
+
 def bench(args) -> None:
     import torch
     from ppimpl.model.stage import CHECKPOINT, StageModel, bench_config
@@ -275,6 +309,9 @@ def bench(args) -> None:
     if args.check_trims:
         result["trims_check"] = check_trims(model, tokens, lengths)
         print(f"[host] trims check: {result['trims_check']}", flush=True)
+    if args.compare_metadata:
+        result["metadata_check"] = compare_metadata(model, tokens, lengths, args.compare_metadata)
+        print(f"[host] metadata check: {result['metadata_check']}", flush=True)
     trace_dir = Path(tempfile.mkdtemp(prefix="pph-", dir=os.environ.get("TMPDIR")))
     OUT.mkdir(parents=True, exist_ok=True)
     out_path = OUT / f"{args.tag or os.environ.get('SLURM_JOB_ID', 'local')}.json"
@@ -344,6 +381,8 @@ def main() -> None:
     ap.add_argument("--tag", default=None)
     ap.add_argument("--check-trims", action="store_true",
                     help="build without the host trims, compare outputs before/after installing them, then time")
+    ap.add_argument("--compare-metadata", type=Path, default=None,
+                    help="a previous commit's metadata.py: compare stage-0 outputs with it vs this tree's")
     ap.add_argument("--spy", type=Path, default=None, help="fold a py-spy raw file and exit")
     a = ap.parse_args()
     if a.spy:
