@@ -16,6 +16,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -33,6 +34,7 @@ CLIENT_BIN = Path(os.environ.get("PPIMPL_REQ_FRONTEND_BIN", ROOT / "build/req-fr
 CHECKPOINT = Path("/raid/hf/hub/models--nvidia--GLM-5.3-Flash-NVFP4/snapshots/da920bb0b9f4a06727223a349e55468e38352348")
 ENWIK9 = WS / "data/corpus/enwik9"
 PYTHON = sys.executable
+NSYS = shutil.which("nsys") or "/usr/local/cuda/bin/nsys"
 
 
 def parse_name(name: str) -> tuple[str, int]:
@@ -135,7 +137,7 @@ def stop(proc: subprocess.Popen, port: int, timeout_s: float = 90):
 def nsys_prefix(run_dir: Path, window: bool) -> list[str]:
     """Nsight Systems around the server; it follows the worker processes it spawns. With `window`, collection runs
     only between the workers' cudaProfilerStart/Stop (server config `profile_mbs`)."""
-    argv = ["nsys", "profile", "-o", str(run_dir / "trace"), "--force-overwrite", "true", "-t", "cuda,nvtx",
+    argv = [NSYS, "profile", "-o", str(run_dir / "trace"), "--force-overwrite", "true", "-t", "cuda,nvtx",
             "--cuda-graph-trace=node", "--sample=none", "--cpuctxsw=none"]
     if window:
         argv += ["--capture-range=cudaProfilerApi", "--capture-range-end=stop"]
@@ -203,7 +205,7 @@ def execute(run_dir: Path, server_cfg: dict, client_cfg: dict, *, port: int, met
             else server.returncode
     if nsys and (run_dir / "trace.nsys-rep").exists():
         t = time.time()
-        subprocess.run(["nsys", "export", "--type", "sqlite", "--force-overwrite", "true", "-o",
+        subprocess.run([NSYS, "export", "--type", "sqlite", "--force-overwrite", "true", "-o",
                         str(run_dir / "trace.sqlite"), str(run_dir / "trace.nsys-rep")],
                        stdout=subprocess.DEVNULL, stderr=open(run_dir / "nsys_export.log", "w"), check=False)
         tr = subprocess.run([PYTHON, str(ROOT / "bench/trace.py"), str(run_dir)], cwd=ROOT, capture_output=True,
