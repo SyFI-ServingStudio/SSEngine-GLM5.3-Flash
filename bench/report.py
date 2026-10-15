@@ -72,7 +72,8 @@ def trace_request(tr: dict, mb_ids: list[int], nstages: int) -> dict | None:
         stages.append({"stage": s, "start_ms": xs[0]["start_ms"], "end_ms": xs[-1]["end_ms"],
                        "compute_ms": sum(x["compute_ms"] for x in xs), "gaps_ms": sum(x["gaps_ms"] for x in xs),
                        "nccl_recv_ms": _sum_opt(x["nccl_recv_ms"] for x in xs),
-                       "nccl_send_ms": _sum_opt(x["nccl_send_ms"] for x in xs)})
+                       "nccl_send_ms": _sum_opt(x["nccl_send_ms"] for x in xs),
+                       "host_lead_ms": xs[0].get("host_lead_ms"), "launch_ms": _sum_opt(x.get("launch_ms") for x in xs)})
     return {"stages": stages, "span": stages[-1]["end_ms"] - stages[0]["start_ms"]}
 
 
@@ -125,7 +126,8 @@ def one_request(run_dir: Path, meta: dict) -> list[dict]:
             o = t["stages"][0]["start_ms"]
             for st, ts in zip(line["stages"], t["stages"]):
                 st.update(event_start_ms=st["start_ms"], event_compute_ms=st["compute_ms"],
-                          start_ms=ts["start_ms"] - o, compute_ms=ts["compute_ms"], gaps_ms=ts["gaps_ms"])
+                          start_ms=ts["start_ms"] - o, compute_ms=ts["compute_ms"], gaps_ms=ts["gaps_ms"],
+                          host_lead_ms=ts["host_lead_ms"], launch_ms=ts["launch_ms"])
             for se in line["sends"]:
                 a, b = t["stages"][se["after_stage"]], t["stages"][se["after_stage"] + 1]
                 se.update(event_ms=se["ms"], ms=b["start_ms"] - a["end_ms"], nccl_send_ms=a["nccl_send_ms"],
@@ -163,7 +165,14 @@ def saturated(run_dir: Path, meta: dict) -> dict:
     busy = [sum(max(0.0, min(m["start_ms"] + m["compute_ms"], hi) - max(m["start_ms"], lo)) for m in s) / (hi - lo)
             for s in by]
     s0 = sorted(by[0], key=lambda m: m["start_ms"])
-    gaps = [b["start_ms"] - (a["start_ms"] + a["compute_ms"]) for a, b in zip(s0, s0[1:])]
+    edges = set((meta.get("nsys") or {}).get("profile_mbs") or [])   # cudaProfilerStart/Stop stall the host there (seconds), not the engine
+    gaps = [b["start_ms"] - (a["start_ms"] + a["compute_ms"]) for a, b in zip(s0, s0[1:]) if b["index"] not in edges]
+    s3_end = {}
+    for m in by[-1]:
+        for q in m["requests"]:
+            s3_end[q["id"]] = max(s3_end.get(q["id"], 0.0), m["start_ms"] + m["compute_ms"])
+    lags = [r["token_ms"] - s3_end[r["id"]] for r in read_jsonl(run_dir / "server_requests.jsonl")
+            if "token_ms" in r and r["id"] in s3_end]
     client = client_rows(run_dir)
     ids = trace_ids(Path(meta["trace"]))
     rows = [client.get(client_id(t)) for t in ids]
@@ -181,6 +190,9 @@ def saturated(run_dir: Path, meta: dict) -> dict:
         "stage_busy": busy,
         "stage0_gap_ms": {"mean": float(np.mean(gaps)), "max": float(np.max(gaps)),
                           "p99": float(np.percentile(gaps, 99))} if gaps else None,
+        "stage0_gap_excluded_mbs": sorted(edges),
+        # stage-3 end -> the controller handled that report (control thread responsiveness)
+        "report_lag_ms": {"p50": float(np.median(lags)), "max": float(np.max(lags))} if lags else None,
         "ttft_ms_by_request": [round(r["ttft_ms"], 3) if r is not None and r["ok"] else None for r in rows],
     }
     tr = load_trace(run_dir)
@@ -205,6 +217,8 @@ def trace_summary(tr: dict, event_compute: dict) -> dict:
                                                   if (s, int(k)) in event_compute])) for s in range(n)],
         "stage_gaps_ms": [float(np.mean([v["stages"][s]["gaps_ms"] for _, v in ms])) for s in range(n)],
         "send_ms": [float(np.mean([v["sends"][s]["ms"] for _, v in ms])) for s in range(n - 1)],
+        "host_lead_ms": [_median_opt([v["stages"][s].get("host_lead_ms") for _, v in ms]) for s in range(n)],
+        "launch_ms": [_median_opt([v["stages"][s].get("launch_ms") for _, v in ms]) for s in range(n)],
         "stage0_gap_ms": _stats(tr["stage0_gap_ms"]),
         "unattributed_kernels": tr["unattributed_kernels"],
     }
@@ -216,6 +230,11 @@ def _targets():
     it = {t["prompt_tokens"]: t for t in json.loads((HANDOFF / "data/iteration_targets.json").read_text())}
     sat = {t["prompt_tokens"]: t for t in json.loads((HANDOFF / "data/saturated_targets.json").read_text())}
     return it, sat
+
+
+def _median_opt(xs):
+    xs = [x for x in xs if x is not None]
+    return float(np.median(xs)) if xs else None
 
 
 def _mean_opt(xs):
@@ -272,8 +291,9 @@ def iteration_md(one: list[dict], sat: list[dict], title: str) -> str:
         if traced:
             out += ["", "From the nsys trace (mean over runs, ms): gaps between kernels inside each stage, NCCL kernel "
                     "time per send, and CUDA-event / trace stage compute.", "",
-                    "| Prompt | Gaps 0 / 1 / 2 / 3 | NCCL send 0 / 1 / 2 | NCCL recv 1 / 2 / 3 | Event / trace 0 / 1 / 2 / 3 |",
-                    "|---|---|---|---|---|"]
+                    "| Prompt | Gaps 0 / 1 / 2 / 3 | NCCL send 0 / 1 / 2 | NCCL recv 1 / 2 / 3 | Event / trace 0 / 1 / 2 / 3 "
+                    "| Host lead 0 / 1 / 2 / 3 | Launch 0 / 1 / 2 / 3 |",
+                    "|---|---|---|---|---|---|---|"]
             for L in sorted({r["prompt_tokens"] for r in traced}):
                 rs = [r for r in traced if r["prompt_tokens"] == L]
                 ns = len(rs[0]["stages"])
@@ -282,8 +302,11 @@ def iteration_md(one: list[dict], sat: list[dict], title: str) -> str:
                 rcv = [_mean_opt([r["sends"][s].get("nccl_recv_ms") for r in rs]) for s in range(ns - 1)]
                 ev = [np.mean([r["stages"][s]["event_compute_ms"] / r["stages"][s]["compute_ms"] for r in rs])
                       for s in range(ns)]
+                lead = [_mean_opt([r["stages"][s].get("host_lead_ms") for r in rs]) for s in range(ns)]
+                launch = [_mean_opt([r["stages"][s].get("launch_ms") for r in rs]) for s in range(ns)]
                 out.append(f"| {L // 1024}k | " + " / ".join(_f(x) for x in g) + " | " + " / ".join(_f(x) for x in snd)
-                           + " | " + " / ".join(_f(x) for x in rcv) + " | " + " / ".join(f"{x:.3f}" for x in ev) + " |")
+                           + " | " + " / ".join(_f(x) for x in rcv) + " | " + " / ".join(f"{x:.3f}" for x in ev)
+                           + " | " + " / ".join(_f(x) for x in lead) + " | " + " / ".join(_f(x) for x in launch) + " |")
         parts = [r for r in one if r.get("host_parts_ms")]
         if parts:
             out += ["", "Host time by part (mean over runs, ms):", "",
@@ -297,29 +320,32 @@ def iteration_md(one: list[dict], sat: list[dict], title: str) -> str:
     if sat:
         out += ["## Saturated (4_iteration.md §4)", "",
                 "| Prompt | Requests | Run (s) | Tokens/s | TTFT first / p50 / p90 / p99 / max (s) "
-                "| Stage busy 0 / 1 / 2 / 3 | Submit spread (s) | Stage-0 gap mean / max (ms) |",
-                "|---|---|---|---|---|---|---|---|"]
+                "| Stage busy 0 / 1 / 2 / 3 | Submit spread (s) | Stage-0 gap mean / max (ms) | Report lag p50 / max (ms) |",
+                "|---|---|---|---|---|---|---|---|---|"]
         for r in sorted(sat, key=lambda r: r["prompt_tokens"]):
             t = sat_t.get(r["prompt_tokens"])
             tt = r["ttft_s"] or {}
             q = ("first", "p50", "p90", "p99", "max")
             g = r.get("stage0_gap_ms") or {}
+            lag = r.get("report_lag_ms") or {}
             out.append(f"| {r['prompt_tokens'] // 1024}k | {r['answered']}/{r['requests']} | {_f(r['run_s'], 2)} "
                        f"| {r['tokens_per_s'] / 1e3:.1f}k | " + " / ".join(_f(tt.get(k), 3) for k in q)
                        + " | " + " / ".join(f"{100 * b:.1f}" for b in r["stage_busy"])
-                       + f" | {_f(r['submit_spread_s'], 3)} | {_f(g.get('mean'), 3)} / {_f(g.get('max'), 3)} |")
+                       + f" | {_f(r['submit_spread_s'], 3)} | {_f(g.get('mean'), 3)} / {_f(g.get('max'), 3)}"
+                       + f" | {_f(lag.get('p50'), 3)} / {_f(lag.get('max'), 3)} |")
             if t:
                 out.append(f"| ratio | | {_ratio(r['run_s'], t['run_s'])} | {_ratio(r['tokens_per_s'], t['tokens_per_s'])}"
-                           " | " + " / ".join(_ratio(tt.get(k), t["ttft_s"][k]) for k in q) + " | | | |")
+                           " | " + " / ".join(_ratio(tt.get(k), t["ttft_s"][k]) for k in q) + " | | | | |")
                 out.append(f"| target | {t['requests']} | {_f(t['run_s'], 2)} | {t['tokens_per_s'] / 1e3:.1f}k | "
                            + " / ".join(_f(t["ttft_s"][k], 3) for k in q) + " | "
-                           + " / ".join(f"{100 * b:.1f}" for b in t["stage_busy"]) + " | | |")
+                           + " / ".join(f"{100 * b:.1f}" for b in t["stage_busy"]) + " | | | |")
         traced = [r for r in sat if r.get("trace")]
         if traced:
             out += ["", "From the nsys trace of each run's traced microbatches (ms): stage compute (CUDA events in "
                     "brackets), gaps inside the stage, sends, and the stage-0 gap between consecutive microbatches.", "",
                     "| Prompt | Traced mbs | Stage compute 0 / 1 / 2 / 3 | Gaps 0 / 1 / 2 / 3 | Sends | "
-                    "Stage-0 gap mean / p99 / max |", "|---|---|---|---|---|---|"]
+                    "Stage-0 gap mean / p99 / max | Host lead p50 0 / 1 / 2 / 3 | Launch p50 0 / 1 / 2 / 3 |",
+                    "|---|---|---|---|---|---|---|---|"]
             for r in traced:
                 t = r["trace"]
                 g = t["stage0_gap_ms"] or {}
@@ -328,7 +354,9 @@ def iteration_md(one: list[dict], sat: list[dict], title: str) -> str:
                                                                            t["event_stage_compute_ms"]))
                            + " | " + " / ".join(_f(x) for x in t["stage_gaps_ms"])
                            + " | " + " / ".join(_f(x) for x in t["send_ms"])
-                           + f" | {_f(g.get('mean'))} / {_f(g.get('p99'))} / {_f(g.get('max'))} |")
+                           + f" | {_f(g.get('mean'))} / {_f(g.get('p99'))} / {_f(g.get('max'))}"
+                           + " | " + " / ".join(_f(x) for x in t.get("host_lead_ms", []))
+                           + " | " + " / ".join(_f(x) for x in t.get("launch_ms", [])) + " |")
         out.append("")
     return "\n".join(out)
 
