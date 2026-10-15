@@ -372,6 +372,11 @@ def bench(args) -> None:
     trace_dir = Path(tempfile.mkdtemp(prefix="pph-", dir=os.environ.get("TMPDIR")))
     OUT.mkdir(parents=True, exist_ok=True)
     out_path = OUT / f"{args.tag or os.environ.get('SLURM_JOB_ID', 'local')}.json"
+    from ppimpl.model import pp_patch
+
+    # phase 1, plain timing of every length before any profiler runs: a profiler session leaves CUPTI attached,
+    # which adds ~4 us to every later launch (7106)
+    plain_res = {}
     for L in lengths:
         plan = lb.one_request_plan(tokens[:L])
         with torch.inference_mode():
@@ -380,22 +385,30 @@ def bench(args) -> None:
             idle = plain(model, plan, args.runs, 0, cpm)
             busy_ms = 2 * idle["forward"] / 1e3 + 50
             busy = plain(model, plan, args.runs, busy_ms, cpm)
-            prof = profiled(model, plan, trace_dir, f"L{L}")
+        plain_res[L] = (idle, busy, busy_ms)
+        print(f"[host] L={L}: forward idle {idle['forward'] / 1e3:.1f} ms (median "
+              f"{idle['_median_forward_us'] / 1e3:.1f}), busy {busy['forward'] / 1e3:.1f} ms", flush=True)
+    # phase 2: py-spy (no CUPTI), then the profiled runs
+    for L in lengths:
+        plan = lb.one_request_plan(tokens[:L])
+        idle, busy, busy_ms = plain_res[L]
+        with torch.inference_mode():
             spy = None
             if args.spy_seconds and L <= 8192:
                 spy = spy_loop_marker(model, plan, args.spy_seconds,
                                       OUT / f"{args.tag or os.environ.get('SLURM_JOB_ID', 'local')}_spy_L{L}.txt")
         units = {k: v for k, v in idle.items() if not k.startswith("_") and k != "forward"}
-        from ppimpl.model import pp_patch
-
-        r = {"prompt_tokens": L, "autotune_memo": dict(pp_patch.AUTOTUNE_MEMO_STATS), "idle_us": idle, "busy_us": busy, "busy_sleep_ms": round(busy_ms, 1),
-             "idle_by_type": by_type(units), "profiled": prof, "profiled_by_type": by_type(prof["units"]),
-             "spy": spy}
-        result[L] = r
+        result[L] = {"prompt_tokens": L, "autotune_memo": dict(pp_patch.AUTOTUNE_MEMO_STATS), "idle_us": idle,
+                     "busy_us": busy, "busy_sleep_ms": round(busy_ms, 1), "idle_by_type": by_type(units),
+                     "spy": spy}
+    for L in lengths:
+        plan = lb.one_request_plan(tokens[:L])
+        with torch.inference_mode():
+            prof = profiled(model, plan, trace_dir, f"L{L}")
+        r = result[L]
+        r.update(profiled=prof, profiled_by_type=by_type(prof["units"]))
         out_path.write_text(json.dumps(result, indent=1))
-        print(f"[host] L={L}: forward idle {idle['forward'] / 1e3:.1f} ms (median {idle['_median_forward_us'] / 1e3:.1f}),"
-              f" busy {busy['forward'] / 1e3:.1f} ms; profiled run {prof['run_us'] / 1e3:.1f} ms, "
-              f"{prof['kernels']} kernels", flush=True)
+        print(f"[host] L={L}: profiled run {prof['run_us'] / 1e3:.1f} ms, {prof['kernels']} kernels", flush=True)
         for t, row in r["profiled_by_type"].items():
             print(f"[host]   {t:16s} idle {r['idle_by_type'].get(t, {}).get('host_us', '-')} us | prof {row}",
                   flush=True)
