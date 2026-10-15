@@ -316,7 +316,7 @@ def main():
             raise SystemExit("--time is required to submit (run slurm-windows first)")
         return submit(args)
     job = os.environ.get("SLURM_JOB_ID")
-    port = args.port or (20000 + int(job) % 10000 if job else 18500)
+    port = args.port or (20000 + int(job) % 400 * 100 if job else 18500)   # 100 ports per job: runs use port + 10 i
     if args.cpu and not (args.fake and args.inline):
         raise SystemExit("--cpu needs --fake --inline")
     out = Path(args.out_root) if args.out_root else \
