@@ -33,3 +33,17 @@ Two kinds (`1_contract.md` §6): **setup difference** (names the targets it affe
   `recurrent_kda` wrapper calls `cu_seqlens.tolist()`, a host sync, so pp-impl calls the persistent `fwd` directly).
 - Glue the targets do not price: q/k/v are made contiguous for FlashInfer (3 copies of [T, 8192] BF16) and beta
   (one small copy). Measured at M2 under position `null` in `measured/layers.jsonl`.
+
+## Target rules the real engine cannot follow (found on the CPU replay, engine lane 5696d19; affects M4–M6)
+
+- **Rewind rounds.** 4,933 rounds of `sessions_2ps.csv` keep only part of the previous context (`prefix_len` < previous
+  prompt + 1); 1,146 more drop it. The targets count the partial ones as hits (hit = min(kept, declared)). With one
+  KDA state per kept context, the real engine cannot resume inside a context and recomputes them. Hit share 100% →
+  98.9%; at N=500 full memory the replay goes 118.3k → 103.6k new tok/s, TTFT p99 6.5 → 60.8 s. Resuming from the
+  nearest earlier round end would recompute a median 216 tokens, but needs KDA states kept a median 28 rounds back.
+  This is a model fact (the KDA state exists only where it was saved), so it is a simulator fidelity gap, not an
+  implementation gap. Decision needed: model it in the simulator (and re-derive targets), or add round-end state
+  checkpoints to the design (with their memory cost).
+- **Session slot.** The simulator frees a session's slot at its last round's token; req-frontend (the trusted
+  client) holds it through the last tool wait (mean 14 s). About −5% rounds/s at N=400 against every session target.
+- Block-rounded vs token accounting: < 1% on the design runs.
