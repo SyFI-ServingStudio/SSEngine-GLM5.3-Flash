@@ -226,7 +226,9 @@ class StageModel:
         or invalid here; "force" tunes in this process (bench/tune_tactics.py); "off" uses neither. Tuning is one
         autotuned pass at the microbatch budget, as vLLM's `kernel_warmup` does. Shapes: one request at the full
         budget (indexer and both top-k paths), then two requests, one continuing a cached prefix (conv and KDA initial
-        state, chunk start > 0). Uses blocks 1.. before any request holds them. `self.tactics` records the source."""
+        state, chunk start > 0), then every power-of-2 length from 512 below the budget, a length not divisible by
+        16, and the first layer's mHC pre at every split count. Uses blocks 1.. before any request holds them.
+        `self.tactics` records the source."""
         from types import SimpleNamespace as NS
 
         B = self.kv.block_tokens
@@ -253,16 +255,48 @@ class StageModel:
                 print(f"WARNING: {msg}", flush=True)
                 self.tactics["source"] = "tuned_in_process"
             ctx = fi_autotune(True)
+        def run(plan):
+            T_p = sum(c.num_tokens for c in plan.chunks)
+            hidden = None if self.first else torch.zeros(T_p, self.hidden_width, dtype=torch.bfloat16,
+                                                          device=self.device)
+            self.forward(plan, hidden)
+
         with torch.inference_mode():
             for i, plan in enumerate(plans()):
-                T_p = sum(c.num_tokens for c in plan.chunks)
-                hidden = None if self.first else torch.zeros(T_p, self.hidden_width, dtype=torch.bfloat16,
-                                                              device=self.device)
                 with ctx if i == 0 else contextlib.nullcontext():
-                    self.forward(plan, hidden)
-                self.forward(plan, hidden)
+                    run(plan)
+                run(plan)
+            # first-use costs keyed by shape (7126): every power-of-2 token count from 512 below the budget (MoE
+            # tactic buckets, kernel modules first loaded per bucket; one-request runs at those exact lengths), and
+            # one count not divisible by 16 (Triton specializes integer arguments on divisibility: 1000 tokens
+            # compiled two builder/indexer kernels, 120 ms, on first use)
+            p = 512
+            while p < T:
+                run(NS(mb_id=-3, chunks=[chunk("wb", 0, p, 1)]))
+                p *= 2
+            run(NS(mb_id=-4, chunks=[chunk("wo", 0, 1000, 1)]))
+            self._warm_mhc_pre()
         torch.cuda.synchronize(self.device)
         pp_patch.clear_autotune_memo()     # tactics may have changed while tuning
+
+    def _warm_mhc_pre(self) -> None:
+        """The standalone mHC pre of the stage's first layer (layer 0 after the input head, or after the stage edge)
+        runs a split-K DeepGEMM + TileLang pair whose split count is n_SMs // ceil(T / 64) below ~5k tokens, and each
+        new count loads its own kernels on first use (7126: ~80 ms on the first microbatch of each new count, on
+        every stage). Run it once per distinct split count up to the budget, on zeros."""
+        from vllm.model_executor.kernels.mhc.tilelang_kernels import compute_num_split
+
+        layer = self.layers[0]
+        n, H = layer.n, layer.hidden_size
+        first_T: dict[int, int] = {}
+        for T in range(64, self.max_tokens + 1, 64):
+            first_T.setdefault(compute_num_split(64, n * H, -(-T // 64)), T)
+        x = torch.zeros(max(first_T.values()), n, H, dtype=torch.bfloat16, device=self.device)
+        norm = layer.input_layernorm
+        for T in sorted(first_T.values()):
+            layer.hc_pre(x[:T], layer.hc_attn_fn, layer.hc_attn_scale, layer.hc_attn_base,
+                         norm_weight=norm.weight.data, norm_eps=norm.variance_epsilon)
+        self.mhc_pre_splits = sorted(first_T)
 
     # ------------------------------------------------------------------------------------------------ forward
 
