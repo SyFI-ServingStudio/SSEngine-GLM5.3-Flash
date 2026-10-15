@@ -420,9 +420,9 @@ def runs_md(runs: list[dict]) -> str:
     for r in sorted(runs, key=lambda r: (r["kind"], size(r), r["name"])):
         t = r.get("tokens")
         cell = "—" if t is None else \
-            f"{t['pass']} / {t['fail']} / {t['no_token']} / {t['near_tie']} / {t['no_reference']}"
+            f"{t['pass']} / {t['fail']} / {t['no_token']} / {t.get('near_tie', 0)} / {t['no_reference']}"
         miss = "; ".join(f"{m['id']}: {m['token']} vs {m['reference_token']} (margin {m['reference_margin']}"
-                         + (", near tie)" if m["verdict"] == "near_tie" else ")")
+                         + (", near tie)" if m.get("verdict") == "near_tie" else ")")
                          for m in (t or {}).get("misses", [])) or "—"
         out.append(f"| {r['name']} | {cell} | {miss} | {tactics_note(r.get('tactics'))} |")
     return "\n".join(out) + "\n"
