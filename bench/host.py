@@ -233,8 +233,37 @@ def stage_outputs(model, plan):
         return x.clone(), model.head_logits(b, x, r, p, c).clone()
 
 
+def kernel_sequence(model, plan) -> list[tuple]:
+    """Names of the GPU activities (kernels, copies, fills) of one forward's `run` (the metadata is built outside the
+    profiled region), in start order: a different tactic or code path shows as a different name or count."""
+    import torch
+    from torch.profiler import ProfilerActivity, profile
+
+    b = model.prepare(plan)
+    torch.cuda.synchronize()
+    with profile(activities=[ProfilerActivity.CUDA]) as prof:
+        model.run(b, None)
+        torch.cuda.synchronize()
+    ev = [e for e in prof.events() if e.device_type == torch.autograd.DeviceType.CUDA]
+    ev.sort(key=lambda e: e.time_range.start)
+    return [(e.name, ) for e in ev]
+
+
+def _same(a, b) -> dict:
+    return {"hidden_equal": bool(torch_equal(a[0], b[0])), "logits_equal": bool(torch_equal(a[1], b[1])),
+            "hidden_max_abs": float((a[0].float() - b[0].float()).abs().max())}
+
+
+def torch_equal(x, y) -> bool:
+    import torch
+
+    return torch.equal(x, y)
+
+
 def check_trims(model, tokens, lengths) -> dict:
-    """Outputs without the host trims, then with them (installed in place): must be bitwise equal."""
+    """Outputs without the host trims (twice: the run-to-run baseline), then with them (installed in place). Where
+    the baseline is bitwise equal the trimmed run must be too; where it is not (non-deterministic kernels), the
+    kernel sequence (names in launch order) must be identical."""
     import torch
 
     from ppimpl.model import pp_patch
@@ -242,15 +271,26 @@ def check_trims(model, tokens, lengths) -> dict:
     plans = {L: lb.one_request_plan(tokens[:L]) for L in lengths if L <= 8192}
     with torch.inference_mode():
         before = {L: stage_outputs(model, p) for L, p in plans.items()}
+        again = {L: stage_outputs(model, p) for L, p in plans.items()}
+        seq_before = {L: kernel_sequence(model, p) for L, p in plans.items()}
         trims = model.install_host_trims()
         after = {L: stage_outputs(model, p) for L, p in plans.items()}
+        seq_after = {L: kernel_sequence(model, p) for L, p in plans.items()}
         torch.cuda.synchronize()
     res = {"installed": trims, "memo": dict(pp_patch.AUTOTUNE_MEMO_STATS)}
+    ok = True
     for L in plans:
-        res[L] = {"hidden_equal": bool(torch.equal(before[L][0], after[L][0])),
-                  "logits_equal": bool(torch.equal(before[L][1], after[L][1])),
-                  "hidden_max_abs": float((before[L][0].float() - after[L][0].float()).abs().max())}
-    res["pass"] = all(res[L]["hidden_equal"] and res[L]["logits_equal"] for L in plans)
+        base, trim = _same(before[L], again[L]), _same(before[L], after[L])
+        seq_equal = seq_before[L] == seq_after[L]
+        deterministic = base["hidden_equal"] and base["logits_equal"]
+        passed = seq_equal and (not deterministic or (trim["hidden_equal"] and trim["logits_equal"]))
+        res[L] = {"repeat": base, "trimmed": trim, "kernel_sequence_equal": seq_equal,
+                  "kernels": len(seq_after[L]), "pass": passed}
+        if not seq_equal:
+            diff = [(i, x, y) for i, (x, y) in enumerate(zip(seq_before[L], seq_after[L])) if x != y][:5]
+            res[L]["first_diffs"] = [(i, x[0][:80], y[0][:80]) for i, x, y in diff]
+        ok &= passed
+    res["pass"] = ok
     return res
 
 
@@ -279,12 +319,18 @@ def compare_metadata(model, tokens, lengths, old_path: Path) -> dict:
         for name, plan in plans.items():
             model.meta = old_meta
             a = stage_outputs(model, plan)
+            a2 = stage_outputs(model, plan)
+            seq_a = kernel_sequence(model, plan)
             model.meta = new_meta
             b = stage_outputs(model, plan)
+            seq_b = kernel_sequence(model, plan)
             torch.cuda.synchronize()
-            res[name] = {"hidden_equal": bool(torch.equal(a[0], b[0])), "logits_equal": bool(torch.equal(a[1], b[1]))}
+            base, new = _same(a, a2), _same(a, b)
+            deterministic = base["hidden_equal"] and base["logits_equal"]
+            res[name] = {"repeat": base, "packed": new, "kernel_sequence_equal": seq_a == seq_b,
+                         "pass": seq_a == seq_b and (not deterministic or (new["hidden_equal"] and new["logits_equal"]))}
     model.meta = new_meta
-    res["pass"] = all(v["hidden_equal"] and v["logits_equal"] for v in res.values())
+    res["pass"] = all(v["pass"] for v in res.values())
     return res
 
 
