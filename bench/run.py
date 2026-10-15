@@ -44,6 +44,11 @@ def parse_name(name: str) -> tuple[str, int]:
     return m.group(1), int(m.group(2)) * 1024
 
 
+# The queued plan forms this long before stage 0 frees: the real stage 0 spends 25-30 ms of host time launching an
+# eager forward at <= 8k (model lane, M2), plus margin. Recorded in each run's server_config.yaml.
+REAL_FORM_LEAD_MS = 35.0
+
+
 def trace_for(kind: str, length: int) -> Path:
     return HANDOFF / "data/bringup" / f"{'one' if kind == 'one' else 'uni'}_{length // 1024}k.csv"
 
@@ -54,6 +59,7 @@ def server_config(kind: str, length: int, use_fake: bool, run_dir: Path, device:
            "scheduler": {"mb_tokens": max(8192, length) if kind == "one" else 8192}}
     if not use_fake:
         cfg["checkpoint"] = str(CHECKPOINT)
+        cfg["form_lead_ms"] = REAL_FORM_LEAD_MS
     cfg.update(extra)
     return cfg
 

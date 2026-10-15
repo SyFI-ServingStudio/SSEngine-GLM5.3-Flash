@@ -11,6 +11,7 @@ POST /shutdown  graceful stop (bench/run.py).
 import asyncio
 import os
 import signal
+import sys
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -105,5 +106,6 @@ def build_app(cfg: RunConfig) -> FastAPI:
 
 
 def serve(cfg: RunConfig):
+    sys.setswitchinterval(0.0005)   # the control thread gets the GIL within 0.5 ms while the event loop takes a burst
     uvicorn.run(build_app(cfg), host=cfg.host, port=cfg.port, loop="uvloop", http="httptools",
                 log_level="warning", access_log=False, backlog=4096, timeout_keep_alive=3600)
