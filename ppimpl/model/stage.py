@@ -104,7 +104,8 @@ def check_ninja() -> bool:
 class StageModel:
     def __init__(self, cfg, stage: int, device: torch.device, *, layers: range | None = None,
                  first: bool | None = None, last: bool | None = None, num_blocks: int | None = None,
-                 max_model_len: int | None = None, warmup: bool = True):
+                 max_model_len: int | None = None, warmup: bool = True,
+                 host_trims: bool = True):
         st = stage_settings(cfg)
         check_ninja()
         split = st["layer_split"]
@@ -161,6 +162,9 @@ class StageModel:
                 pp_patch.route_kda(layer.self_attn)
         pp_patch.install_topk_router()
         pp_patch.install_sparse_mla_split()
+        # host trims (no kernel or argument changes): env cache, FlashInfer tactic memo / mm_fp4 skip_check, plain
+        # parameters
+        self.host_trims = self.install_host_trims() if host_trims else None
 
         # KV: vLLM's block size, then this stage's tensors
         current_platform.update_block_size_for_backend(vc)
@@ -182,6 +186,10 @@ class StageModel:
         self.max_tokens = max_tokens
         if warmup:
             self.warmup()
+
+    def install_host_trims(self) -> dict:
+        mods = [m for m in (*self.layers, self.embed, self.norm, self.lm_head) if m is not None]
+        return pp_patch.install_host_trims(mods)
 
     def warmup(self, autotune: bool = True) -> None:
         """Before `Ready`: run every kernel once (first launches load modules) and tune FlashInfer's kernels as vLLM's
@@ -218,6 +226,7 @@ class StageModel:
                     self.forward(plan, hidden)
                 self.forward(plan, hidden)
         torch.cuda.synchronize(self.device)
+        pp_patch.clear_autotune_memo()     # tactics may have changed while tuning
 
     # ------------------------------------------------------------------------------------------------ forward
 

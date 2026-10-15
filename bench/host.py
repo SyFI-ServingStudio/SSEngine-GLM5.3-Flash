@@ -223,6 +223,37 @@ def spy_loop_marker(model, plan, seconds: float, raw: Path) -> dict:
             "py_spy": out[-500:]}
 
 
+def stage_outputs(model, plan):
+    """Stage 0's last hidden state and FP32 logits of the returned rows."""
+    from vllm.forward_context import set_forward_context
+
+    b = model.prepare(plan)
+    with set_forward_context(b.attn, model.vc, num_tokens=b.num_tokens, slot_mapping=b.slots):
+        x, r, p, c = model.run_layers(b, None)
+        return x.clone(), model.head_logits(b, x, r, p, c).clone()
+
+
+def check_trims(model, tokens, lengths) -> dict:
+    """Outputs without the host trims, then with them (installed in place): must be bitwise equal."""
+    import torch
+
+    from ppimpl.model import pp_patch
+
+    plans = {L: lb.one_request_plan(tokens[:L]) for L in lengths if L <= 8192}
+    with torch.inference_mode():
+        before = {L: stage_outputs(model, p) for L, p in plans.items()}
+        trims = model.install_host_trims()
+        after = {L: stage_outputs(model, p) for L, p in plans.items()}
+        torch.cuda.synchronize()
+    res = {"installed": trims, "memo": dict(pp_patch.AUTOTUNE_MEMO_STATS)}
+    for L in plans:
+        res[L] = {"hidden_equal": bool(torch.equal(before[L][0], after[L][0])),
+                  "logits_equal": bool(torch.equal(before[L][1], after[L][1])),
+                  "hidden_max_abs": float((before[L][0].float() - after[L][0].float()).abs().max())}
+    res["pass"] = all(res[L]["hidden_equal"] and res[L]["logits_equal"] for L in plans)
+    return res
+
+
 def bench(args) -> None:
     import torch
     from ppimpl.model.stage import CHECKPOINT, StageModel, bench_config
@@ -231,7 +262,7 @@ def bench(args) -> None:
     dev = torch.device("cuda", 0)
     t0 = time.time()
     model = StageModel(bench_config(max(lengths)), 0, dev, warmup=False, last=True, num_blocks=lb.NUM_BLOCKS,
-                       max_model_len=max(max(lengths), 8192) + 8576)
+                       max_model_len=max(max(lengths), 8192) + 8576, host_trims=not args.check_trims)
     install(model)
     print(f"[host] built in {time.time() - t0:.0f} s", flush=True)
     t0 = time.time()
@@ -240,10 +271,13 @@ def bench(args) -> None:
     print(f"[host] warmup (autotune) {time.time() - t0:.0f} s", flush=True)
     cpm = lb.sleep_cycles_per_ms()
     tokens = lb.enwik9_tokens(CHECKPOINT, max(lengths))
+    result = {}
+    if args.check_trims:
+        result["trims_check"] = check_trims(model, tokens, lengths)
+        print(f"[host] trims check: {result['trims_check']}", flush=True)
     trace_dir = Path(tempfile.mkdtemp(prefix="pph-", dir=os.environ.get("TMPDIR")))
     OUT.mkdir(parents=True, exist_ok=True)
     out_path = OUT / f"{args.tag or os.environ.get('SLURM_JOB_ID', 'local')}.json"
-    result = {}
     for L in lengths:
         plan = lb.one_request_plan(tokens[:L])
         with torch.inference_mode():
@@ -258,7 +292,9 @@ def bench(args) -> None:
                 spy = spy_loop_marker(model, plan, args.spy_seconds,
                                       OUT / f"{args.tag or os.environ.get('SLURM_JOB_ID', 'local')}_spy_L{L}.txt")
         units = {k: v for k, v in idle.items() if not k.startswith("_") and k != "forward"}
-        r = {"prompt_tokens": L, "idle_us": idle, "busy_us": busy, "busy_sleep_ms": round(busy_ms, 1),
+        from ppimpl.model import pp_patch
+
+        r = {"prompt_tokens": L, "autotune_memo": dict(pp_patch.AUTOTUNE_MEMO_STATS), "idle_us": idle, "busy_us": busy, "busy_sleep_ms": round(busy_ms, 1),
              "idle_by_type": by_type(units), "profiled": prof, "profiled_by_type": by_type(prof["units"]),
              "spy": spy}
         result[L] = r
@@ -306,6 +342,8 @@ def main() -> None:
     ap.add_argument("--runs", type=int, default=5)
     ap.add_argument("--spy-seconds", type=float, default=0)
     ap.add_argument("--tag", default=None)
+    ap.add_argument("--check-trims", action="store_true",
+                    help="build without the host trims, compare outputs before/after installing them, then time")
     ap.add_argument("--spy", type=Path, default=None, help="fold a py-spy raw file and exit")
     a = ap.parse_args()
     if a.spy:
