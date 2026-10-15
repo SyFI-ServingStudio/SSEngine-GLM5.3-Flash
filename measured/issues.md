@@ -42,7 +42,7 @@ past 128k, and a stage at 1M would be the first place where it counts.
 
 Kind: setup difference, now closed. The engine's env differs from the environments the rows were measured in: FlashInfer
 0.7.2.dev20261008 and CuTe DSL 4.8.0 against the fork's 0.7.0 / 4.7.1, and most rows came from the
-`cu130-3f667d7e` container (`setup.md`). Every row of the 15 configurations the engine calls through those libraries
+`cu130-3f667d7e` container (`setup.md`). Every row of the 15 configurations selected for the re-measure (1, 5, 7, 9, 11, 12, 15, 16, 18, 20, 25, 30, 31, 32, 34)
 (3,084 rows) was re-measured in `pp-impl/.venv` with the profiler's own runners. See `kernels.md` and `kernels.jsonl`.
 
 - 154 rows fall outside ±10%. 149 of them are below 20 µs and differ by at most 2.3 µs.
