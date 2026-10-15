@@ -5,8 +5,12 @@ POST /inference/v1/generate  {"token_ids": [...], "sampling_params": {"max_token
   otherwise one JSON body with both. `usage.prompt_tokens_details.cached_tokens` is 0 in phase A.
   The request id is the `x-request-id` header (req-frontend sends the trace id), else the body's `rid`.
 GET /health  200 once all stages are ready.
+POST /shutdown  graceful stop (bench/run.py).
 """
 
+import asyncio
+import os
+import signal
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -56,6 +60,13 @@ def build_app(cfg: RunConfig) -> FastAPI:
     async def health():
         ok = ctl.ready and not ctl.failed
         return Response(status_code=200 if ok else 503)
+
+    @app.post("/shutdown")
+    async def shutdown():
+        """Graceful stop by request: under `srun nsys profile`, signalling the server process itself is not possible
+        from the client side, and nsys writes its report only when the server exits on its own."""
+        asyncio.get_running_loop().call_later(0.1, os.kill, os.getpid(), signal.SIGTERM)
+        return Response(status_code=200)
 
     @app.post("/inference/v1/generate")
     async def generate(request: Request):

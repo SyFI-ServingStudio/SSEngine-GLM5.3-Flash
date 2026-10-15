@@ -37,6 +37,7 @@ class RunConfig(msgspec.Struct, forbid_unknown_fields=True):
     max_in_flight: int = MAX_IN_FLIGHT
     dispatch_ahead: int = 1           # plans queued on stage 0 behind the running one (0: form when stage 0 is free)
     pool_tokens: int | None = None    # cap on the KV pool, in tokens (1_contract.md §2.3)
+    profile_mbs: list[int] | None = None  # [a, b): cudaProfilerStart at mb a, Stop after mb b-1 (bench/run.py --nsys)
     fake: FakeConfig = msgspec.field(default_factory=FakeConfig)
 
     @property

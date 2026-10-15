@@ -59,6 +59,21 @@ class Clock:
         return host_ns + int(ev.elapsed_time(mark) * 1e6)
 
 
+class ProfileWindow:
+    """cudaProfilerStart/Stop around microbatches [a, b), for `nsys --capture-range=cudaProfilerApi`."""
+
+    def __init__(self, mbs: list[int] | None):
+        self.a, self.b = mbs if mbs else (None, None)
+
+    def before(self, mb_id: int):
+        if mb_id == self.a:
+            torch.cuda.profiler.start()
+
+    def after(self, mb_id: int):
+        if self.b is not None and mb_id == self.b - 1:
+            torch.cuda.profiler.stop()
+
+
 class Reporter(threading.Thread):
     """Owns the worker's report socket. Items: a message to send as is, or a finished-microbatch record."""
 
@@ -117,6 +132,7 @@ def run_worker(cfg: RunConfig, stage: int):
         pipe = Pipe(stage, n, device, cfg.dist_init_method())
         model = build_model(cfg, stage, device)
         clock = Clock(device)
+        window = ProfileWindow(cfg.profile_mbs if cuda else None)
         reporter.q.put(Ready(stage, model.num_blocks))
         while True:
             while not plans.poll(1000):
@@ -127,6 +143,9 @@ def run_worker(cfg: RunConfig, stage: int):
                 ok = True
                 break
             plan: Plan = msg
+            window.before(plan.mb_id)
+            if cuda:
+                torch.cuda.nvtx.range_push(f"stage {stage} mb {plan.mb_id}")   # bench/trace.py attributes kernels
             clock.maybe_reanchor()
             hidden_in = pipe.recv(plan.num_tokens, model.hidden_width) if stage > 0 else None
             start = clock.mark()
@@ -134,12 +153,16 @@ def run_worker(cfg: RunConfig, stage: int):
             end = clock.mark()
             del hidden_in
             anchor = clock.anchor if cuda else None
+            wait = end if cuda else None
             if not last:
-                pipe.send(out, end if cuda else None)
-                reporter.q.put((stage, plan.mb_id, start, end, anchor, end if cuda else None, None, None))
-                continue
-            tok_ids = [c.req_id for c in plan.chunks if c.is_last]
-            reporter.q.put((stage, plan.mb_id, start, end, anchor, end if cuda else None, out, tok_ids))
+                pipe.send(out, wait)
+                reporter.q.put((stage, plan.mb_id, start, end, anchor, wait, None, None))
+            else:
+                tok_ids = [c.req_id for c in plan.chunks if c.is_last]
+                reporter.q.put((stage, plan.mb_id, start, end, anchor, wait, out, tok_ids))
+            if cuda:
+                torch.cuda.nvtx.range_pop()
+            window.after(plan.mb_id)
     except BaseException:
         reporter.q.put(WorkerError(stage, traceback.format_exc()))
         raise

@@ -56,7 +56,35 @@ def client_id(trace_id: str) -> str:
 
 # --- one request ------------------------------------------------------------------------------------------------------
 
+def load_trace(run_dir: Path) -> dict | None:
+    f = run_dir / "trace.json"
+    return json.loads(f.read_text()) if f.exists() else None
+
+
+def trace_request(tr: dict, mb_ids: list[int], nstages: int) -> dict | None:
+    """A request's stages, sends and span from the nsys trace (bench/trace.py), over its microbatches."""
+    got = [tr["mbs"].get(str(i)) for i in sorted(set(mb_ids))]
+    if not got or any(g is None for g in got):
+        return None
+    stages = []
+    for s in range(nstages):
+        xs = [g["stages"][s] for g in got]
+        stages.append({"stage": s, "start_ms": xs[0]["start_ms"], "end_ms": xs[-1]["end_ms"],
+                       "compute_ms": sum(x["compute_ms"] for x in xs), "gaps_ms": sum(x["gaps_ms"] for x in xs),
+                       "nccl_recv_ms": _sum_opt(x["nccl_recv_ms"] for x in xs),
+                       "nccl_send_ms": _sum_opt(x["nccl_send_ms"] for x in xs)})
+    return {"stages": stages, "span": stages[-1]["end_ms"] - stages[0]["start_ms"]}
+
+
+def _sum_opt(xs):
+    xs = [x for x in xs if x is not None]
+    return sum(xs) if xs else None
+
+
 def one_request(run_dir: Path, meta: dict) -> list[dict]:
+    """Stages, sends and GPU span come from the nsys trace when the run has one (trace.json), with the CUDA-event
+    numbers of microbatches.jsonl beside them as `event_*`; otherwise from the CUDA events alone."""
+    tr = load_trace(run_dir)
     mbs = read_jsonl(run_dir / "microbatches.jsonl")
     sreq = {r["id"]: r for r in read_jsonl(run_dir / "server_requests.jsonl")}
     t0 = json.loads((run_dir / "t0.json").read_text())["t0_unix_ns"] / 1e6 if (run_dir / "t0.json").exists() else None
@@ -87,8 +115,23 @@ def one_request(run_dir: Path, meta: dict) -> list[dict]:
                 "stages": [{"stage": st["stage"], "start_ms": st["start_ms"] - origin, "compute_ms": st["compute_ms"],
                             "gaps_ms": st["gaps_ms"]} for st in stages],
                 "sends": sends, "token_matches_reference": None}
+        t = trace_request(tr, [m["index"] for m in mine], nstages) if tr else None
+        if t is not None:
+            o = t["stages"][0]["start_ms"]
+            for st, ts in zip(line["stages"], t["stages"]):
+                st.update(event_start_ms=st["start_ms"], event_compute_ms=st["compute_ms"],
+                          start_ms=ts["start_ms"] - o, compute_ms=ts["compute_ms"], gaps_ms=ts["gaps_ms"])
+            for se in line["sends"]:
+                a, b = t["stages"][se["after_stage"]], t["stages"][se["after_stage"] + 1]
+                se.update(event_ms=se["ms"], ms=b["start_ms"] - a["end_ms"], nccl_send_ms=a["nccl_send_ms"],
+                          nccl_recv_ms=b["nccl_recv_ms"])
+            line.update(event_gpu_span_ms=span, gpu_span_ms=t["span"], source="nsys")
+            if c["ttft_ms"] is not None:
+                line["host_ms"] = c["ttft_ms"] - t["span"]
+        else:
+            line["source"] = "cuda_events"
         sr = sreq.get(rid)
-        if t0 is not None and sr is not None and c["ttft_ms"] is not None:
+        if t0 is not None and sr is not None and c["ttft_ms"] is not None:   # on the host clock (CUDA events)
             post = c["post_unix_ms"] - t0                 # client send, on the server's t0 axis
             first = post + c["ttft_ms"]                   # client sees the token
             line["host_parts_ms"] = {
@@ -123,7 +166,7 @@ def saturated(run_dir: Path, meta: dict) -> dict:
     ttft = np.array([r["ttft_ms"] for r in ok]) / 1e3
     submits = [r["submit_unix_ms"] for r in rows if r is not None]
     tps = tokens / ((hi - lo) / 1e3)
-    return {
+    out = {
         "prompt_tokens": meta["prompt_tokens"], "requests": len(ids), "answered": len(ok),
         "microbatches": len(by[0]),
         "submit_spread_s": (max(submits) - min(submits)) / 1e3 if submits else None,
@@ -135,6 +178,31 @@ def saturated(run_dir: Path, meta: dict) -> dict:
                           "p99": float(np.percentile(gaps, 99))} if gaps else None,
         "ttft_ms_by_request": [round(r["ttft_ms"], 3) if r is not None and r["ok"] else None for r in rows],
     }
+    tr = load_trace(run_dir)
+    if tr and tr["mbs"]:
+        out["trace"] = trace_summary(tr, {(m["stage"], m["index"]): m["compute_ms"] for m in mbs})
+    return out
+
+
+def _stats(xs: list[float]) -> dict | None:
+    return {"mean": float(np.mean(xs)), "max": float(np.max(xs)), "p99": float(np.percentile(xs, 99))} if xs else None
+
+
+def trace_summary(tr: dict, event_compute: dict) -> dict:
+    """The traced microbatches (nsys window): per-stage compute and gaps, sends, the stage-0 gap between consecutive
+    microbatches at kernel level, and the CUDA-event compute of the same microbatches as a cross-check."""
+    ms = list(tr["mbs"].items())
+    n = tr["stages"]
+    return {
+        "microbatches": len(ms), "mb_range": [min(int(k) for k, _ in ms), max(int(k) for k, _ in ms)],
+        "stage_compute_ms": [float(np.mean([v["stages"][s]["compute_ms"] for _, v in ms])) for s in range(n)],
+        "event_stage_compute_ms": [float(np.mean([event_compute[(s, int(k))] for k, _ in ms
+                                                  if (s, int(k)) in event_compute])) for s in range(n)],
+        "stage_gaps_ms": [float(np.mean([v["stages"][s]["gaps_ms"] for _, v in ms])) for s in range(n)],
+        "send_ms": [float(np.mean([v["sends"][s]["ms"] for _, v in ms])) for s in range(n - 1)],
+        "stage0_gap_ms": _stats(tr["stage0_gap_ms"]),
+        "unattributed_kernels": tr["unattributed_kernels"],
+    }
 
 
 # --- summary ----------------------------------------------------------------------------------------------------------
@@ -143,6 +211,11 @@ def _targets():
     it = {t["prompt_tokens"]: t for t in json.loads((HANDOFF / "data/iteration_targets.json").read_text())}
     sat = {t["prompt_tokens"]: t for t in json.loads((HANDOFF / "data/saturated_targets.json").read_text())}
     return it, sat
+
+
+def _mean_opt(xs):
+    xs = [x for x in xs if x is not None]
+    return float(np.mean(xs)) if xs else None
 
 
 def _f(x, nd=3):
@@ -186,6 +259,22 @@ def iteration_md(one: list[dict], sat: list[dict], title: str) -> str:
                 out.append(f"| | | target | " + " | ".join(
                     [_f(s["compute_ms"]) for s in t["stages"]] + [_f(s["ms"]) for s in t["sends"]]
                     + [_f(t["ttft_ms"]), _f(t["ttft_ms"]), "0"]) + " |")
+        traced = [r for r in one if r.get("source") == "nsys"]
+        if traced:
+            out += ["", "From the nsys trace (mean over runs, ms): gaps between kernels inside each stage, NCCL kernel "
+                    "time per send, and CUDA-event / trace stage compute.", "",
+                    "| Prompt | Gaps 0 / 1 / 2 / 3 | NCCL send 0 / 1 / 2 | NCCL recv 1 / 2 / 3 | Event / trace 0 / 1 / 2 / 3 |",
+                    "|---|---|---|---|---|"]
+            for L in sorted({r["prompt_tokens"] for r in traced}):
+                rs = [r for r in traced if r["prompt_tokens"] == L]
+                ns = len(rs[0]["stages"])
+                g = [np.mean([r["stages"][s]["gaps_ms"] for r in rs]) for s in range(ns)]
+                snd = [_mean_opt([r["sends"][s].get("nccl_send_ms") for r in rs]) for s in range(ns - 1)]
+                rcv = [_mean_opt([r["sends"][s].get("nccl_recv_ms") for r in rs]) for s in range(ns - 1)]
+                ev = [np.mean([r["stages"][s]["event_compute_ms"] / r["stages"][s]["compute_ms"] for r in rs])
+                      for s in range(ns)]
+                out.append(f"| {L // 1024}k | " + " / ".join(_f(x) for x in g) + " | " + " / ".join(_f(x) for x in snd)
+                           + " | " + " / ".join(_f(x) for x in rcv) + " | " + " / ".join(f"{x:.3f}" for x in ev) + " |")
         parts = [r for r in one if r.get("host_parts_ms")]
         if parts:
             out += ["", "Host time by part (mean over runs, ms):", "",
@@ -216,6 +305,21 @@ def iteration_md(one: list[dict], sat: list[dict], title: str) -> str:
                 out.append(f"| target | {t['requests']} | {_f(t['run_s'], 2)} | {t['tokens_per_s'] / 1e3:.1f}k | "
                            + " / ".join(_f(t["ttft_s"][k], 3) for k in q) + " | "
                            + " / ".join(f"{100 * b:.1f}" for b in t["stage_busy"]) + " | | |")
+        traced = [r for r in sat if r.get("trace")]
+        if traced:
+            out += ["", "From the nsys trace of each run's traced microbatches (ms): stage compute (CUDA events in "
+                    "brackets), gaps inside the stage, sends, and the stage-0 gap between consecutive microbatches.", "",
+                    "| Prompt | Traced mbs | Stage compute 0 / 1 / 2 / 3 | Gaps 0 / 1 / 2 / 3 | Sends | "
+                    "Stage-0 gap mean / p99 / max |", "|---|---|---|---|---|---|"]
+            for r in traced:
+                t = r["trace"]
+                g = t["stage0_gap_ms"] or {}
+                out.append(f"| {r['prompt_tokens'] // 1024}k | {t['microbatches']} ({t['mb_range'][0]}–{t['mb_range'][1]}) | "
+                           + " / ".join(f"{a:.3f} ({b:.3f})" for a, b in zip(t["stage_compute_ms"],
+                                                                           t["event_stage_compute_ms"]))
+                           + " | " + " / ".join(_f(x) for x in t["stage_gaps_ms"])
+                           + " | " + " / ".join(_f(x) for x in t["send_ms"])
+                           + f" | {_f(g.get('mean'))} / {_f(g.get('p99'))} / {_f(g.get('max'))} |")
         out.append("")
     return "\n".join(out)
 
@@ -227,12 +331,32 @@ def report_run(run_dir: Path) -> dict:
         rep["requests"] = one_request(run_dir, meta)
     else:
         rep["saturated"] = saturated(run_dir, meta)
+    tr = load_trace(run_dir)
+    if tr:
+        rep["kernels"] = [{k: v for k, v in a.items() if k != "demangled"} for a in tr["kernels"]]
     (run_dir / "report.json").write_text(json.dumps(rep) + "\n")
     return rep
 
 
+def kernels_md(name: str, kernels: list[dict], top: int = 12) -> str:
+    out = [f"### {name}: kernels per stage (nsys, per microbatch)", "",
+           "| Stage | Kernel | ms / mb | launches / mb | Manifest | Positions |", "|---|---|---|---|---|---|"]
+    stages = sorted({k["stage"] for k in kernels})
+    for s in stages:
+        ks = [k for k in kernels if k["stage"] == s]
+        for k in ks[:top]:
+            mbs = k["total_ms"] / k["per_mb_ms"] if k["per_mb_ms"] else 1
+            cls = k.get("class", "—") + (f" {k['configs']}" if k.get("configs") else "")
+            out.append(f"| {s} | `{k['name'][:60]}` | {k['per_mb_ms']:.3f} | {k['count'] / mbs:.1f} | {cls} "
+                       f"| {', '.join(k.get('positions', []))[:80] or '—'} |")
+        rest = ks[top:]
+        if rest:
+            out.append(f"| {s} | ({len(rest)} more) | {sum(k['per_mb_ms'] for k in rest):.3f} | | | |")
+    return "\n".join(out + [""])
+
+
 def summarize(runs_root: Path) -> Path:
-    one, sat = [], []
+    one, sat, kern = [], [], []
     for d in sorted(runs_root.iterdir()):
         f = d / "report.json"
         if not f.exists():
@@ -241,13 +365,18 @@ def summarize(runs_root: Path) -> Path:
         one += rep.get("requests", [])
         if "saturated" in rep:
             sat.append(rep["saturated"])
+        if rep.get("kernels"):
+            kern.append(kernels_md(rep["name"], rep["kernels"]))
     out = runs_root.parent if runs_root.name == "runs" else runs_root
     one.sort(key=lambda r: (r["prompt_tokens"], r["run"]))
     sat.sort(key=lambda r: r["prompt_tokens"])
     (out / "iteration.jsonl").write_text("".join(json.dumps(r) + "\n" for r in one))
     (out / "saturated.jsonl").write_text("".join(json.dumps(r) + "\n" for r in sat))
     title = "M3 iteration: measured vs targets" + (f" ({runs_root.name} runs)" if out == runs_root else "")
-    (out / "iteration.md").write_text(iteration_md(one, sat, title))
+    md = iteration_md(one, sat, title)
+    if kern:
+        md += "\n## Kernels (nsys)\n\n" + "\n".join(kern)
+    (out / "iteration.md").write_text(md)
     return out / "iteration.md"
 
 

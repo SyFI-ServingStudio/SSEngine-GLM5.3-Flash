@@ -2,6 +2,7 @@
 
   python bench/run.py one_8k saturated_8k [--fake] --time 00:20:00 [--partition priority]   submit one Slurm job
   python bench/run.py one_8k --fake --inline                                                 run here (no Slurm)
+  ... --nsys [--nsys-mbs a:b|all]     the server under Nsight Systems -> trace.nsys-rep, trace.sqlite, trace.json
 
 Names: one_<L>, saturated_<L> (4_iteration.md), L in 1k..128k. Each run gets a fresh server; the server and the
 client run as concurrent steps of one job (port 20000 + job id % 10000). Everything goes to
@@ -112,15 +113,45 @@ def wait_health(port: int, proc: subprocess.Popen, timeout_s: float) -> float:
     raise RuntimeError(f"/health not ready after {timeout_s} s")
 
 
-def stop(proc: subprocess.Popen, timeout_s: float = 90):
+def stop(proc: subprocess.Popen, port: int, timeout_s: float = 90):
+    """Ask the server to stop (POST /shutdown) and wait; under nsys the report is written before it exits."""
     if proc.poll() is not None:
         return
-    proc.send_signal(signal.SIGTERM)
+    try:
+        urllib.request.urlopen(urllib.request.Request(f"http://127.0.0.1:{port}/shutdown", method="POST"), timeout=5)
+    except OSError:
+        proc.send_signal(signal.SIGTERM)
     try:
         proc.wait(timeout_s)
     except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait()
+        proc.send_signal(signal.SIGTERM)
+        try:
+            proc.wait(60)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+
+
+def nsys_prefix(run_dir: Path, window: bool) -> list[str]:
+    """Nsight Systems around the server; it follows the worker processes it spawns. With `window`, collection runs
+    only between the workers' cudaProfilerStart/Stop (server config `profile_mbs`)."""
+    argv = ["nsys", "profile", "-o", str(run_dir / "trace"), "--force-overwrite", "true", "-t", "cuda,nvtx",
+            "--cuda-graph-trace=node", "--sample=none", "--cpuctxsw=none"]
+    if window:
+        argv += ["--capture-range=cudaProfilerApi", "--capture-range-end=stop"]
+    return argv
+
+
+def nsys_window(kind: str, length: int, requests: int, spec: str | None) -> list[int] | None:
+    """Microbatches to trace: `a:b`, `all`, or by default the whole one-request run and the middle 80% of a
+    saturated run's expected microbatches (requests x L / 8192)."""
+    if spec == "all" or (spec is None and kind == "one"):
+        return None
+    if spec:
+        a, b = spec.split(":")
+        return [int(a), int(b)]
+    n = -(-requests * length // 8192)
+    return [round(0.1 * n), round(0.9 * n)]
 
 
 def step(argv: list[str], gpus: int | None) -> list[str]:
@@ -131,10 +162,12 @@ def step(argv: list[str], gpus: int | None) -> list[str]:
 
 
 def execute(run_dir: Path, server_cfg: dict, client_cfg: dict, *, port: int, meta: dict,
-            client_timeout_s: float = 1200, health_timeout_s: float = 1800, gpus: int | None = 4) -> dict:
+            client_timeout_s: float = 1200, health_timeout_s: float = 1800, gpus: int | None = 4,
+            nsys: bool = False) -> dict:
     """One run: fresh server, req-frontend, metrics and report. Returns run.json's content."""
     run_dir.mkdir(parents=True, exist_ok=True)
-    for f in ("microbatches.jsonl", "server_requests.jsonl", "requests.jsonl"):
+    for f in ("microbatches.jsonl", "server_requests.jsonl", "requests.jsonl", "trace.nsys-rep", "trace.sqlite",
+              "trace.json"):
         (run_dir / f).unlink(missing_ok=True)
     server_cfg = {**server_cfg, "port": port, "run_dir": str(run_dir)}
     (run_dir / "server.yaml").write_text(yaml.safe_dump(server_cfg, sort_keys=False))
@@ -148,9 +181,12 @@ def execute(run_dir: Path, server_cfg: dict, client_cfg: dict, *, port: int, met
     meta["uptime"] = uptime
     print(f"[{run_dir.name}] uptime: {uptime}", flush=True)
 
+    serve = [PYTHON, "-m", "ppimpl", "serve", "--config", str(run_dir / "server.yaml")]
+    if nsys:
+        serve = nsys_prefix(run_dir, server_cfg.get("profile_mbs") is not None) + serve
+        meta["nsys"] = {"command": shlex.join(serve), "profile_mbs": server_cfg.get("profile_mbs")}
     with open(run_dir / "server.log", "w") as slog:
-        server = subprocess.Popen(step([PYTHON, "-m", "ppimpl", "serve", "--config", str(run_dir / "server.yaml")],
-                                       gpus), cwd=ROOT, stdout=slog, stderr=subprocess.STDOUT)
+        server = subprocess.Popen(step(serve, gpus), cwd=ROOT, stdout=slog, stderr=subprocess.STDOUT)
     try:
         meta["server_ready_s"] = round(wait_health(port, server, health_timeout_s), 1)
         print(f"[{run_dir.name}] server ready after {meta['server_ready_s']} s", flush=True)
@@ -161,9 +197,19 @@ def execute(run_dir: Path, server_cfg: dict, client_cfg: dict, *, port: int, met
         meta["client_s"] = round(time.time() - t, 1)
         meta["client_returncode"] = client.returncode
     finally:
-        stop(server)
-        # uvicorn re-raises the SIGTERM it handled once it has shut down: -15 is a clean stop
-        meta["server_returncode"] = 0 if server.returncode == -signal.SIGTERM else server.returncode
+        stop(server, port, timeout_s=1800 if nsys else 90)
+        # uvicorn re-raises the SIGTERM it handled once it has shut down: -15 (143 through nsys) is a clean stop
+        meta["server_returncode"] = 0 if server.returncode in (-signal.SIGTERM, 128 + signal.SIGTERM) \
+            else server.returncode
+    if nsys and (run_dir / "trace.nsys-rep").exists():
+        t = time.time()
+        subprocess.run(["nsys", "export", "--type", "sqlite", "--force-overwrite", "true", "-o",
+                        str(run_dir / "trace.sqlite"), str(run_dir / "trace.nsys-rep")],
+                       stdout=subprocess.DEVNULL, stderr=open(run_dir / "nsys_export.log", "w"), check=False)
+        tr = subprocess.run([PYTHON, str(ROOT / "bench/trace.py"), str(run_dir)], cwd=ROOT, capture_output=True,
+                            text=True)
+        (run_dir / "trace.log").write_text(tr.stdout + tr.stderr)
+        meta["nsys"]["export_and_parse_s"] = round(time.time() - t, 1)
     pool = run_dir / "pool.json"
     if pool.exists():
         meta["pool"] = json.loads(pool.read_text())
@@ -183,6 +229,11 @@ def run_named(name: str, fake: bool, port: int, out_root: Path, args) -> dict:
     run_dir = out_root / name
     trace = trace_for(kind, length)
     extra = {}
+    if args.nsys:
+        requests = len(trace.read_text().splitlines()) - 1
+        window = nsys_window(kind, length, requests, args.nsys_mbs)
+        if window is not None:
+            extra["profile_mbs"] = window
     if fake and args.us_per_token is not None:
         extra["fake"] = {"us_per_token": args.us_per_token}
     if args.cpu:    # harness check without GPUs: gloo, small activations
@@ -190,7 +241,7 @@ def run_named(name: str, fake: bool, port: int, out_root: Path, args) -> dict:
     return execute(run_dir, server_config(kind, length, fake, run_dir, device="cpu" if args.cpu else "cuda", **extra),
                    client_config(trace, port, run_dir), port=port, gpus=None if args.cpu else 4, meta={"name": name, "kind": kind, "prompt_tokens": length, "fake": fake,
                                     "trace": str(trace)},
-                   client_timeout_s=args.client_timeout)
+                   client_timeout_s=args.client_timeout, nsys=args.nsys)
 
 
 def submit(args) -> None:
@@ -202,12 +253,19 @@ def submit(args) -> None:
         inner.append("--fake")
     if args.us_per_token is not None:
         inner += ["--us-per-token", str(args.us_per_token)]
+    if args.nsys:
+        inner.append("--nsys")
+    if args.nsys_mbs:
+        inner += ["--nsys-mbs", args.nsys_mbs]
+    if args.out_root:
+        inner += ["--out-root", str(Path(args.out_root).resolve())]
     script = f"""#!/bin/bash
 #SBATCH -J ppimpl-bench
 #SBATCH --gres=gpu:4
 #SBATCH --time={args.time}
 #SBATCH -p {args.partition}
 #SBATCH -o {logs}/%j.out
+{f"#SBATCH -d {args.dependency}" if args.dependency else ""}
 set -e
 source {WS}/.env
 cd {ROOT}
@@ -225,9 +283,14 @@ def main():
     ap.add_argument("--inline", action="store_true", help="run here (inside a job, or without Slurm)")
     ap.add_argument("--time", help="Slurm --time (required to submit)")
     ap.add_argument("--partition", default="main")
+    ap.add_argument("--dependency", help="Slurm dependency, e.g. afterany:7034")
     ap.add_argument("--port", type=int)
     ap.add_argument("--us-per-token", type=float, help="FakeStageModel stage time per token")
     ap.add_argument("--client-timeout", type=float, default=1200)
+    ap.add_argument("--nsys", action="store_true", help="run the server under Nsight Systems (bench/trace.py parses it)")
+    ap.add_argument("--nsys-mbs", help="microbatches to trace, a:b or all (default: one-request all, saturated the "
+                    "middle 80%% of the expected microbatches)")
+    ap.add_argument("--out-root", help="runs root (default measured/runs, or measured/runs/fake[_cpu])")
     ap.add_argument("--cpu", action="store_true", help="with --fake --inline: stages on CPU (gloo), to check the harness")
     args = ap.parse_args()
     for n in args.names:
@@ -241,7 +304,8 @@ def main():
     port = args.port or (20000 + int(job) % 10000 if job else 18500)
     if args.cpu and not (args.fake and args.inline):
         raise SystemExit("--cpu needs --fake --inline")
-    out = ROOT / "measured/runs" / ("fake_cpu" if args.cpu else "fake" if args.fake else "")
+    out = Path(args.out_root) if args.out_root else \
+        ROOT / "measured/runs" / ("fake_cpu" if args.cpu else "fake" if args.fake else "")
     failed = []
     for i, name in enumerate(args.names):
         meta = run_named(name, args.fake, port + 10 * i, out, args)   # fresh ports per run
