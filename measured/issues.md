@@ -37,3 +37,17 @@ The estimated stage error is −0.2% to −0.6% at 8k and 128k. The misses contr
 128k, both below 1%. The 128k share of the misses comes from the 1M-key mqa row. It is the sampled row nearest in time
 to a 128k layer's mqa call (8.8 ms), so this 0.886 is applied conservatively at 128k. The handoff has no layer targets
 past 128k, and a stage at 1M would be the first place where it counts.
+
+## Kernel library versions in pp-impl/.venv: rows re-measured — closed
+
+Kind: setup difference, now closed. The engine's env differs from the environments the rows were measured in: FlashInfer
+0.7.2.dev20261008 and CuTe DSL 4.8.0 against the fork's 0.7.0 / 4.7.1, and most rows came from the
+`cu130-3f667d7e` container (`setup.md`). Every row of the 15 configurations the engine calls through those libraries
+(3,084 rows) was re-measured in `pp-impl/.venv` with the profiler's own runners. See `kernels.md` and `kernels.jsonl`.
+
+- 154 rows fall outside ±10%. 149 of them are below 20 µs and differ by at most 2.3 µs.
+- 5 GEMM rows of 21–101 µs are 10–16% faster.
+- `rms_norm` is about 5% faster overall.
+- Swapping these rows into `data/layer_targets.jsonl`'s calls would move a stage target by at most 0.35% at 1k,
+  8k or 128k, so the targets stay as shipped.
+- For per-kernel expectations in this env, use `real_time_ms`.
