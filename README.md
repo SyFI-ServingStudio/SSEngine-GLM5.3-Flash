@@ -11,8 +11,8 @@ files 2–7 are the specification; its `data/` holds the targets.
    commit `892da0822f`, `vllm/models/glm5next`): imported as a library where it works unchanged, vendored into
    `ppimpl/` only where we must change it (e.g. the stage split and the mHC hand-off between stages).
 2. **Runtime dependencies:** PyTorch, the vLLM fork as a kernel/layer library (its custom ops, FlashInfer, DeepGEMM,
-   DeepSelect, TileLang, causal-conv1d as it pins them), safetensors, FastAPI/Uvicorn (server), NCCL via
-   torch.distributed. Nothing else without a note in this file.
+   DeepSelect, TileLang, causal-conv1d as it pins them), safetensors, FastAPI/Uvicorn (server), pyzmq + msgspec
+   (control messages), NCCL via torch.distributed. Nothing else without a note in this file.
 3. **Model execution** is owned by `ppimpl` (one process per stage, our forward loop); no vLLM engine,
    scheduler, model runner or KV-cache manager runs.
 4. **Attention backends:** DSA = DeepGEMM `fp8_mqa_logits` + top-k + FlashInfer TRTLLM sparse MLA; KDA = FlashInfer
