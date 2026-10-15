@@ -51,3 +51,11 @@ Kind: setup difference, now closed. The engine's env differs from the environmen
 - Swapping these rows into `data/layer_targets.jsonl`'s calls would move a stage target by at most 0.35% at 1k,
   8k or 128k, so the targets stay as shipped.
 - For per-kernel expectations in this env, use `real_time_ms`.
+
+## Local SSD for prefix KV: free space short of 1 TB — open (M6)
+
+Kind: setup difference, open. `1_contract.md` §1 gives the node 1 TB of local SSD (256 GB per GPU) for prefix KV.
+`/raid` (md1, RAID 0 of 8 NVMe, shared with other users) had 469 GB free at 01:48 and 313 GB at 04:15 on 2026-10-15
+(`setup.md`). Bandwidth is not the problem: 40 GB/s with deep queues, 103 GB/s at most. Affects `7_offloading.md`:
+the SSD tier runs (`tiers`, `ssd_heavy`) cannot hold the contract's 1 TB. Before M6, free or reserve the space, or
+record the smaller SSD tier each run actually had.
