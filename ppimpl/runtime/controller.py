@@ -11,6 +11,7 @@ When a microbatch forms is `DispatchRule`'s decision (ppimpl/runtime/dispatch.py
 """
 
 import asyncio
+import hashlib
 import json
 import os
 import subprocess
@@ -18,6 +19,7 @@ import sys
 import time
 from pathlib import Path
 
+import numpy as np
 import zmq
 import zmq.asyncio
 
@@ -30,6 +32,11 @@ from ppimpl.runtime.transport import (Chunk, Plan, Ready, Shutdown, StageDone, W
 
 READY_TIMEOUT_S = 1800   # a real stage loads its weights and captures graphs before Ready
 
+
+
+def prompt_sha256(token_ids: list[int]) -> str:
+    """The prompt's id in measured/reference.jsonl: sha256 of its token ids as little-endian int32."""
+    return hashlib.sha256(np.asarray(token_ids, "<i4").tobytes()).hexdigest()
 
 class RequestError(Exception):
     """A request the engine cannot serve (HTTP 400)."""
@@ -176,7 +183,7 @@ class Controller:
         req = Request(req_id, len(token_ids), arrival_ns, token_ids)
         fut = asyncio.get_running_loop().create_future()
         self.reqs[req_id] = (req, fut, {"id": req_id, "seq": self.next_seq, "prompt_tokens": len(token_ids),
-                                        "arrival_ms": self._ms(arrival_ns)})
+                                        "arrival_ms": self._ms(arrival_ns), "prompt_sha256": prompt_sha256(token_ids)})
         self.next_seq += 1
         self.sched.add(req)
         self._pump()

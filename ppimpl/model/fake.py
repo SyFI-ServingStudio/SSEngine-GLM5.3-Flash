@@ -32,7 +32,9 @@ class FakeStageModel:
             self._warm_up()
 
     def _warm_up(self):
-        """Run every kernel forward uses once: the first launch of each loads its module (tens of ms)."""
+        """Run every kernel forward uses once (the first launch of each loads its module: tens of ms), and let the
+        caching allocator reserve the largest output once (a cudaMalloc inside a microbatch costs ms)."""
+        torch.empty(self.cfg.scheduler.mb_tokens, self.hidden_width, dtype=torch.bfloat16, device=self.device)
         hidden = torch.empty(2, self.hidden_width, dtype=torch.bfloat16, device=self.device)
         hidden[:, 0] = torch.arange(2, device=self.device) % 128
         self._check([1], [0], hidden)
