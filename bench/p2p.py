@@ -26,6 +26,10 @@ def nccl_rank(rank: int, port: int, q):
     torch.cuda.set_device(rank)
     dist.init_process_group("nccl", init_method=f"tcp://127.0.0.1:{port}", rank=rank, world_size=2)
     cpu = dist.new_group(backend="gloo")
+    # The first send/recv creates the pair's communicator, which needs both ranks inside NCCL at once.
+    t = torch.zeros(1, device=rank)
+    dist.send(t, 1) if rank == 0 else dist.recv(t, 0)
+    torch.cuda.synchronize()
     out = {}
     for T in TOKENS:
         buf = torch.ones(T, BYTES_PER_TOKEN // 2, dtype=torch.bfloat16, device=rank)
