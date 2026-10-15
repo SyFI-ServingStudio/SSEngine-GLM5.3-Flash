@@ -78,13 +78,49 @@ Fixed during M2 (each found by the per-position comparison):
 - vLLM IR op priorities were unset outside the engine (native RMSNorm); set as vLLM's worker does.
 
 Open:
-- **Host launch time.** Eager launching of a stage-0 forward costs 25–30 ms of host time at ≤ 8k (54–61 ms at 64k).
-  With launches queued ahead the layers run back to back (≤ 0.03 ms of gaps per layer), but a stage forward whose GPU
-  time is below its host time leaves gaps: 1k 13.8 ms, 2k 9.1 ms, 4k 3.2 ms; none from 8k on. The runtime hides it
-  when it launches a plan ahead of its input (recv on the stream); stage 0 of a lone short request cannot. CUDA graphs
-  would remove it for fixed shapes; not done.
-- **128k host block.** A 128k forward blocks the host for ~1.1 s inside the forward (no allocator retry, not seen by
-  torch's sync debug mode); GPU gaps stay < 2 ms because the GPU is the bottleneck there. Located in job 7080.
+- **Host launch time** (job 7091, `bench/host.py`, `measured/host/7091.json`). Plain host time of a stage-0
+  forward (no profiler) is 18.2 ms at 1k and 20.8 ms at 8k. M2's 25–30 ms included its per-module record_function
+  scopes. GPU time is 11.8 / 16.8 / 28 / 50 ms at 1k–8k, so host > GPU only below ~2.5k.
+  - Per layer at 1k: dsa_moe 2.15 ms / 52 launches, kda_moe 1.08 ms / 25, kda_dense 1.0 ms / 19, prepare 0.95 ms;
+    390 kernels per forward, ~47 µs of host per kernel.
+  - CUDA runtime calls are 7–8% of it. Torch ops, including the Python inside vLLM custom ops, are 55–62%; Python
+    outside ops is 30–45%. In py-spy --native the leaf frames are 37% Python, 29% torch C++, 13% CUDA/cuBLAS.
+  - No single wrapper dominates. Option (A), done in M3: trim per-call wrapper Python (vLLM env cache, FlashInfer
+    tactic memo, mm_fp4 skip_check, plain parameters; `pp_patch.install_host_trims`).
+  - **Follow-up (B), deferred:** piecewise CUDA graphs per token bucket (512/1k/1.5k/2k/3k/4k, eager above), using
+    vLLM's compile path with the DSA attention + indexer op and our KDA prefill as split points. They would capture
+    MoE, mHC, the linears, norms and quant, ~50–55% of host time (est. 1k: ~9 ms).
+    Trigger: M4/M5 session runs showing host-bound stage-0 microbatches, i.e. appends of < 2.5k tokens alone in a
+    microbatch.
+- **128k host block: launch-queue back-pressure, not a sync** (7091). A 128k forward issues 1,245 kernels. The first
+  launch over 1 ms is #1223, with 1,028 launched kernels still unfinished; every later block has 1,025–1,030 pending.
+  So the queue is capped at ~1,024 pending kernels. M2's 1.6 s block equals its 1.69 s lead sleep.
+  - StageMetadata copies: all pinned + non_blocking. `prepare` takes the same time with a 347 ms GPU sleep queued
+    ahead (945 vs 957 µs at 1k), so no copy waits for the stream.
+
+- **M3 host results** (bench/host.py, clean timing before any profiler session).
+  - Option (A) trims plus StageMetadata packing: stage-0 forward 16.6 / 16.5 / 17.0 / 17.4 ms at 1k / 2k / 4k / 8k
+    (7113). The untrimmed 1k is 18.15 ms (7091).
+  - Exactness, 7106: bitwise equal at 1k, 2k and a two-request plan; same kernels at every length.
+  - A torch.profiler session leaves CUPTI attached, which adds about 4 µs per later launch, so time before
+    profiling.
+- **Forward not bitwise reproducible from 4k** (7106). The same untrimmed forward, run twice in one process,
+  differs by up to 0.23 max-abs on the hidden state at 4k and 8k; it is bitwise equal at 1k and 2k. Likely cause:
+  above 2,048 keys the indexer's top-k index order varies, which changes the sparse-MLA summation order. Not a bug
+  in our code. Token checks at ≤ 2k are exact.
+- **FlashInfer tactics persisted** (`ppimpl/data/flashinfer_tactics_b200.json`, written by bench/tune_tactics.py,
+  jobs 7114 and 7127). Warm-up takes 6 s instead of ~180 s, with 0 autotuner misses over 1k–128k. Every stage and
+  run uses the same tactics. `StageModel.tactics` records the file and its sha256 for run.json.
+- **Cold first microbatch** (bench/cold.py; 7126 before, 7132 after).
+  - Before: the first 1k forward after warm-up took 138 ms vs 28 ms.
+    - 87 ms was the first layer's standalone mHC pre, which loads a DeepGEMM + TileLang kernel per split-K count
+      (n_SMs // ceil(T/64) below ~5k tokens). It hits every stage.
+    - A length not divisible by 16 compiled two Triton kernels (120 ms).
+  - Fix: warm-up now also runs every power-of-2 length from 512, a length of 1000 and the mHC pre at every split
+    count, taking 9 s in all. 1k, 2k, 4k, 8k and 1000 are now warm on first use.
+  - Remaining: a length never seen before (1100, 3000, 6000) pays 12–18 ms once on stage 0, in per-M first calls
+    of the GEMMs (BF16 projections, router gate, o_proj; 1.3–2.7 ms each). Open; matters only for a lone short
+    request of a new length.
 
 ## Node check: 27 of 105 sampled kernel rows outside ±10% — closed
 

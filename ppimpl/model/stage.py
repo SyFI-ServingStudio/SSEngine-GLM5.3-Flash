@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import warnings
 from pathlib import Path
 
 import torch
@@ -28,6 +29,11 @@ from ppimpl.model.metadata import StageMetadata
 
 CHECKPOINT = "/raid/hf/hub/models--nvidia--GLM-5.3-Flash-NVFP4/snapshots/da920bb0b9f4a06727223a349e55468e38352348"
 HIDDEN_WIDTH = 4 * 4096
+# FlashInfer tactics, tuned once (bench/tune_tactics.py) and loaded at warm-up with tuning off, as vLLM loads its
+# persisted configs: start-up skips ~150 s of MoE profiling and every stage, run and test uses the same tactics.
+# The file's own metadata (FlashInfer/CUDA/cuBLAS/cuDNN versions, GPU) decides whether it is valid here.
+TACTICS = Path(os.environ.get("PPIMPL_FI_TACTICS",
+                              Path(__file__).resolve().parents[1] / "data" / "flashinfer_tactics_b200.json"))
 RESERVE_GB = 13.6     # 1_contract.md §1: activations and workspace beside weights and KV
 MAX_MODEL_LEN = 1_048_576
 
@@ -56,15 +62,21 @@ def init_vllm_distributed(device: torch.device) -> None:
     if ps._TP is not None:
         return
     if dist.is_initialized():
-        world, rank, method = dist.get_world_size(), dist.get_rank(), None
+        ps.init_distributed_environment(world_size=dist.get_world_size(), rank=dist.get_rank(),
+                                        distributed_init_method="env://", local_rank=device.index, backend="nccl")
     else:
         import socket
-        with socket.socket() as s:
-            s.bind(("127.0.0.1", 0))
-            port = s.getsockname()[1]
-        world, rank, method = 1, 0, f"tcp://127.0.0.1:{port}"
-    ps.init_distributed_environment(world_size=world, rank=rank, distributed_init_method=method or "env://",
-                                    local_rank=device.index, backend="nccl")
+        for attempt in range(5):     # the free port can be taken between probe and listen (7114: EADDRINUSE)
+            with socket.socket() as s:
+                s.bind(("127.0.0.1", 0))
+                port = s.getsockname()[1]
+            try:
+                ps.init_distributed_environment(world_size=1, rank=0, distributed_init_method=f"tcp://127.0.0.1:{port}",
+                                                local_rank=device.index, backend="nccl")
+                break
+            except dist.DistNetworkError:
+                if attempt == 4:
+                    raise
     ps.initialize_model_parallel(1, 1)
 
 
@@ -86,6 +98,23 @@ def bench_config(mb_tokens: int, checkpoint: str | None = None):
 NINJA = "/usr/bin/ninja"
 
 
+def load_tactics(path: Path | None = None) -> dict:
+    """Load the persisted FlashInfer tactics into the autotuner (lookup only, no profiling). Returns what a run
+    records: source "file" with path and sha256, or source "missing"/"invalid" with the reason."""
+    import hashlib
+
+    from flashinfer.autotuner import AutoTuner
+
+    path = Path(path or TACTICS)
+    if not path.is_file():
+        return {"source": "missing", "file": str(path), "reason": f"{path} does not exist"}
+    sha = hashlib.sha256(path.read_bytes()).hexdigest()
+    if not AutoTuner.get().load_configs(str(path)):
+        return {"source": "invalid", "file": str(path), "sha256": sha,
+                "reason": f"{path} was tuned in another environment (FlashInfer/CUDA/GPU metadata)"}
+    return {"source": "file", "file": str(path), "sha256": sha}
+
+
 def check_ninja() -> bool:
     """FlashInfer JIT builds only with /usr/bin/ninja (1.11.1): another ninja on PATH hashes build commands differently
     and rebuilds every object of the shared ~/.cache/flashinfer (fused_moe_trtllm_sm100 ~290 s). Warns, never fails."""
@@ -104,7 +133,8 @@ def check_ninja() -> bool:
 class StageModel:
     def __init__(self, cfg, stage: int, device: torch.device, *, layers: range | None = None,
                  first: bool | None = None, last: bool | None = None, num_blocks: int | None = None,
-                 max_model_len: int | None = None, warmup: bool = True):
+                 max_model_len: int | None = None, warmup: bool = True,
+                 host_trims: bool = True):
         st = stage_settings(cfg)
         check_ninja()
         split = st["layer_split"]
@@ -161,6 +191,9 @@ class StageModel:
                 pp_patch.route_kda(layer.self_attn)
         pp_patch.install_topk_router()
         pp_patch.install_sparse_mla_split()
+        # host trims (no kernel or argument changes): env cache, FlashInfer tactic memo / mm_fp4 skip_check, plain
+        # parameters
+        self.host_trims = self.install_host_trims() if host_trims else None
 
         # KV: vLLM's block size, then this stage's tensors
         current_platform.update_block_size_for_backend(vc)
@@ -183,11 +216,19 @@ class StageModel:
         if warmup:
             self.warmup()
 
-    def warmup(self, autotune: bool = True) -> None:
-        """Before `Ready`: run every kernel once (first launches load modules) and tune FlashInfer's kernels as vLLM's
-        `kernel_warmup` does (one autotuned pass at the microbatch budget, then plain passes). Shapes: one request at
-        the full budget (indexer and both top-k paths), then two requests, one continuing a cached prefix (conv and
-        KDA initial state, chunk start > 0). Uses blocks 1.. before any request holds them."""
+    def install_host_trims(self) -> dict:
+        mods = [m for m in (*self.layers, self.embed, self.norm, self.lm_head) if m is not None]
+        return pp_patch.install_host_trims(mods)
+
+    def warmup(self, tune: str = "auto") -> None:
+        """Before `Ready`: run every kernel once (first launches load modules) with FlashInfer's tactics settled.
+        `tune`: "auto" loads `TACTICS` (tuning off) and tunes in this process, loudly, only when the file is missing
+        or invalid here; "force" tunes in this process (bench/tune_tactics.py); "off" uses neither. Tuning is one
+        autotuned pass at the microbatch budget, as vLLM's `kernel_warmup` does. Shapes: one request at the full
+        budget (indexer and both top-k paths), then two requests, one continuing a cached prefix (conv and KDA initial
+        state, chunk start > 0), then every power-of-2 length from 512 below the budget, a length not divisible by
+        16, and the first layer's mHC pre at every split count. Uses blocks 1.. before any request holds them.
+        `self.tactics` records the source."""
         from types import SimpleNamespace as NS
 
         B = self.kv.block_tokens
@@ -202,22 +243,60 @@ class StageModel:
             yield NS(mb_id=-1, chunks=[chunk("w0", 0, T, 1)])
             yield NS(mb_id=-2, chunks=[chunk("w1", 0, 512, 1), chunk("w2", 1024, 1024, 1 + 1 + 6)])
 
+        self.tactics = load_tactics() if tune == "auto" else {"source": tune}
         ctx = contextlib.nullcontext()
-        if autotune:
-            try:
-                from flashinfer.autotuner import autotune as fi_autotune
-                ctx = fi_autotune(True)
-            except ImportError:
-                pass
+        if tune == "force" or (tune == "auto" and self.tactics["source"] != "file"):
+            from flashinfer.autotuner import autotune as fi_autotune
+
+            if tune == "auto":
+                msg = (f"FlashInfer tactics not loaded ({self.tactics['reason']}): tuning in this process (~150 s, "
+                       f"tactics may differ per process). Run bench/tune_tactics.py to write {TACTICS}.")
+                warnings.warn(msg, stacklevel=2)
+                print(f"WARNING: {msg}", flush=True)
+                self.tactics["source"] = "tuned_in_process"
+            ctx = fi_autotune(True)
+        def run(plan):
+            T_p = sum(c.num_tokens for c in plan.chunks)
+            hidden = None if self.first else torch.zeros(T_p, self.hidden_width, dtype=torch.bfloat16,
+                                                          device=self.device)
+            self.forward(plan, hidden)
+
         with torch.inference_mode():
             for i, plan in enumerate(plans()):
-                T_p = sum(c.num_tokens for c in plan.chunks)
-                hidden = None if self.first else torch.zeros(T_p, self.hidden_width, dtype=torch.bfloat16,
-                                                              device=self.device)
                 with ctx if i == 0 else contextlib.nullcontext():
-                    self.forward(plan, hidden)
-                self.forward(plan, hidden)
+                    run(plan)
+                run(plan)
+            # first-use costs keyed by shape (7126): every power-of-2 token count from 512 below the budget (MoE
+            # tactic buckets, kernel modules first loaded per bucket; one-request runs at those exact lengths), and
+            # one count not divisible by 16 (Triton specializes integer arguments on divisibility: 1000 tokens
+            # compiled two builder/indexer kernels, 120 ms, on first use)
+            p = 512
+            while p < T:
+                run(NS(mb_id=-3, chunks=[chunk("wb", 0, p, 1)]))
+                p *= 2
+            run(NS(mb_id=-4, chunks=[chunk("wo", 0, 1000, 1)]))
+            self._warm_mhc_pre()
         torch.cuda.synchronize(self.device)
+        pp_patch.clear_autotune_memo()     # tactics may have changed while tuning
+
+    def _warm_mhc_pre(self) -> None:
+        """The standalone mHC pre of the stage's first layer (layer 0 after the input head, or after the stage edge)
+        runs a split-K DeepGEMM + TileLang pair whose split count is n_SMs // ceil(T / 64) below ~5k tokens, and each
+        new count loads its own kernels on first use (7126: ~80 ms on the first microbatch of each new count, on
+        every stage). Run it once per distinct split count up to the budget, on zeros."""
+        from vllm.model_executor.kernels.mhc.tilelang_kernels import compute_num_split
+
+        layer = self.layers[0]
+        n, H = layer.n, layer.hidden_size
+        first_T: dict[int, int] = {}
+        for T in range(64, self.max_tokens + 1, 64):
+            first_T.setdefault(compute_num_split(64, n * H, -(-T // 64)), T)
+        x = torch.zeros(max(first_T.values()), n, H, dtype=torch.bfloat16, device=self.device)
+        norm = layer.input_layernorm
+        for T in sorted(first_T.values()):
+            layer.hc_pre(x[:T], layer.hc_attn_fn, layer.hc_attn_scale, layer.hc_attn_base,
+                         norm_weight=norm.weight.data, norm_eps=norm.variance_epsilon)
+        self.mhc_pre_splits = sorted(first_T)
 
     # ------------------------------------------------------------------------------------------------ forward
 

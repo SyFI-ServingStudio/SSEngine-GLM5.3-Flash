@@ -1,0 +1,2805 @@
+{
+ "1024": {
+  "prompt_tokens": 1024,
+  "idle_us": {
+   "prepare": 945.0,
+   "embed": 34.3,
+   "hc_expand": 27.2,
+   "L0": 1259.8,
+   "L1": 991.8,
+   "L2": 1002.2,
+   "L3": 2158.3,
+   "L4": 1100.1,
+   "L5": 1072.1,
+   "L6": 1068.9,
+   "L7": 2150.9,
+   "L8": 1097.8,
+   "L9": 1060.5,
+   "L10": 1062.0,
+   "L11": 2145.2,
+   "output_head": 240.4,
+   "forward": 18152.8,
+   "_median_forward_us": 18211.6
+  },
+  "busy_us": {
+   "prepare": 957.0,
+   "embed": 33.4,
+   "hc_expand": 26.9,
+   "L0": 1255.9,
+   "L1": 998.9,
+   "L2": 1002.3,
+   "L3": 2153.0,
+   "L4": 1079.4,
+   "L5": 1071.5,
+   "L6": 1075.0,
+   "L7": 2139.7,
+   "L8": 1085.0,
+   "L9": 1054.0,
+   "L10": 1056.6,
+   "L11": 2134.4,
+   "output_head": 243.5,
+   "forward": 18108.0,
+   "_median_forward_us": 18146.6
+  },
+  "busy_sleep_ms": 86.3,
+  "idle_by_type": {
+   "prepare": {
+    "host_us": 945.0,
+    "n": 1
+   },
+   "input_head": {
+    "host_us": 30.8,
+    "n": 2
+   },
+   "first_kda_dense": {
+    "host_us": 1259.8,
+    "n": 1
+   },
+   "kda_dense": {
+    "host_us": 997.0,
+    "n": 2
+   },
+   "dsa_moe": {
+    "host_us": 2151.5,
+    "n": 3
+   },
+   "kda_moe": {
+    "host_us": 1076.9,
+    "n": 6
+   },
+   "output_head": {
+    "host_us": 240.4,
+    "n": 1
+   }
+  },
+  "profiled": {
+   "run_us": 23364.7,
+   "units": {
+    "prepare": {
+     "span_us": 1391.3,
+     "launches": 14,
+     "runtime_calls": 108,
+     "runtime_us": 185.3,
+     "op_outside_runtime_us": 456.5,
+     "python_us": 749.5
+    },
+    "embed": {
+     "span_us": 64.8,
+     "launches": 1,
+     "runtime_calls": 1,
+     "runtime_us": 7.9,
+     "op_outside_runtime_us": 34.5,
+     "python_us": 22.4
+    },
+    "L0": {
+     "span_us": 1583.2,
+     "launches": 21,
+     "runtime_calls": 28,
+     "runtime_us": 103.0,
+     "op_outside_runtime_us": 833.0,
+     "python_us": 647.2
+    },
+    "hc_expand": {
+     "span_us": 47.1,
+     "launches": 0,
+     "runtime_calls": 0,
+     "runtime_us": 0,
+     "op_outside_runtime_us": 0,
+     "python_us": 47.1
+    },
+    "L1": {
+     "span_us": 1318.9,
+     "launches": 19,
+     "runtime_calls": 25,
+     "runtime_us": 89.1,
+     "op_outside_runtime_us": 619.4,
+     "python_us": 610.3
+    },
+    "L2": {
+     "span_us": 1324.2,
+     "launches": 19,
+     "runtime_calls": 25,
+     "runtime_us": 87.8,
+     "op_outside_runtime_us": 630.3,
+     "python_us": 606.2
+    },
+    "L3": {
+     "span_us": 2787.9,
+     "launches": 52,
+     "runtime_calls": 76,
+     "runtime_us": 236.0,
+     "op_outside_runtime_us": 1726.5,
+     "python_us": 825.5
+    },
+    "L4": {
+     "span_us": 1456.0,
+     "launches": 25,
+     "runtime_calls": 44,
+     "runtime_us": 111.0,
+     "op_outside_runtime_us": 767.4,
+     "python_us": 577.5
+    },
+    "L5": {
+     "span_us": 1419.9,
+     "launches": 25,
+     "runtime_calls": 44,
+     "runtime_us": 113.7,
+     "op_outside_runtime_us": 761.7,
+     "python_us": 544.5
+    },
+    "L6": {
+     "span_us": 1445.8,
+     "launches": 25,
+     "runtime_calls": 44,
+     "runtime_us": 114.8,
+     "op_outside_runtime_us": 795.8,
+     "python_us": 535.2
+    },
+    "L7": {
+     "span_us": 2775.2,
+     "launches": 52,
+     "runtime_calls": 76,
+     "runtime_us": 232.6,
+     "op_outside_runtime_us": 1715.2,
+     "python_us": 827.4
+    },
+    "L8": {
+     "span_us": 1454.9,
+     "launches": 25,
+     "runtime_calls": 44,
+     "runtime_us": 111.7,
+     "op_outside_runtime_us": 799.6,
+     "python_us": 543.6
+    },
+    "L9": {
+     "span_us": 1400.4,
+     "launches": 25,
+     "runtime_calls": 44,
+     "runtime_us": 112.5,
+     "op_outside_runtime_us": 750.0,
+     "python_us": 537.9
+    },
+    "L10": {
+     "span_us": 1452.0,
+     "launches": 25,
+     "runtime_calls": 44,
+     "runtime_us": 114.5,
+     "op_outside_runtime_us": 790.4,
+     "python_us": 547.1
+    },
+    "L11": {
+     "span_us": 2806.3,
+     "launches": 52,
+     "runtime_calls": 76,
+     "runtime_us": 233.0,
+     "op_outside_runtime_us": 1741.7,
+     "python_us": 831.7
+    },
+    "output_head": {
+     "span_us": 342.9,
+     "launches": 10,
+     "runtime_calls": 12,
+     "runtime_us": 48.9,
+     "op_outside_runtime_us": 199.1,
+     "python_us": 94.9
+    }
+   },
+   "top_self_us": {
+    "prepare": [
+     [
+      "aten::copy_",
+      62.2
+     ],
+     [
+      "cudaMemcpyAsync",
+      59.8
+     ],
+     [
+      "aten::_pin_memory",
+      54.1
+     ],
+     [
+      "aten::empty_strided",
+      51.4
+     ],
+     [
+      "cudaLaunchKernel",
+      45.0
+     ],
+     [
+      "cudaEventQuery",
+      33.8
+     ],
+     [
+      "aten::_to_copy",
+      31.4
+     ],
+     [
+      "aten::sub",
+      29.6
+     ],
+     [
+      "aten::slice",
+      26.3
+     ],
+     [
+      "aten::is_pinned",
+      25.9
+     ],
+     [
+      "aten::empty",
+      25.0
+     ],
+     [
+      "aten::fill_",
+      16.6
+     ],
+     [
+      "cuLaunchKernelEx",
+      16.4
+     ],
+     [
+      "aten::pin_memory",
+      16.3
+     ],
+     [
+      "aten::to",
+      16.1
+     ],
+     [
+      "aten::floor_divide",
+      15.5
+     ],
+     [
+      "aten::cumsum",
+      15.5
+     ],
+     [
+      "aten::select",
+      13.3
+     ],
+     [
+      "aten::as_strided",
+      11.1
+     ],
+     [
+      "cudaPointerGetAttributes",
+      10.6
+     ],
+     [
+      "cudaEventRecordWithFlags",
+      9.3
+     ],
+     [
+      "cudaStreamIsCapturing",
+      7.8
+     ],
+     [
+      "aten::item",
+      7.6
+     ],
+     [
+      "aten::set_",
+      6.9
+     ],
+     [
+      "aten::max",
+      6.7
+     ]
+    ],
+    "input_head": [
+     [
+      "aten::gather",
+      11.8
+     ],
+     [
+      "aten::index_select",
+      10.8
+     ],
+     [
+      "cudaLaunchKernel",
+      7.9
+     ],
+     [
+      "aten::resize_",
+      3.6
+     ],
+     [
+      "aten::empty",
+      2.4
+     ],
+     [
+      "aten::embedding",
+      1.6
+     ],
+     [
+      "aten::expand",
+      1.5
+     ],
+     [
+      "aten::as_strided",
+      1.5
+     ],
+     [
+      "aten::view",
+      1.1
+     ],
+     [
+      "aten::to",
+      0.2
+     ]
+    ],
+    "first_kda_dense": [
+     [
+      "vllm::flashinfer_mm_fp4",
+      325.8
+     ],
+     [
+      "vllm::mhc_pre_tilelang",
+      172.4
+     ],
+     [
+      "aten::mm",
+      81.9
+     ],
+     [
+      "aten::empty",
+      66.3
+     ],
+     [
+      "cuLaunchKernelEx",
+      37.4
+     ],
+     [
+      "cudaLaunchKernel",
+      35.8
+     ],
+     [
+      "cudaLaunchKernelExC",
+      27.5
+     ],
+     [
+      "aten::as_strided",
+      17.0
+     ],
+     [
+      "aten::t",
+      15.5
+     ],
+     [
+      "aten::view",
+      14.1
+     ],
+     [
+      "_C::scaled_fp4_quant",
+      13.7
+     ],
+     [
+      "aten::slice",
+      12.9
+     ],
+     [
+      "aten::transpose",
+      11.9
+     ],
+     [
+      "aten::unsqueeze",
+      11.1
+     ],
+     [
+      "aten::index_copy_",
+      10.0
+     ],
+     [
+      "aten::empty_strided",
+      8.6
+     ],
+     [
+      "aten::copy_",
+      8.5
+     ],
+     [
+      "aten::linear",
+      7.0
+     ],
+     [
+      "aten::cat",
+      6.7
+     ],
+     [
+      "aten::permute",
+      6.6
+     ],
+     [
+      "_C::silu_and_mul_with_clamp",
+      6.3
+     ],
+     [
+      "aten::reshape",
+      5.1
+     ],
+     [
+      "aten::empty_like",
+      4.4
+     ],
+     [
+      "aten::fill_",
+      4.0
+     ],
+     [
+      "aten::matmul",
+      3.7
+     ]
+    ],
+    "kda_dense": [
+     [
+      "vllm::flashinfer_mm_fp4",
+      603.0
+     ],
+     [
+      "aten::mm",
+      156.1
+     ],
+     [
+      "aten::empty",
+      106.9
+     ],
+     [
+      "cuLaunchKernelEx",
+      60.9
+     ],
+     [
+      "cudaLaunchKernel",
+      58.8
+     ],
+     [
+      "cudaLaunchKernelExC",
+      52.9
+     ],
+     [
+      "aten::t",
+      45.3
+     ],
+     [
+      "aten::as_strided",
+      39.9
+     ],
+     [
+      "aten::empty_strided",
+      37.1
+     ],
+     [
+      "_C::scaled_fp4_quant",
+      26.7
+     ],
+     [
+      "aten::transpose",
+      22.5
+     ],
+     [
+      "aten::view",
+      22.2
+     ],
+     [
+      "aten::slice",
+      21.9
+     ],
+     [
+      "aten::copy_",
+      20.2
+     ],
+     [
+      "aten::index_copy_",
+      20.1
+     ],
+     [
+      "aten::unsqueeze",
+      18.6
+     ],
+     [
+      "aten::empty_like",
+      13.1
+     ],
+     [
+      "aten::linear",
+      12.3
+     ],
+     [
+      "_C::silu_and_mul_with_clamp",
+      12.1
+     ],
+     [
+      "aten::permute",
+      11.4
+     ],
+     [
+      "aten::reshape",
+      9.7
+     ],
+     [
+      "aten::fill_",
+      8.1
+     ],
+     [
+      "aten::matmul",
+      6.9
+     ],
+     [
+      "aten::split_with_sizes",
+      6.2
+     ],
+     [
+      "aten::select",
+      5.7
+     ]
+    ],
+    "dsa_moe": [
+     [
+      "vllm::moe_forward_shared",
+      1195.4
+     ],
+     [
+      "vllm::unified_mla_attention_with_output",
+      1156.4
+     ],
+     [
+      "aten::mm",
+      502.1
+     ],
+     [
+      "aten::empty",
+      331.2
+     ],
+     [
+      "cuLaunchKernelEx",
+      276.2
+     ],
+     [
+      "cudaLaunchKernel",
+      270.1
+     ],
+     [
+      "aten::bmm",
+      154.2
+     ],
+     [
+      "Torch-Compiled Region: 0/0",
+      152.0
+     ],
+     [
+      "Torch-Compiled Region: 1/0",
+      95.0
+     ],
+     [
+      "## Call CompiledFxGraph fnaxwuxd34j4bdptc4b25qkynynyut6zlupcjhiz37pva5sx766j ##",
+      92.1
+     ],
+     [
+      "cudaLaunchKernelExC",
+      84.0
+     ],
+     [
+      "## Call CompiledFxGraph fge3jj3nar4vb5gygflb2ph4jszuuq7nau65tktw4g2v3p7ronya ##",
+      83.7
+     ],
+     [
+      "TorchDynamo Cache Lookup",
+      76.5
+     ],
+     [
+      "aten::empty_strided",
+      75.7
+     ],
+     [
+      "vllm::unified_mla_kv_cache_update",
+      72.0
+     ],
+     [
+      "aten::slice",
+      66.1
+     ],
+     [
+      "aten::index",
+      61.8
+     ],
+     [
+      "aten::copy_",
+      60.4
+     ],
+     [
+      "Pregraph bytecode",
+      60.4
+     ],
+     [
+      "aten::as_strided",
+      57.1
+     ],
+     [
+      "aten::view",
+      56.7
+     ],
+     [
+      "aten::ge",
+      55.4
+     ],
+     [
+      "aten::add",
+      54.9
+     ],
+     [
+      "aten::arange",
+      54.1
+     ],
+     [
+      "triton_red_fused__to_copy_native_layer_norm_0",
+      46.0
+     ]
+    ],
+    "kda_moe": [
+     [
+      "vllm::moe_forward_shared",
+      2328.6
+     ],
+     [
+      "aten::mm",
+      666.0
+     ],
+     [
+      "aten::empty",
+      522.1
+     ],
+     [
+      "cuLaunchKernelEx",
+      306.2
+     ],
+     [
+      "cudaLaunchKernel",
+      201.0
+     ],
+     [
+      "cudaLaunchKernelExC",
+      145.4
+     ],
+     [
+      "aten::empty_strided",
+      104.7
+     ],
+     [
+      "aten::as_strided",
+      85.8
+     ],
+     [
+      "aten::t",
+      82.3
+     ],
+     [
+      "aten::unsqueeze",
+      80.0
+     ],
+     [
+      "aten::view",
+      72.3
+     ],
+     [
+      "aten::slice",
+      69.4
+     ],
+     [
+      "aten::add",
+      66.8
+     ],
+     [
+      "aten::transpose",
+      65.5
+     ],
+     [
+      "aten::index_copy_",
+      60.2
+     ],
+     [
+      "aten::copy_",
+      57.7
+     ],
+     [
+      "aten::linear",
+      51.2
+     ],
+     [
+      "_C::silu_and_mul_with_clamp",
+      48.9
+     ],
+     [
+      "aten::empty_like",
+      40.8
+     ],
+     [
+      "_C::scaled_fp4_quant",
+      35.7
+     ],
+     [
+      "aten::reshape",
+      31.4
+     ],
+     [
+      "aten::matmul",
+      29.9
+     ],
+     [
+      "aten::numpy_T",
+      27.7
+     ],
+     [
+      "cudaDeviceGetAttribute",
+      25.6
+     ],
+     [
+      "aten::fill_",
+      24.6
+     ]
+    ],
+    "output_head": [
+     [
+      "vllm::mhc_post_tilelang",
+      69.8
+     ],
+     [
+      "aten::mm",
+      33.2
+     ],
+     [
+      "cudaLaunchKernel",
+      28.8
+     ],
+     [
+      "aten::index_select",
+      24.9
+     ],
+     [
+      "aten::argmax",
+      13.6
+     ],
+     [
+      "aten::mean",
+      13.5
+     ],
+     [
+      "aten::empty",
+      9.9
+     ],
+     [
+      "_C::rms_norm",
+      9.1
+     ],
+     [
+      "cuLaunchKernelEx",
+      8.8
+     ],
+     [
+      "aten::resize_",
+      7.8
+     ],
+     [
+      "cudaMemsetAsync",
+      7.0
+     ],
+     [
+      "cudaLaunchKernelExC",
+      4.1
+     ],
+     [
+      "aten::empty_strided",
+      4.0
+     ],
+     [
+      "aten::as_strided",
+      2.6
+     ],
+     [
+      "aten::t",
+      2.6
+     ],
+     [
+      "aten::linear",
+      2.4
+     ],
+     [
+      "aten::squeeze",
+      1.8
+     ],
+     [
+      "aten::empty_like",
+      1.4
+     ],
+     [
+      "aten::matmul",
+      1.2
+     ],
+     [
+      "aten::transpose",
+      1.1
+     ],
+     [
+      "cudaPeekAtLastError",
+      0.1
+     ]
+    ]
+   },
+   "kernels": 390,
+   "blocking": []
+  },
+  "profiled_by_type": {
+   "prepare": {
+    "span_us": 1391.3,
+    "launches": 14.0,
+    "runtime_calls": 108.0,
+    "runtime_us": 185.3,
+    "op_outside_runtime_us": 456.5,
+    "python_us": 749.5,
+    "n": 1
+   },
+   "input_head": {
+    "span_us": 56.0,
+    "launches": 0.5,
+    "runtime_calls": 0.5,
+    "runtime_us": 4.0,
+    "op_outside_runtime_us": 17.2,
+    "python_us": 34.8,
+    "n": 2
+   },
+   "first_kda_dense": {
+    "span_us": 1583.2,
+    "launches": 21.0,
+    "runtime_calls": 28.0,
+    "runtime_us": 103.0,
+    "op_outside_runtime_us": 833.0,
+    "python_us": 647.2,
+    "n": 1
+   },
+   "kda_dense": {
+    "span_us": 1321.6,
+    "launches": 19.0,
+    "runtime_calls": 25.0,
+    "runtime_us": 88.4,
+    "op_outside_runtime_us": 624.8,
+    "python_us": 608.2,
+    "n": 2
+   },
+   "dsa_moe": {
+    "span_us": 2789.8,
+    "launches": 52.0,
+    "runtime_calls": 76.0,
+    "runtime_us": 233.9,
+    "op_outside_runtime_us": 1727.8,
+    "python_us": 828.2,
+    "n": 3
+   },
+   "kda_moe": {
+    "span_us": 1438.2,
+    "launches": 25.0,
+    "runtime_calls": 44.0,
+    "runtime_us": 113.0,
+    "op_outside_runtime_us": 777.5,
+    "python_us": 547.6,
+    "n": 6
+   },
+   "output_head": {
+    "span_us": 342.9,
+    "launches": 10.0,
+    "runtime_calls": 12.0,
+    "runtime_us": 48.9,
+    "op_outside_runtime_us": 199.1,
+    "python_us": 94.9,
+    "n": 1
+   }
+  },
+  "spy": {
+   "forwards": 65,
+   "ms_per_forward": 1313.15,
+   "raw": "/raid/kanzhu/ServingStudio/pp-impl/lanes/model/measured/host/7091_spy_L1024.txt",
+   "py_spy": ", results may be inaccurate. Try reducing the sampling rate\npy-spy> 65.36s behind in sampling, results may be inaccurate. Try reducing the sampling rate\npy-spy> 66.23s behind in sampling, results may be inaccurate. Try reducing the sampling rate\npy-spy> Wrote raw flamegraph data to '/raid/kanzhu/ServingStudio/pp-impl/lanes/model/measured/host/7091_spy_L1024.txt'. Samples: 951 Errors: 0\npy-spy> You can use the flamegraph.pl script from https://github.com/brendangregg/flamegraph to generate a SVG\n"
+  }
+ },
+ "8192": {
+  "prompt_tokens": 8192,
+  "idle_us": {
+   "prepare": 1378.8,
+   "embed": 44.3,
+   "hc_expand": 35.2,
+   "L0": 1373.7,
+   "L1": 1091.4,
+   "L2": 1092.3,
+   "L3": 2488.5,
+   "L4": 1200.9,
+   "L5": 1194.4,
+   "L6": 1212.9,
+   "L7": 2463.2,
+   "L8": 1202.5,
+   "L9": 1202.5,
+   "L10": 1182.2,
+   "L11": 2472.6,
+   "output_head": 313.4,
+   "forward": 20807.8,
+   "_median_forward_us": 20932.9
+  },
+  "busy_us": {
+   "prepare": 1397.3,
+   "embed": 44.0,
+   "hc_expand": 33.3,
+   "L0": 1377.0,
+   "L1": 1091.4,
+   "L2": 1071.2,
+   "L3": 2495.2,
+   "L4": 1211.8,
+   "L5": 1186.8,
+   "L6": 1170.3,
+   "L7": 2452.6,
+   "L8": 1200.8,
+   "L9": 1181.7,
+   "L10": 1166.5,
+   "L11": 2455.9,
+   "output_head": 290.7,
+   "forward": 20705.6,
+   "_median_forward_us": 20786.8
+  },
+  "busy_sleep_ms": 91.6,
+  "idle_by_type": {
+   "prepare": {
+    "host_us": 1378.8,
+    "n": 1
+   },
+   "input_head": {
+    "host_us": 39.8,
+    "n": 2
+   },
+   "first_kda_dense": {
+    "host_us": 1373.7,
+    "n": 1
+   },
+   "kda_dense": {
+    "host_us": 1091.8,
+    "n": 2
+   },
+   "dsa_moe": {
+    "host_us": 2474.8,
+    "n": 3
+   },
+   "kda_moe": {
+    "host_us": 1199.2,
+    "n": 6
+   },
+   "output_head": {
+    "host_us": 313.4,
+    "n": 1
+   }
+  },
+  "profiled": {
+   "run_us": 24317.8,
+   "units": {
+    "prepare": {
+     "span_us": 1687.1,
+     "launches": 14,
+     "runtime_calls": 108,
+     "runtime_us": 203.2,
+     "op_outside_runtime_us": 470.2,
+     "python_us": 1013.6
+    },
+    "embed": {
+     "span_us": 75.4,
+     "launches": 1,
+     "runtime_calls": 1,
+     "runtime_us": 11.5,
+     "op_outside_runtime_us": 36.5,
+     "python_us": 27.5
+    },
+    "L0": {
+     "span_us": 1574.9,
+     "launches": 21,
+     "runtime_calls": 28,
+     "runtime_us": 103.1,
+     "op_outside_runtime_us": 836.3,
+     "python_us": 635.5
+    },
+    "hc_expand": {
+     "span_us": 49.4,
+     "launches": 0,
+     "runtime_calls": 0,
+     "runtime_us": 0,
+     "op_outside_runtime_us": 0,
+     "python_us": 49.4
+    },
+    "L1": {
+     "span_us": 1307.4,
+     "launches": 19,
+     "runtime_calls": 25,
+     "runtime_us": 89.2,
+     "op_outside_runtime_us": 611.1,
+     "python_us": 607.1
+    },
+    "L2": {
+     "span_us": 1384.8,
+     "launches": 19,
+     "runtime_calls": 25,
+     "runtime_us": 93.8,
+     "op_outside_runtime_us": 613.6,
+     "python_us": 677.4
+    },
+    "L3": {
+     "span_us": 2942.5,
+     "launches": 53,
+     "runtime_calls": 76,
+     "runtime_us": 242.1,
+     "op_outside_runtime_us": 1770.2,
+     "python_us": 930.2
+    },
+    "L4": {
+     "span_us": 1453.6,
+     "launches": 25,
+     "runtime_calls": 44,
+     "runtime_us": 110.7,
+     "op_outside_runtime_us": 794.1,
+     "python_us": 548.8
+    },
+    "L5": {
+     "span_us": 1417.1,
+     "launches": 25,
+     "runtime_calls": 44,
+     "runtime_us": 109.9,
+     "op_outside_runtime_us": 773.2,
+     "python_us": 534.0
+    },
+    "L6": {
+     "span_us": 1506.2,
+     "launches": 25,
+     "runtime_calls": 44,
+     "runtime_us": 117.5,
+     "op_outside_runtime_us": 796.5,
+     "python_us": 592.2
+    },
+    "L7": {
+     "span_us": 2922.9,
+     "launches": 53,
+     "runtime_calls": 76,
+     "runtime_us": 238.0,
+     "op_outside_runtime_us": 1770.6,
+     "python_us": 914.4
+    },
+    "L8": {
+     "span_us": 1482.8,
+     "launches": 25,
+     "runtime_calls": 44,
+     "runtime_us": 111.3,
+     "op_outside_runtime_us": 830.4,
+     "python_us": 541.1
+    },
+    "L9": {
+     "span_us": 1423.7,
+     "launches": 25,
+     "runtime_calls": 44,
+     "runtime_us": 119.6,
+     "op_outside_runtime_us": 767.1,
+     "python_us": 537.1
+    },
+    "L10": {
+     "span_us": 1465.2,
+     "launches": 25,
+     "runtime_calls": 44,
+     "runtime_us": 111.9,
+     "op_outside_runtime_us": 808.4,
+     "python_us": 544.8
+    },
+    "L11": {
+     "span_us": 2943.4,
+     "launches": 53,
+     "runtime_calls": 76,
+     "runtime_us": 237.3,
+     "op_outside_runtime_us": 1758.2,
+     "python_us": 947.9
+    },
+    "output_head": {
+     "span_us": 346.1,
+     "launches": 10,
+     "runtime_calls": 12,
+     "runtime_us": 51.8,
+     "op_outside_runtime_us": 201.5,
+     "python_us": 92.8
+    }
+   },
+   "top_self_us": {
+    "prepare": [
+     [
+      "aten::copy_",
+      85.8
+     ],
+     [
+      "cudaMemcpyAsync",
+      69.8
+     ],
+     [
+      "aten::empty_strided",
+      53.5
+     ],
+     [
+      "cudaLaunchKernel",
+      48.5
+     ],
+     [
+      "aten::_pin_memory",
+      37.2
+     ],
+     [
+      "cudaEventQuery",
+      36.0
+     ],
+     [
+      "aten::_to_copy",
+      30.8
+     ],
+     [
+      "aten::sub",
+      29.7
+     ],
+     [
+      "aten::is_pinned",
+      27.3
+     ],
+     [
+      "aten::slice",
+      26.1
+     ],
+     [
+      "aten::empty",
+      26.1
+     ],
+     [
+      "cuLaunchKernelEx",
+      18.7
+     ],
+     [
+      "aten::fill_",
+      18.1
+     ],
+     [
+      "aten::cumsum",
+      16.9
+     ],
+     [
+      "aten::to",
+      16.4
+     ],
+     [
+      "aten::floor_divide",
+      15.7
+     ],
+     [
+      "aten::pin_memory",
+      15.6
+     ],
+     [
+      "aten::select",
+      13.3
+     ],
+     [
+      "cudaPointerGetAttributes",
+      11.4
+     ],
+     [
+      "aten::as_strided",
+      10.6
+     ],
+     [
+      "cudaEventRecordWithFlags",
+      9.5
+     ],
+     [
+      "aten::item",
+      7.1
+     ],
+     [
+      "aten::set_",
+      7.0
+     ],
+     [
+      "aten::sum",
+      6.9
+     ],
+     [
+      "cudaStreamIsCapturing",
+      6.9
+     ]
+    ],
+    "input_head": [
+     [
+      "aten::gather",
+      13.3
+     ],
+     [
+      "cudaLaunchKernel",
+      11.5
+     ],
+     [
+      "aten::index_select",
+      10.3
+     ],
+     [
+      "aten::resize_",
+      4.0
+     ],
+     [
+      "aten::empty",
+      2.4
+     ],
+     [
+      "aten::embedding",
+      2.0
+     ],
+     [
+      "aten::expand",
+      1.6
+     ],
+     [
+      "aten::as_strided",
+      1.4
+     ],
+     [
+      "aten::view",
+      1.1
+     ],
+     [
+      "aten::to",
+      0.4
+     ]
+    ],
+    "first_kda_dense": [
+     [
+      "vllm::flashinfer_mm_fp4",
+      320.2
+     ],
+     [
+      "vllm::mhc_pre_tilelang",
+      168.4
+     ],
+     [
+      "aten::mm",
+      80.6
+     ],
+     [
+      "aten::empty",
+      74.7
+     ],
+     [
+      "cuLaunchKernelEx",
+      36.7
+     ],
+     [
+      "cudaLaunchKernel",
+      35.6
+     ],
+     [
+      "cudaLaunchKernelExC",
+      28.7
+     ],
+     [
+      "aten::as_strided",
+      18.3
+     ],
+     [
+      "aten::t",
+      16.2
+     ],
+     [
+      "_C::scaled_fp4_quant",
+      14.6
+     ],
+     [
+      "aten::slice",
+      14.0
+     ],
+     [
+      "aten::view",
+      13.9
+     ],
+     [
+      "aten::transpose",
+      11.7
+     ],
+     [
+      "aten::unsqueeze",
+      10.7
+     ],
+     [
+      "aten::index_copy_",
+      9.9
+     ],
+     [
+      "aten::empty_strided",
+      9.1
+     ],
+     [
+      "aten::copy_",
+      9.1
+     ],
+     [
+      "aten::linear",
+      8.4
+     ],
+     [
+      "aten::cat",
+      7.9
+     ],
+     [
+      "_C::silu_and_mul_with_clamp",
+      6.6
+     ],
+     [
+      "aten::permute",
+      6.4
+     ],
+     [
+      "aten::reshape",
+      5.3
+     ],
+     [
+      "aten::fill_",
+      4.1
+     ],
+     [
+      "aten::empty_like",
+      4.0
+     ],
+     [
+      "aten::matmul",
+      3.7
+     ]
+    ],
+    "kda_dense": [
+     [
+      "vllm::flashinfer_mm_fp4",
+      601.3
+     ],
+     [
+      "aten::mm",
+      147.8
+     ],
+     [
+      "aten::empty",
+      109.1
+     ],
+     [
+      "cudaLaunchKernel",
+      64.4
+     ],
+     [
+      "cuLaunchKernelEx",
+      62.1
+     ],
+     [
+      "cudaLaunchKernelExC",
+      52.5
+     ],
+     [
+      "aten::empty_strided",
+      38.0
+     ],
+     [
+      "aten::as_strided",
+      35.1
+     ],
+     [
+      "_C::scaled_fp4_quant",
+      27.9
+     ],
+     [
+      "aten::t",
+      27.5
+     ],
+     [
+      "aten::view",
+      22.5
+     ],
+     [
+      "aten::transpose",
+      22.2
+     ],
+     [
+      "aten::slice",
+      21.8
+     ],
+     [
+      "aten::index_copy_",
+      20.7
+     ],
+     [
+      "aten::copy_",
+      20.4
+     ],
+     [
+      "aten::unsqueeze",
+      17.8
+     ],
+     [
+      "aten::linear",
+      14.7
+     ],
+     [
+      "aten::empty_like",
+      12.6
+     ],
+     [
+      "_C::silu_and_mul_with_clamp",
+      12.5
+     ],
+     [
+      "aten::permute",
+      11.3
+     ],
+     [
+      "aten::reshape",
+      9.2
+     ],
+     [
+      "aten::fill_",
+      8.7
+     ],
+     [
+      "aten::matmul",
+      7.2
+     ],
+     [
+      "aten::split_with_sizes",
+      6.0
+     ],
+     [
+      "aten::numpy_T",
+      5.9
+     ]
+    ],
+    "dsa_moe": [
+     [
+      "vllm::moe_forward_shared",
+      1231.2
+     ],
+     [
+      "vllm::unified_mla_attention_with_output",
+      1139.0
+     ],
+     [
+      "aten::mm",
+      509.8
+     ],
+     [
+      "aten::empty",
+      359.0
+     ],
+     [
+      "cuLaunchKernelEx",
+      318.7
+     ],
+     [
+      "cudaLaunchKernel",
+      283.5
+     ],
+     [
+      "aten::bmm",
+      157.1
+     ],
+     [
+      "Torch-Compiled Region: 0/0",
+      143.7
+     ],
+     [
+      "## Call CompiledFxGraph fnaxwuxd34j4bdptc4b25qkynynyut6zlupcjhiz37pva5sx766j ##",
+      122.2
+     ],
+     [
+      "aten::empty_strided",
+      85.9
+     ],
+     [
+      "Torch-Compiled Region: 1/0",
+      85.8
+     ],
+     [
+      "TorchDynamo Cache Lookup",
+      84.6
+     ],
+     [
+      "## Call CompiledFxGraph fge3jj3nar4vb5gygflb2ph4jszuuq7nau65tktw4g2v3p7ronya ##",
+      82.9
+     ],
+     [
+      "aten::slice",
+      80.5
+     ],
+     [
+      "aten::add",
+      78.7
+     ],
+     [
+      "aten::copy_",
+      76.0
+     ],
+     [
+      "vllm::unified_mla_kv_cache_update",
+      69.0
+     ],
+     [
+      "aten::index",
+      63.1
+     ],
+     [
+      "Pregraph bytecode",
+      61.9
+     ],
+     [
+      "aten::as_strided",
+      61.6
+     ],
+     [
+      "aten::view",
+      60.2
+     ],
+     [
+      "aten::ge",
+      57.9
+     ],
+     [
+      "cudaLaunchKernelExC",
+      56.5
+     ],
+     [
+      "triton_red_fused__to_copy_native_layer_norm_0",
+      48.0
+     ],
+     [
+      "aten::linear",
+      39.8
+     ]
+    ],
+    "kda_moe": [
+     [
+      "vllm::moe_forward_shared",
+      2337.7
+     ],
+     [
+      "aten::mm",
+      686.6
+     ],
+     [
+      "aten::empty",
+      529.9
+     ],
+     [
+      "cuLaunchKernelEx",
+      305.5
+     ],
+     [
+      "cudaLaunchKernel",
+      196.4
+     ],
+     [
+      "cudaLaunchKernelExC",
+      155.2
+     ],
+     [
+      "aten::t",
+      123.7
+     ],
+     [
+      "aten::empty_strided",
+      116.9
+     ],
+     [
+      "aten::index_copy_",
+      110.7
+     ],
+     [
+      "aten::as_strided",
+      90.3
+     ],
+     [
+      "aten::view",
+      74.0
+     ],
+     [
+      "aten::add",
+      68.0
+     ],
+     [
+      "aten::slice",
+      67.9
+     ],
+     [
+      "aten::transpose",
+      66.3
+     ],
+     [
+      "aten::copy_",
+      58.9
+     ],
+     [
+      "aten::linear",
+      56.2
+     ],
+     [
+      "_C::silu_and_mul_with_clamp",
+      49.3
+     ],
+     [
+      "_C::scaled_fp4_quant",
+      38.9
+     ],
+     [
+      "aten::empty_like",
+      38.7
+     ],
+     [
+      "aten::unsqueeze",
+      38.2
+     ],
+     [
+      "aten::reshape",
+      31.4
+     ],
+     [
+      "aten::matmul",
+      29.6
+     ],
+     [
+      "aten::select",
+      27.0
+     ],
+     [
+      "aten::fill_",
+      26.9
+     ],
+     [
+      "cudaDeviceGetAttribute",
+      23.7
+     ]
+    ],
+    "output_head": [
+     [
+      "vllm::mhc_post_tilelang",
+      69.5
+     ],
+     [
+      "aten::mm",
+      34.5
+     ],
+     [
+      "cudaLaunchKernel",
+      29.9
+     ],
+     [
+      "aten::index_select",
+      26.4
+     ],
+     [
+      "aten::argmax",
+      14.3
+     ],
+     [
+      "aten::mean",
+      13.8
+     ],
+     [
+      "aten::empty",
+      9.6
+     ],
+     [
+      "cuLaunchKernelEx",
+      8.9
+     ],
+     [
+      "aten::resize_",
+      8.5
+     ],
+     [
+      "_C::rms_norm",
+      7.9
+     ],
+     [
+      "cudaMemsetAsync",
+      7.2
+     ],
+     [
+      "cudaLaunchKernelExC",
+      5.7
+     ],
+     [
+      "aten::empty_strided",
+      3.9
+     ],
+     [
+      "aten::t",
+      2.5
+     ],
+     [
+      "aten::as_strided",
+      2.4
+     ],
+     [
+      "aten::linear",
+      2.2
+     ],
+     [
+      "aten::squeeze",
+      2.1
+     ],
+     [
+      "aten::empty_like",
+      1.6
+     ],
+     [
+      "aten::matmul",
+      1.3
+     ],
+     [
+      "aten::transpose",
+      1.1
+     ],
+     [
+      "cudaPeekAtLastError",
+      0.1
+     ]
+    ]
+   },
+   "kernels": 393,
+   "blocking": []
+  },
+  "profiled_by_type": {
+   "prepare": {
+    "span_us": 1687.1,
+    "launches": 14.0,
+    "runtime_calls": 108.0,
+    "runtime_us": 203.2,
+    "op_outside_runtime_us": 470.2,
+    "python_us": 1013.6,
+    "n": 1
+   },
+   "input_head": {
+    "span_us": 62.4,
+    "launches": 0.5,
+    "runtime_calls": 0.5,
+    "runtime_us": 5.8,
+    "op_outside_runtime_us": 18.2,
+    "python_us": 38.5,
+    "n": 2
+   },
+   "first_kda_dense": {
+    "span_us": 1574.9,
+    "launches": 21.0,
+    "runtime_calls": 28.0,
+    "runtime_us": 103.1,
+    "op_outside_runtime_us": 836.3,
+    "python_us": 635.5,
+    "n": 1
+   },
+   "kda_dense": {
+    "span_us": 1346.1,
+    "launches": 19.0,
+    "runtime_calls": 25.0,
+    "runtime_us": 91.5,
+    "op_outside_runtime_us": 612.4,
+    "python_us": 642.2,
+    "n": 2
+   },
+   "dsa_moe": {
+    "span_us": 2936.3,
+    "launches": 53.0,
+    "runtime_calls": 76.0,
+    "runtime_us": 239.1,
+    "op_outside_runtime_us": 1766.3,
+    "python_us": 930.8,
+    "n": 3
+   },
+   "kda_moe": {
+    "span_us": 1458.1,
+    "launches": 25.0,
+    "runtime_calls": 44.0,
+    "runtime_us": 113.5,
+    "op_outside_runtime_us": 794.9,
+    "python_us": 549.7,
+    "n": 6
+   },
+   "output_head": {
+    "span_us": 346.1,
+    "launches": 10.0,
+    "runtime_calls": 12.0,
+    "runtime_us": 51.8,
+    "op_outside_runtime_us": 201.5,
+    "python_us": 92.8,
+    "n": 1
+   }
+  },
+  "spy": {
+   "forwards": 56,
+   "ms_per_forward": 1627.85,
+   "raw": "/raid/kanzhu/ServingStudio/pp-impl/lanes/model/measured/host/7091_spy_L8192.txt",
+   "py_spy": ", results may be inaccurate. Try reducing the sampling rate\npy-spy> 71.37s behind in sampling, results may be inaccurate. Try reducing the sampling rate\npy-spy> 72.12s behind in sampling, results may be inaccurate. Try reducing the sampling rate\npy-spy> Wrote raw flamegraph data to '/raid/kanzhu/ServingStudio/pp-impl/lanes/model/measured/host/7091_spy_L8192.txt'. Samples: 847 Errors: 0\npy-spy> You can use the flamegraph.pl script from https://github.com/brendangregg/flamegraph to generate a SVG\n"
+  }
+ },
+ "131072": {
+  "prompt_tokens": 131072,
+  "idle_us": {
+   "prepare": 29344.2,
+   "embed": 63.9,
+   "hc_expand": 60.7,
+   "L0": 1849.5,
+   "L1": 1279.1,
+   "L2": 1214.8,
+   "L3": 6589.9,
+   "L4": 1274.8,
+   "L5": 1243.8,
+   "L6": 1244.9,
+   "L7": 6015.4,
+   "L8": 1248.4,
+   "L9": 1229.2,
+   "L10": 1225.9,
+   "L11": 49864.8,
+   "output_head": 38728.2,
+   "forward": 148388.6,
+   "_median_forward_us": 148719.3
+  },
+  "busy_us": {
+   "prepare": 25718.1,
+   "embed": 60.2,
+   "hc_expand": 58.1,
+   "L0": 1677.8,
+   "L1": 1265.2,
+   "L2": 1174.3,
+   "L3": 6239.2,
+   "L4": 1267.0,
+   "L5": 1239.4,
+   "L6": 1234.9,
+   "L7": 6003.3,
+   "L8": 1244.7,
+   "L9": 1228.2,
+   "L10": 1200.7,
+   "L11": 361316.3,
+   "output_head": 39388.6,
+   "forward": 471720.3,
+   "_median_forward_us": 473408.2
+  },
+  "busy_sleep_ms": 346.8,
+  "idle_by_type": {
+   "prepare": {
+    "host_us": 29344.2,
+    "n": 1
+   },
+   "input_head": {
+    "host_us": 62.3,
+    "n": 2
+   },
+   "first_kda_dense": {
+    "host_us": 1849.5,
+    "n": 1
+   },
+   "kda_dense": {
+    "host_us": 1246.9,
+    "n": 2
+   },
+   "dsa_moe": {
+    "host_us": 20823.4,
+    "n": 3
+   },
+   "kda_moe": {
+    "host_us": 1244.5,
+    "n": 6
+   },
+   "output_head": {
+    "host_us": 38728.2,
+    "n": 1
+   }
+  },
+  "profiled": {
+   "run_us": 146014.9,
+   "units": {
+    "prepare": {
+     "span_us": 26892.6,
+     "launches": 169,
+     "runtime_calls": 454,
+     "runtime_us": 1975.6,
+     "op_outside_runtime_us": 5829.1,
+     "python_us": 19087.9
+    },
+    "embed": {
+     "span_us": 262.9,
+     "launches": 1,
+     "runtime_calls": 1,
+     "runtime_us": 33.4,
+     "op_outside_runtime_us": 152.8,
+     "python_us": 76.7
+    },
+    "L0": {
+     "span_us": 4589.4,
+     "launches": 25,
+     "runtime_calls": 32,
+     "runtime_us": 263.9,
+     "op_outside_runtime_us": 2366.4,
+     "python_us": 1959.0
+    },
+    "hc_expand": {
+     "span_us": 170.1,
+     "launches": 0,
+     "runtime_calls": 0,
+     "runtime_us": 0,
+     "op_outside_runtime_us": 0,
+     "python_us": 170.1
+    },
+    "L1": {
+     "span_us": 1834.4,
+     "launches": 22,
+     "runtime_calls": 28,
+     "runtime_us": 129.8,
+     "op_outside_runtime_us": 832.6,
+     "python_us": 872.1
+    },
+    "L2": {
+     "span_us": 1655.0,
+     "launches": 22,
+     "runtime_calls": 28,
+     "runtime_us": 128.2,
+     "op_outside_runtime_us": 721.5,
+     "python_us": 805.3
+    },
+    "L3": {
+     "span_us": 13078.3,
+     "launches": 276,
+     "runtime_calls": 299,
+     "runtime_us": 1391.5,
+     "op_outside_runtime_us": 6951.8,
+     "python_us": 4735.0
+    },
+    "L4": {
+     "span_us": 1735.8,
+     "launches": 28,
+     "runtime_calls": 47,
+     "runtime_us": 148.5,
+     "op_outside_runtime_us": 941.2,
+     "python_us": 646.1
+    },
+    "L5": {
+     "span_us": 1701.9,
+     "launches": 28,
+     "runtime_calls": 47,
+     "runtime_us": 151.5,
+     "op_outside_runtime_us": 949.9,
+     "python_us": 600.5
+    },
+    "L6": {
+     "span_us": 1647.4,
+     "launches": 28,
+     "runtime_calls": 47,
+     "runtime_us": 148.5,
+     "op_outside_runtime_us": 877.7,
+     "python_us": 621.2
+    },
+    "L7": {
+     "span_us": 8659.3,
+     "launches": 276,
+     "runtime_calls": 299,
+     "runtime_us": 1247.4,
+     "op_outside_runtime_us": 4054.4,
+     "python_us": 3357.6
+    },
+    "L8": {
+     "span_us": 2131.9,
+     "launches": 28,
+     "runtime_calls": 47,
+     "runtime_us": 173.7,
+     "op_outside_runtime_us": 1307.6,
+     "python_us": 650.6
+    },
+    "L9": {
+     "span_us": 3049.0,
+     "launches": 28,
+     "runtime_calls": 47,
+     "runtime_us": 352.4,
+     "op_outside_runtime_us": 1264.8,
+     "python_us": 1431.7
+    },
+    "L10": {
+     "span_us": 1802.9,
+     "launches": 28,
+     "runtime_calls": 47,
+     "runtime_us": 149.9,
+     "op_outside_runtime_us": 953.6,
+     "python_us": 699.4
+    },
+    "L11": {
+     "span_us": 36951.4,
+     "launches": 276,
+     "runtime_calls": 299,
+     "runtime_us": 28985.1,
+     "op_outside_runtime_us": 4384.6,
+     "python_us": 3581.8
+    },
+    "output_head": {
+     "span_us": 39012.5,
+     "launches": 10,
+     "runtime_calls": 12,
+     "runtime_us": 38322.2,
+     "op_outside_runtime_us": 448.9,
+     "python_us": 241.3
+    }
+   },
+   "top_self_us": {
+    "prepare": [
+     [
+      "aten::copy_",
+      844.3
+     ],
+     [
+      "cudaLaunchKernel",
+      801.1
+     ],
+     [
+      "aten::empty",
+      785.7
+     ],
+     [
+      "cudaMemcpyAsync",
+      659.5
+     ],
+     [
+      "aten::cumsum",
+      554.3
+     ],
+     [
+      "aten::as_strided",
+      514.8
+     ],
+     [
+      "aten::item",
+      420.5
+     ],
+     [
+      "aten::empty_strided",
+      400.3
+     ],
+     [
+      "aten::slice",
+      358.0
+     ],
+     [
+      "aten::sub",
+      355.6
+     ],
+     [
+      "aten::sum",
+      292.5
+     ],
+     [
+      "aten::select",
+      278.1
+     ],
+     [
+      "aten::_pin_memory",
+      229.0
+     ],
+     [
+      "aten::fill_",
+      208.2
+     ],
+     [
+      "cuLaunchKernelEx",
+      203.7
+     ],
+     [
+      "aten::_to_copy",
+      190.6
+     ],
+     [
+      "cudaPointerGetAttributes",
+      121.0
+     ],
+     [
+      "aten::is_pinned",
+      95.3
+     ],
+     [
+      "cudaEventQuery",
+      85.9
+     ],
+     [
+      "aten::to",
+      84.9
+     ],
+     [
+      "aten::floor_divide",
+      47.7
+     ],
+     [
+      "aten::pin_memory",
+      39.0
+     ],
+     [
+      "cudaOccupancyMaxActiveBlocksPerMultiprocessorWithFlags",
+      37.8
+     ],
+     [
+      "aten::ones",
+      27.8
+     ],
+     [
+      "cudaStreamIsCapturing",
+      26.4
+     ]
+    ],
+    "input_head": [
+     [
+      "aten::gather",
+      44.9
+     ],
+     [
+      "aten::index_select",
+      43.1
+     ],
+     [
+      "aten::resize_",
+      41.0
+     ],
+     [
+      "cudaLaunchKernel",
+      33.4
+     ],
+     [
+      "aten::embedding",
+      11.3
+     ],
+     [
+      "aten::expand",
+      4.1
+     ],
+     [
+      "aten::empty",
+      3.4
+     ],
+     [
+      "aten::as_strided",
+      3.2
+     ],
+     [
+      "aten::view",
+      1.3
+     ],
+     [
+      "aten::to",
+      0.4
+     ]
+    ],
+    "first_kda_dense": [
+     [
+      "vllm::flashinfer_mm_fp4",
+      852.8
+     ],
+     [
+      "vllm::mhc_pre_tilelang",
+      596.1
+     ],
+     [
+      "aten::mm",
+      278.1
+     ],
+     [
+      "aten::empty",
+      179.8
+     ],
+     [
+      "cudaLaunchKernel",
+      109.2
+     ],
+     [
+      "cuLaunchKernelEx",
+      98.7
+     ],
+     [
+      "cudaLaunchKernelExC",
+      53.6
+     ],
+     [
+      "_C::scaled_fp4_quant",
+      38.9
+     ],
+     [
+      "aten::as_strided",
+      35.9
+     ],
+     [
+      "aten::t",
+      34.8
+     ],
+     [
+      "aten::unsqueeze",
+      34.4
+     ],
+     [
+      "aten::copy_",
+      31.1
+     ],
+     [
+      "aten::slice",
+      30.6
+     ],
+     [
+      "aten::linear",
+      28.1
+     ],
+     [
+      "aten::transpose",
+      24.9
+     ],
+     [
+      "aten::cat",
+      24.4
+     ],
+     [
+      "aten::view",
+      24.2
+     ],
+     [
+      "aten::index_copy_",
+      22.9
+     ],
+     [
+      "_C::silu_and_mul_with_clamp",
+      20.6
+     ],
+     [
+      "aten::empty_strided",
+      19.3
+     ],
+     [
+      "aten::matmul",
+      13.4
+     ],
+     [
+      "aten::fill_",
+      9.6
+     ],
+     [
+      "aten::clone",
+      8.5
+     ],
+     [
+      "aten::permute",
+      8.5
+     ],
+     [
+      "aten::zeros",
+      8.3
+     ]
+    ],
+    "kda_dense": [
+     [
+      "vllm::flashinfer_mm_fp4",
+      698.2
+     ],
+     [
+      "aten::mm",
+      181.9
+     ],
+     [
+      "aten::empty",
+      117.1
+     ],
+     [
+      "cudaLaunchKernel",
+      102.7
+     ],
+     [
+      "cuLaunchKernelEx",
+      82.2
+     ],
+     [
+      "aten::as_strided",
+      73.7
+     ],
+     [
+      "cudaLaunchKernelExC",
+      68.8
+     ],
+     [
+      "aten::transpose",
+      52.9
+     ],
+     [
+      "aten::t",
+      51.1
+     ],
+     [
+      "aten::linear",
+      50.6
+     ],
+     [
+      "_C::scaled_fp4_quant",
+      49.6
+     ],
+     [
+      "aten::empty_strided",
+      41.3
+     ],
+     [
+      "aten::copy_",
+      36.3
+     ],
+     [
+      "aten::view",
+      32.7
+     ],
+     [
+      "aten::slice",
+      23.4
+     ],
+     [
+      "aten::index_copy_",
+      21.3
+     ],
+     [
+      "aten::unsqueeze",
+      20.6
+     ],
+     [
+      "_C::silu_and_mul_with_clamp",
+      13.2
+     ],
+     [
+      "aten::empty_like",
+      13.0
+     ],
+     [
+      "aten::permute",
+      12.4
+     ],
+     [
+      "aten::reshape",
+      9.7
+     ],
+     [
+      "aten::fill_",
+      8.4
+     ],
+     [
+      "aten::matmul",
+      7.3
+     ],
+     [
+      "aten::split_with_sizes",
+      6.7
+     ],
+     [
+      "aten::select",
+      6.2
+     ]
+    ],
+    "dsa_moe": [
+     [
+      "cuLaunchKernelEx",
+      27813.9
+     ],
+     [
+      "cudaLaunchKernel",
+      3614.8
+     ],
+     [
+      "vllm::unified_mla_attention_with_output",
+      2878.0
+     ],
+     [
+      "vllm::moe_forward_shared",
+      2115.2
+     ],
+     [
+      "aten::empty",
+      1121.8
+     ],
+     [
+      "aten::slice",
+      1110.7
+     ],
+     [
+      "aten::copy_",
+      1048.0
+     ],
+     [
+      "aten::mm",
+      757.9
+     ],
+     [
+      "## Call CompiledFxGraph fnaxwuxd34j4bdptc4b25qkynynyut6zlupcjhiz37pva5sx766j ##",
+      665.2
+     ],
+     [
+      "_C::top_k_per_row_prefill",
+      599.9
+     ],
+     [
+      "aten::add",
+      577.4
+     ],
+     [
+      "aten::empty_strided",
+      548.0
+     ],
+     [
+      "aten::_to_copy",
+      408.9
+     ],
+     [
+      "Torch-Compiled Region: 0/0",
+      357.1
+     ],
+     [
+      "aten::as_strided",
+      317.1
+     ],
+     [
+      "aten::arange",
+      293.7
+     ],
+     [
+      "aten::bmm",
+      229.2
+     ],
+     [
+      "TorchDynamo Cache Lookup",
+      190.7
+     ],
+     [
+      "aten::view",
+      171.3
+     ],
+     [
+      "## Call CompiledFxGraph fge3jj3nar4vb5gygflb2ph4jszuuq7nau65tktw4g2v3p7ronya ##",
+      165.7
+     ],
+     [
+      "Torch-Compiled Region: 1/0",
+      160.6
+     ],
+     [
+      "aten::squeeze",
+      139.3
+     ],
+     [
+      "vllm::unified_mla_kv_cache_update",
+      129.8
+     ],
+     [
+      "Pregraph bytecode",
+      110.6
+     ],
+     [
+      "aten::to",
+      104.1
+     ]
+    ],
+    "kda_moe": [
+     [
+      "vllm::moe_forward_shared",
+      3405.2
+     ],
+     [
+      "aten::mm",
+      842.9
+     ],
+     [
+      "aten::empty",
+      574.0
+     ],
+     [
+      "cudaLaunchKernel",
+      488.4
+     ],
+     [
+      "cuLaunchKernelEx",
+      395.8
+     ],
+     [
+      "cudaLaunchKernelExC",
+      217.8
+     ],
+     [
+      "aten::as_strided",
+      165.9
+     ],
+     [
+      "aten::transpose",
+      141.7
+     ],
+     [
+      "aten::empty_strided",
+      108.3
+     ],
+     [
+      "aten::view",
+      107.8
+     ],
+     [
+      "aten::copy_",
+      101.2
+     ],
+     [
+      "aten::t",
+      97.6
+     ],
+     [
+      "aten::slice",
+      86.2
+     ],
+     [
+      "aten::add",
+      79.8
+     ],
+     [
+      "aten::index_copy_",
+      73.8
+     ],
+     [
+      "aten::linear",
+      64.0
+     ],
+     [
+      "_C::scaled_fp4_quant",
+      53.0
+     ],
+     [
+      "_C::silu_and_mul_with_clamp",
+      51.7
+     ],
+     [
+      "aten::unsqueeze",
+      46.3
+     ],
+     [
+      "aten::empty_like",
+      44.9
+     ],
+     [
+      "aten::reshape",
+      38.1
+     ],
+     [
+      "aten::matmul",
+      34.4
+     ],
+     [
+      "aten::select",
+      31.3
+     ],
+     [
+      "aten::fill_",
+      27.9
+     ],
+     [
+      "aten::split_with_sizes",
+      23.4
+     ]
+    ],
+    "output_head": [
+     [
+      "cudaLaunchKernel",
+      38194.8
+     ],
+     [
+      "vllm::mhc_post_tilelang",
+      187.5
+     ],
+     [
+      "aten::mm",
+      63.9
+     ],
+     [
+      "aten::index_select",
+      48.0
+     ],
+     [
+      "cuLaunchKernelEx",
+      47.4
+     ],
+     [
+      "cudaLaunchKernelExC",
+      43.3
+     ],
+     [
+      "aten::argmax",
+      40.4
+     ],
+     [
+      "cudaMemsetAsync",
+      36.7
+     ],
+     [
+      "aten::mean",
+      25.5
+     ],
+     [
+      "_C::rms_norm",
+      20.8
+     ],
+     [
+      "aten::gather",
+      16.0
+     ],
+     [
+      "aten::empty",
+      10.3
+     ],
+     [
+      "aten::resize_",
+      8.3
+     ],
+     [
+      "aten::t",
+      7.4
+     ],
+     [
+      "aten::empty_strided",
+      4.5
+     ],
+     [
+      "aten::as_strided",
+      4.4
+     ],
+     [
+      "aten::linear",
+      2.6
+     ],
+     [
+      "aten::squeeze",
+      2.1
+     ],
+     [
+      "aten::expand",
+      1.8
+     ],
+     [
+      "aten::empty_like",
+      1.7
+     ],
+     [
+      "aten::matmul",
+      1.6
+     ],
+     [
+      "aten::transpose",
+      1.4
+     ],
+     [
+      "aten::view",
+      0.6
+     ],
+     [
+      "cudaPeekAtLastError",
+      0.1
+     ]
+    ]
+   },
+   "kernels": 1245,
+   "blocking": [
+    {
+     "call": "cuLaunchKernelEx",
+     "ms": 18.0,
+     "unit": "L11",
+     "launch_ordinal": 1223,
+     "pending_kernels_at_call": 1028
+    },
+    {
+     "call": "cudaLaunchKernel",
+     "ms": 1.04,
+     "unit": "L11",
+     "launch_ordinal": 1226,
+     "pending_kernels_at_call": 1025
+    },
+    {
+     "call": "cuLaunchKernelEx",
+     "ms": 6.58,
+     "unit": "L11",
+     "launch_ordinal": 1232,
+     "pending_kernels_at_call": 1025
+    },
+    {
+     "call": "cudaLaunchKernel",
+     "ms": 14.04,
+     "unit": "output_head",
+     "launch_ordinal": 1238,
+     "pending_kernels_at_call": 1029
+    },
+    {
+     "call": "cudaLaunchKernel",
+     "ms": 24.0,
+     "unit": "output_head",
+     "launch_ordinal": 1244,
+     "pending_kernels_at_call": 1030
+    }
+   ]
+  },
+  "profiled_by_type": {
+   "prepare": {
+    "span_us": 26892.6,
+    "launches": 169.0,
+    "runtime_calls": 454.0,
+    "runtime_us": 1975.6,
+    "op_outside_runtime_us": 5829.1,
+    "python_us": 19087.9,
+    "n": 1
+   },
+   "input_head": {
+    "span_us": 216.5,
+    "launches": 0.5,
+    "runtime_calls": 0.5,
+    "runtime_us": 16.7,
+    "op_outside_runtime_us": 76.4,
+    "python_us": 123.4,
+    "n": 2
+   },
+   "first_kda_dense": {
+    "span_us": 4589.4,
+    "launches": 25.0,
+    "runtime_calls": 32.0,
+    "runtime_us": 263.9,
+    "op_outside_runtime_us": 2366.4,
+    "python_us": 1959.0,
+    "n": 1
+   },
+   "kda_dense": {
+    "span_us": 1744.7,
+    "launches": 22.0,
+    "runtime_calls": 28.0,
+    "runtime_us": 129.0,
+    "op_outside_runtime_us": 777.0,
+    "python_us": 838.7,
+    "n": 2
+   },
+   "dsa_moe": {
+    "span_us": 19563.0,
+    "launches": 276.0,
+    "runtime_calls": 299.0,
+    "runtime_us": 10541.3,
+    "op_outside_runtime_us": 5130.3,
+    "python_us": 3891.5,
+    "n": 3
+   },
+   "kda_moe": {
+    "span_us": 2011.5,
+    "launches": 28.0,
+    "runtime_calls": 47.0,
+    "runtime_us": 187.4,
+    "op_outside_runtime_us": 1049.1,
+    "python_us": 774.9,
+    "n": 6
+   },
+   "output_head": {
+    "span_us": 39012.5,
+    "launches": 10.0,
+    "runtime_calls": 12.0,
+    "runtime_us": 38322.2,
+    "op_outside_runtime_us": 448.9,
+    "python_us": 241.3,
+    "n": 1
+   }
+  },
+  "spy": null
+ }
+}

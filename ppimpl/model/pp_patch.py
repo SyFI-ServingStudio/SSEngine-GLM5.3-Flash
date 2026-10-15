@@ -387,3 +387,118 @@ def install_sparse_mla_split(max_rows: int = SPARSE_MLA_MAX_ROWS) -> None:
         return out
 
     fd.trtllm_batch_decode_with_kv_cache_mla = split
+
+
+# ---------------------------------------------------------------- host trims (M3: stage-0 host time, job 7091)
+#
+# Per-call Python that returns the same answer on every call of a serving process, hoisted or memoized. None of them
+# changes a launched kernel or its arguments (bench/host.py measures the host time; the chain/edge checks stay exact).
+
+AUTOTUNE_MEMO: dict = {}
+AUTOTUNE_MEMO_STATS = {"hit": 0, "miss": 0, "bypass": 0}
+_AUTOTUNE_MEMO_MAX = 4096
+_ORIG_CHOOSE_ONE = None
+_ORIG_MM_FP4 = None
+
+
+def _memo_sig(x):
+    if isinstance(x, torch.Tensor):
+        return (tuple(x.shape), x.dtype, x.device)
+    if x is None or isinstance(x, (int, float, bool, str, torch.dtype)):
+        return x
+    if isinstance(x, (list, tuple)):
+        return tuple(_memo_sig(v) for v in x)
+    raise TypeError
+
+
+def install_autotune_memo() -> None:
+    """FlashInfer `AutoTuner.choose_one` outside tuning: a lookup of the winner cache by (op, runners, input shapes)
+    that takes ~4% of stage-0 host time (lock, policy, bucket search, per-runner keys). Outside tuning its answer
+    depends only on the op, the runners' hashes (their parameters), the inputs' shapes/dtypes and the winner cache,
+    which changes only while tuning; so it is memoized on exactly those, cleared whenever tuning is active or any
+    autotune override (skip ops, buckets) is in effect, and by `clear_autotune_memo` after the warm-up. The memo
+    keeps the runner index, so the caller's own (fresh) runner object is returned."""
+    global _ORIG_CHOOSE_ONE
+    from flashinfer.autotuner.autotuner import AutoTuner
+
+    if _ORIG_CHOOSE_ONE is not None:
+        return
+    _ORIG_CHOOSE_ONE = orig = AutoTuner.choose_one
+
+    def choose_one(self, custom_op, runners, tuning_config, inputs, **kwargs):
+        if (self.is_tuning_mode or self._effective_skip_ops or self._get_override_stack()
+                or self._effective_measure_policy is not None):
+            AUTOTUNE_MEMO.clear()
+            AUTOTUNE_MEMO_STATS["bypass"] += 1
+            return orig(self, custom_op, runners, tuning_config, inputs, **kwargs)
+        try:
+            key = (custom_op, tuple((type(r), hash(r)) for r in runners), _memo_sig(list(inputs)))
+        except TypeError:
+            AUTOTUNE_MEMO_STATS["bypass"] += 1
+            return orig(self, custom_op, runners, tuning_config, inputs, **kwargs)
+        hit = AUTOTUNE_MEMO.get(key)
+        if hit is not None:
+            AUTOTUNE_MEMO_STATS["hit"] += 1
+            return runners[hit[0]], hit[1]
+        AUTOTUNE_MEMO_STATS["miss"] += 1
+        runner, tactic = orig(self, custom_op, runners, tuning_config, inputs, **kwargs)
+        idx = next(i for i, r in enumerate(runners) if r is runner)
+        if len(AUTOTUNE_MEMO) >= _AUTOTUNE_MEMO_MAX:
+            AUTOTUNE_MEMO.clear()
+        AUTOTUNE_MEMO[key] = (idx, tactic)
+        return runner, tactic
+
+    AutoTuner.choose_one = choose_one
+
+
+def clear_autotune_memo() -> None:
+    AUTOTUNE_MEMO.clear()
+
+
+def install_mm_fp4_skip_check() -> None:
+    """`flashinfer.mm_fp4` re-validates backend, capability and problem size on every call (`inspect` bind and
+    checks, ~1% of host time); the checks only raise. vLLM imports `flashinfer.mm_fp4` at call time and passes an
+    explicit backend, so the wrapper passes `skip_check=True` (FlashInfer's own opt-out) after the warm-up has
+    run the same shapes through the checks."""
+    global _ORIG_MM_FP4
+    import flashinfer
+
+    if _ORIG_MM_FP4 is not None:
+        return
+    _ORIG_MM_FP4 = orig = flashinfer.mm_fp4
+
+    def mm_fp4(*a, **kw):
+        if kw.get("backend", "auto") != "auto":
+            kw.setdefault("skip_check", True)
+        return orig(*a, **kw)
+
+    flashinfer.mm_fp4 = mm_fp4
+
+
+def plain_parameters(modules) -> int:
+    """vLLM's parameter subclasses override `__torch_function__` (a Python round trip on every op that takes a
+    weight); after loading they are only tensors. Replace each by a plain `nn.Parameter` over the same storage,
+    keeping its attributes. Returns the number replaced."""
+    n = 0
+    for root in modules:
+        for mod in root.modules():
+            for name, p in list(mod._parameters.items()):
+                if p is None or type(p) is torch.nn.Parameter or not isinstance(p, torch.nn.Parameter):
+                    continue
+                new = torch.nn.Parameter(p.data, requires_grad=False)
+                for k, v in vars(p).items():
+                    setattr(new, k, v)
+                mod._parameters[name] = new
+                n += 1
+    return n
+
+
+def install_host_trims(modules) -> dict:
+    """All of the above plus vLLM's env cache (the engine enables it after start-up: envs are read on every linear
+    call otherwise). Call after the weights are loaded."""
+    import vllm.envs as envs
+
+    envs.enable_envs_cache()
+    install_autotune_memo()
+    install_mm_fp4_skip_check()
+    return {"plain_parameters": plain_parameters(modules)}

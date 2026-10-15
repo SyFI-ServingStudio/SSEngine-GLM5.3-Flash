@@ -153,3 +153,10 @@ def test_ninja_check_warns_not_fails(monkeypatch):
         assert stage.check_ninja() is False
     monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/ninja")
     assert stage.check_ninja() is True
+
+
+def test_load_tactics_missing_file_is_reported(tmp_path):
+    from ppimpl.model.stage import load_tactics
+
+    r = load_tactics(tmp_path / "none.json")
+    assert r["source"] == "missing" and "does not exist" in r["reason"]
