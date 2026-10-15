@@ -242,3 +242,41 @@ logprobs. One-request runs keep judging nearly every request. The rejected optio
 of T: it gives the alone result in any batch, but mHC is slower at small T, and the TP-vs-PP difference to vLLM would
 still need the margin rule.
 Data: `measured/batchflip/{7170,7172}_s*.json`, `7174_s0.json`, `vllm_7173.json`, `measured/host/overlap_s1_716{4,5}.json`.
+
+## Implementation gap, fixed: persistent kernels stalled beside NCCL p2p kernels (M3 saturated)
+
+- Before the fix, saturated runs reached 46–56k tok/s against 138–150k at every length (7140, 7161, 7166). Stages 1–3
+  took 2–5× their compute time (p90 up to 296 ms). Stage 0, which posts no receive, was never slow. A per-microbatch
+  host sync removed it (7162: 147.6k tok/s), and the allocator had no retries (7166).
+- Cause (nsys 7167, saturated_1k): the gaps between kernels inside a stage stayed below 1 ms, but
+  `sm100_mega_mhc_impl` took up to 50 / 145 / 199 ms on stages 1 / 2 / 3 (normally 0.19 ms) while an
+  `ncclDevKernel_SendRecv` ran beside it. DeepGEMM mega_mhc (split barriers) and FlashInfer persistent KDA (split
+  chains) hand work between CTAs by spinning, so all of their CTAs must be resident at once. An NCCL kernel waiting
+  for its peer holds SMs, and the CTAs that do not fit wait until the NCCL kernel ends.
+- Fix (b99ee0a, `RunConfig.compute_sms` 132 and `nccl_channels` 8): both kernels' grids are sized to 132 SMs
+  (DeepGEMM `set_num_sms`, the KDA plan's SM count), and NCCL p2p kernels use at most 8 CTAs each
+  (`NCCL_MAX_NCHANNELS`, `NCCL_MAX_P2P_NCHANNELS`), so a send and a receive fit in the other 16 SMs.
+  7178/7185: saturated_8k 135.9k tok/s, saturated_1k 144.7k; stage compute p90 ≤ 61 ms on every stage.
+- Cost: with 8 channels a send takes ~2.5× its target (8k 1.2 ms vs 0.48 ms; 128k 18.5 vs 7.5 ms). In one-request
+  runs that is 3 × 0.7 ms at 8k (0.3% of TTFT) and 3 × 11 ms at 128k (1%). The copy-engine transport (entry above)
+  would remove both the SM sharing and the send gap.
+
+## Implementation gap: first-request TTFT in saturated runs (M3) — open, intake next
+
+- TTFT first is 0.30 / 0.29 / 0.33 / 0.62 s at 1k / 2k / 4k / 8k against 0.21–0.22 s (7185). From arrival to the
+  token at the controller the pipeline takes 174 / 203 / 211 / 275 ms; the rest is response delivery.
+- At 1k–4k the server sends the token within 1 ms, but the client reads it 88–560 ms later: the req-frontend session
+  runner reads no response until it has posted the whole burst. At 8k the server's single intake loop holds the
+  response 349 ms while it is still taking the burst (intake ends at 1.16 s).
+- Precheck (do-nothing server, 8k burst): last response at 755 / 503 / 347 ms with 1 / 2 / 4 SO_REUSEPORT
+  processes; the first response still comes at ~0.21–0.25 s, after the client's posting ends. Multi-process intake
+  can shorten the 8k case; the 1k–4k floor is the client.
+
+## Saturated 64k and 128k: stage 0 slower than in one-request runs (M3) — open
+
+- 7258: saturated_64k 128.6k tok/s (×0.91), saturated_128k 111.2k (×0.80); stage 0 busy 100%, stages 1–3 78–90%.
+  Stage-0 compute median is normal (59.0 / 68.8 ms) but has spikes to 115–214 ms; stages 1–3 have none.
+- nsys 7259 (saturated_128k, 38 microbatches): stage-0 kernels keep their usual durations; the GPU idles 20–32 ms
+  inside forwards (482 ms of gaps > 2 ms in 2.85 s), and single launch calls take up to 9–14 ms. Host load average
+  was 155–223 on 224 cores (7258 and 7259 ran side by side). Suspected host CPU contention on the stage that has no
+  slack; to confirm with a rerun on a quiet host before any code change.
