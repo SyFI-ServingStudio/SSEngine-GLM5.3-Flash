@@ -76,6 +76,13 @@ class StageModel:
         # Enqueues GPU work only; no host sync inside.
 ```
 
+- Stages 1–2 may return `hidden_in` itself (updated in place).
+- The last stage's output is copied to the host by the worker's reporter thread after the end event; `forward` must
+  not overwrite that tensor in a later call before the copy is done (allocate a fresh output per call).
+- `Ready.num_blocks` counts the null block.
+- Extra message `WorkerError(stage, error)`: a failing stage sends its traceback; the controller stops the server.
+- Messages are msgspec structs in `ppimpl/runtime/transport.py`.
+
 `ppimpl/model/fake.py` provides `FakeStageModel` with the same interface and no weights: a configurable per-token
 GPU (or CPU) delay, deterministic outputs (token = hash of req_id and length). The runtime is developed and tested
 against it.
