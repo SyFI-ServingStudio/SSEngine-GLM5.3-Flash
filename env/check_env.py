@@ -90,8 +90,25 @@ def rows() -> list[tuple[str, str, bool]]:
         check("vLLM _C", lambda: ext("vllm._custom_ops", "_C", "top_k_per_row_prefill")),
         check("causal-conv1d (Dao; KDA short conv)", causal_conv1d),
         check("FlashInfer KDA cute-dsl-persistent", kda_persistent),
+        check("ninja (FlashInfer JIT)", ninja),
     ]
     return out
+
+
+NINJA = "/usr/bin/ninja"
+
+
+def ninja() -> str:
+    """FlashInfer JIT builds only with /usr/bin/ninja 1.11.1: processes sharing ~/.cache/flashinfer with another ninja
+    hash build commands differently and rebuild every object (fused_moe_trtllm_sm100 ~290 s). Warns, never fails."""
+    import shutil
+
+    found = shutil.which("ninja")
+    if found != NINJA:
+        msg = f"WARNING: ninja on PATH is {found}, expected {NINJA} (shared FlashInfer JIT cache would rebuild)"
+        print(msg, file=sys.stderr)
+        return msg
+    return found
 
 
 def main() -> int:

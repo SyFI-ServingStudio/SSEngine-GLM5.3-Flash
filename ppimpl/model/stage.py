@@ -83,11 +83,30 @@ def bench_config(mb_tokens: int, checkpoint: str | None = None):
                            scheduler=SimpleNamespace(mb_tokens=mb_tokens))
 
 
+NINJA = "/usr/bin/ninja"
+
+
+def check_ninja() -> bool:
+    """FlashInfer JIT builds only with /usr/bin/ninja (1.11.1): another ninja on PATH hashes build commands differently
+    and rebuilds every object of the shared ~/.cache/flashinfer (fused_moe_trtllm_sm100 ~290 s). Warns, never fails."""
+    import shutil
+    import warnings
+
+    found = shutil.which("ninja")
+    if found != NINJA:
+        msg = f"ninja on PATH is {found}, expected {NINJA}: FlashInfer JIT will rebuild the shared cache"
+        warnings.warn(msg, stacklevel=2)
+        print(f"WARNING: {msg}", flush=True)
+        return False
+    return True
+
+
 class StageModel:
     def __init__(self, cfg, stage: int, device: torch.device, *, layers: range | None = None,
                  first: bool | None = None, last: bool | None = None, num_blocks: int | None = None,
                  max_model_len: int | None = None, warmup: bool = True):
         st = stage_settings(cfg)
+        check_ninja()
         split = st["layer_split"]
         self.stage, self.device = stage, device
         self.layer_range = layers if layers is not None else kernels.stage_layers(stage, split)

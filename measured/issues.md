@@ -47,3 +47,41 @@ Two kinds (`1_contract.md` §6): **setup difference** (names the targets it affe
 - **Session slot.** The simulator frees a session's slot at its last round's token; req-frontend (the trusted
   client) holds it through the last tool wait (mean 14 s). About −5% rounds/s at N=400 against every session target.
 - Block-rounded vs token accounting: < 1% on the design runs.
+
+## M2 results (bench/layers.py; measured/layers.md, jobs 7068-7070, 7080)
+
+No layer type is slower than its target by more than 10% at any prompt length except the two heads at sizes where
+they are tens of microseconds:
+- `input_head` 1k ×1.13 (0.016 vs 0.014 ms), 8k ×1.10 (0.099 vs 0.090 ms): the embedding gather plus the 4-stream
+  concatenation; immaterial to a stage (< 0.2%).
+- `output_head` 1k ×1.10 (0.250 vs 0.227 ms): `lm_head` alone is 0.200 ms (= target); the rest is the four row
+  selects, the final post/mean/norm on one row and argmax (fixed ~0.05 ms; the target's T-proportional final post
+  and mean make it cheaper only below ~2k).
+
+Faster than the target by more than 10% (recorded, not failures):
+- KDA layers (`first_kda_dense`, `kda_dense`: ×0.77–0.90; `kda_moe` ×0.84–0.94): FlashInfer persistent KDA
+  (0.7.2.dev20261008) runs `chunk_prefill` at about half the row's time (8k: 0.40 vs 0.84 ms), and the BF16 GEMMs
+  (`in_proj` 0.92 vs 1.20 ms, `o_proj` 0.31 vs 0.41 ms at 8k) beat the cold-L2 rows. Version-only configs are
+  re-measured by the measure lane.
+- `output_head` from 4k on (row selection first: see above).
+Stage sums are ×0.87–0.99 of the README one-request stage times (stage 0 measured directly matches its sum).
+
+Fixed during M2 (each found by the per-position comparison):
+- **Sparse MLA past 32,768 rows.** A 65,536-row TRTLLM sparse MLA launch returned in 0.72 ms instead of ~11.7 ms
+  (no error, no work done). `pp_patch.install_sparse_mla_split` splits launches at 32,768 rows into one output, as
+  the target does; `dsa_moe` 64k went 34.2 → 48.9 ms (×1.08), 128k → 104.7 ms (×1.10).
+- **Short prefills.** The fork runs prompts within the top-k (≤ 2,048 pools) through dense MHA prefill (FlashAttention
+  plus `kv_b_proj` up-projection), ×1.11 at 2k. `sparse_mla_force_mqa` keeps them on TRTLLM sparse MLA as priced
+  (2k ×1.00; also faster at 1k).
+- KDA q/k/v copies (3 × 0.3 ms at 16k): conv now writes q, k, v into contiguous buffers.
+- `hc_expand`: the fork's broadcast copy ran at ~1 TB/s (×3.3); vectorized concatenation, < 2^31 elements per launch.
+- vLLM IR op priorities were unset outside the engine (native RMSNorm); set as vLLM's worker does.
+
+Open:
+- **Host launch time.** Eager launching of a stage-0 forward costs 25–30 ms of host time at ≤ 8k (54–61 ms at 64k).
+  With launches queued ahead the layers run back to back (≤ 0.03 ms of gaps per layer), but a stage forward whose GPU
+  time is below its host time leaves gaps: 1k 13.8 ms, 2k 9.1 ms, 4k 3.2 ms; none from 8k on. The runtime hides it
+  when it launches a plan ahead of its input (recv on the stream); stage 0 of a lone short request cannot. CUDA graphs
+  would remove it for fixed shapes; not done.
+- **128k host block.** A 128k forward blocks the host for ~1.1 s inside the forward (no allocator retry, not seen by
+  torch's sync debug mode); GPU gaps stay < 2 ms because the GPU is the bottleneck there. Located in job 7080.

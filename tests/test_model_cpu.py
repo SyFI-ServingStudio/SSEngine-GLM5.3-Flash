@@ -140,3 +140,16 @@ def test_stage_reads_only_run_config_fields():
     one.scheduler.mb_tokens = 131072
     assert stage_settings(one)["mb_tokens"] == 131072
     assert stage_settings(bench_config(131072)).keys() == st.keys()
+
+
+def test_ninja_check_warns_not_fails(monkeypatch):
+    import shutil
+
+    from ppimpl.model import stage
+
+    monkeypatch.setattr(shutil, "which", lambda name: "/opt/venv/bin/ninja")
+    import pytest
+    with pytest.warns(UserWarning):
+        assert stage.check_ninja() is False
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/ninja")
+    assert stage.check_ninja() is True
