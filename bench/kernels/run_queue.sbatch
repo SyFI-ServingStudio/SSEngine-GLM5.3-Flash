@@ -1,15 +1,16 @@
 #!/bin/bash
 #SBATCH -p priority
 #SBATCH --gres=gpu:2
-#SBATCH --time=00:27:00
+#SBATCH --time=00:25:00
 #SBATCH -J pp-remeasure
 #SBATCH -o /raid/kanzhu/ServingStudio/pp-impl/lanes/measure/measured/kernels_runs/logs/%x-%j.out
 # Re-measure kernel rows (2_kernels.md §4/§8) through the ServingStudioSim profiler runners
 # executing in pp-impl/.venv (bench/kernels/ppimpl_profile.py), cold L2, --fresh (no DB writes).
 # One lane per GPU claims chunks from the shared queue until the job's time runs short;
-# several such jobs drain one queue. LIMIT_S must match --time.
+# several such jobs drain one queue. The deadline comes from the job's own time limit.
 set -u
-LIMIT_S=${LIMIT_S:-1620}
+TL=$(squeue -h -j "$SLURM_JOB_ID" -o %l)   # [[D-]HH:]MM:SS
+LIMIT_S=$(echo "$TL" | awk -F'[-:]' '{n=NF; s=$n+60*$(n-1); if(n>2)s+=3600*$(n-2); if(n>3)s+=86400*$(n-3); print s}')
 LANE=/raid/kanzhu/ServingStudio/pp-impl/lanes/measure
 SIM=/raid/kanzhu/ServingStudio/wt-pp-main
 Q=$LANE/measured/kernels_runs/queue
