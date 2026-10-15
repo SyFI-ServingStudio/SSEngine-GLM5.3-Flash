@@ -1,0 +1,61 @@
+{
+  "workload": {
+    "kind": "independent_requests",
+    "requests": 5,
+    "first_context_overflow_request_id": null,
+    "first_context_overflow_input_len": null,
+    "first_context_overflow_requested_total_len": null,
+    "max_input_len": 65536,
+    "max_output_len": 1,
+    "total_output_len": 5,
+    "max_arrival_time_ms": 40000.0
+  },
+  "replay": {
+    "kind": "independent_requests",
+    "common": {
+      "attempted_steps": 5,
+      "success_steps": 5,
+      "failed_steps": 0,
+      "target_output_tokens": 5,
+      "actual_output_tokens": 5,
+      "output_mismatch_steps": 0,
+      "output_token_delta": 0,
+      "total_duration_ms_sum": 5220.27,
+      "total_duration_ms_avg": 1044.054,
+      "total_duration_ms_p50": 1042.06,
+      "total_duration_ms_p90": 1048.982,
+      "total_duration_ms_max": 1052.21,
+      "ttft_ms_avg": 1043.1739999999998,
+      "ttft_ms_p50": 1041.61,
+      "ttft_ms_p90": 1047.838,
+      "ttft_ms_max": 1051.07,
+      "ttft_token_id_steps": 5,
+      "ttft_text_fallback_steps": 0,
+      "run_duration_ms": 41041.245460510254,
+      "request_throughput_per_s": 0.12182866148180085,
+      "output_token_throughput_per_s": 0.12182866148180085,
+      "tpot_measured_steps": 0,
+      "tpot_ms_avg": null,
+      "tpot_ms_p50": null,
+      "tpot_ms_p90": null,
+      "tpot_ms_max": null,
+      "completion_amortized_tpot_measured_steps": 0,
+      "completion_amortized_tpot_ms_avg": null,
+      "completion_amortized_tpot_ms_p50": null,
+      "completion_amortized_tpot_ms_p90": null,
+      "completion_amortized_tpot_ms_max": null,
+      "context_overflow_steps": 0
+    }
+  },
+  "client_runtime": {
+    "tokio_worker_threads": 112,
+    "sampled_global_queue_depth_peak": 0
+  },
+  "timeline": {
+    "path": "/raid/kanzhu/ServingStudio/pp-impl/lanes/measure/measured/runs/reference_one_64k/client/timeline.parquet",
+    "requests_written": 5,
+    "events_written": 10,
+    "dropped_requests": 0
+  },
+  "slo": null
+}

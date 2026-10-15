@@ -44,24 +44,38 @@ def main():
                 "prompt_sent_matches": bool(x) and x["prompt_sha256"] == p["prompt_sha256"],
                 "output_token_id": (x or {}).get("output_token_ids", [None])[0],
                 "logprob_pass_token_id": (lp or {}).get("token_id"),
+                "logprob_prompt_matches": bool(lp) and lp["prompt_sha256"] == p["prompt_sha256"],
                 "top5": [[t["token_id"], round(t["logprob"], 4)] for t in top[:5]],
             }
             row["margin"] = round(top[0]["logprob"] - top[1]["logprob"], 4) if len(top) > 1 else None
-            row["agree"] = (row["prompt_sent_matches"] and row["output_token_id"] is not None
-                            and row["output_token_id"] == row["logprob_pass_token_id"]
-                            and bool(top) and top[0]["token_id"] == row["output_token_id"])
-            bad += not row["agree"]
+            tied = [t["token_id"] for t in top if top and t["logprob"] == top[0]["logprob"]]
+            row["tied_top_tokens"] = tied if len(tied) > 1 else None
+            if not row["logprob_prompt_matches"]:
+                row["check"] = "**reference pass prompt differs**"
+            elif x is None:
+                row["check"] = "run record lost (proxy)"
+            elif not row["prompt_sent_matches"]:
+                row["check"] = "**prompt differs**"
+            elif row["output_token_id"] == row["logprob_pass_token_id"]:
+                row["check"] = "ok"
+            elif row["tied_top_tokens"] and row["output_token_id"] in row["tied_top_tokens"]:
+                row["check"] = "ok (tied top-1)"
+            else:
+                row["check"] = "**mismatch**"
+            bad += row["check"].startswith("**")
             rows.append(row)
     with open(runs.parent / "reference.jsonl", "w") as f:
         for r in rows:
             f.write(json.dumps(r) + "\n")
-    print("| Length | Request | Prompt tokens | Prompt sha256 (first 16) | Output token | Top-2 logprobs | Margin | Checks |")
-    print("|---|---|---|---|---|---|---|---|")
+    print("| Length | Request | Prompt tokens | Prompt sha256 (first 16) | Reference token | Run token | Top-2 logprobs | Margin | Check |")
+    print("|---|---|---|---|---|---|---|---|---|")
     for r in rows:
         t2 = ", ".join(f"{t} ({lp})" for t, lp in r["top5"][:2])
         print(f"| {r['length']} | `{r['id']}` | {r['prompt_len']:,} | `{r['prompt_sha256'][:16]}` | "
-              f"{r['output_token_id']} | {t2} | {r['margin']} | {'ok' if r['agree'] else '**mismatch**'} |")
+              f"{r['logprob_pass_token_id']} | {r['output_token_id'] if r['output_token_id'] is not None else '—'} | {t2} | "
+              f"{r['margin']} | {r['check']} |")
     print(f"\n{len(rows)} requests, {bad} with a disagreement.", file=sys.stderr)
+    return bad
 
 
 if __name__ == "__main__":
