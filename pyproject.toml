@@ -19,3 +19,4 @@ include = ["ppimpl*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = ["gpu: needs 4 GPUs (run through Slurm)"]
+addopts = "-m 'not gpu'"   # GPU tests only through Slurm: pytest -m gpu

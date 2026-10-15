@@ -121,6 +121,18 @@ class Pipe:
         self.recv_stream = torch.cuda.Stream(device) if self.cuda else None
         self.send_stream = torch.cuda.Stream(device) if self.cuda else None
         self._sends: deque = deque()   # (work, tensor): keep sent tensors alive until the send completes
+        self._connect()
+
+    def _connect(self):
+        """Pass one small tensor down the chain, so each pair creates its communicator now (about a second each)
+        and not inside the first microbatch."""
+        t = torch.zeros(1, device=self.device)
+        if self.stage > 0:
+            dist.recv(t, self.stage - 1)
+        if self.stage < self.num_stages - 1:
+            dist.send(t, self.stage + 1)
+        if self.cuda:
+            torch.cuda.synchronize(self.device)
 
     def recv(self, num_tokens: int, width: int) -> torch.Tensor:
         src = self.stage - 1

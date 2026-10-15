@@ -28,6 +28,15 @@ class FakeStageModel:
         self.hidden_width = cfg.fake.hidden_width
         self.cuda = device.type == "cuda"
         self.cycles_per_ms = self._calibrate() if self.cuda else 0.0
+        if self.cuda:
+            self._warm_up()
+
+    def _warm_up(self):
+        """Run every kernel forward uses once: the first launch of each loads its module (tens of ms)."""
+        hidden = torch.empty(2, self.hidden_width, dtype=torch.bfloat16, device=self.device)
+        hidden[:, 0] = torch.arange(2, device=self.device) % 128
+        self._check([1], [0], hidden)
+        torch.cuda.synchronize(self.device)
 
     def _calibrate(self) -> float:
         torch.cuda._sleep(1_000_000)  # warm up
@@ -65,9 +74,19 @@ class FakeStageModel:
             if c.is_last:
                 rows.append(row - 1)
                 base.append(fake_token(c.req_id, c.start + c.num_tokens))
-        idx = torch.tensor(rows, dtype=torch.int64)
-        out = torch.tensor(base, dtype=torch.int64).to(self.device, non_blocking=True)
+        if not self.cuda:
+            out = torch.tensor(base, dtype=torch.int64)
+            if hidden_in is not None and rows:
+                idx = torch.tensor(rows, dtype=torch.int64)
+                out = out + hidden_in[idx, 0].to(torch.int64) - idx % 128
+            return out
+        return self._check(rows, base, hidden_in)
+
+    def _check(self, rows: list[int], base: list[int], hidden_in: torch.Tensor | None) -> torch.Tensor:
+        # Pinned source: a pageable host-to-device copy blocks the host until the compute stream drains, so this
+        # stage could not enqueue (and post the receive of) its next microbatch while the current one runs.
+        host = torch.tensor([rows, base], dtype=torch.int64, pin_memory=True)
+        idx, out = host.to(self.device, non_blocking=True)
         if hidden_in is not None and rows:
-            check = hidden_in[idx.to(self.device, non_blocking=True), 0].to(torch.int64) - (idx % 128).to(self.device)
-            out = out + check
+            out = out + hidden_in[idx, 0].to(torch.int64) - idx % 128
         return out

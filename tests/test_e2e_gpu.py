@@ -30,9 +30,10 @@ def test_serve_http_gpu(tmp_path):
     check_responses({"solo": 131072}, one)
     by_mb, peak = check_microbatches(tmp_path / "run", {**prompts, "solo": 131072})
     assert peak >= 3
-    for mb in by_mb.values():                     # stage time = the fake's per-token delay
+    for i, mb in by_mb.items():                   # stage time = the fake's per-token delay + launching its few kernels
         T = sum(q["append"] for q in mb[0]["requests"])
         for s in range(4):
-            assert mb[s]["compute_ms"] == pytest.approx(T * us / 1e3, rel=0.1, abs=0.05)
+            ms = T * us / 1e3
+            assert ms * 0.95 <= mb[s]["compute_ms"] <= ms * 1.1 + 0.5, (i, s, T, mb[s]["compute_ms"])
     pool = json.loads((tmp_path / "run/pool.json").read_text())
     assert pool["pool_tokens"] == 61_258_368
