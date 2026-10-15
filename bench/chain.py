@@ -54,7 +54,7 @@ def split(L: int) -> None:
     from vllm.forward_context import set_forward_context
 
     dev = torch.device("cuda", 0)
-    cfg = SimpleNamespace(mb_tokens=max(L, 8192), checkpoint=CHECKPOINT, pool_tokens=None)
+    cfg = SimpleNamespace(mb_tokens=max(L, 8192), checkpoint=CHECKPOINT, pool_tokens=None, warmup=False)
     t0 = time.time()
     m = StageModel(cfg, 0, dev, layers=range(0, 23), first=True, last=False, num_blocks=NUM_BLOCKS,
                    max_model_len=max(L, 8192) + 8576)
@@ -89,6 +89,89 @@ def split(L: int) -> None:
                           "max_token_rel_error": per_tok.max().item(), "min_token_cosine": cos.min().item(),
                           "finite": bool(torch.isfinite(split_out).all().item()),
                           "pass": rel < 2e-2 and cos.min().item() > 0.999})
+
+
+def _rel(a, b) -> dict:
+    import torch
+
+    a, b = a.float().flatten(1), b.float().flatten(1)
+    d = a - b
+    cos = torch.nn.functional.cosine_similarity(a, b, dim=1)
+    return {"rel_fro": (d.norm() / b.norm().clamp_min(1e-30)).item(), "min_cos": cos.min().item(),
+            "max_abs": d.abs().max().item()}
+
+
+def edge(L: int) -> None:
+    """Diagnostics for the stage edge: layer 12's attention boundary computed (A) by mega_mhc (design routing),
+    (B) by the fork's fused TileLang post+pre, (C) by hc_post then a standalone hc_pre (the stage edge); and the
+    unsplit 0-22 run repeated (noise), and with the fork's fused op at every boundary."""
+    import torch
+    from layers import NUM_BLOCKS, one_request_plan
+    from ppimpl.model import pp_patch
+    from ppimpl.model.stage import CHECKPOINT, StageModel
+    from vllm.forward_context import set_forward_context
+    from vllm.model_executor.layers.mhc import MHCFusedPostPreOp
+
+    dev = torch.device("cuda", 0)
+    cfg = SimpleNamespace(mb_tokens=max(L, 8192), checkpoint=CHECKPOINT, pool_tokens=None, warmup=False)
+    m = StageModel(cfg, 0, dev, layers=range(0, 23), first=True, last=False, num_blocks=NUM_BLOCKS,
+                   max_model_len=max(L, 8192) + 8576)
+    plan = one_request_plan(_prompt(L))
+    fork_op = MHCFusedPostPreOp()
+    res = {"prompt_tokens": L}
+
+    def run(layers, cut=None):
+        b = m.prepare(plan)
+        with set_forward_context(b.attn, m.vc, num_tokens=b.num_tokens, slot_mapping=b.slots):
+            x = m.embed(b.token_ids)
+            r = p = c = None
+            states = []
+            for i, layer in enumerate(layers):
+                if cut is not None and i == cut:
+                    x, r, p, c = pp_patch.edge_recv(pp_patch.edge_send(layers[i - 1], x, r, p, c)), None, None, None
+                states.append((x, r, p, c))
+                x, r, p, c = layer(b.positions, x, r, p, c)
+            return pp_patch.edge_send(layers[-1], x, r, p, c), states
+
+    with torch.inference_mode():
+        u1, states = run(m.layers)
+        u2, _ = run(m.layers)
+        res["unsplit_repeat"] = _rel(u2, u1)
+        x, r, p, c = states[12]
+        L12 = m.layers[12]
+        args = (L12.hc_attn_fn, L12.hc_attn_scale, L12.hc_attn_base)
+        kw = dict(norm_weight=L12.input_layernorm.weight.data, norm_eps=L12.input_layernorm.variance_epsilon)
+        A = L12.hc_fused_post_pre(x, r, p, c, *args, **kw)
+        saved = L12.mhc_fused_post_pre_op
+        L12.mhc_fused_post_pre_op = fork_op
+        B = L12.hc_fused_post_pre(x, r, p, c, *args, **kw)
+        L12.mhc_fused_post_pre_op = saved
+        post_out = m.layers[11].hc_post(x, r, p, c)
+        Cp, Cc, Cy = L12.hc_pre(post_out, *args, **kw)
+        res["edge_residual_mega_vs_fork"] = _rel(A[0], B[0])
+        res["edge_y_mega_vs_fork"] = _rel(A[3], B[3])
+        res["edge_residual_split_vs_fork"] = _rel(post_out, B[0])
+        res["edge_y_split_vs_fork"] = _rel(Cy, B[3])
+        res["edge_post_split_vs_fork"] = _rel(Cp, B[1])
+        res["edge_comb_split_vs_fork"] = _rel(Cc, B[2])
+        res["edge_post_mega_vs_fork"] = _rel(A[1], B[1])
+        res["edge_comb_mega_vs_fork"] = _rel(A[2], B[2])
+        s1, _ = run(m.layers, cut=12)
+        res["split_vs_unsplit_mega"] = _rel(s1, u1)
+        for layer in m.layers:
+            layer.mhc_fused_post_pre_op = fork_op
+        f1, fstates = run(m.layers)
+        fs, _ = run(m.layers, cut=12)
+        res["unsplit_fork_vs_mega"] = _rel(f1, u1)
+        # inputs of layer i (layer 0: the embedding) under the two boundary ops: where the runs drift apart
+        res["layer_input_fork_vs_mega"] = [round(_rel(a[0], b[0])["rel_fro"], 6) for a, b in zip(fstates, states)]
+        res["layer_residual_fork_vs_mega"] = [None if a[1] is None else round(_rel(a[1], b[1])["rel_fro"], 6)
+                                              for a, b in zip(fstates, states)]
+        res["split_vs_unsplit_fork"] = _rel(fs, f1)
+        torch.cuda.synchronize()
+    res["pass"] = (res["split_vs_unsplit_fork"]["rel_fro"] < 1e-3 and res["edge_y_split_vs_fork"]["rel_fro"] < 1e-3
+                   and res["edge_y_mega_vs_fork"]["rel_fro"] < 1e-2)
+    _write(f"edge_{L}", res)
 
 
 def _chain_worker(rank: int, L: int, port: int, profile: bool) -> None:
@@ -180,12 +263,14 @@ def vllm_reference(L: int) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("mode", choices=["split", "chain", "vllm"])
+    ap.add_argument("mode", choices=["split", "chain", "vllm", "edge"])
     ap.add_argument("--prompt-len", type=int, default=1024)
     ap.add_argument("--no-profile", dest="profile", action="store_false")
     a = ap.parse_args()
     if a.mode == "split":
         split(a.prompt_len)
+    elif a.mode == "edge":
+        edge(a.prompt_len)
     elif a.mode == "chain":
         chain(a.prompt_len, a.profile)
     else:

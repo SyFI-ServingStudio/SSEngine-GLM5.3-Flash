@@ -16,6 +16,7 @@ Forward runs the layers inside vLLM's forward context; no host sync: plan -> met
 
 from __future__ import annotations
 
+import contextlib
 import os
 from pathlib import Path
 
@@ -132,6 +133,45 @@ class StageModel:
                                       device)
         self.num_blocks = num_blocks
         self.meta = StageMetadata(vc, self.kv, device)
+        self.max_tokens = max_tokens
+        if getattr(cfg, "warmup", True):
+            self.warmup()
+
+    def warmup(self, autotune: bool = True) -> None:
+        """Before `Ready`: run every kernel once (first launches load modules) and tune FlashInfer's kernels as vLLM's
+        `kernel_warmup` does (one autotuned pass at the microbatch budget, then plain passes). Shapes: one request at
+        the full budget (indexer and both top-k paths), then two requests, one continuing a cached prefix (conv and
+        KDA initial state, chunk start > 0). Uses blocks 1.. before any request holds them."""
+        from types import SimpleNamespace as NS
+
+        B = self.kv.block_tokens
+        T = min(self.max_tokens, (self.num_blocks - 1 - 6) * B)
+
+        def chunk(rid, start, n, base):
+            kv = list(range(base, base + -(-(start + n) // B)))
+            return NS(req_id=rid, start=start, num_tokens=n, kv_blocks=kv, is_last=True,
+                      state_blocks=list(range(base + len(kv), base + len(kv) + 6)), token_ids=[1] * n)
+
+        def plans():
+            yield NS(mb_id=-1, chunks=[chunk("w0", 0, T, 1)])
+            yield NS(mb_id=-2, chunks=[chunk("w1", 0, 512, 1), chunk("w2", 1024, 1024, 1 + 1 + 6)])
+
+        ctx = contextlib.nullcontext()
+        if autotune:
+            try:
+                from flashinfer.autotuner import autotune as fi_autotune
+                ctx = fi_autotune(True)
+            except ImportError:
+                pass
+        with torch.inference_mode():
+            for i, plan in enumerate(plans()):
+                T_p = sum(c.num_tokens for c in plan.chunks)
+                hidden = None if self.first else torch.zeros(T_p, self.hidden_width, dtype=torch.bfloat16,
+                                                              device=self.device)
+                with ctx if i == 0 else contextlib.nullcontext():
+                    self.forward(plan, hidden)
+                self.forward(plan, hidden)
+        torch.cuda.synchronize(self.device)
 
     # ------------------------------------------------------------------------------------------------ forward
 

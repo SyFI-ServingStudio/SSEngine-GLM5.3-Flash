@@ -107,6 +107,18 @@ class StageKV:
         return {name: g for g, names in enumerate(self.kda_groups) for name in names}
 
 
+def resolve_layout(vc, static_ctx: dict, local_spec: dict):
+    """The KV layout vLLM's engine core would resolve for this stage's backends (`resolve_kv_cache_layout` over
+    `get_supported_kv_cache_layouts`), recorded on the cache config as the engine does."""
+    from vllm.v1.attention.backends.utils import get_supported_kv_cache_layouts, resolve_kv_cache_layout
+
+    backends = {static_ctx[name].get_attn_backend() for name in local_spec}
+    supported = [layout.name for layout in get_supported_kv_cache_layouts(backends)]
+    layout = resolve_kv_cache_layout(vc, [supported], local_spec.values())
+    vc.cache_config.kv_cache_layout = layout.name
+    return layout
+
+
 def allocate(vc, static_ctx: dict, local_spec: dict, num_blocks: int, device: torch.device) -> StageKV:
     from vllm.v1.kv_cache_interface import KpoolTailSpec, MambaSpec, UniformTypeKVCacheSpecs
     from vllm.v1.worker.utils import allocate_kv_cache, bind_kv_cache_to_layers
@@ -128,8 +140,10 @@ def allocate(vc, static_ctx: dict, local_spec: dict, num_blocks: int, device: to
                 (idx if ".indexer." in name else mla).append(name)
             kernel_block_sizes.append(64)   # FlashInfer sparse MLA / indexer kernel block (select_common_block_size)
     assert len(kda) == STATE_BLOCKS - 1, f"{len(kda)} KDA groups"
-    vc.cache_config.kv_cache_layout = "LBHNC"
-    tensors = allocate_kv_cache(cfg, device, "LBHNC", kernel_block_sizes)
+    layout = resolve_layout(vc, static_ctx, local_spec)
+    if hasattr(cfg, "kv_cache_layout"):
+        cfg.kv_cache_layout = layout.name
+    tensors = allocate_kv_cache(cfg, device, layout, kernel_block_sizes)
     bind_kv_cache_to_layers(tensors, static_ctx, 1, kv_cache_groups=cfg.kv_cache_groups)
     return StageKV(cfg, num_blocks, per_block, mla, idx, tail, kda,
                    local_spec[mla[0]], local_spec[idx[0]], local_spec[tail[0]] if tail else None)

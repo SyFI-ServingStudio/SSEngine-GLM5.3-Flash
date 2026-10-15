@@ -427,6 +427,40 @@ def sleep_cycles_per_ms() -> float:
     return cycles / a.elapsed_time(b)
 
 
+def host_syncs(model, plan) -> list[dict]:
+    """Synchronizing CUDA calls in one forward (prepare + run), with the innermost non-torch frame of each:
+    torch's sync debug mode warns on every .item()/.cpu()/pageable copy/stream sync it issues."""
+    import traceback as tb
+    import warnings
+
+    import torch
+
+    found: dict = {}
+
+    def show(message, category, filename, lineno, file=None, line=None):
+        frames = [f for f in tb.extract_stack()[:-1] if "/torch/" not in f.filename and "warnings" not in f.filename]
+        where = " <- ".join(f"{Path(f.filename).name}:{f.lineno} {f.name}" for f in frames[-3:][::-1])
+        key = (str(message)[:120], where)
+        found[key] = found.get(key, 0) + 1
+
+    torch.cuda.synchronize()
+    old = warnings.showwarning
+    warnings.showwarning = show
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("always")
+            warnings.showwarning = show
+            torch.cuda.set_sync_debug_mode("warn")
+            try:
+                model.forward(plan, None)
+            finally:
+                torch.cuda.set_sync_debug_mode("default")
+    finally:
+        warnings.showwarning = old
+    torch.cuda.synchronize()
+    return [{"message": m, "where": w, "count": n} for (m, w), n in found.items()]
+
+
 def profile_runs(model, plan, runs: int, lead_ms: float, cycles_per_ms: float, trace_dir: Path, tag: str):
     """`runs` forwards under the profiler, each after a GPU sleep of `lead_ms` (0: none). Returns parsed runs."""
     import torch
@@ -548,7 +582,7 @@ def bench(args) -> None:
     routings = args.routing.split(",")
     dev = torch.device("cuda", 0)
     t0 = time.time()
-    cfg = SimpleNamespace(mb_tokens=max(lengths), checkpoint=CHECKPOINT, pool_tokens=None)
+    cfg = SimpleNamespace(mb_tokens=max(lengths), checkpoint=CHECKPOINT, pool_tokens=None, warmup=False)
     model = StageModel(cfg, 0, dev, last=True, num_blocks=NUM_BLOCKS, max_model_len=max(max(lengths), 8192) + 8576)
     print(f"[layers] model built in {time.time() - t0:.0f} s; layers {model.layer_range}; "
           f"mem {torch.cuda.memory_allocated() / 2**30:.1f} GiB", flush=True)
@@ -589,11 +623,13 @@ def bench(args) -> None:
                         launch.append((time.perf_counter() - h0) * 1e3)
                         torch.cuda.synchronize()
                     lead = 1.5 * max(launch) + 5
+                    syncs = host_syncs(model, plan)
                     parsed, tok = profile_runs(model, plan, args.runs, lead, cpm, trace_dir, f"L{L}_{routing}")
                     Scopes.on = False
                     gap_parsed, _ = profile_runs(model, plan, 3, 0, cpm, trace_dir, f"L{L}_{routing}_eager")
                     Scopes.on = True
                 extra = dict(extra_common, host_launch_ms=round(max(launch), 2), lead_ms=round(lead, 1),
+                             host_syncs=syncs,
                              gaps=host_gaps(gap_parsed), token=int(tok[0]))
                 lines = aggregate(L, routing, parsed, targets, extra)
                 if routing == routings[0]:
@@ -605,7 +641,9 @@ def bench(args) -> None:
                 raw_dump(L, routing, parsed)
                 summary = " ".join(f"{x['layer_type']}={x['real_ms']:.3f}({x['ratio']})" for x in lines)
                 print(f"[layers] L={L} {routing}: {summary}; launch {max(launch):.1f} ms; "
-                      f"eager gap {extra['gaps']['eager_gap_ms']} ms", flush=True)
+                      f"eager gap {extra['gaps']['eager_gap_ms']} ms; host syncs {len(syncs)}", flush=True)
+                for sync in syncs:
+                    print(f"[layers]   sync x{sync['count']}: {sync['message'][:80]} @ {sync['where']}", flush=True)
         except Exception as e:  # noqa: BLE001 - record and go on to the next length
             traceback.print_exc()
             with out_path.open("a") as f:
