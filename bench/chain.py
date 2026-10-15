@@ -219,10 +219,13 @@ def _chain_worker(rank: int, L: int, port: int, profile: bool) -> None:
             with prof_ctx(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
                 out = step()
                 torch.cuda.synchronize()
-            names = sorted({e.name for e in prof.profiler.kineto_results.events()
-                            if e.device_type() == torch.autograd.DeviceType.CUDA})
-            chk = km.check_trace(names, rank, optional=frozenset({19, 20, 21} if L <= 2048 else set()))
-            result["trace_check"] = {"ok": chk.ok, "summary": chk.summary(), "kernels": names}
+            try:
+                names = sorted({e.name() for e in prof.profiler.kineto_results.events()
+                                if e.device_type() == torch.autograd.DeviceType.CUDA})
+                chk = km.check_trace(names, rank, optional=frozenset({19, 20, 21} if L <= 2048 else set()))
+                result["trace_check"] = {"ok": chk.ok, "summary": chk.summary(), "kernels": names}
+            except Exception as e:  # noqa: BLE001 - the token result must still be written
+                result["trace_check"] = {"ok": False, "summary": f"trace check failed: {type(e).__name__}: {e}"}
         else:
             out = step()
             torch.cuda.synchronize()
