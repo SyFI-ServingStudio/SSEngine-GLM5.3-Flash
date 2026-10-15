@@ -5,7 +5,7 @@ Configuration numbers follow lanes/model/measured/kernels_identity.md (the 35 of
 written to <queue>/todo/<nn>__<kind>__<backend>__<k>.jsonl with a sidecar .rows.jsonl
 holding the handoff rows (db_time_ms, config) in the same order.
 
-usage: python make_queue.py <kernel_specs.jsonl> <queue_dir> --configs 1,5,7,... [--chunk 100]
+usage: python make_queue.py <kernel_specs.jsonl> <queue_dir> --configs 1,5,7,... [--chunk 50]
 """
 
 import argparse
@@ -66,7 +66,14 @@ def cli_spec(spec):
     out = dict(spec)
     if isinstance(out.get("per_expert_batches"), str):
         out["per_expert_batches"] = json.loads(out["per_expert_batches"])
+    if out.get("clean_logits") in ("0", "1"):  # stored as text in the DB, a bool in the CLI
+        out["clean_logits"] = out["clean_logits"] == "1"
     return out
+
+
+# The NVFP4 MoE runner autotunes every shape before timing it (as vLLM does), so its specs
+# cost far more than the others; small chunks keep a timeout from losing a whole config.
+CHUNK_CAP = {"nvfp4_fused_moe": 12}
 
 
 def main():
@@ -74,7 +81,7 @@ def main():
     ap.add_argument("specs")
     ap.add_argument("queue")
     ap.add_argument("--configs", required=True)
-    ap.add_argument("--chunk", type=int, default=100)
+    ap.add_argument("--chunk", type=int, default=50)
     a = ap.parse_args()
     wanted = {int(c) for c in a.configs.split(",")}
     groups = defaultdict(list)
@@ -95,7 +102,7 @@ def main():
     chunks = []
     for (kind, backend), rows in sorted(groups.items()):
         rows.sort(key=lambda r: r["db_time_ms"])
-        k = -(-len(rows) // a.chunk)
+        k = -(-len(rows) // min(a.chunk, CHUNK_CAP.get(kind, a.chunk)))
         for i in range(k):
             chunks.append((i, kind, backend, rows[i::k]))  # strided: each chunk spans all sizes
     chunks.sort(key=lambda c: (c[0], -len(c[3])))

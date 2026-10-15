@@ -17,17 +17,22 @@ export MOESIM_CUPTI_BUILD_DIR=/raid/kanzhu/ServingStudio/tmp/moesim_cupti_ext_pp
 export VIBESIM_AUTOTUNE_CACHE_DIR=$Q/autotune
 echo "job=$SLURM_JOB_ID cvd=$CUDA_VISIBLE_DEVICES start=$(date -Is) uptime: $(uptime)"
 bad=0
-for f in $(ls "$Q/todo" | grep -v rows | awk -F'__' '!seen[$2"__"$3]++'); do
+# SMOKE_ONLY: optional regex over "<kind>__<backend>" to smoke a subset.
+for f in $(ls "$Q/todo" | grep -v rows | awk -F'__' '!seen[$2"__"$3]++' | grep -E "${SMOKE_ONLY:-.}"); do
   stem=${f%.jsonl}; kind=$(echo "$stem" | awk -F'__' '{print $2}'); backend=$(echo "$stem" | awk -F'__' '{print $3}')
   python3 "$LANE/bench/kernels/smallest_spec.py" "$Q/todo/$stem.rows.jsonl" > "$OUT/$kind.$backend.spec.jsonl"
   t0=$(date +%s)
-  ( cd "$SIM" && PPM_KNAMES_DIR="$OUT/knames_$kind.$backend" timeout 240 uv run --no-sync python "$LANE/bench/kernels/ppimpl_profile.py" run "$kind" \
-      --backend "$backend" --specs "$OUT/$kind.$backend.spec.jsonl" --fresh --gpu-name "NVIDIA B200" --json \
-      > "$OUT/$kind.$backend.json" 2> "$OUT/$kind.$backend.err" )
+  # The NVFP4 MoE runner autotunes before timing; give it longer. run_call.sh kills only its own session.
+  to=240; case "$kind" in nvfp4_fused_moe) to=420;; esac
+  ( cd "$SIM" && PPM_KNAMES_DIR="$OUT/knames_$kind.$backend" "$LANE/bench/kernels/run_call.sh" $to \
+      "$OUT/$kind.$backend.json" "$OUT/$kind.$backend.err" \
+      uv run --no-sync python "$LANE/bench/kernels/ppimpl_profile.py" run "$kind" \
+      --backend "$backend" --specs "$OUT/$kind.$backend.spec.jsonl" --fresh --gpu-name "NVIDIA B200" --json )
   rc=$?
   st=$(python3 -c "import json; d=json.load(open('$OUT/$kind.$backend.json')); r=d['results'][0]; print(r.get('status'), r.get('metrics',{}).get('time_ms'), (r.get('error') or '')[:200])" 2>/dev/null || echo "no-json")
   echo "$kind/$backend rc=$rc $(( $(date +%s) - t0 ))s: $st"
   case "$st" in ok*) ;; *) bad=1; tail -15 "$OUT/$kind.$backend.err";; esac
+  [ $rc -eq 125 ] && { echo "GPU still held after cleanup; stopping"; break; }
 done
 echo "end $(date -Is) bad=$bad"
 exit $bad

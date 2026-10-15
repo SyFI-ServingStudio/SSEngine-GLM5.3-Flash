@@ -15,7 +15,7 @@ LANE=/raid/kanzhu/ServingStudio/pp-impl/lanes/measure
 SIM=/raid/kanzhu/ServingStudio/wt-pp-main
 Q=$LANE/measured/kernels_runs/queue
 LOG=$LANE/measured/kernels_runs/logs/$SLURM_JOB_ID
-mkdir -p "$LOG" "$Q/out" "$Q/knames"
+mkdir -p "$LOG" "$Q/out" "$Q/knames" "$Q/timeouts"
 set -a; source /raid/kanzhu/ServingStudio/.env; set +a
 export MOESIM_CUPTI_BUILD_DIR=/raid/kanzhu/ServingStudio/tmp/moesim_cupti_ext_ppimpl
 export VIBESIM_AUTOTUNE_CACHE_DIR=$Q/autotune
@@ -44,16 +44,26 @@ lane() {
     local n; n=$(wc -l < "$Q/claimed/$f")
     echo "$(date -Is) dev$dev start $stem n=$n load=$(cut -d' ' -f1-3 /proc/loadavg)" >> "$LOG/progress.log"
     mkdir -p "$Q/knames/$stem"
+    # run_call.sh: own session; on timeout it kills that session only (never by GPU or user).
     ( cd "$SIM" && CUDA_VISIBLE_DEVICES=$dev PPM_KNAMES_DIR="$Q/knames/$stem" \
-        timeout $(( left - 120 )) uv run --no-sync python "$LANE/bench/kernels/ppimpl_profile.py" run "$kind" \
-        --backend "$backend" --specs "$Q/claimed/$f" --fresh --gpu-name "NVIDIA B200" --json \
-        > "$Q/out/$stem.json" 2> "$Q/out/$stem.err" )
+        "$LANE/bench/kernels/run_call.sh" $(( left - 120 )) "$Q/out/$stem.json" "$Q/out/$stem.err" \
+        uv run --no-sync python "$LANE/bench/kernels/ppimpl_profile.py" run "$kind" \
+        --backend "$backend" --specs "$Q/claimed/$f" --fresh --gpu-name "NVIDIA B200" --json )
     local rc=$?
     if [ $rc -eq 0 ] || grep -q '"results"' "$Q/out/$stem.json"; then
       fails=0
       mv "$Q/claimed/$f" "$Q/claimed/$stem.rows.jsonl" "$Q/done/"
-    elif [ $rc -eq 124 ]; then
-      mv "$Q/claimed/$f" "$Q/claimed/$stem.rows.jsonl" "$Q/todo/"   # out of time: back to the queue
+    elif [ $rc -eq 124 ] || [ $rc -eq 125 ]; then
+      # Out of time (or the GPU was not released): back to the queue once, then to failed.
+      if [ -e "$Q/timeouts/$stem" ]; then
+        mv "$Q/claimed/$f" "$Q/claimed/$stem.rows.jsonl" "$Q/failed/"
+      else
+        touch "$Q/timeouts/$stem"; mv "$Q/claimed/$f" "$Q/claimed/$stem.rows.jsonl" "$Q/todo/"
+      fi
+      { echo "--- $stem rc=$rc (timeout/GPU not released) stderr tail:"; tail -5 "$Q/out/$stem.err"; } >> "$LOG/errors.log"
+      if [ $rc -eq 125 ]; then
+        echo "$(date -Is) dev$dev stop: GPU still held after cleanup" >> "$LOG/progress.log"; return
+      fi
     else
       fails=$((fails + 1))
       mv "$Q/claimed/$f" "$Q/claimed/$stem.rows.jsonl" "$Q/failed/"
