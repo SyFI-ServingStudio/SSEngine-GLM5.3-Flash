@@ -1,0 +1,94 @@
+{
+  "backend": "vllm_triton",
+  "db_path": "/raid/kanzhu/ServingStudio/pp-impl/lanes/measure/measured/nodecheck_runs/7079/scratch_profile.db",
+  "energy_measured": false,
+  "gpu_name": "NVIDIA B200",
+  "missing_count": 0,
+  "mode": "fresh",
+  "ok": true,
+  "persisted": false,
+  "results": [
+    {
+      "index": 0,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 3.2602250396412473,
+        "tflops": 0.0,
+        "time_ms": 0.0054450229
+      },
+      "status": "ok"
+    },
+    {
+      "index": 1,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 1065.1609232909132,
+        "tflops": 0.0,
+        "time_ms": 0.037924125
+      },
+      "status": "ok"
+    },
+    {
+      "index": 2,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 1308.8869375438667,
+        "tflops": 0.0,
+        "time_ms": 0.2730568743169399
+      },
+      "status": "ok"
+    }
+  ],
+  "spec_count": 3,
+  "specs": [
+    {
+      "block_size": 64,
+      "index_distribution": "unique_scattered_blocks",
+      "index_dtype": "int32",
+      "local_span_lengths": "u:64x1",
+      "max_blocks_per_request": 16384,
+      "num_queries": 1,
+      "num_requests": 1,
+      "page_table_mapping": "interleaved_requests",
+      "request_row_counts": "u:1x1",
+      "return_valid_counts": true,
+      "selected_k": 2176,
+      "valid_counts": "u:64x1",
+      "workspace_partition": "suffix:0@1"
+    },
+    {
+      "block_size": 64,
+      "index_distribution": "unique_scattered_blocks",
+      "index_dtype": "int32",
+      "local_span_lengths": "u:512x2048",
+      "max_blocks_per_request": 16384,
+      "num_queries": 2048,
+      "num_requests": 2,
+      "page_table_mapping": "interleaved_requests",
+      "request_row_counts": "g:(2040,8)x1",
+      "return_valid_counts": true,
+      "selected_k": 2176,
+      "valid_counts": "u:512x2048",
+      "workspace_partition": "suffix:1@1"
+    },
+    {
+      "block_size": 64,
+      "index_distribution": "unique_scattered_blocks",
+      "index_dtype": "int32",
+      "local_span_lengths": "u:2048x16384",
+      "max_blocks_per_request": 16384,
+      "num_queries": 16384,
+      "num_requests": 2,
+      "page_table_mapping": "interleaved_requests",
+      "request_row_counts": "u:8192x2",
+      "return_valid_counts": true,
+      "selected_k": 2176,
+      "valid_counts": "u:2048x16384",
+      "workspace_partition": "suffix:1@1"
+    }
+  ],
+  "table": "dsa_sparse_index_remap"
+}

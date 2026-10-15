@@ -10,6 +10,8 @@ Per (microbatch, stage), times in ms, by the 4_iteration.md §6 GPU-trace defini
 - `start_ms` / `end_ms`: first compute-kernel start / last compute-kernel end (NCCL kernels excluded), from the first
   traced stage-0 kernel; `compute_ms` = end - start; `busy_ms`: union of the kernels; `gaps_ms` = compute - busy;
 - `nccl_recv_ms` / `nccl_send_ms`: durations of the NCCL kernels launched before / after the compute launches;
+- `host_lead_ms`: first compute kernel's GPU start - the host call that launched it (how far the host runs ahead);
+  `launch_ms`: host time from the first to the last compute launch (the host cost of launching the stage);
 - per microbatch: `sends` (stage s last kernel end -> stage s+1 first kernel start) and `gpu_span_ms`.
 Per stage and kernel name: count and time over the microbatches complete on every stage, with the manifest's
 configuration and layer positions (`ppimpl.kernels.check_trace`) when the manifest is importable.
@@ -100,12 +102,14 @@ def stage_numbers(kernels: list) -> dict:
     if not comp:
         return {}
     first_launch = min(k[4] for k in comp)
-    start, end = min(k[0] for k in comp), max(k[1] for k in comp)
+    first = min(comp, key=lambda k: k[0])
+    start, end = first[0], max(k[1] for k in comp)
     busy = merged_ns([(k[0], k[1]) for k in comp])
     recv = [k for k in nccl if k[4] < first_launch]
     send = [k for k in nccl if k[4] >= first_launch]
     return {"start_ns": start, "end_ns": end, "compute_ms": (end - start) / 1e6, "busy_ms": busy / 1e6,
             "gaps_ms": (end - start - busy) / 1e6, "kernels": len(comp),
+            "host_lead_ms": (start - first[4]) / 1e6, "launch_ms": (max(k[4] for k in comp) - first_launch) / 1e6,
             "nccl_recv_ms": sum(k[1] - k[0] for k in recv) / 1e6 if recv else None,
             "nccl_send_ms": sum(k[1] - k[0] for k in send) / 1e6 if send else None}
 

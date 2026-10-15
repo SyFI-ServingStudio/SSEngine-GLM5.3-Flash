@@ -44,6 +44,11 @@ def parse_name(name: str) -> tuple[str, int]:
     return m.group(1), int(m.group(2)) * 1024
 
 
+# The queued plan forms this long before stage 0 frees: the real stage 0 spends 25-30 ms of host time launching an
+# eager forward at <= 8k (model lane, M2), plus margin. Recorded in each run's server_config.yaml.
+REAL_FORM_LEAD_MS = 35.0
+
+
 def trace_for(kind: str, length: int) -> Path:
     return HANDOFF / "data/bringup" / f"{'one' if kind == 'one' else 'uni'}_{length // 1024}k.csv"
 
@@ -54,6 +59,7 @@ def server_config(kind: str, length: int, use_fake: bool, run_dir: Path, device:
            "scheduler": {"mb_tokens": max(8192, length) if kind == "one" else 8192}}
     if not use_fake:
         cfg["checkpoint"] = str(CHECKPOINT)
+        cfg["form_lead_ms"] = REAL_FORM_LEAD_MS
     cfg.update(extra)
     return cfg
 
@@ -169,7 +175,7 @@ def execute(run_dir: Path, server_cfg: dict, client_cfg: dict, *, port: int, met
     """One run: fresh server, req-frontend, metrics and report. Returns run.json's content."""
     run_dir.mkdir(parents=True, exist_ok=True)
     for f in ("microbatches.jsonl", "server_requests.jsonl", "requests.jsonl", "trace.nsys-rep", "trace.sqlite",
-              "trace.json"):
+              "trace.json", "token_check.json", *(f"stage{s}.json" for s in range(8))):
         (run_dir / f).unlink(missing_ok=True)
     server_cfg = {**server_cfg, "port": port, "run_dir": str(run_dir)}
     (run_dir / "server.yaml").write_text(yaml.safe_dump(server_cfg, sort_keys=False))
@@ -215,6 +221,13 @@ def execute(run_dir: Path, server_cfg: dict, client_cfg: dict, *, port: int, met
     pool = run_dir / "pool.json"
     if pool.exists():
         meta["pool"] = json.loads(pool.read_text())
+    stages = sorted(run_dir.glob("stage[0-9].json"))
+    if stages:
+        meta["tactics"] = [json.loads(f.read_text())["tactics"] for f in stages]
+    if server_cfg.get("model") != "fake" and (run_dir / "server_requests.jsonl").exists():
+        tc = subprocess.run([PYTHON, str(ROOT / "bench/check_tokens.py"), str(run_dir)], cwd=ROOT, capture_output=True,
+                            text=True)
+        print(tc.stdout + tc.stderr, flush=True)
     reqs = run_dir / "requests.jsonl"
     if reqs.exists() and reqs.stat().st_size:
         m = subprocess.run([PYTHON, str(HANDOFF / "data/metrics.py"), str(reqs)], capture_output=True, text=True)

@@ -1,25 +1,37 @@
 """The controller: spawns the stage workers, admits requests, forms microbatches, dispatches plans, completes requests.
 
-It runs in the server process's event loop (ppimpl/server.py). Microbatches go to all workers at once, in mb_id order;
-workers report `StageDone`; the last stage's report carries the tokens. Logs, in `run_dir` (times in ms from t0, the
-first request's arrival at the server):
+Two threads. The HTTP server's event loop (ppimpl/server.py) only admits: `submit` checks a request, queues it and
+returns a future. The control thread owns everything else: it takes queued requests into the scheduler, receives the
+workers' reports, forms and dispatches microbatches and resolves the futures (`call_soon_threadsafe`). So a burst of
+thousands of requests cannot hold back a report or a dispatch: in one event loop the burst's handlers all ran before
+the report socket was read again (~1 s for 2,048 requests, job 7056).
+
+Microbatches go to all workers at once, in mb_id order; workers report `StageDone`; the last stage's report carries
+the tokens. Logs, in `run_dir` (times in ms from t0, the first request's arrival at the server):
 - `microbatches.jsonl`: one line per (microbatch, stage), 1_contract.md §3;
-- `server_requests.jsonl`: one line per request: scheduler order (seq), arrival, first dispatch, token, response;
+- `server_requests.jsonl`: one line per request: scheduler order (seq), arrival, first dispatch, token (when the
+  control thread handled the last stage's report), response, prompt sha256;
 - `plans.jsonl`: one line per microbatch at dispatch: tokens, dispatch time, whether it was queued behind a running
   stage-0 plan, and that plan's predicted stage-0 end.
 When a microbatch forms is `DispatchRule`'s decision (ppimpl/runtime/dispatch.py); what it holds is the scheduler's.
 """
 
 import asyncio
+import gc
+import hashlib
 import json
+import math
 import os
+import queue
 import subprocess
 import sys
+import threading
 import time
+import traceback
 from pathlib import Path
 
+import numpy as np
 import zmq
-import zmq.asyncio
 
 from ppimpl.config import BLOCK_TOKENS, RunConfig, dump_config
 from ppimpl.engine.kv import KvManager, kv_blocks_for, pool_size
@@ -29,6 +41,13 @@ from ppimpl.runtime.transport import (Chunk, Plan, Ready, Shutdown, StageDone, W
                                       encode, for_stage)
 
 READY_TIMEOUT_S = 1800   # a real stage loads its weights and captures graphs before Ready
+WAKE_ADDR = "inproc://ppimpl-control-wake"
+ADMIT_BATCH = 64   # requests the control thread takes in before it looks at the reports again
+
+
+def prompt_sha256(token_ids: list[int]) -> str:
+    """The prompt's id in measured/reference.jsonl: sha256 of its token ids as little-endian int32."""
+    return hashlib.sha256(np.asarray(token_ids, "<i4").tobytes()).hexdigest()
 
 
 class RequestError(Exception):
@@ -43,14 +62,21 @@ class Controller:
         self.run_dir.mkdir(parents=True, exist_ok=True)
         self.procs: list[subprocess.Popen] = []
         self.sched: PlainScheduler | None = None
-        self.reqs: dict[str, tuple[Request, asyncio.Future, dict]] = {}
-        self.inflight_plans: dict[int, tuple[list[dict], int]] = {}   # mb_id -> (log requests, stages left)
-        self.next_mb = 0
-        self.next_seq = 0     # order in which requests entered the scheduler
         self.t0_ns: int | None = None
         self.ready = False
         self.failed: str | None = None
-        self._tasks: list[asyncio.Task] = []
+        # event loop
+        self.loop: asyncio.AbstractEventLoop | None = None
+        self.live: set[str] = set()                           # ids of requests not answered yet (unique ids)
+        self.inbox: queue.SimpleQueue = queue.SimpleQueue()   # -> control thread: (id, tokens, arrival, future)
+        self.wake_sent = False    # set by the event loop when it wakes the control thread, cleared by that thread
+        self.thread: threading.Thread | None = None
+        # control thread
+        self.reqs: dict[str, tuple[Request, asyncio.Future, dict]] = {}
+        self.inflight_plans: dict[int, tuple[list[dict], int]] = {}   # mb_id -> (log requests, stages left)
+        self.next_mb = 0
+        self.next_seq = 0                    # order in which requests entered the scheduler
+        self.timer_at: int | None = None     # host ns at which the dispatch rule wants to be asked again
 
     # --- lifecycle ------------------------------------------------------------------------------------------------
 
@@ -58,10 +84,15 @@ class Controller:
         cfg = self.cfg
         cfg_path = self.run_dir / "server_config.yaml"
         cfg_path.write_text(dump_config(cfg))
-        self.actx = zmq.asyncio.Context()
-        self.reports = self.actx.socket(zmq.PULL)
-        self.reports.bind(cfg.report_addr())
+        self.loop = asyncio.get_running_loop()
         self.ctx = zmq.Context()
+        self.reports = self.ctx.socket(zmq.PULL)
+        self.reports.bind(cfg.report_addr())
+        self.wake_rx = self.ctx.socket(zmq.PULL)     # the control thread sleeps in a poll on reports + this
+        self.wake_rx.bind(WAKE_ADDR)
+        self.wake_tx = self.ctx.socket(zmq.PUSH)     # used by the event loop only
+        self.wake_tx.setsockopt(zmq.SNDHWM, 0)
+        self.wake_tx.connect(WAKE_ADDR)
         self.plans = []
         pkg_root = str(Path(__file__).resolve().parents[2])
         env = {**os.environ, "PYTHONUNBUFFERED": "1",
@@ -76,7 +107,7 @@ class Controller:
             sock.connect(cfg.plan_addr(s))
             self.plans.append(sock)
         try:
-            ready = await self._wait_ready()
+            ready = await asyncio.to_thread(self._wait_ready)
         except BaseException:
             for p in self.procs:
                 p.kill()
@@ -85,26 +116,29 @@ class Controller:
         self.rule = DispatchRule(cfg.max_in_flight, cfg.dispatch_ahead >= 1, cfg.form_lead_ms)
         # the scheduler's own cap is not the binding one: the rule admits the extra queued plan
         self.sched = PlainScheduler(KvManager(num_blocks), cfg.scheduler.mb_tokens, self.rule.cap, 1)
-        self._timer: asyncio.TimerHandle | None = None
-        self._timer_at = None
         self.mb_log = open(self.run_dir / "microbatches.jsonl", "w")
         self.plan_log = open(self.run_dir / "plans.jsonl", "w")
         self.req_log = open(self.run_dir / "server_requests.jsonl", "w")
         (self.run_dir / "pool.json").write_text(json.dumps(
             {"ready_blocks": [r.num_blocks for r in ready], "num_blocks": num_blocks,
              "pool_tokens": num_blocks * BLOCK_TOKENS}))
-        self._tasks = [asyncio.create_task(self._report_loop()), asyncio.create_task(self._watchdog())]
+        # Leave start-up objects (torch, FastAPI, ...) out of later collections: a full one took ~50 ms with the GIL
+        # held, stalling the control thread during a burst.
+        gc.collect()
+        gc.freeze()
+        self.thread = threading.Thread(target=self._control, name="control", daemon=True)
+        self.thread.start()
         self.ready = True
 
-    async def _wait_ready(self) -> list[Ready]:
+    def _wait_ready(self) -> list[Ready]:
         ready: dict[int, Ready] = {}
         deadline = time.monotonic() + READY_TIMEOUT_S
         while len(ready) < self.n:
             self._check_procs()
             if time.monotonic() > deadline:
                 raise RuntimeError("workers not ready in time")
-            if await self.reports.poll(1000):
-                msg = decode_to_controller(await self.reports.recv())
+            if self.reports.poll(1000):
+                msg = decode_to_controller(self.reports.recv())
                 if isinstance(msg, WorkerError):
                     raise RuntimeError(f"worker {msg.stage} failed:\n{msg.error}")
                 if isinstance(msg, Ready):
@@ -117,8 +151,10 @@ class Controller:
                 raise RuntimeError(f"worker {s} exited with {p.returncode}; see {self.run_dir}/worker{s}.log")
 
     async def stop(self):
-        for t in self._tasks:
-            t.cancel()
+        if self.thread is not None and self.thread.is_alive():
+            self.inbox.put(None)
+            self.wake_tx.send(b"")
+            await asyncio.to_thread(self.thread.join, 10)
         for sock in self.plans:
             sock.send(encode(Shutdown()))
         for p in self.procs:
@@ -126,41 +162,19 @@ class Controller:
                 await asyncio.to_thread(p.wait, 60)
             except subprocess.TimeoutExpired:
                 p.kill()
-        for sock in self.plans:
+        for sock in (*self.plans, self.reports, self.wake_rx, self.wake_tx):
             sock.close(linger=0)
-        self.reports.close(linger=0)
-        if self._timer is not None:
-            self._timer.cancel()
         for f in ("mb_log", "req_log", "plan_log"):
             if hasattr(self, f):
                 getattr(self, f).close()
 
-    async def _watchdog(self):
-        while True:
-            await asyncio.sleep(1.0)
-            try:
-                self._check_procs()
-            except RuntimeError as e:
-                self._fail(str(e))
-                return
-            self.mb_log.flush()
-            self.req_log.flush()
-            self.plan_log.flush()
-
-    def _fail(self, why: str):
-        self.failed = why
-        print(f"controller: {why}", file=sys.stderr, flush=True)
-        for _, fut, _ in self.reqs.values():
-            if not fut.done():
-                fut.set_exception(RuntimeError(why))
-        os.kill(os.getpid(), 15)   # stop the server: a broken pipeline must not keep answering /health
-
-    # --- requests -------------------------------------------------------------------------------------------------
-
     def _ms(self, ns: int) -> float:
         return (ns - self.t0_ns) / 1e6
 
+    # --- event loop -----------------------------------------------------------------------------------------------
+
     def submit(self, req_id: str, token_ids: list[int], arrival_ns: int) -> asyncio.Future:
+        """Check a request and queue it for the control thread; the future gets (token, info)."""
         if self.failed:
             raise RequestError(self.failed)
         if not token_ids:
@@ -171,16 +185,94 @@ class Controller:
             self.t0_ns = arrival_ns
             (self.run_dir / "t0.json").write_text(json.dumps({"t0_unix_ns": arrival_ns}) + "\n")
         base, k = req_id, 1
-        while req_id in self.reqs:
+        while req_id in self.live:
             req_id, k = f"{base}#{k}", k + 1
+        self.live.add(req_id)
+        fut = self.loop.create_future()
+        self.inbox.put((req_id, token_ids, arrival_ns, fut))
+        if not self.wake_sent:    # one wake per batch the control thread takes, not one per request
+            self.wake_sent = True
+            self.wake_tx.send(b"")
+        return fut
+
+    def _answered(self, done: list[tuple[asyncio.Future, int, dict]]):
+        for fut, tok, info in done:
+            self.live.discard(info["id"])
+            if not fut.done():
+                fut.set_result((tok, info))
+
+    def log_response(self, info: dict):
+        """After the response went out."""
+        info["response_ms"] = self._ms(time.time_ns())
+        info["prompt_sha256"] = prompt_sha256(info.pop("_prompt"))   # here, not on intake: bursts are the hot path
+        self.req_log.write(json.dumps(info) + "\n")
+
+    # --- control thread -------------------------------------------------------------------------------------------
+
+    def _control(self):
+        poller = zmq.Poller()
+        poller.register(self.reports, zmq.POLLIN)
+        poller.register(self.wake_rx, zmq.POLLIN)
+        next_check = time.monotonic() + 1.0
+        try:
+            more = False   # requests left in the inbox after this round's batch
+            while True:
+                timeout_ms = 0 if more else 1000
+                if self.timer_at is not None:
+                    timeout_ms = min(timeout_ms, max(0, math.ceil((self.timer_at - time.time_ns()) / 1e6)))
+                poller.poll(timeout_ms)
+                while self.reports.poll(0):          # reports first: they free in-flight slots and time stage 0
+                    msg = decode_to_controller(self.reports.recv())
+                    if isinstance(msg, WorkerError):
+                        raise RuntimeError(f"worker {msg.stage} failed:\n{msg.error}")
+                    if isinstance(msg, StageDone):
+                        self._on_stage_done(msg)
+                while self.wake_rx.poll(0):
+                    self.wake_rx.recv()
+                self.wake_sent = False
+                more = False
+                for _ in range(ADMIT_BATCH):   # bounded, so a burst of requests cannot hold back the reports
+                    try:
+                        item = self.inbox.get_nowait()
+                    except queue.Empty:
+                        break
+                    if item is None:
+                        return
+                    self._admit(*item)
+                else:
+                    more = True
+                if self.timer_at is not None and time.time_ns() >= self.timer_at:
+                    self.timer_at = None
+                self._pump()
+                if time.monotonic() >= next_check:
+                    next_check = time.monotonic() + 1.0
+                    self._check_procs()
+                    for f in (self.mb_log, self.plan_log, self.req_log):
+                        f.flush()
+        except Exception as e:
+            self._fail(str(e) if isinstance(e, RuntimeError) else traceback.format_exc())
+
+    def _fail(self, why: str):
+        """Fail every open request and stop the server: a broken pipeline must not keep answering /health."""
+        self.failed = why
+        print(f"controller: {why}", file=sys.stderr, flush=True)
+        futs = [fut for _, fut, _ in self.reqs.values()]
+        while True:
+            try:
+                item = self.inbox.get_nowait()
+            except queue.Empty:
+                break
+            if item is not None:
+                futs.append(item[3])
+        self.loop.call_soon_threadsafe(_fail_all, futs, why)
+        os.kill(os.getpid(), 15)
+
+    def _admit(self, req_id: str, token_ids: list[int], arrival_ns: int, fut: asyncio.Future):
         req = Request(req_id, len(token_ids), arrival_ns, token_ids)
-        fut = asyncio.get_running_loop().create_future()
         self.reqs[req_id] = (req, fut, {"id": req_id, "seq": self.next_seq, "prompt_tokens": len(token_ids),
-                                        "arrival_ms": self._ms(arrival_ns)})
+                                        "arrival_ms": self._ms(arrival_ns), "_prompt": token_ids})
         self.next_seq += 1
         self.sched.add(req)
-        self._pump()
-        return fut
 
     def _pump(self):
         """Form and dispatch microbatches while the dispatch rule allows and the scheduler has work."""
@@ -188,7 +280,7 @@ class Controller:
             now = time.time_ns()
             verdict, at = self.rule.decide(self.sched.in_flight, now)
             if verdict == WAIT:
-                self._arm(at, now)
+                self.timer_at = at
                 return
             if verdict != NOW:
                 return
@@ -196,19 +288,6 @@ class Controller:
             if chunks is None:
                 return
             self._dispatch(chunks, now)
-
-    def _arm(self, at_ns: int, now_ns: int):
-        if self._timer is not None:
-            if self._timer_at == at_ns:
-                return
-            self._timer.cancel()
-        self._timer_at = at_ns
-        self._timer = asyncio.get_running_loop().call_later((at_ns - now_ns) / 1e9, self._on_timer)
-
-    def _on_timer(self):
-        self._timer = self._timer_at = None
-        if not self.failed:
-            self._pump()
 
     def _dispatch(self, specs: list[ChunkSpec], now: int):
         mb_id, self.next_mb = self.next_mb, self.next_mb + 1
@@ -234,15 +313,6 @@ class Controller:
         self.inflight_plans[mb_id] = ([{"id": c.req.req_id, "prefix": c.start, "append": c.num_tokens}
                                        for c in specs], self.n)
 
-    async def _report_loop(self):
-        while True:
-            msg = decode_to_controller(await self.reports.recv())
-            if isinstance(msg, WorkerError):
-                self._fail(f"worker {msg.stage} failed:\n{msg.error}")
-                return
-            if isinstance(msg, StageDone):
-                self._on_stage_done(msg)
-
     def _on_stage_done(self, d: StageDone):
         reqs, left = self.inflight_plans[d.mb_id]
         self.mb_log.write(json.dumps({"stage": d.stage, "index": d.mb_id, "start_ms": round(self._ms(d.start_ns), 4),
@@ -257,15 +327,17 @@ class Controller:
             self.rule.stage0_done(d.mb_id, d.start_ns, d.end_ns)
         if d.tokens:
             now = time.time_ns()
+            done = []
             for req_id, tok in d.tokens:
                 req, fut, info = self.reqs.pop(req_id)
                 self.sched.finish(req)
                 info["token_ms"] = self._ms(now)
                 info["token"] = tok
-                if not fut.done():
-                    fut.set_result((tok, info))
-        self._pump()
+                done.append((fut, tok, info))
+            self.loop.call_soon_threadsafe(self._answered, done)
 
-    def log_response(self, info: dict):
-        info["response_ms"] = self._ms(time.time_ns())
-        self.req_log.write(json.dumps(info) + "\n")
+
+def _fail_all(futs: list[asyncio.Future], why: str):
+    for fut in futs:
+        if not fut.done():
+            fut.set_exception(RuntimeError(why))

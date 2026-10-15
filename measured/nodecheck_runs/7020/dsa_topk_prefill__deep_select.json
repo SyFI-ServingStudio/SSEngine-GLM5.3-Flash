@@ -1,0 +1,79 @@
+{
+  "backend": "deep_select",
+  "db_path": "/raid/kanzhu/ServingStudio/pp-impl/lanes/measure/measured/nodecheck_runs/7020/scratch_profile.db",
+  "energy_measured": false,
+  "gpu_name": "NVIDIA B200",
+  "missing_count": 0,
+  "mode": "fresh",
+  "ok": true,
+  "persisted": false,
+  "results": [
+    {
+      "index": 0,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 7.317486307944216,
+        "tflops": 0.0,
+        "time_ms": 0.001682545
+      },
+      "status": "ok"
+    },
+    {
+      "index": 1,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 396.47990826414247,
+        "tflops": 0.0,
+        "time_ms": 0.010890397999999999
+      },
+      "status": "ok"
+    },
+    {
+      "index": 2,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 1865.0475206024764,
+        "tflops": 0.0,
+        "time_ms": 4.678061863636364
+      },
+      "status": "ok"
+    }
+  ],
+  "spec_count": 3,
+  "specs": [
+    {
+      "index_dtype": "int32",
+      "logits_dtype": "fp32",
+      "logits_row_stride": 768,
+      "num_keys": 257,
+      "num_queries": 4,
+      "num_sequences": 1,
+      "span_mode": "single_causal_tail",
+      "top_k": 512
+    },
+    {
+      "index_dtype": "int32",
+      "logits_dtype": "fp32",
+      "logits_row_stride": 16640,
+      "num_keys": 16384,
+      "num_queries": 64,
+      "num_sequences": 1,
+      "span_mode": "single_causal_tail",
+      "top_k": 512
+    },
+    {
+      "index_dtype": "int32",
+      "logits_dtype": "fp32",
+      "logits_row_stride": 65792,
+      "num_keys": 65536,
+      "num_queries": 65536,
+      "num_sequences": 1,
+      "span_mode": "single_causal_tail",
+      "top_k": 512
+    }
+  ],
+  "table": "dsa_topk_prefill"
+}

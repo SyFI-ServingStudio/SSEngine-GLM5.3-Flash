@@ -1,0 +1,12 @@
+job=7062 cvd=0 start=2026-10-15T03:51:35-07:00 uptime:  03:51:35 up 11 days, 14:33, 42 users,  load average: 15.90, 15.80, 14.50
+dsa_sparse_mla_attention/flashinfer_trtllm_fp8 rc=0 50s: ok 0.00610537 
+mhc_fused_post_pre_rms_norm/deepgemm_mega_nonshifted rc=0 7s: ok 0.012714893 
+kda_chunk_prefill/flashinfer_cute_persistent rc=0 4s: ok 0.023067644999999998 
+dsa_topk_prefill/deep_select rc=0 5s: ok 0.0019993190000000003 
+single_gemm/torch_linear_vllm rc=0 3s: ok 0.0053447170000000006 
+nvfp4_fused_moe/flashinfer_trtllm_sm100 rc=124 240s: no-json
+mhc_pre_rms_norm/vllm_tilelang rc=2 1s: no-json
+{"ok": false, "error": "need 1 idle GPU(s), found 0"}
+single_gemm/flashinfer_cutedsl rc=0 7s: ok 0.009504196 
+rms_norm/vllm_cuda rc=0 5s: ok 0.003260945 
+end 2026-10-15T03:56:57-07:00 bad=1

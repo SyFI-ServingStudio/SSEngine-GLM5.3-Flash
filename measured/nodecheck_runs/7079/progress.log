@@ -1,0 +1,3 @@
+2026-10-15T04:11:24-07:00 lane0 dev=0 start dsa_sparse_index_remap__vllm_triton n=3 uptime=38.22 21.31 17.22
+2026-10-15T04:11:46-07:00 lane0 dev=0 done dsa_sparse_index_remap__vllm_triton rc=0
+2026-10-15T04:11:46-07:00 all lanes done; uptime:  04:11:46 up 11 days, 14:53, 43 users,  load average: 37.16, 22.29, 17.64

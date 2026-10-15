@@ -27,12 +27,19 @@ class FakeStageModel:
         self.num_blocks = cfg.fake.num_blocks
         self.hidden_width = cfg.fake.hidden_width
         self.cuda = device.type == "cuda"
+        # Like StageModel: a tensor made under inference_mode (its warm-up) used with a requires_grad parameter in
+        # forward, which only works when the worker runs forward under inference_mode too (job 7095). CPU scalars.
+        with torch.inference_mode():
+            self._inference_tensor = torch.ones(1)
+        self._param = torch.nn.Parameter(torch.ones(1))
         self.cycles_per_ms = self._calibrate() if self.cuda else 0.0
         if self.cuda:
             self._warm_up()
 
     def _warm_up(self):
-        """Run every kernel forward uses once: the first launch of each loads its module (tens of ms)."""
+        """Run every kernel forward uses once (the first launch of each loads its module: tens of ms), and let the
+        caching allocator reserve the largest output once (a cudaMalloc inside a microbatch costs ms)."""
+        torch.empty(self.cfg.scheduler.mb_tokens, self.hidden_width, dtype=torch.bfloat16, device=self.device)
         hidden = torch.empty(2, self.hidden_width, dtype=torch.bfloat16, device=self.device)
         hidden[:, 0] = torch.arange(2, device=self.device) % 128
         self._check([1], [0], hidden)
@@ -53,6 +60,7 @@ class FakeStageModel:
 
     def forward(self, plan, hidden_in: torch.Tensor | None) -> torch.Tensor:
         T = sum(c.num_tokens for c in plan.chunks)
+        self._inference_tensor * self._param   # raises "Inference tensors cannot be saved for backward" otherwise
         ms = self.stage_ms(T)
         if self.cuda:
             if ms > 0:

@@ -1,0 +1,61 @@
+2026-10-15T04:32:35-07:00 dev0 start 016__rms_norm__vllm_cuda__1 n=31 load=3.77 11.26 17.82
+2026-10-15T04:32:35-07:00 dev1 start 017__nvfp4_fused_moe__flashinfer_trtllm_sm100__1 n=11 load=3.77 11.26 17.82
+2026-10-15T04:32:46-07:00 dev0 end 016__rms_norm__vllm_cuda__1 rc=0
+2026-10-15T04:32:46-07:00 dev0 start 020__dsa_topk_prefill__deep_select__2 n=46 load=4.50 11.17 17.72
+2026-10-15T04:32:49-07:00 dev1 end 017__nvfp4_fused_moe__flashinfer_trtllm_sm100__1 rc=0
+2026-10-15T04:32:49-07:00 dev1 start 021__single_gemm__torch_linear_vllm__2 n=46 load=5.02 11.17 17.68
+2026-10-15T04:32:57-07:00 dev0 end 020__dsa_topk_prefill__deep_select__2 rc=0
+2026-10-15T04:32:57-07:00 dev0 start 023__nvfp4_fused_moe__flashinfer_trtllm_sm100__2 n=11 load=5.10 11.08 17.62
+2026-10-15T04:33:13-07:00 dev0 end 023__nvfp4_fused_moe__flashinfer_trtllm_sm100__2 rc=0
+2026-10-15T04:33:13-07:00 dev0 start 026__dsa_topk_prefill__deep_select__3 n=46 load=6.00 11.00 17.49
+2026-10-15T04:33:23-07:00 dev0 end 026__dsa_topk_prefill__deep_select__3 rc=0
+2026-10-15T04:33:23-07:00 dev0 start 027__single_gemm__torch_linear_vllm__3 n=45 load=6.31 10.90 17.39
+2026-10-15T04:33:24-07:00 dev1 end 021__single_gemm__torch_linear_vllm__2 rc=0
+2026-10-15T04:33:24-07:00 dev1 start 028__nvfp4_fused_moe__flashinfer_trtllm_sm100__3 n=10 load=6.45 10.85 17.33
+2026-10-15T04:33:37-07:00 dev1 end 028__nvfp4_fused_moe__flashinfer_trtllm_sm100__3 rc=0
+2026-10-15T04:33:37-07:00 dev1 start 030__kda_chunk_prefill__flashinfer_cute_persistent__4 n=47 load=6.83 10.79 17.25
+2026-10-15T04:33:54-07:00 dev1 end 030__kda_chunk_prefill__flashinfer_cute_persistent__4 rc=0
+2026-10-15T04:33:54-07:00 dev1 start 032__single_gemm__torch_linear_vllm__4 n=45 load=7.35 10.65 17.06
+2026-10-15T04:33:55-07:00 dev0 end 027__single_gemm__torch_linear_vllm__3 rc=0
+2026-10-15T04:33:55-07:00 dev0 start 033__nvfp4_fused_moe__flashinfer_trtllm_sm100__4 n=10 load=7.35 10.65 17.06
+2026-10-15T04:34:07-07:00 dev0 end 033__nvfp4_fused_moe__flashinfer_trtllm_sm100__4 rc=0
+2026-10-15T04:34:07-07:00 dev0 start 036__dsa_topk_prefill__deep_select__5 n=46 load=7.14 10.50 16.94
+2026-10-15T04:34:18-07:00 dev0 end 036__dsa_topk_prefill__deep_select__5 rc=0
+2026-10-15T04:34:18-07:00 dev0 start 039__dsa_sparse_mla_attention__flashinfer_trtllm_fp8__6 n=49 load=7.13 10.39 16.84
+2026-10-15T04:34:28-07:00 dev1 end 032__single_gemm__torch_linear_vllm__4 rc=0
+2026-10-15T04:34:28-07:00 dev1 start 041__kda_chunk_prefill__flashinfer_cute_persistent__6 n=46 load=6.88 10.17 16.66
+2026-10-15T04:34:34-07:00 dev0 end 039__dsa_sparse_mla_attention__flashinfer_trtllm_fp8__6 rc=0
+2026-10-15T04:34:34-07:00 dev0 start 042__single_gemm__torch_linear_vllm__6 n=45 load=6.81 10.10 16.60
+2026-10-15T04:34:45-07:00 dev1 end 041__kda_chunk_prefill__flashinfer_cute_persistent__6 rc=0
+2026-10-15T04:34:45-07:00 dev1 start 045__kda_chunk_prefill__flashinfer_cute_persistent__7 n=46 load=6.69 9.96 16.49
+2026-10-15T04:35:04-07:00 dev1 end 045__kda_chunk_prefill__flashinfer_cute_persistent__7 rc=0
+2026-10-15T04:35:04-07:00 dev1 start 048__dsa_sparse_mla_attention__flashinfer_trtllm_fp8__8 n=49 load=7.31 9.89 16.33
+2026-10-15T04:35:07-07:00 dev0 end 042__single_gemm__torch_linear_vllm__6 rc=0
+2026-10-15T04:35:07-07:00 dev0 start 050__dsa_topk_prefill__deep_select__8 n=45 load=7.31 9.89 16.33
+2026-10-15T04:35:17-07:00 dev0 end 050__dsa_topk_prefill__deep_select__8 rc=0
+2026-10-15T04:35:17-07:00 dev0 start 051__single_gemm__torch_linear_vllm__8 n=45 load=7.27 9.79 16.23
+2026-10-15T04:35:19-07:00 dev1 end 048__dsa_sparse_mla_attention__flashinfer_trtllm_fp8__8 rc=0
+2026-10-15T04:35:19-07:00 dev1 start 052__dsa_sparse_mla_attention__flashinfer_trtllm_fp8__9 n=49 load=7.25 9.75 16.18
+2026-10-15T04:35:35-07:00 dev1 end 052__dsa_sparse_mla_attention__flashinfer_trtllm_fp8__9 rc=0
+2026-10-15T04:35:35-07:00 dev1 start 055__kda_chunk_prefill__flashinfer_cute_persistent__10 n=46 load=7.26 9.63 16.03
+2026-10-15T04:35:48-07:00 dev0 end 051__single_gemm__torch_linear_vllm__8 rc=0
+2026-10-15T04:35:48-07:00 dev0 start 057__dsa_sparse_mla_attention__flashinfer_trtllm_fp8__12 n=49 load=7.38 9.53 15.90
+2026-10-15T04:35:53-07:00 dev1 end 055__kda_chunk_prefill__flashinfer_cute_persistent__10 rc=0
+2026-10-15T04:35:53-07:00 dev1 start 059__dsa_sparse_mla_attention__flashinfer_trtllm_fp8__14 n=49 load=7.38 9.53 15.90
+2026-10-15T04:36:03-07:00 dev0 end 057__dsa_sparse_mla_attention__flashinfer_trtllm_fp8__12 rc=0
+2026-10-15T04:36:03-07:00 dev0 start 061__dsa_sparse_mla_attention__flashinfer_trtllm_fp8__16 n=49 load=7.35 9.42 15.76
+2026-10-15T04:36:10-07:00 dev1 end 059__dsa_sparse_mla_attention__flashinfer_trtllm_fp8__14 rc=0
+2026-10-15T04:36:10-07:00 dev1 start 063__dsa_sparse_mla_attention__flashinfer_trtllm_fp8__18 n=49 load=7.57 9.43 15.73
+2026-10-15T04:36:18-07:00 dev0 end 061__dsa_sparse_mla_attention__flashinfer_trtllm_fp8__16 rc=0
+2026-10-15T04:36:18-07:00 dev0 start 065__dsa_sparse_mla_attention__flashinfer_trtllm_fp8__20 n=49 load=7.54 9.37 15.64
+2026-10-15T04:36:25-07:00 dev1 end 063__dsa_sparse_mla_attention__flashinfer_trtllm_fp8__18 rc=0
+2026-10-15T04:36:25-07:00 dev1 start 067__dsa_sparse_mla_attention__flashinfer_trtllm_fp8__22 n=49 load=7.58 9.34 15.60
+2026-10-15T04:36:33-07:00 dev0 end 065__dsa_sparse_mla_attention__flashinfer_trtllm_fp8__20 rc=0
+2026-10-15T04:36:33-07:00 dev0 start 069__dsa_sparse_mla_attention__flashinfer_trtllm_fp8__24 n=49 load=8.01 9.41 15.58
+2026-10-15T04:36:41-07:00 dev1 end 067__dsa_sparse_mla_attention__flashinfer_trtllm_fp8__22 rc=0
+2026-10-15T04:36:41-07:00 dev1 start 071__dsa_sparse_mla_attention__flashinfer_trtllm_fp8__26 n=49 load=11.96 10.17 15.77
+2026-10-15T04:36:47-07:00 dev0 end 069__dsa_sparse_mla_attention__flashinfer_trtllm_fp8__24 rc=0
+2026-10-15T04:36:47-07:00 dev0 queue empty
+2026-10-15T04:36:57-07:00 dev1 end 071__dsa_sparse_mla_attention__flashinfer_trtllm_fp8__26 rc=0
+2026-10-15T04:36:57-07:00 dev1 queue empty
+2026-10-15T04:36:57-07:00 job done; uptime:  04:36:57 up 11 days, 15:18, 43 users,  load average: 10.26, 9.89, 15.58

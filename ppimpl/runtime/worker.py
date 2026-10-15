@@ -4,12 +4,14 @@ The main thread only enqueues GPU work. A reporter thread waits for each microba
 with GPU times on the host clock, so the controller and all stages share one time base.
 """
 
+import json
 import os
 import queue
 import signal
 import threading
 import time
 import traceback
+from pathlib import Path
 
 import torch
 import zmq
@@ -114,7 +116,8 @@ def build_model(cfg: RunConfig, stage: int, device: torch.device):
     return StageModel(cfg, stage, device)
 
 
-def run_worker(cfg: RunConfig, stage: int):
+@torch.inference_mode()   # all of it: model construction, warm-up, receive, forward, send (StageModel's warm-up
+def run_worker(cfg: RunConfig, stage: int):   # makes inference tensors, which autograd-tracked code may not use)
     signal.signal(signal.SIGINT, signal.SIG_IGN)   # the controller stops us (Shutdown), or we see it is gone
     parent = os.getppid()
     n = cfg.num_stages
@@ -131,6 +134,10 @@ def run_worker(cfg: RunConfig, stage: int):
     try:
         pipe = Pipe(stage, n, device, cfg.dist_init_method())
         model = build_model(cfg, stage, device)
+        # which FlashInfer tactics the stage runs with (StageModel.tactics: source file|tuned_in_process, file, sha256)
+        info = {"stage": stage, "tactics": getattr(model, "tactics", None)}
+        print(f"stage {stage}: {json.dumps(info)}", flush=True)
+        (Path(cfg.run_dir) / f"stage{stage}.json").write_text(json.dumps(info) + "\n")
         clock = Clock(device)
         window = ProfileWindow(cfg.profile_mbs if cuda else None)
         reporter.q.put(Ready(stage, model.num_blocks))

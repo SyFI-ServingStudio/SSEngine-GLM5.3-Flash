@@ -1,0 +1,35 @@
+2026-10-15T04:26:35-07:00 dev1 start 000__dsa_sparse_mla_attention__flashinfer_trtllm_fp8__0 n=50 load=25.99 24.87 23.33
+2026-10-15T04:26:35-07:00 dev0 start 001__kda_chunk_prefill__flashinfer_cute_persistent__0 n=47 load=25.99 24.87 23.33
+2026-10-15T04:26:50-07:00 dev1 end 000__dsa_sparse_mla_attention__flashinfer_trtllm_fp8__0 rc=0
+2026-10-15T04:26:50-07:00 dev1 start 002__dsa_topk_prefill__deep_select__0 n=46 load=34.24 26.69 23.94
+2026-10-15T04:27:01-07:00 dev1 end 002__dsa_topk_prefill__deep_select__0 rc=0
+2026-10-15T04:27:01-07:00 dev1 start 003__single_gemm__flashinfer_cutedsl__0 n=46 load=29.59 25.94 23.73
+2026-10-15T04:27:03-07:00 dev0 end 001__kda_chunk_prefill__flashinfer_cute_persistent__0 rc=0
+2026-10-15T04:27:03-07:00 dev0 start 004__single_gemm__torch_linear_vllm__0 n=46 load=29.59 25.94 23.73
+2026-10-15T04:27:36-07:00 dev0 end 004__single_gemm__torch_linear_vllm__0 rc=0
+2026-10-15T04:27:36-07:00 dev0 start 005__mhc_fused_post_pre_rms_norm__deepgemm_mega_nonshifted__0 n=44 load=18.38 23.56 23.01
+2026-10-15T04:28:10-07:00 dev1 end 003__single_gemm__flashinfer_cutedsl__0 rc=0
+2026-10-15T04:28:10-07:00 dev1 start 006__mhc_pre_rms_norm__vllm_tilelang__0 n=34 load=11.72 21.32 22.28
+2026-10-15T04:28:10-07:00 dev0 end 005__mhc_fused_post_pre_rms_norm__deepgemm_mega_nonshifted__0 rc=0
+2026-10-15T04:28:10-07:00 dev0 start 007__rms_norm__vllm_cuda__0 n=32 load=11.72 21.32 22.28
+2026-10-15T04:28:20-07:00 dev0 end 007__rms_norm__vllm_cuda__0 rc=0
+2026-10-15T04:28:20-07:00 dev0 start 008__nvfp4_fused_moe__flashinfer_trtllm_sm100__0 n=11 load=10.78 20.80 22.10
+2026-10-15T04:28:34-07:00 dev0 end 008__nvfp4_fused_moe__flashinfer_trtllm_sm100__0 rc=0
+2026-10-15T04:28:34-07:00 dev0 start 009__dsa_sparse_mla_attention__flashinfer_trtllm_fp8__1 n=49 load=9.75 20.09 21.85
+2026-10-15T04:28:47-07:00 dev0 end 009__dsa_sparse_mla_attention__flashinfer_trtllm_fp8__1 rc=0
+2026-10-15T04:28:47-07:00 dev0 start 010__kda_chunk_prefill__flashinfer_cute_persistent__1 n=47 load=9.51 19.69 21.70
+2026-10-15T04:29:05-07:00 dev0 end 010__kda_chunk_prefill__flashinfer_cute_persistent__1 rc=0
+2026-10-15T04:29:05-07:00 dev0 start 011__dsa_topk_prefill__deep_select__1 n=46 load=7.86 18.66 21.31
+2026-10-15T04:29:15-07:00 dev0 end 011__dsa_topk_prefill__deep_select__1 rc=0
+2026-10-15T04:29:15-07:00 dev0 start 012__single_gemm__torch_linear_vllm__1 n=46 load=7.04 18.12 21.11
+2026-10-15T04:29:45-07:00 dev0 end 012__single_gemm__torch_linear_vllm__1 rc=0
+2026-10-15T04:29:45-07:00 dev0 start 013__single_gemm__flashinfer_cutedsl__1 n=45 load=6.76 16.97 20.63
+2026-10-15T04:29:49-07:00 dev1 end 006__mhc_pre_rms_norm__vllm_tilelang__0 rc=0
+2026-10-15T04:29:49-07:00 dev1 start 014__mhc_fused_post_pre_rms_norm__deepgemm_mega_nonshifted__1 n=44 load=6.70 16.79 20.55
+2026-10-15T04:30:30-07:00 dev1 end 014__mhc_fused_post_pre_rms_norm__deepgemm_mega_nonshifted__1 rc=0
+2026-10-15T04:30:30-07:00 dev1 start 015__mhc_pre_rms_norm__vllm_tilelang__1 n=34 load=5.27 15.15 19.84
+2026-10-15T04:30:51-07:00 dev0 end 013__single_gemm__flashinfer_cutedsl__1 rc=0
+2026-10-15T04:30:51-07:00 dev0 stop: 464s left
+2026-10-15T04:31:29-07:00 dev1 end 015__mhc_pre_rms_norm__vllm_tilelang__1 rc=0
+2026-10-15T04:31:29-07:00 dev1 stop: 426s left
+2026-10-15T04:31:29-07:00 job done; uptime:  04:31:29 up 11 days, 15:13, 42 users,  load average: 5.13, 13.32, 18.91

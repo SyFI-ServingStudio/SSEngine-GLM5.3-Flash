@@ -1,0 +1,73 @@
+{
+  "backend": "flashinfer_cute_persistent",
+  "db_path": "/raid/kanzhu/ServingStudio/pp-impl/lanes/measure/measured/nodecheck_runs/7020/scratch_profile.db",
+  "energy_measured": false,
+  "gpu_name": "NVIDIA B200",
+  "missing_count": 0,
+  "mode": "fresh",
+  "ok": true,
+  "persisted": false,
+  "results": [
+    {
+      "index": 0,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 739.7577491593408,
+        "tflops": 1.366959386106555,
+        "time_ms": 0.023012592999999998
+      },
+      "status": "ok"
+    },
+    {
+      "index": 1,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 1442.5870293718997,
+        "tflops": 115.34998164687741,
+        "time_ms": 0.37379672284644194
+      },
+      "status": "ok"
+    },
+    {
+      "index": 2,
+      "metric_family": "compute",
+      "metrics": {
+        "energy_j": 0.0,
+        "memory_bandwidth_gbps": 2373.7476677258255,
+        "tflops": 108.52905424053344,
+        "time_ms": 3.172131875
+      },
+      "status": "ok"
+    }
+  ],
+  "spec_count": 3,
+  "specs": [
+    {
+      "dtype": "bf16",
+      "head_dim": 128,
+      "max_sequence_length": 2,
+      "num_decode_sequences": 1,
+      "num_heads": 64,
+      "num_tokens": 3
+    },
+    {
+      "dtype": "bf16",
+      "head_dim": 128,
+      "max_sequence_length": 512,
+      "num_decode_sequences": 16,
+      "num_heads": 64,
+      "num_tokens": 4112
+    },
+    {
+      "dtype": "bf16",
+      "head_dim": 128,
+      "max_sequence_length": 64,
+      "num_decode_sequences": 64,
+      "num_heads": 64,
+      "num_tokens": 32832
+    }
+  ],
+  "table": "kda_chunk_prefill"
+}
