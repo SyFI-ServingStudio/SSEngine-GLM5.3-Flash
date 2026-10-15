@@ -178,3 +178,20 @@ Kind: setup difference, open. `1_contract.md` §1 gives the node 1 TB of local S
 (`setup.md`). Bandwidth is not the problem: 40 GB/s with deep queues, 103 GB/s at most. Affects `7_offloading.md`:
 the SSD tier runs (`tiers`, `ssd_heavy`) cannot hold the contract's 1 TB. Before M6, free or reserve the space, or
 record the smaller SSD tier each run actually had.
+
+## Implementation gap: NCCL p2p sends slower than the targets' send (M3) — deferred, with trigger
+
+- Measured (job 7128, `bench/p2p.py`, 2 B200s, NCCL 2.29.7, 32 KiB per token, p50):
+
+  | tokens | NCCL send/recv | peer copy (copy engine) | target |
+  | ---: | ---: | ---: | ---: |
+  | 1k | 0.134 ms | 0.061 ms | 0.068 ms |
+  | 2k | 0.187 ms | 0.104 ms | |
+  | 4k | 0.31 ms | 0.19 ms | |
+  | 8k | 0.543 ms | 0.361 ms | 0.482 ms |
+  | 16k | 0.848 ms | 0.705 ms | |
+
+- NCCL settings change nothing (32 P2P channels, 2 MB NVLink chunk, Simple protocol). A peer copy meets the targets.
+- Effect on one-request runs: 3 sends × ~0.07 ms excess, < 0.5% of TTFT at 1k and 0.1% at 8k.
+- Deferred: a copy-engine transport (CUDA IPC buffers and events, a host-side handshake per microbatch). Revisit if
+  the saturated runs show sends, or receives posted early, costing stage time.
