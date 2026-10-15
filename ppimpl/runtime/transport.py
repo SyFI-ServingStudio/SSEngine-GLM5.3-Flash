@@ -114,9 +114,10 @@ class Pipe:
     def __init__(self, stage: int, num_stages: int, device: torch.device, init_method: str):
         self.stage, self.num_stages, self.device = stage, num_stages, device
         self.cuda = device.type == "cuda"
-        backend = "nccl" if self.cuda else "gloo"
-        kw = {"device_id": device} if self.cuda else {}
-        dist.init_process_group(backend, init_method=init_method, rank=stage, world_size=num_stages, **kw)
+        # No device_id (eager init): lazily created p2p communicators are per pair, so the receive from s-1 and the
+        # send to s+1 run on different NCCL streams and the receive can land while the send waits for compute.
+        dist.init_process_group("nccl" if self.cuda else "gloo", init_method=init_method, rank=stage,
+                                world_size=num_stages)
         self.recv_stream = torch.cuda.Stream(device) if self.cuda else None
         self.send_stream = torch.cuda.Stream(device) if self.cuda else None
         self._sends: deque = deque()   # (work, tensor): keep sent tensors alive until the send completes

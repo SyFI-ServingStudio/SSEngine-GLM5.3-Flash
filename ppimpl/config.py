@@ -69,12 +69,12 @@ class RunConfig(msgspec.Struct, forbid_unknown_fields=True):
     control_port: int | None = None   # zmq + torch.distributed ports: control_port .. control_port+5 (default port+1)
     run_dir: str = "run"              # microbatches.jsonl, server logs
     layer_split: list[int] = msgspec.field(default_factory=lambda: list(LAYER_SPLIT))
-    mb_tokens: int = MB_TOKENS        # microbatch budget; one-request runs set it >= the prompt
     max_in_flight: int = MAX_IN_FLIGHT
     dispatch_ahead: int = 1           # plans queued on stage 0 behind the running one (0: form when stage 0 is free)
     pool_tokens: int | None = None    # cap on the KV pool, in tokens (1_contract.md §2.3)
+    profile_mbs: list[int] | None = None  # [a, b): cudaProfilerStart at mb a, Stop after mb b-1 (bench/run.py --nsys)
     keep_sessions: bool = False       # phase B: exact prefix cache (kept sessions, LRU eviction of whole sessions)
-    scheduler: SchedulerConfig = msgspec.field(default_factory=SchedulerConfig)
+    scheduler: SchedulerConfig = msgspec.field(default_factory=SchedulerConfig)  # mb_tokens: one-request runs set it >= the prompt
     tiers: TierConfig | None = None   # phase D: DRAM / SSD behind HBM
     fake: FakeConfig = msgspec.field(default_factory=FakeConfig)
 
