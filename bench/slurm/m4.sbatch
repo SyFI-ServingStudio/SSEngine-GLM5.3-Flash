@@ -15,8 +15,9 @@
 # cache-on half passed (the cache-on rounds are read from prefix_check_unaligned_on/); SKIP_CHECK=1 skips the prefix
 # check too. Token differences between the cache-on and cache-off servers go to the margin rule (bench/margin.py
 # --judge: each side's token in the top 2, margin < 3 nats).
-# resume_nsys: bench/margin.py --nvtx on CASES (default cases_resume_cost.json: P 100,000 / 100,003 / 100,004 resumed
-# with A 256 / 1,024, and 3- and 256-token chunks at 512k) under Nsight Systems; bench/mb_kernels.py per stage, kernel.
+# resume_nsys: bench/margin.py --nvtx on CASES (absolute paths, space-separated; default cases_resume_cost.json: P
+# 100,000 / 100,003 / 100,004 resumed with A 256 / 1,024) at each commit of REVS (default "worktree") under Nsight
+# Systems; bench/mb_kernels.py per stage and kernel (compare runs: python -m bench.mb_kernels --compare).
 # check: bench/prefix_check.py (round-1 tokens, cache on vs off, ~6 min). bringup: prefix_bringup (20 min) under
 # Nsight Systems, traced from microbatch NSYS_MBS (default 564:631: the last round-0 chunk and round 1 of session
 # 34, P 512k A 1k, and all of session 35, P 512k A 8k; microbatch 0 is req-frontend's preflight). prefix_n<N>: the
@@ -51,14 +52,27 @@ case $WHAT in
     ;;
   margin) rc=0; [ -n "${GTEST:-}" ] && { $PY -m pytest tests -m gpu -k "$GTEST" -v; rc=$?; }   # GPU tests first
     (( rc == 0 )) && $PY -m bench.margin "${CASES:-measured/margins/cases_unaligned.json}" --repeats "${REPEATS:-3}" ${MARGIN_ARGS:-}; rc=$? ;;
-  resume_nsys) D=$R/resume_nsys_${SLURM_JOB_ID:-local}; mkdir -p "$D"   # per-kernel cost of the last chunks of CASES
-    /usr/local/cuda/bin/nsys profile -o "$D/trace" --force-overwrite true -t cuda,nvtx --cuda-graph-trace=node \
-      --sample=none --cpuctxsw=none $PY -m bench.margin "${CASES:-measured/margins/cases_resume_cost.json}" \
-      --repeats "${REPEATS:-4}" --nvtx --out "$D/res.json"; rc=$?
-    (( rc == 0 )) && { /usr/local/cuda/bin/nsys export --type sqlite --force-overwrite true -o "$D/trace.sqlite" \
-                         "$D/trace.nsys-rep" > "$D/export.log" 2>&1; rc=$?; }
-    (( rc == 0 )) && { $PY -m bench.mb_kernels "$D/trace.sqlite" "$D/res.mbs.json" --base "${BASE:-p100000_a1024}" \
-                         --out "$D/kernels.json" > "$D/kernels.txt"; rc=$?; tail -n 80 "$D/kernels.txt"; }
+  resume_nsys)   # per-kernel cost of the last chunks of CASES, at each of REVS (a commit: its ppimpl/ and bench/ from
+                 # git archive; "worktree": this tree), under Nsight Systems; bench/mb_kernels.py per stage and kernel
+    rc=0
+    for rev in ${REVS:-worktree}; do
+      D=$R/resume_nsys_${SLURM_JOB_ID:-local}/$rev; mkdir -p "$D"; src=$ROOT
+      if [ "$rev" != worktree ]; then
+        src=$TMPDIR/rev_$rev; mkdir -p "$src"; git -C "$ROOT" archive "$rev" ppimpl bench | tar -x -C "$src" || { rc=1; break; }
+      fi
+      echo "== resume_nsys $rev ($(git -C "$ROOT" log --oneline -1 "${rev/worktree/HEAD}")) from $src"
+      for cases in ${CASES:-$ROOT/measured/margins/cases_resume_cost.json}; do
+        n=$(basename "$cases" .json)
+        (cd "$src" && /usr/local/cuda/bin/nsys profile -o "$D/$n" --force-overwrite true -t cuda,nvtx \
+           --cuda-graph-trace=node --sample=none --cpuctxsw=none $PY -m bench.margin "$cases" --repeats "${REPEATS:-4}" \
+           --nvtx --out "$D/$n.json") || { rc=1; break 2; }
+        /usr/local/cuda/bin/nsys export --type sqlite --force-overwrite true -o "$D/$n.sqlite" "$D/$n.nsys-rep" \
+          > "$D/$n.export.log" 2>&1 || { rc=1; break 2; }
+        $PY -m bench.mb_kernels "$D/$n.sqlite" "$D/$n.mbs.json" --base p100000 --out "$D/$n.kernels.json" > "$D/$n.kernels.txt" \
+          || { rc=1; break 2; }
+        rm -f "$D/$n.nsys-rep"
+      done
+    done
     ;;
   bringup) $PY -m bench.run prefix_bringup --inline --nsys --nsys-mbs "${NSYS_MBS:-564:631}" --gpus "$G" --port "$P" \
              --out-root "$R" ${BRINGUP_ARGS:-}; rc=$? ;;
