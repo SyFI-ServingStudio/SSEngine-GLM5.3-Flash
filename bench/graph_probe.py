@@ -31,6 +31,9 @@ def main():
     ap.add_argument("--pool-per-bucket", action="store_true", help="with --loop: a fresh graph pool per bucket")
     ap.add_argument("--keep-eager-args", action="store_true",
                     help="with --loop: eager breaks hold strong references to their arguments (no weak refs)")
+    ap.add_argument("--trace-ops", action="store_true",
+                    help="with --trace-eager: also sync after every torch op and Triton launch inside the eager breaks "
+                         "and print the last ones completed before a fault")
     ap.add_argument("--trace-eager", action="store_true",
                     help="with --loop: during capture, sync after each eager break and print its op and its tensor "
                          "arguments (int: min/max, float: non-finite count), to name the one that faults")
@@ -66,6 +69,42 @@ def main():
         print(f"[graph_probe] stage {a.stage}: capture {b} ok: {model.graph_info}", flush=True)
 
 
+class SyncEachOp:
+    """Inside: every torch op (TorchDispatchMode) and Triton launch (launch_exit_hook) is followed by a device sync;
+    `done` lists those that completed, in order."""
+
+    def __enter__(self):
+        import torch
+        from torch.utils._python_dispatch import TorchDispatchMode
+        from triton import knobs
+
+        done = self.done = []
+
+        class Mode(TorchDispatchMode):
+            def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+                out = func(*args, **(kwargs or {}))
+                torch.cuda.synchronize()
+                done.append(str(func))
+                return out
+
+        def exit_hook(meta=None, *args, **kwargs):     # meta: triton's LazyDict of the launch
+            torch.cuda.synchronize()
+            done.append("triton " + str(getattr(meta, "data", {}).get("name", "?")))
+
+        self.mode = Mode()
+        self.old_hook = knobs.runtime.launch_exit_hook
+        knobs.runtime.launch_exit_hook = exit_hook
+        self.mode.__enter__()
+        return self
+
+    def __exit__(self, *exc):
+        from triton import knobs
+
+        self.mode.__exit__(*exc)
+        knobs.runtime.launch_exit_hook = self.old_hook
+        return False
+
+
 def capture_loop(model, buckets, a):
     """StageModel._capture_graphs, step by step: eager pass, sync, capture, sync, print, per bucket."""
     import torch
@@ -96,8 +135,17 @@ def capture_loop(model, buckets, a):
                   flush=True)
 
             def run():
-                out = fn()
-                torch.cuda.synchronize()
+                if not a.trace_ops:
+                    out = fn()
+                    torch.cuda.synchronize()
+                    return out
+                with SyncEachOp() as ops:
+                    try:
+                        out = fn()
+                        torch.cuda.synchronize()
+                    except Exception:
+                        print("[graph_probe]   last ops before the fault: " + " | ".join(ops.done[-8:]), flush=True)
+                        raise
                 return out
             out = add_eager(self, run)
             self.segments[-1] = fn          # replay the original
