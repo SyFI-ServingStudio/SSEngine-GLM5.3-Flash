@@ -91,6 +91,8 @@ class RunConfig(msgspec.Struct, forbid_unknown_fields=True):
                                       # 16: first TTFT at 8k 0.25 s vs 0.42 s with 4 (measured/runs_intake)
     profile_mbs: list[int] | None = None  # [a, b): cudaProfilerStart at mb a, Stop after mb b-1 (bench/run.py --nsys)
     keep_sessions: bool = False       # phase B: exact prefix cache (kept sessions, LRU eviction of whole sessions)
+    hold_requests: int = 0            # form no microbatch before this many requests have arrived (6_scheduler.md §6:
+                                      # the scheduling check's 26 requests at t = 0 are all queued before the first)
     scheduler: SchedulerConfig = msgspec.field(default_factory=SchedulerConfig)  # mb_tokens: one-request runs set it >= the prompt
     tiers: TierConfig | None = None   # phase D: DRAM / SSD behind HBM
     fake: FakeConfig = msgspec.field(default_factory=FakeConfig)

@@ -35,6 +35,7 @@ import json
 import math
 import os
 import queue
+import re
 import signal
 import subprocess
 import sys
@@ -50,7 +51,7 @@ import zmq
 
 from ppimpl.config import BLOCK_TOKENS, RunConfig, dump_config
 from ppimpl.engine.kv import KvManager, kv_blocks_for, pool_size
-from ppimpl.engine.scheduler import ChunkSpec, PlainScheduler, Request
+from ppimpl.engine.scheduler import ChunkSpec, Request, Scheduler
 from ppimpl.runtime.cpus import CONTROLLER_CORES, cpu_list, pin_process, split_cores, threads
 from ppimpl.runtime.dispatch import NOW, WAIT, DispatchRule
 from ppimpl.runtime.transport import (Chunk, Plan, Ready, Shutdown, StageDone, WorkerError, decode_to_controller,
@@ -82,6 +83,11 @@ class RequestError(Exception):
     """A request the engine cannot serve (HTTP 400)."""
 
 
+def id_order(req_id: str) -> tuple:
+    """Natural order of request ids: sched_2 before sched_10."""
+    return tuple(int(x) if x.isdigit() else x for x in re.split(r"(\d+)", req_id))
+
+
 class Controller:
     def __init__(self, cfg: RunConfig):
         self.cfg = cfg
@@ -89,7 +95,7 @@ class Controller:
         self.run_dir = Path(cfg.run_dir)
         self.run_dir.mkdir(parents=True, exist_ok=True)
         self.procs: list[subprocess.Popen] = []
-        self.sched: PlainScheduler | None = None
+        self.sched: Scheduler | None = None
         self.t0_ns: int | None = None
         self.ready = False
         self.failed: str | None = None
@@ -104,6 +110,9 @@ class Controller:
         self.inflight_plans: dict[int, tuple[list[dict], int]] = {}   # mb_id -> (log requests, stages left)
         self.next_mb = 0
         self.next_seq = 0                    # order in which requests entered the scheduler
+        # RunConfig.hold_requests: requests held out of the scheduler until that many have arrived, then added in id
+        # order (simultaneous submits reach us in a random order; the trace orders them by id)
+        self.held: list[Request] | None = [] if cfg.hold_requests else None
         self.timer_at: int | None = None     # host ns at which the dispatch rule wants to be asked again
         # intake processes (cfg.intake_procs): all their messages go through the control thread
         self.intake = None
@@ -162,8 +171,8 @@ class Controller:
         num_blocks = pool_size([r.num_blocks for r in ready], cfg.pool_tokens)
         self.rule = DispatchRule(cfg.max_in_flight, cfg.dispatch_ahead >= 1, cfg.form_lead_ms)
         # the scheduler's own cap is not the binding one: the rule admits the extra queued plan
-        self.sched = PlainScheduler(KvManager(num_blocks, keep_sessions=cfg.keep_sessions, content_keys=True),
-                                    cfg.scheduler.mb_tokens, self.rule.cap, 1)
+        self.sched = Scheduler(KvManager(num_blocks, keep_sessions=cfg.keep_sessions, content_keys=True),
+                               cfg.scheduler, None, self.rule.cap, 1)
         self.mb_log = open(self.run_dir / "microbatches.jsonl", "w")
         self.host_log = open(self.run_dir / "worker_host.jsonl", "w")
         self.plan_log = open(self.run_dir / "plans.jsonl", "w")
@@ -457,10 +466,20 @@ class Controller:
                 if done:
                     self.loop.call_soon_threadsafe(self._answered, done)
                 return
-        self.sched.add(req)
+        if self.held is not None:
+            self.held.append(req)
+        else:
+            self.sched.add(req)
 
     def _pump(self):
-        """Form and dispatch microbatches while the dispatch rule allows and the scheduler has work."""
+        """Form and dispatch microbatches while the dispatch rule allows and the scheduler has work (none before
+        `hold_requests` requests have arrived)."""
+        if self.held is not None:
+            if self.next_seq < self.cfg.hold_requests:
+                return
+            for req in sorted(self.held, key=lambda r: id_order(r.req_id)):
+                self.sched.add(req)
+            self.held = None
         while True:
             now = time.time_ns()
             verdict, at = self.rule.decide(self.sched.in_flight, now)
