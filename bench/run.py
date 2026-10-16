@@ -60,9 +60,11 @@ def parse_name(name: str) -> tuple[str, int]:
     return m.group(1), int(m.group(2)) * 1024
 
 
-# The queued plan forms this long before stage 0 frees: the real stage 0 spends 25-30 ms of host time launching an
-# eager forward at <= 8k (model lane, M2), plus margin. Recorded in each run's server_config.yaml.
-REAL_FORM_LEAD_MS = 35.0
+# The queued plan forms this long before stage 0 frees: stage 0's host time from a plan's forming to its forward
+# returning with all GPU work enqueued, with CUDA graphs (smoke 7658, worker_host.jsonl): p50 / p90 / p99 7.2 / 10.1 /
+# 41.5 ms (the p99 is 8,192-token microbatches with 56k-134k contexts), plus margin. Recorded in each run's
+# server_config.yaml.
+REAL_FORM_LEAD_MS = 45.0
 
 # One request of 64k or more is one microbatch, and its activations outgrow the contract's 13.6 GB reserve beside the
 # full KV pool (job 7117: one_64k needs ~37 GB, one_128k ran out of memory in warm-up). These runs need a few blocks of
