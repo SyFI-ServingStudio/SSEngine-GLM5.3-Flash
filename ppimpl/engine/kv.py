@@ -53,6 +53,16 @@ def pool_size(ready_blocks: list[int], pool_tokens: int | None = None) -> int:
     return n
 
 
+def common_prefix(content, token_ids) -> int | None:
+    """Tokens a kept context and a prompt share from the start (None without the ids). A numpy compare of the whole
+    overlap: for misses only, not on a full hit's path."""
+    if content is None or token_ids is None:
+        return None
+    n = min(len(content), len(token_ids))
+    diff = np.flatnonzero(np.asarray(content[:n]) != np.asarray(token_ids[:n], dtype=np.int32))
+    return int(diff[0]) if len(diff) else n
+
+
 def prefix_content(token_ids, n: int) -> np.ndarray:
     """A prompt's first n token ids (int32, a view when token_ids is already an int32 array): what a kept context is
     compared with."""
@@ -151,6 +161,7 @@ class KvManager:
         self._charge: dict[str, int] = {}
         self.stats = dict(admitted=0, hits=0, hit_tokens=0, evicted_sessions=0, evicted_tokens=0, dropped_stale=0,
                           peak_hard=0, preemptions=0, repeats=0)    # no preemption: the count stays 0
+        self.evicted: dict[object, int] = {}           # key -> tokens of a kept context evicted and not replaced since
 
     @property
     def num_blocks(self) -> int:
@@ -237,12 +248,23 @@ class KvManager:
         assert self.fits(req), req.req_id
         k = self.kept.pop(req.session, None) if req.session is not None else None
         hit = 0
+        evicted_before = self.stats["evicted_sessions"]
+        info = {"hit_kind": "none_first_round", "kept_tokens": 0, "common_prefix_tokens": None}
         if k is not None:
             self._unkeep(k)
             hit = self._hit(k, req)
+            info["kept_tokens"] = k.tokens
             if hit == 0:
                 self.pool.give(k.alloc.kv_blocks + k.alloc.state_blocks)     # superseded: the prompt left it
                 self.stats["dropped_stale"] += 1
+                info["hit_kind"] = "superseded"
+                info["common_prefix_tokens"] = common_prefix(k.content, req.token_ids)
+            else:
+                info["hit_kind"] = "full" if hit == k.tokens else "partial"   # partial: the simulator's rule (replay)
+                info["common_prefix_tokens"] = hit
+        elif req.session is not None and req.session in self.evicted:
+            info["hit_kind"] = "evicted"
+            info["evicted_context_tokens"] = self.evicted[req.session]
         charge = self.footprint(req.num_tokens)
         self.hard += charge
         self.stats["peak_hard"] = max(self.stats["peak_hard"], self.hard)
@@ -264,6 +286,8 @@ class KvManager:
         if hit:
             self.stats["hits"] += 1
             self.stats["hit_tokens"] += hit
+        info["evicted_sessions_at_admit"] = self.stats["evicted_sessions"] - evicted_before
+        req.admit_info = info
         return hit
 
     def admit(self, req) -> Allocation | None:
@@ -278,8 +302,9 @@ class KvManager:
         free."""
         while self.kept and (self.hard + self.kept_charge > self.capacity
                              or (not self.pool.virtual and self.pool.num_free < blocks_needed)):
-            _, k = self.kept.popitem(last=False)
+            key, k = self.kept.popitem(last=False)
             self._unkeep(k)
+            self.evicted[key] = k.tokens
             self.pool.give(k.alloc.kv_blocks + k.alloc.state_blocks)
             self.stats["evicted_sessions"] += 1
             self.stats["evicted_tokens"] += k.tokens
@@ -300,6 +325,7 @@ class KvManager:
             self.pool.give(old.alloc.kv_blocks + old.alloc.state_blocks)
         content = prefix_content(req.token_ids, req.num_tokens) if req.token_ids is not None else None
         self.kept[key] = Kept(key, req.num_tokens, alloc, content, req.output_token)
+        self.evicted.pop(key, None)
         self.kept_charge += self.kept_cost(req.num_tokens)
         if self.content_keys and req.num_tokens < SESSION_KEY_TOKENS:
             self._short[req.num_tokens] += 1

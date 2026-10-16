@@ -12,7 +12,12 @@ the tokens. Logs, in `run_dir` (times in ms from t0, the first request's arrival
 - `mb_host.jsonl`: per (microbatch, stage), the worker's host clock when it received the plan, called the forward and
   the forward returned (its GPU work all enqueued);
 - `server_requests.jsonl`: one line per request: scheduler order (seq), arrival, first dispatch, token (when the
-  control thread handled the last stage's report), response, prompt sha256;
+  control thread handled the last stage's report), response, prompt sha256; with the prefix cache, how it was served:
+  `hit_kind` (none_first_round: no kept context for its key; full; superseded: the kept context is not a prefix of
+  the prompt, dropped; evicted: its session's context was evicted earlier; repeat), `kept_tokens` (the kept context
+  at admission, 0 if none), `common_prefix_tokens` (prompt and kept context, compared only on a miss),
+  `evicted_context_tokens` (evicted), `evicted_sessions_at_admit` and `admit_wait_ms` (at the head, waiting for pool
+  room);
 - `plans.jsonl`: one line per microbatch at dispatch: tokens, dispatch time, whether it was queued behind a running
   stage-0 plan, and that plan's predicted stage-0 end;
 - `cache.json` (rewritten every 10 s and at stop): the pool in blocks and tokens, the prefix cache's counters (hits,
@@ -446,6 +451,8 @@ class Controller:
             if tok is not None:      # the same prompt as a kept context: its token, nothing computed
                 req.cached = req.num_tokens
                 info["repeat"] = True
+                info.update(hit_kind="repeat", kept_tokens=req.num_tokens, common_prefix_tokens=req.num_tokens,
+                            evicted_sessions_at_admit=0, admit_wait_ms=0.0)
                 done = self._reply(req, tok, time.time_ns())
                 if done:
                     self.loop.call_soon_threadsafe(self._answered, done)
@@ -487,6 +494,10 @@ class Controller:
             if "first_dispatch_ms" not in info:
                 info["first_dispatch_ms"] = self._ms(now)
                 info["cached"] = r.cached
+                if r.admit_info is not None:
+                    info.update(r.admit_info)
+                info["admit_wait_ms"] = (round((r.admit_ns - r.room_wait_ns) / 1e6, 3)
+                                         if r.room_wait_ns is not None and r.admit_ns is not None else 0.0)
             info["chunks"] = info.get("chunks", 0) + 1
         plan = Plan(mb_id, chunks)
         for s in range(self.n):

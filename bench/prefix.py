@@ -187,7 +187,8 @@ def smoke(run_dir: Path, n: int) -> dict:
             "measured": window_metrics(real, window),
             "target": None if sim is None else window_metrics(sim_arrays(sim), window),
             "target_source": None if sim is None else sim["source"],
-            "replay": replay_window(run_dir, n, window), "stage_fit": stage_fit(run_dir)}
+            "replay": replay_window(run_dir, n, window), "stage_fit": stage_fit(run_dir),
+            "cache_kinds": cache_kinds(run_dir)}
 
 
 def smoke_md(rows: list[dict]) -> str:
@@ -212,6 +213,17 @@ def smoke_md(rows: list[dict]) -> str:
                        f"{rp['new_tokens_per_s'] / 1e3:.1f}k | {100 * rp['prefix_hit_share']:.2f}% | "
                        + " / ".join(f"{tr[p]:.2f}" for p in ("p50", "p90", "p99")) + " ("
                        + " / ".join(f"x{_r(tr[p], ts[p])}" for p in ("p50", "p90", "p99")) + " of target) |")
+    kinds = [x for x in rows if x.get("cache_kinds")]
+    if kinds:
+        out += ["", "Prefix cache per round (server_requests.jsonl hit_kind): rounds by kind, tokens recomputed "
+                "because the kept context was superseded or evicted, waits for pool room:", "",
+                "| Run | Rounds by kind | Superseded: recomputed tokens | Evicted: recomputed tokens | Admit waits |",
+                "|---|---|---|---|---|"]
+        for x in kinds:
+            c = x["cache_kinds"]
+            out.append(f"| {x['run']} | " + ", ".join(f"{k} {v}" for k, v in sorted(c["by_kind"].items()))
+                       + f" | {c['superseded_recomputed_tokens']:,} | {c['evicted_recomputed_tokens']:,} | "
+                       f"{c['admit_waits']} (max {c['admit_wait_ms_max']:.0f} ms) |")
     fits = [x for x in rows if x.get("stage_fit")]
     if fits:
         f0 = fits[0]["stage_fit"]
@@ -412,7 +424,27 @@ def sessions(run_dir: Path) -> dict:
             "prefix_shortfall_tokens": sum(c["shortfall"] for c in client.values()),
             "rounds_sent": len(client), "rounds_failed": sum(not c["ok"] for c in client.values()),
             "server_answered": len(sreq), "microbatches": len({m["index"] for m in mbs}),
-            "microbatch_check": microbatch_check(mbs)}
+            "microbatch_check": microbatch_check(mbs), "cache_kinds": cache_kinds(run_dir)}
+
+
+def cache_kinds(run_dir: Path) -> dict | None:
+    """server_requests.jsonl's prefix-cache fields over the run: rounds by hit_kind, the tokens recomputed because a
+    kept context was superseded (what the prompt shared with it) or evicted (the context's length), evictions at
+    admission and the wait for pool room."""
+    rows = [r for r in server_rows(run_dir).values() if "hit_kind" in r]
+    if not rows:
+        return None
+    kinds = {}
+    for r in rows:
+        kinds[r["hit_kind"]] = kinds.get(r["hit_kind"], 0) + 1
+    waits = [r.get("admit_wait_ms") or 0.0 for r in rows]
+    return {"rounds": len(rows), "by_kind": kinds,
+            "superseded_recomputed_tokens": sum(r.get("common_prefix_tokens") or 0 for r in rows
+                                                if r["hit_kind"] == "superseded"),
+            "evicted_recomputed_tokens": sum(r.get("evicted_context_tokens") or 0 for r in rows
+                                             if r["hit_kind"] == "evicted"),
+            "evicted_sessions_at_admit": sum(r.get("evicted_sessions_at_admit") or 0 for r in rows),
+            "admit_waits": sum(w > 0 for w in waits), "admit_wait_ms_max": max(waits)}
 
 
 def report_run(run_dir: Path) -> dict:
@@ -570,6 +602,14 @@ def sessions_md(runs: dict[int, dict]) -> str:
                         for st, v in mc.items())
         out.append(f"| {n} | {s['pool_tokens']:,} | {s['evicted_sessions']:,} ({s['evicted_tokens']:,}) | "
                    f"{s['preemptions']} | {s['prefix_shortfall_tokens']} | {s['rounds_failed']} | {fit} |")
+    kinds = {n: s["cache_kinds"] for n, s in runs.items() if s.get("cache_kinds")}
+    if kinds:
+        out += ["", "| N | Rounds by hit kind | Superseded: recomputed tokens | Evicted: recomputed tokens | Admit waits |",
+                "|---|---|---|---|---|"]
+        for n, c in sorted(kinds.items()):
+            out.append(f"| {n} | " + ", ".join(f"{k} {v}" for k, v in sorted(c["by_kind"].items()))
+                       + f" | {c['superseded_recomputed_tokens']:,} | {c['evicted_recomputed_tokens']:,} | "
+                       f"{c['admit_waits']} (max {c['admit_wait_ms_max']:.0f} ms) |")
     return "\n".join(out)
 
 

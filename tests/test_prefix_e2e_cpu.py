@@ -45,6 +45,10 @@ class Client:
         return tok[0], usage["prompt_tokens_details"]["cached_tokens"]
 
 
+def sreq_of(run_dir) -> dict[str, dict]:
+    return {r["id"]: r for r in map(json.loads, (run_dir / "server_requests.jsonl").read_text().splitlines())}
+
+
 def chunks_of(run_dir) -> dict[str, list[tuple[int, int]]]:
     """Per request: its (prefix, append) chunks, from stage 0's lines of microbatches.jsonl."""
     out = {}
@@ -131,6 +135,13 @@ def test_lru_evicts_whole_sessions_and_an_evicted_session_recomputes(server):
     # B (for E), C (for B_r1), then A for C_r1 (LRU: A_r1 < E_r0 < B_r1 < D_r1): a whole session each time
     assert cache["evicted_sessions"] == 3 and cache["preemptions"] == 0
     assert cache["evicted_tokens"] == 2 * n + (n + 100)
+    sr = sreq_of(srv.run_dir)                                  # how each round was served, per request
+    assert sr["A_r0"]["hit_kind"] == "none_first_round" and sr["A_r0"]["kept_tokens"] == 0
+    assert sr["A_r1"]["hit_kind"] == "full" and sr["A_r1"]["kept_tokens"] == n
+    assert sr["E_r0"]["evicted_sessions_at_admit"] == 1
+    assert sr["B_r1"]["hit_kind"] == "evicted" and sr["B_r1"]["evicted_context_tokens"] == n
+    assert sr["B_r1"]["evicted_sessions_at_admit"] == 1 and sr["D_r1"]["hit_kind"] == "full"
+    assert all(r["admit_wait_ms"] == 0.0 for r in sr.values())   # one round at a time: never waits for room
 
 
 def test_no_hit_unless_the_prompt_starts_with_the_whole_kept_context(server):
@@ -146,6 +157,10 @@ def test_no_hit_unless_the_prompt_starts_with_the_whole_kept_context(server):
     srv.stop()
     cache = json.loads((srv.run_dir / "cache.json").read_text())
     assert cache["hits"] == 0 and cache["dropped_stale"] == 2
+    sr = sreq_of(srv.run_dir)
+    for rid, kept in (("x_r1", 3000), ("x_r2", 3051)):    # the kept context and the prompt part at token 2,000
+        assert sr[rid]["hit_kind"] == "superseded" and sr[rid]["kept_tokens"] == kept
+        assert sr[rid]["common_prefix_tokens"] == 2000
 
 
 def test_short_contexts_and_exact_repeat(server):
@@ -164,6 +179,10 @@ def test_short_contexts_and_exact_repeat(server):
     assert "y_r2" not in ch and ch["y_r3"] == [(0, 11)]
     cache = json.loads((srv.run_dir / "cache.json").read_text())
     assert cache["repeats"] == 1 and cache["hits"] == 1
+    sr = sreq_of(srv.run_dir)
+    # y_r3 is shorter than the kept context's content key (its 16 tokens): no kept context is found for it
+    assert [sr[i]["hit_kind"] for i in ("y_r0", "y_r1", "y_r2", "y_r3")] == ["none_first_round", "full", "repeat",
+                                                                              "none_first_round"]
 
 
 def test_off_by_default(tmp_path):
