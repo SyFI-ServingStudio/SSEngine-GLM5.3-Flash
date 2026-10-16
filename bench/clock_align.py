@@ -1,4 +1,4 @@
-"""Align nvidia-smi samples (clock_sat8k.sbatch's gpu_samples_<job>.csv) with a run's microbatches.jsonl.
+"""Align nvidia-smi samples (bench/slurm/study.sbatch SAMPLE=1: gpu_samples_<job>.csv) with a run's microbatches.jsonl.
 
   python bench/clock_align.py <gpu_samples.csv> <run dir>
 

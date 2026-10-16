@@ -398,3 +398,23 @@ the keys equal to it, in ascending order. It is a Triton kernel, one program per
 8k rows × 2k pools and 0.6 ms at 32k × 8k (3 calls per stage). Rows of at most 512 keys are unchanged (the kernel
 already returns all of them in order). After the fix: 0 of 150 stage-3 8k runs differ. vLLM keeps the
 nondeterministic order; this is a tie-break choice, not a parity change.
+
+## Saturated stage times 10–15% above one-request runs: GPU power cap (M3) — hardware; the targets already assume it
+
+- Same 8k microbatch: ~51 ms per stage alone, 55–59 ms once the stages run back to back. 7389 (study.sbatch SAMPLE=1):
+  every GPU at its 1000 W power cap (= power.max_limit, cannot be raised), throttle reason sw_power_cap only. The SM
+  clock falls from 1965 to ~1590 MHz within 3 microbatches; stage 2's GPU settles at ~1515 MHz as it warms from 58 to
+  70 °C, which is the slow creep over the run.
+- nsys 7392 (one_8k vs saturated microbatches 1003–1006; bench/nsys_compare.py): gaps between kernels unchanged
+  (0.4–0.5 ms); kernel time grows. KDA, sparse MLA and the DSA indexer +17–24% (the clock ratio 1965/1590 = 1.24);
+  dense GEMM, NVFP4 MoE and mHC +3–11% (already near the cap in a lone burst). CE copies (0.27 ms each) are not the
+  cause: kernels overlapping them change by under 4%, and the NCCL transport (7142) rose the same. Host run-ahead is
+  not the cause: PPIMPL_SYNC_EACH_MB=1 gives the same steady state. Not cache state: a microbatch after an idle gap
+  is back at ~52 ms.
+- The L1 rows, and so the targets, are timed at sustained power-capped clocks (ServingStudioSim
+  profiling/profilers/timer.py: kernels that cross the cap read 8–19% faster on a cold board). Stages 0 and 1 match
+  their targets in saturated runs (57.0 / 55.0 vs 57.1 / 54.1 ms); one-request runs at ~0.90× target are the cold
+  board. Judge stage times against targets from saturated runs.
+- Residual: stages 2 and 3 are +7% and +4% over target. GPUs 2 and 3 run ~10 °C hotter. With the stages on the GPUs
+  in reverse order (7396, REVERSE=1), stage 2 fell 59.3 → 58.1 ms and stage 0 rose 57.0 → 58.3 ms: ~1.2 ms is GPU
+  placement, the rest per stage.
