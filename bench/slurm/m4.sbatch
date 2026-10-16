@@ -25,7 +25,9 @@
 # Nsight Systems, traced from microbatch NSYS_MBS (default 564:631: the last round-0 chunk and round 1 of session
 # 34, P 512k A 1k, and all of session 35, P 512k A 8k; microbatch 0 is req-frontend's preflight). prefix_n<N>: the
 # 20-minute session run at N. M5 (6_scheduler.md, OUT=measured/runs_m5): sched_check_<step>, force_check_<step> and
-# sched_<step>_n<N> (step plain, srpt8k, budget, even or good; bench/run.py), then `python -m bench.sched summarize`. BRINGUP_ARGS adds bench/run.py options to bringup, e.g. "--gap-s 17 --sessions 30,31
+# sched_<step>_n<N> (step plain, srpt8k, budget, even or good; bench/run.py), then `python -m bench.sched summarize`;
+# one job per run, e.g. OUT=measured/runs_m5 BY_JOB=1 SAMPLE=1 sbatch -p priority -J ppimpl-m5 --dependency=singleton
+# --time=00:07:00 -o measured/runs_m5/slurm/%j_force_check_even.out bench/slurm/m4.sbatch force_check_even. BRINGUP_ARGS adds bench/run.py options to bringup, e.g. "--gap-s 17 --sessions 30,31
 # --run-name prefix_bringup_rest" (sessions 17 s apart: the cluster stops GPU jobs idle for 10 min). Then `python -m bench.prefix summarize measured/runs_m4 --out measured`.
 #SBATCH -J ppimpl
 #SBATCH --gres=gpu:4
@@ -94,8 +96,10 @@ case $WHAT in
     ;;
   bringup) $PY -m bench.run prefix_bringup --inline --nsys --nsys-mbs "${NSYS_MBS:-564:631}" --gpus "$G" --port "$P" \
              --out-root "$R" ${BRINGUP_ARGS:-}; rc=$? ;;
-  prefix_n*|sched_check_*|force_check_*|sched_*_n*)
-    $PY -m bench.run "$WHAT" --inline --gpus "$G" --port "$P" --out-root "$R"; rc=$? ;;
+  prefix_n*|sched_check_*|force_check_*|sched_*_n*)   # BY_JOB=1: into <name>_<job>/ with the job's GPU samples
+    N=$WHAT; [ -n "${BY_JOB:-}" ] && N=${WHAT}_$JOB
+    $PY -m bench.run "$WHAT" --inline --gpus "$G" --port "$P" --out-root "$R" --run-name "$N"; rc=$?
+    [ -n "${SAMPLE:-}" ] && [ -d "$R/$N" ] && cp "$R/slurm/gpu_samples_$JOB.csv" "$R/$N/gpu_samples.csv" ;;
   *) echo "unknown: $WHAT"; exit 2 ;;
 esac
 uptime
