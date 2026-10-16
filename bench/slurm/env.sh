@@ -21,7 +21,5 @@ export TMPDIR=${PPIMPL_TMP:-${TMPDIR:-/tmp}}/pp$JOB
 if (( ${#TMPDIR} > 64 )); then echo "TMPDIR $TMPDIR is over 64 characters (vLLM's zmq ipc path); set PPIMPL_TMP"; exit 1; fi
 mkdir -p "$TMPDIR"
 trap 'rm -rf "$TMPDIR"' EXIT
-# Dao causal-conv1d 1.7.0, built from source for this torch (ENV.md)
-export PYTHONPATH=$MAIN/third_party/causal_conv1d_try/pkg${PYTHONPATH:+:$PYTHONPATH}
 echo "job $JOB host $(hostname) gpus ${CUDA_VISIBLE_DEVICES:-?} $(git -C "$ROOT" log --oneline -1)"
 uptime

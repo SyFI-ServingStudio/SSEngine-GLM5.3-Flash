@@ -5,8 +5,7 @@ Run from the ServingStudioSim checkout (its project venv is the controller):
 
 Every profiling env a configuration of 2_kernels.md can name (the vllm_env container,
 vllm_upstream_fork_env, flashinfer_kda_env, causal_conv1d_env) is re-registered as a
-host env on pp-impl/.venv's interpreter, with the fork checkout and Dao causal-conv1d
-on PYTHONPATH, torch/lib first on LD_LIBRARY_PATH and inherited site-packages dropped.
+host env on pp-impl/.venv's interpreter, with the fork checkout on PYTHONPATH, torch/lib first on LD_LIBRARY_PATH and inherited site-packages dropped.
 Nothing in the profiler is edited; with --fresh nothing is written to any DB.
 """
 
@@ -18,7 +17,7 @@ _ROOT = Path(__file__).resolve().parents[2]
 PPI = _ROOT.parents[1] if _ROOT.parent.name == "lanes" else _ROOT   # the tree with .venv and third_party/
 VENV_PY = PPI / ".venv" / "bin" / "python"
 TORCH_LIB = PPI / ".venv" / "lib" / "python3.12" / "site-packages" / "torch" / "lib"
-PATHS = [PPI / "third_party" / "vllm", PPI / "third_party" / "causal_conv1d_try" / "pkg"]
+PATHS = [PPI / "third_party" / "vllm"]
 HOOK = Path(__file__).resolve().parent / "hook"
 # The profiler package is the ServingStudioSim checkout itself (not installed into its venv);
 # running this file as a script puts only its own directory on sys.path.
