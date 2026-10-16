@@ -1,14 +1,13 @@
 #!/bin/bash
 # M4 (5_prefix_cache.md) runs on one 4-GPU server, into OUT (default measured/runs_m4). Usage, from the repo root:
 #   mkdir -p measured/runs_m4/slurm
-#   sbatch -p priority --time=00:12:00 -o measured/runs_m4/slurm/%j.out bench/slurm/m4.sbatch check
-#   sbatch -p priority --time=00:30:00 -o measured/runs_m4/slurm/%j.out bench/slurm/m4.sbatch bringup
-#   sbatch -p priority --time=00:30:00 -o measured/runs_m4/slurm/%j.out bench/slurm/m4.sbatch preflight
-#   sbatch -p priority --time=00:28:00 -o measured/runs_m4/slurm/%j.out bench/slurm/m4.sbatch prefix_n400
+#   sbatch -p priority -J ppimpl --dependency=singleton --time=00:12:00 -o measured/runs_m4/slurm/%j.out bench/slurm/m4.sbatch check
+#   sbatch -p priority -J ppimpl --dependency=singleton --time=00:30:00 -o measured/runs_m4/slurm/%j.out bench/slurm/m4.sbatch bringup
+#   sbatch -p priority -J ppimpl --dependency=singleton --time=00:20:00 -o measured/runs_m4/slurm/%j.out bench/slurm/m4.sbatch preflight
+#   sbatch -p priority -J ppimpl --dependency=singleton --time=00:28:00 -o measured/runs_m4/slurm/%j.out bench/slurm/m4.sbatch prefix_n400
 # preflight (before any long run), stopping at the first failure: kvcheck with chunk starts inside 4-token indexer
 # pools (40,000 tokens in 8,001- and 8,190-token chunks, bitwise against unsplit), prefix_check with P + 1/2/3
-# (prefix_check_unaligned), an Nsight Systems trace of one 512k + 1k session alone (bring-up session 34, round 0's
-# 64 chunks and round 1: prefix_nsys_512k_1k, microbatches [1, 66); microbatch 0 is the preflight), then a smoke of prefix_n400's first ~2 min (client limit 3m incl. ~45 s tokenization:
+# (prefix_check_unaligned), then a smoke of prefix_n400's first ~2 min (client limit 3m incl. ~45 s tokenization:
 # prefix_smoke_n400) that must end with failed=0. bench/run.py stops any run at the first fault (server or worker
 # traceback, server exit, client failed > 0).
 # check: bench/prefix_check.py (round-1 tokens, cache on vs off, ~6 min). bringup: prefix_bringup (20 min) under
@@ -16,7 +15,7 @@
 # 34, P 512k A 1k, and all of session 35, P 512k A 8k; microbatch 0 is req-frontend's preflight). prefix_n<N>: the
 # 20-minute session run at N. BRINGUP_ARGS adds bench/run.py options to bringup, e.g. "--gap-s 17 --sessions 30,31
 # --run-name prefix_bringup_rest" (sessions 17 s apart: the cluster stops GPU jobs idle for 10 min). Then `python -m bench.prefix summarize measured/runs_m4 --out measured`.
-#SBATCH -J ppm4
+#SBATCH -J ppimpl
 #SBATCH --gres=gpu:4
 set -uo pipefail
 source "${SLURM_SUBMIT_DIR:-$(dirname "$0")/../..}/bench/slurm/env.sh"
@@ -32,8 +31,6 @@ case $WHAT in
   preflight)
     $PY -m bench.kvcheck --prompt-len 40000 --chunk 8001 --chunk-b 8190 --exact; rc=$?
     (( rc == 0 )) && { $PY -m bench.prefix_check --out "$R" --port "$P" --p-shift 1,2,3 --name prefix_check_unaligned; rc=$?; }
-    (( rc == 0 )) && { $PY -m bench.run prefix_bringup --inline --nsys --nsys-mbs 1:66 --gpus "$G" --port "$P" --out-root "$R" \
-                         --gap-s 17 --sessions 34 --run-name prefix_nsys_512k_1k; rc=$?; }
     (( rc == 0 )) && { $PY -m bench.run prefix_n400 --inline --gpus "$G" --port "$P" --out-root "$R" --client-limit 3m \
                          --run-name prefix_smoke_n400; rc=$?; }
     ;;
