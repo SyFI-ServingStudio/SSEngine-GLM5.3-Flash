@@ -569,3 +569,15 @@ Its kernel 2 holds the [K, V] state as bf16 and rounds it every 16 tokens. The e
 - This is about 45x below FlashKDA in the same head, but above the Triton chunk kernel (0.003).
 - It does not reach top-1 or KL.
 - Decision (user): record it, and don't pursue it now.
+
+## Warm-up crash: DeepSelect writes junk indices on NaN logits, topk_canon read past the row (M4, jobs 7670, 7681) — fixed
+
+Smoke 7670 died in warm-up (illegal memory access, worker 0) once the served shapes (`_warm_served_shapes`) ran.
+Warm-up runs on whatever KV earlier warm-up forwards left, and the indexer logits of the multi-request shapes carried
+NaN inside the rows' valid range. DeepSelect (`deep_select.topk`) then writes junk indices for those rows (0x3F3F3F3F,
+probe in 7681: NaN past the row end and inf are harmless), and `topk_canon._kth_kernel` read `logits[r, lo + sel]`
+with them. Fix (840c1ab): both count kernels treat `sel` outside `[0, ke - ks)` as unselected and `_kth_kernel`
+rewrites it to -1, so no path reads or keeps it; valid input gives the same result as before. In 7681 each stage's
+warm-up and 33-bucket capture with the smoke's server config passed one at a time (38-40 s per stage), and the topk
+GPU tests pass with a new out-of-row case. Served rows never carry NaN logits; the guard is a bound, not a fix of
+the data.

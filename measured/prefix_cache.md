@@ -31,20 +31,24 @@ Measured / target over the same window: from the first submit to the last first 
 | └ replay (our engine, fit times; plain, dispatch_ahead 1, form lead 35 ms) | | | 2090 | 13.98 | 94.5k | 99.74% | 0.40 / 1.26 / 2.14 (x1.02 / x0.99 / x1.00 of target) |
 | prefix_smoke_n400_7658 | 400 | 151 | 2040 / 2139 | 13.50 / 14.16 | 93.9k / 95.9k | 99.72% / 99.74% | 0.48 / 2.19 / 4.27 vs 0.40 / 1.36 / 3.57 (x1.19 / x1.62 / x1.20) |
 | └ replay (our engine, fit times; plain, dispatch_ahead 1, form lead 35 ms) | | | 2145 | 14.20 | 96.0k | 99.74% | 0.41 / 1.40 / 3.61 (x1.02 / x1.03 / x1.01 of target) |
+| prefix_smoke_n400_7683 | 400 | 149 | 2048 / 2090 | 13.74 / 14.02 | 94.1k / 94.7k | 99.73% / 99.74% | 0.45 / 1.73 / 2.82 vs 0.39 / 1.28 / 2.14 (x1.15 / x1.35 / x1.32) |
+| └ replay (our engine, fit times; plain, dispatch_ahead 1, form lead 45 ms) | | | 2100 | 14.09 | 94.9k | 99.74% | 0.40 / 1.22 / 2.22 (x1.03 / x0.95 / x1.03 of target) |
 
-Kernels compiled after warm-up (worker jit_stage<S>.jsonl; any fails the run): prefix_smoke_n400_7508 not monitored; prefix_smoke_n400_7569 not monitored; prefix_smoke_n400_7658 44 (by stage {0: 11, 1: 11, 2: 11, 3: 11}).
+Kernels compiled after warm-up (worker jit_stage<S>.jsonl; any fails the run): prefix_smoke_n400_7508 not monitored; prefix_smoke_n400_7569 not monitored; prefix_smoke_n400_7658 44 (by stage {0: 11, 1: 11, 2: 11, 3: 11}); prefix_smoke_n400_7683 4 (by stage {0: 1, 1: 1, 2: 1, 3: 1}).
 
 Prefix cache per round (server_requests.jsonl hit_kind): rounds by kind, tokens recomputed because the kept context was superseded or evicted, waits for pool room:
 
 | Run | Rounds by kind | Superseded: recomputed tokens | Evicted: recomputed tokens | Admit waits |
 |---|---|---|---|---|
 | prefix_smoke_n400_7658 | full 1792, none_first_round 307, superseded 5 | 188,750 | 0 | 0 (max 0 ms) |
+| prefix_smoke_n400_7683 | full 1813, none_first_round 302, superseded 5 | 188,750 | 0 | 0 (max 0 ms) |
 
 Stage 0, plan formed -> its forward returned with all GPU work enqueued (ms, p50 / p90 / p99); of the plans formed while another ran, how many were enqueued after that one's stage-0 end (late, by how much):
 
 | Run | Formed → enqueued | Formed → received | Forward host | Queued plans late | Late by |
 |---|---|---|---|---|---|
 | prefix_smoke_n400_7658 | 7.2 / 10.1 / 41.5 | 0.8 / 1.0 / 2.4 | 6.5 / 9.1 / 39.0 | 135 / 1830 | 5.3 / 15.8 / 475.2 |
+| prefix_smoke_n400_7683 | 7.4 / 10.1 / 38.6 | 0.7 / 0.9 / 3.5 | 6.7 / 9.1 / 37.8 | 229 / 1795 | 4.9 / 9.9 / 24.1 |
 
 Stage time / fit (microbatch_fit.json) by microbatch size in tokens, summed over the run's microbatches (n); stage 0 idle while a round was already waiting (gaps), and from a round's arrival on an idle stage 0 to its start (arrivals):
 
@@ -62,6 +66,10 @@ Stage time / fit (microbatch_fit.json) by microbatch size in tokens, summed over
 | prefix_smoke_n400_7658 | 1 | x1.701 (77; +0.4 s) | x1.094 (179; +0.2 s) | x1.094 (431; +1.2 s) | x1.021 (1610; +1.8 s) |  |  |
 | prefix_smoke_n400_7658 | 2 | x1.703 (77; +0.5 s) | x1.105 (179; +0.2 s) | x1.119 (431; +1.5 s) | x1.060 (1610; +5.4 s) |  |  |
 | prefix_smoke_n400_7658 | 3 | x1.748 (77; +0.5 s) | x1.113 (179; +0.2 s) | x1.122 (431; +1.6 s) | x1.048 (1610; +4.3 s) |  |  |
+| prefix_smoke_n400_7683 | 0 | x1.354 (73; +0.2 s) | x1.254 (198; +0.5 s) | x1.032 (448; +0.4 s) | x1.008 (1586; +0.7 s) | 3.47 s (1706 gaps) | 3.58 s (453 arrivals) |
+| prefix_smoke_n400_7683 | 1 | x0.921 (73; -0.0 s) | x1.088 (198; +0.2 s) | x1.038 (448; +0.5 s) | x1.018 (1586; +1.6 s) |  |  |
+| prefix_smoke_n400_7683 | 2 | x0.918 (73; -0.1 s) | x1.101 (198; +0.2 s) | x1.069 (448; +0.9 s) | x1.062 (1586; +5.4 s) |  |  |
+| prefix_smoke_n400_7683 | 3 | x0.993 (73; -0.0 s) | x1.103 (198; +0.2 s) | x1.059 (448; +0.8 s) | x1.037 (1586; +3.3 s) |  |  |
 
 ## Notes
 
