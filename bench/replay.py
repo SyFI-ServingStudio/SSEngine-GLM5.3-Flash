@@ -56,7 +56,8 @@ MS = 1_000_000          # ns per ms
 class StageModel:
     """Per-stage compute (ms) from the microbatch fit; sends from the iteration targets."""
 
-    def __init__(self, handoff: Path = HANDOFF):
+    def __init__(self, handoff: Path = HANDOFF, stage_mult: list[float] | None = None):
+        self.stage_mult = stage_mult or [1.0] * NUM_STAGES     # per-stage time / fit (a real run's stage balance)
         fit = json.loads((handoff / "data/microbatch_fit.json").read_text())
         self.coef = [(f["a_ms"], f["b_ms_per_1k_tokens"], f["c_ms_per_1e9_pairs"]) for f in fit]
         it = json.loads((handoff / "data/iteration_targets.json").read_text())
@@ -71,7 +72,7 @@ class StageModel:
         return a + b * tokens / 1e3 + c * pairs / 1e9
 
     def times(self, index: int, chunks) -> list[float]:
-        return [self.fit_ms(s, chunks) for s in range(NUM_STAGES)]
+        return [self.fit_ms(s, chunks) * self.stage_mult[s] for s in range(NUM_STAGES)]
 
     def send_ms(self, tokens: int) -> float:
         return self.send_base + self.send_slope * tokens
@@ -141,8 +142,12 @@ class Microbatch:
 class Replay:
     def __init__(self, sched: Scheduler, stages: StageModel, requests: list[Round] = (), sessions: list[Session] = (),
                  max_sessions: int | None = None, horizon_ms: float | None = None, form_lead_ms: float | None = None,
-                 slot_after_last_wait: bool = True):
+                 slot_after_last_wait: bool = True, pace_margin_ms: float | None = None):
         self.sched, self.stages = sched, stages
+        # pacing (None: off): form a microbatch only once it would reach every later stage no more than the margin
+        # before that stage frees, judged by the last microbatch's stage times
+        self.pace_margin_ns = None if pace_margin_ms is None else int(pace_margin_ms * MS)
+        self.pace_event_ns = -1
         self.slot_after_last_wait = slot_after_last_wait
         self.max_sessions = max_sessions
         self.horizon_ns = None if horizon_ms is None else int(horizon_ms * MS)
@@ -242,7 +247,26 @@ class Replay:
                                dram_tokens=tiers["dram"], ssd_tokens=tiers["ssd"],
                                read_start_ms=t / MS, read_land_ms=land / MS))
 
+    def _pace_ns(self) -> int:
+        """Earliest stage-0 start at which the next microbatch would not queue before a later stage (by more than the
+        margin), taking the last microbatch's stage times as the next one's."""
+        if self.pace_margin_ns is None or not self.microbatches:
+            return 0
+        mb = self.microbatches[-1]
+        send = self.stages.send_ms(sum(n for _, _, n in mb.chunks))
+        t, ahead = 0.0, 0.0
+        for s in range(1, NUM_STAGES):
+            ahead += mb.compute[s - 1] + send
+            t = max(t, self.stage_free[s] - ahead)
+        return round(t * MS) - self.pace_margin_ns
+
     def _may_form(self, now: int) -> bool:
+        pace = self._pace_ns()
+        if now < pace:
+            if self.pace_event_ns != pace:
+                self.pace_event_ns = pace
+                self._push(pace, FORM, None)
+            return False
         if self.sched.on_stage0 == 0:
             return True
         return self.form_lead_ns is None or now >= self.stage0_end_ns - self.form_lead_ns
@@ -419,7 +443,8 @@ def run_sessions(step: str, n: int | None, out: Path, minutes: float = 20.0, mem
                  tiers: bool = False, accounting: str = "blocks", partial_hits: bool = False,
                  trace: Path | None = None, pool_tokens: int | None = None, tier_cfg: TierConfig | None = None,
                  dispatch_ahead: int = 0, form_lead_ms: float | None = None, handoff: Path = HANDOFF,
-                 slot_after_last_wait: bool = True, max_in_flight: int = NUM_STAGES) -> dict:
+                 slot_after_last_wait: bool = True, max_in_flight: int = NUM_STAGES,
+                 stage_mult: list[float] | None = None, pace_margin_ms: float | None = None) -> dict:
     pool, dram = MEMORY[memory]
     if tiers and tier_cfg is None:
         tier_cfg = TierConfig(dram_gb=dram)
@@ -427,8 +452,9 @@ def run_sessions(step: str, n: int | None, out: Path, minutes: float = 20.0, mem
                            dispatch_ahead, max_in_flight)
     _, sessions = load_trace(trace or handoff / "data/sessions_2ps.csv")
     window = minutes * 60e3
-    rp = Replay(sched, StageModel(handoff), sessions=sessions, max_sessions=n, horizon_ms=window,
-                form_lead_ms=form_lead_ms, slot_after_last_wait=slot_after_last_wait).run()
+    rp = Replay(sched, StageModel(handoff, stage_mult), sessions=sessions, max_sessions=n, horizon_ms=window,
+                form_lead_ms=form_lead_ms, slot_after_last_wait=slot_after_last_wait,
+                pace_margin_ms=pace_margin_ms).run()
     summary = rp.write(out, window)
     m = subprocess.run([sys.executable, str(handoff / "data/metrics.py"), str(out / "requests.jsonl"),
                         "--minutes", str(minutes)], capture_output=True, text=True, check=True)
@@ -499,6 +525,8 @@ def main():
     p.add_argument("--dispatch-ahead", type=int, default=0)
     p.add_argument("--form-lead-ms", type=float)
     p.add_argument("--max-in-flight", type=int, default=NUM_STAGES)
+    p.add_argument("--stage-mult", help="per-stage time / fit, comma-separated (default 1 each)")
+    p.add_argument("--pace-margin-ms", type=float, help="pace microbatch formation to the later stages (default off)")
     p.add_argument("--out", type=Path, required=True)
     a = ap.parse_args()
     if a.cmd == "check-sched":
@@ -518,7 +546,9 @@ def main():
         tc = TierConfig(dram_gb=mem[1], ssd_gb=None if a.no_ssd else 256.0, ssd_writes=a.ssd_writes)
         s = run_sessions(a.step, a.n, a.out, a.minutes, a.memory, a.tiers, a.accounting, a.partial_hits, a.trace,
                          a.pool_tokens, tc, a.dispatch_ahead, a.form_lead_ms,
-                         slot_after_last_wait=not a.slot_at_last_token, max_in_flight=a.max_in_flight)
+                         slot_after_last_wait=not a.slot_at_last_token, max_in_flight=a.max_in_flight,
+                         stage_mult=[float(x) for x in a.stage_mult.split(",")] if a.stage_mult else None,
+                         pace_margin_ms=a.pace_margin_ms)
         print(json.dumps(s, indent=1))
 
 
