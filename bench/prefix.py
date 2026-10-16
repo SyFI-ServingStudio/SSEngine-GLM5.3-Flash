@@ -54,6 +54,15 @@ def server_rows(run_dir: Path) -> dict[str, dict]:
     return {r["id"]: r for r in read_jsonl(run_dir / "server_requests.jsonl") if not r["id"].startswith(PREFLIGHT)}
 
 
+def server_ttft_ms(s: dict | None) -> float | None:
+    """Server-side TTFT: the request entered the scheduler's pending queue (`host_ms.admitted`, after the body was
+    received, parsed and handed to the controller) -> the first token's response went out. The client's TTFT adds
+    building, sending, receiving and parsing the body before that and reading the response after."""
+    if s is None or s.get("response_ms") is None or (s.get("host_ms") or {}).get("admitted") is None:
+        return None
+    return round(s["response_ms"] - (s["arrival_ms"] + s["host_ms"]["admitted"]), 3)
+
+
 def shift_ms(run_dir: Path, client: dict) -> float:
     """Workload t = 0 (first workload submit) on the server's ms axis."""
     t0 = json.loads((run_dir / "t0.json").read_text())["t0_unix_ns"] / 1e6
@@ -100,6 +109,7 @@ def round_line(c: dict, mine: list[dict], s: dict | None, tr) -> dict:
             out["nsys"] = {"stages_ms": [round(x["compute_ms"], 3) for x in t["stages"]],
                            "sends_ms": [round(t["stages"][k + 1]["start_ms"] - t["stages"][k]["end_ms"], 3)
                                         for k in range(3)]}
+    out["server_ttft_ms"] = server_ttft_ms(s)
     if s is not None:
         out["token"] = s.get("token")
         out["prompt_sha256"] = s.get("prompt_sha256")
@@ -125,7 +135,8 @@ def bringup(run_dir: Path, reference: Path | None = None) -> list[dict]:
         rounds = sessions[sid]
         r0id, r0 = rounds[0]
         line = {"prefix_tokens": r0["input_len"], "computed_tokens": None, "session": sid,
-                "round0_ttft_ms": r0["ttft_ms"], "round1_ttft_ms": None, "round1_cached_tokens": None,
+                "round0_ttft_ms": r0["ttft_ms"], "round0_server_ttft_ms": server_ttft_ms(sreq.get(r0id)),
+                "round1_ttft_ms": None, "round1_server_ttft_ms": None, "round1_cached_tokens": None,
                 "round1_stages": None, "round1_sends_ms": None, "token_matches_reference": None,
                 "round0_microbatches": len({m["index"] for m in by_req.get(r0id, [])}), "rounds": {}}
         for k in sorted(r for r in rounds if r >= 1):
@@ -141,6 +152,7 @@ def bringup(run_dir: Path, reference: Path | None = None) -> list[dict]:
             continue
         r1 = line["rounds"][1]
         line.update(computed_tokens=r1["computed_tokens"], round1_ttft_ms=r1["ttft_ms"],
+                    round1_server_ttft_ms=r1["server_ttft_ms"],
                     round1_cached_tokens=r1["cached_tokens"], append_tokens=r1["append_tokens"],
                     round1_stages=None if r1["stages"] is None else
                     [{"stage": k, "compute_ms": v} for k, v in enumerate(r1["stages"])],
@@ -209,7 +221,9 @@ def sessions(run_dir: Path) -> dict:
     cache = json.loads((run_dir / "cache.json").read_text()) if (run_dir / "cache.json").exists() else {}
     metrics = json.loads((run_dir / "metrics.json").read_text())
     sreq = server_rows(run_dir)
+    sv = np.array([v for v in (server_ttft_ms(r) for r in sreq.values()) if v is not None]) / 1e3
     return {"metrics": metrics, "stage_busy": busy, "shift_ms": shift,
+            "server_ttft_s": {f"p{q}": float(np.percentile(sv, q)) for q in (50, 90, 99)} if len(sv) else None,
             "pool_tokens": cache.get("pool_tokens"), "evicted_sessions": cache.get("evicted_sessions"),
             "evicted_tokens": cache.get("evicted_tokens"), "preemptions": cache.get("preemptions"),
             "hits": cache.get("hits"), "hit_tokens": cache.get("hit_tokens"), "peak_hard_blocks": cache.get("peak_hard"),
@@ -245,8 +259,8 @@ def _k(n):
 
 def bringup_md(lines: list[dict]) -> str:
     targets = {(t["prefix_tokens"], t["computed_tokens"]): t for t in json.loads((HANDOFF / "data/prefix_targets.json").read_text())}
-    out = ["| P | A | n | hit = P | Round 0 TTFT (ms) | Round 1 TTFT (ms) | Stage 0 | Stage 1 | Stage 2 | Stage 3 | "
-           "Each send | Token = no cache |", "|---|---|---|---|---|---|---|---|---|---|---|---|"]
+    out = ["| P | A | n | hit = P | Round 0 TTFT (ms) | Round 1 TTFT (ms) | Round 1 server TTFT (ms) | Stage 0 | Stage 1 | Stage 2 | Stage 3 | "
+           "Each send | Token = no cache |", "|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
     groups = {}
     for x in lines:
         groups.setdefault((x["prefix_tokens"], x.get("append_tokens")), []).append(x)
@@ -256,6 +270,8 @@ def bringup_md(lines: list[dict]) -> str:
         med = lambda f: float(np.median([f(x) for x in ok])) if ok else None   # noqa: E731
         r0 = float(np.median([x["round0_ttft_ms"] for x in xs if x["round0_ttft_ms"] is not None]))
         r1 = med(lambda x: x["round1_ttft_ms"])
+        sv = [x["round1_server_ttft_ms"] for x in ok if x.get("round1_server_ttft_ms") is not None]
+        s1 = float(np.median(sv)) if sv else None
         st = [med(lambda x, s=s: x["round1_stages"][s]["compute_ms"]) for s in range(4)]
         sends = med(lambda x: float(np.mean(x["round1_sends_ms"]))) if ok and all(x["round1_sends_ms"] for x in ok) else None
         hits = sum(x["round1_cached_tokens"] == P for x in xs)
@@ -267,6 +283,7 @@ def bringup_md(lines: list[dict]) -> str:
         send = f"{sends:.3f} / {tr['microbatches'][0]['send_ms'][0]:.3f}" if sends is not None and tr else "–"
         out.append(f"| {_k(P)} | {_k(A) if A else '?'} | {len(xs)} | {hits}/{len(xs)} | "
                    f"{cell(r0, t['round0']['ttft_ms'] if t else None)} | {cell(r1, tr['ttft_ms'] if tr else None)} | "
+                   f"{cell(s1, tr['ttft_ms'] if tr else None)} | "
                    + " | ".join(cell(st[s], tr["microbatches"][0]["compute_ms"][s] if tr else None) for s in range(4))
                    + f" | {send} | {tok} |")
     return "\n".join(out)
@@ -277,8 +294,8 @@ def rounds_md(lines: list[dict], targets: Path, verdicts: dict | None = None) ->
     no-cache prefill of P; round k >= 1 hits P + (k - 1) A and computes A. `verdicts`: prompt sha256 -> the token
     check's verdict (bench/check_tokens.py), counted per row as pass / judged (+ near ties)."""
     tg = {(t["prefix_tokens"], t["computed_tokens"]): t for t in json.loads(targets.read_text())}
-    out = ["| P | A | Round | n | Hit = target | TTFT (ms) | Stage 0 | Stage 1 | Stage 2 | Stage 3 | Token |",
-           "|---|---|---|---|---|---|---|---|---|---|---|"]
+    out = ["| P | A | Round | n | Hit = target | TTFT (ms) | Server TTFT (ms) | Stage 0 | Stage 1 | Stage 2 | Stage 3 | "
+           "Token |", "|---|---|---|---|---|---|---|---|---|---|---|---|"]
     groups = {}
     for x in lines:
         if x.get("append_tokens"):
@@ -287,9 +304,10 @@ def rounds_md(lines: list[dict], targets: Path, verdicts: dict | None = None) ->
     for (P, A), xs in sorted(groups.items()):
         t = tg.get((P, A))
         r0 = [x["round0_ttft_ms"] for x in xs if x["round0_ttft_ms"] is not None]
-        out.append(f"| {_k(P)} | {_k(A)} | 0 | {len(xs)} | – | "
-                   f"{cell(float(np.median(r0)) if r0 else None, t['round0']['ttft_ms'] if t else None)} "
-                   f"| – | – | – | – | – |")
+        s0 = [x["round0_server_ttft_ms"] for x in xs if x.get("round0_server_ttft_ms") is not None]
+        t0 = t["round0"]["ttft_ms"] if t else None
+        out.append(f"| {_k(P)} | {_k(A)} | 0 | {len(xs)} | – | {cell(float(np.median(r0)) if r0 else None, t0)} "
+                   f"| {cell(float(np.median(s0)) if s0 else None, t0)} | – | – | – | – | – |")
         nrounds = max(max(x["rounds"], default=0) for x in xs)
         for k in range(1, nrounds + 1):
             rs = [x["rounds"][k] for x in xs if k in x["rounds"]]
@@ -297,6 +315,7 @@ def rounds_md(lines: list[dict], targets: Path, verdicts: dict | None = None) ->
             med = lambda f, rs=rs: (lambda v: float(np.median(v)) if v else None)(   # noqa: E731
                 [f(r) for r in rs if f(r) is not None])
             ttft = med(lambda r: r["ttft_ms"])
+            sttft = med(lambda r: r.get("server_ttft_ms"))
             st = [med(lambda r, i=i: r["stages"][i] if r["stages"] else None) for i in range(4)]
             want_hit = tk["hit_tokens"] if tk else None
             hits = sum(r["cached_tokens"] == want_hit for r in rs) if want_hit is not None else None
@@ -312,6 +331,7 @@ def rounds_md(lines: list[dict], targets: Path, verdicts: dict | None = None) ->
                           if any(x is None or x == 'no_reference' for x in v) else ""))
             out.append(f"| {_k(P)} | {_k(A)} | {k} | {len(rs)} | "
                        f"{'–' if hits is None else f'{hits}/{len(rs)}'} | {cell(ttft, tk['ttft_ms'] if tk else None)} | "
+                       f"{cell(sttft, tk['ttft_ms'] if tk else None)} | "
                        + " | ".join(cell(st[i], tmb[i] if tmb else None) for i in range(4)) + f" | {tok} |")
     return "\n".join(out)
 
@@ -338,7 +358,7 @@ def sessions_md(runs: dict[int, dict]) -> str:
     targets = {t["max_sessions"]: t for t in json.loads((HANDOFF / "data/session_targets.json").read_text())
                if t["setting"] == "plain_hbm"}
     out = ["| N | Rounds/s | New tokens/s | Computed tokens/s | Prefix hit share | TTFT p50 / p90 / p99 (s) | "
-           "Stage busy 0 / 1 / 2 / 3 |", "|---|---|---|---|---|---|---|"]
+           "Server TTFT p50 / p90 / p99 (s) | Stage busy 0 / 1 / 2 / 3 |", "|---|---|---|---|---|---|---|---|"]
     for n, s in sorted(runs.items()):
         m, t = s["metrics"], targets.get(n)
         tt = m["ttft_s"]
@@ -352,7 +372,10 @@ def sessions_md(runs: dict[int, dict]) -> str:
             f"| {tt['p50']:.2f} / {tt['p90']:.2f} / {tt['p99']:.2f} vs {t['ttft_s']['p50']:.2f} / "
             f"{t['ttft_s']['p90']:.2f} / {t['ttft_s']['p99']:.2f} (x{_r(tt['p50'], t['ttft_s']['p50'])} / "
             f"x{_r(tt['p90'], t['ttft_s']['p90'])} / x{_r(tt['p99'], t['ttft_s']['p99'])}) "
-            f"| {' / '.join(f'{100 * b:.0f}' for b in s['stage_busy'])}% vs "
+            + (lambda sv: "| – " if not sv else
+               f"| {sv['p50']:.2f} / {sv['p90']:.2f} / {sv['p99']:.2f} (x{_r(sv['p50'], t['ttft_s']['p50'])} / "
+               f"x{_r(sv['p90'], t['ttft_s']['p90'])} / x{_r(sv['p99'], t['ttft_s']['p99'])}) ")(s.get("server_ttft_s"))
+            + f"| {' / '.join(f'{100 * b:.0f}' for b in s['stage_busy'])}% vs "
             f"{' / '.join(f'{100 * b:.0f}' for b in t['stage_busy'])}% |")
     out += ["", "| N | Pool (tokens) | Evicted sessions (tokens) | Preemptions | Prefix shortfall | Rounds failed | "
             "Microbatches / fit, median per stage (p10–p90) |", "|---|---|---|---|---|---|---|"]
