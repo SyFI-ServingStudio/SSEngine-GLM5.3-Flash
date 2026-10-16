@@ -9,8 +9,6 @@ the report socket was read again (~1 s for 2,048 requests, job 7056).
 Microbatches go to all workers at once, in mb_id order; workers report `StageDone`; the last stage's report carries
 the tokens. Logs, in `run_dir` (times in ms from t0, the first request's arrival at the server):
 - `microbatches.jsonl`: one line per (microbatch, stage), 1_contract.md §3;
-- `mb_host.jsonl`: per (microbatch, stage), the worker's host clock when it received the plan, called the forward and
-  the forward returned (its GPU work all enqueued);
 - `server_requests.jsonl`: one line per request: scheduler order (seq), arrival, first dispatch, token (when the
   control thread handled the last stage's report), response, prompt sha256; with the prefix cache, how it was served:
   `hit_kind` (none_first_round: no kept context for its key; full; superseded: the kept context is not a prefix of
@@ -166,7 +164,6 @@ class Controller:
                                     cfg.scheduler.mb_tokens, self.rule.cap, 1)
         self.mb_log = open(self.run_dir / "microbatches.jsonl", "w")
         self.plan_log = open(self.run_dir / "plans.jsonl", "w")
-        self.host_log = open(self.run_dir / "mb_host.jsonl", "w")
         self.req_log = open(self.run_dir / "server_requests.jsonl", "w")
         (self.run_dir / "pool.json").write_text(json.dumps(
             {"ready_blocks": [r.num_blocks for r in ready], "num_blocks": num_blocks,
@@ -249,7 +246,7 @@ class Controller:
         for sock in (*self.plans, self.reports, self.wake_rx, self.wake_tx, self.intake):
             if sock is not None:
                 sock.close(linger=0)
-        for f in ("mb_log", "req_log", "plan_log", "host_log"):
+        for f in ("mb_log", "req_log", "plan_log"):
             if hasattr(self, f):
                 getattr(self, f).close()
         if self.sched is not None:
@@ -364,7 +361,7 @@ class Controller:
                 if time.monotonic() >= next_check:
                     next_check = time.monotonic() + 1.0
                     self._check_procs()
-                    for f in (self.mb_log, self.plan_log, self.req_log, self.host_log):
+                    for f in (self.mb_log, self.plan_log, self.req_log):
                         f.flush()
                     if next_check >= next_cache:
                         next_cache = next_check + 10.0
@@ -510,9 +507,6 @@ class Controller:
         self.mb_log.write(json.dumps({"stage": d.stage, "index": d.mb_id, "start_ms": round(self._ms(d.start_ns), 4),
                                       "compute_ms": round((d.end_ns - d.start_ns) / 1e6, 4),
                                       "requests": reqs}) + "\n")
-        if d.host_ns is not None:
-            self.host_log.write(json.dumps({"stage": d.stage, "index": d.mb_id,
-                                            "host_ms": [round(self._ms(t), 4) for t in d.host_ns]}) + "\n")
         if left == 1:
             del self.inflight_plans[d.mb_id]
         else:
