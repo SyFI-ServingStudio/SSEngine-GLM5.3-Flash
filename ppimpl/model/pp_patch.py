@@ -468,7 +468,7 @@ def kpool_compress_insert(k, gate_score, ape, kv_cache, slot_mapping, kpool, hea
         pos = torch.arange(n, device=k.device)
         write_mask = (slot_mapping >= 0) & (pos >= kpool - 1)
         if heads is not None:
-            write_mask[heads.last] = False
+            write_mask.index_fill_(0, heads.last, False)   # not `[idx] = False`: that copies the scalar H2D and syncs
         idx = (pos - (kpool - 1)).clamp_min(0)[:, None] + torch.arange(kpool, device=k.device)[None, :]
         ops.kpool_compress_and_write_cache(kv_cache, k[idx], gate_score[idx], ape, slot_mapping.to(torch.int64),
                                            pool_size=kpool, head_dim=head_dim, write_mask=write_mask,
