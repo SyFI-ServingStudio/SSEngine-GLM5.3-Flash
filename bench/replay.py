@@ -142,8 +142,9 @@ class Microbatch:
 class Replay:
     def __init__(self, sched: Scheduler, stages: StageModel, requests: list[Round] = (), sessions: list[Session] = (),
                  max_sessions: int | None = None, horizon_ms: float | None = None, form_lead_ms: float | None = None,
-                 slot_after_last_wait: bool = True, pace_margin_ms: float | None = None):
+                 slot_after_last_wait: bool = True, pace_margin_ms: float | None = None, host_ms: float = 0.0):
         self.sched, self.stages = sched, stages
+        self.host_ms = host_ms        # a formed plan reaches stage 0 this much later (the server's host time)
         # pacing (None: off): form a microbatch only once it would reach every later stage no more than the margin
         # before that stage frees, judged by the last microbatch's stage times
         self.pace_margin_ns = None if pace_margin_ms is None else int(pace_margin_ms * MS)
@@ -215,7 +216,7 @@ class Replay:
         tokens = sum(n for _, _, n in spec)
         send = self.stages.send_ms(tokens)
         start = [0.0] * NUM_STAGES
-        start[0] = max(now / MS, self.stage_free[0])
+        start[0] = max(now / MS + self.host_ms, self.stage_free[0])
         ready = start[0] + compute[0]
         for s in range(1, NUM_STAGES):
             pull_start = max(ready, self.stage_start[s])
@@ -258,7 +259,7 @@ class Replay:
         for s in range(1, NUM_STAGES):
             ahead += mb.compute[s - 1] + send
             t = max(t, self.stage_free[s] - ahead)
-        return round(t * MS) - self.pace_margin_ns
+        return round((t - self.host_ms) * MS) - self.pace_margin_ns
 
     def _may_form(self, now: int) -> bool:
         pace = self._pace_ns()
@@ -444,7 +445,8 @@ def run_sessions(step: str, n: int | None, out: Path, minutes: float = 20.0, mem
                  trace: Path | None = None, pool_tokens: int | None = None, tier_cfg: TierConfig | None = None,
                  dispatch_ahead: int = 0, form_lead_ms: float | None = None, handoff: Path = HANDOFF,
                  slot_after_last_wait: bool = True, max_in_flight: int = NUM_STAGES,
-                 stage_mult: list[float] | None = None, pace_margin_ms: float | None = None) -> dict:
+                 stage_mult: list[float] | None = None, pace_margin_ms: float | None = None,
+                 host_ms: float = 0.0) -> dict:
     pool, dram = MEMORY[memory]
     if tiers and tier_cfg is None:
         tier_cfg = TierConfig(dram_gb=dram)
@@ -454,7 +456,7 @@ def run_sessions(step: str, n: int | None, out: Path, minutes: float = 20.0, mem
     window = minutes * 60e3
     rp = Replay(sched, StageModel(handoff, stage_mult), sessions=sessions, max_sessions=n, horizon_ms=window,
                 form_lead_ms=form_lead_ms, slot_after_last_wait=slot_after_last_wait,
-                pace_margin_ms=pace_margin_ms).run()
+                pace_margin_ms=pace_margin_ms, host_ms=host_ms).run()
     summary = rp.write(out, window)
     m = subprocess.run([sys.executable, str(handoff / "data/metrics.py"), str(out / "requests.jsonl"),
                         "--minutes", str(minutes)], capture_output=True, text=True, check=True)
@@ -527,6 +529,7 @@ def main():
     p.add_argument("--max-in-flight", type=int, default=NUM_STAGES)
     p.add_argument("--stage-mult", help="per-stage time / fit, comma-separated (default 1 each)")
     p.add_argument("--pace-margin-ms", type=float, help="pace microbatch formation to the later stages (default off)")
+    p.add_argument("--host-ms", type=float, default=0.0, help="a formed plan reaches stage 0 this much later")
     p.add_argument("--out", type=Path, required=True)
     a = ap.parse_args()
     if a.cmd == "check-sched":
@@ -548,7 +551,7 @@ def main():
                          a.pool_tokens, tc, a.dispatch_ahead, a.form_lead_ms,
                          slot_after_last_wait=not a.slot_at_last_token, max_in_flight=a.max_in_flight,
                          stage_mult=[float(x) for x in a.stage_mult.split(",")] if a.stage_mult else None,
-                         pace_margin_ms=a.pace_margin_ms)
+                         pace_margin_ms=a.pace_margin_ms, host_ms=a.host_ms)
         print(json.dumps(s, indent=1))
 
 
