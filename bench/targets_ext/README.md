@@ -79,8 +79,7 @@ summarizes rounds 0 and 1 only.
 ## How they were made
 
 Simulator: a worktree of ServingStudioSim at `7bb224a6` (detached), with submodule `req-frontend` at `7f6aa9d8`, its
-committed `profiling/profile.db` (identical to `third_party/sim_7bb224a6/profiling/profile.db`), at
-`/raid/kanzhu/ServingStudio/tmp/sim-7bb224a6-prefix-ext`. The preset is a copy of the run that made the handoff's
+committed `profiling/profile.db` (identical to `third_party/sim_7bb224a6/profiling/profile.db`); `$SIM` below. The preset is a copy of the run that made the handoff's
 prefix targets (wt-pp-main `logs/20261013_1_pp4_sched/pp4_prefix.yaml` with `backends_pp.yaml`, sched `plain`:
 greedy 8,192-token microbatches, FIFO, plain chunking; HBM-only pool of 100.18 GB per GPU, 61,258,368 tokens; routing
 `corpus` from the TP4/EP4 capture). Only the trace, `duration_ms` and `log_dir` differ; the resolved run config of the
@@ -95,8 +94,8 @@ greedy 8,192-token microbatches, FIFO, plain chunking; HBM-only pool of 100.18 G
 ```
 python bench/targets_ext/make_prefix_ext.py          # the slotted traces, 10 s and 1 s (lane root)
 
-cd /raid/kanzhu/ServingStudio/tmp/sim-7bb224a6-prefix-ext && source /raid/kanzhu/ServingStudio/.env
-E=/raid/kanzhu/ServingStudio/pp-impl/lanes/longctx/bench/targets_ext
+cd $SIM && source <workspace>/.env                 # SIM: that ServingStudioSim worktree
+E=<this repo>/bench/targets_ext
 X=logs/20261015_0_prefix_ext W=logs/20261015_1_prefix_ext_w1s Q=logs/20261015_2_prefix_ext_w1s_parts
 uv run python -m launcher $X/preset.yaml             # CPU only, as are the two below
 uv run python $E/prefix_targets_ext.py $E/prefix_targets_ext.json --run $X/two/plain $E/prefix_sessions_ext.csv \
@@ -120,7 +119,7 @@ uv run python $E/prefix_targets_ext.py $E/prefix_multiround_ext_w1s.json \
 cmp $E/prefix_targets_ext_w1s.json $E/prefix_targets_ext.json && cmp $E/prefix_multiround_ext_w1s.json $E/prefix_multiround_ext.json
 
 # reproduction check: export the orig run and compare with the handoff's file
-H=/raid/kanzhu/ServingStudio/wt-pp-main/doc/handoff/glm53_flash_pp4_b200_v1/data
+H=<ServingStudioSim at the v1 handoff commit>/doc/handoff/glm53_flash_pp4_b200_v1/data
 uv run python $E/prefix_targets_ext.py $TMPDIR/orig.json --run $X/orig/plain $H/bringup/prefix_sessions.csv \
     && cmp $TMPDIR/orig.json $H/prefix_targets.json
 ```

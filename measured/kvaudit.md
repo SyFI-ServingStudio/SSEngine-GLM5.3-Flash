@@ -214,7 +214,7 @@ flags anything at or above 3x noise (and above 1e-3).
 
 ## Rerun
 
-From the worktree root, with `/raid/kanzhu/ServingStudio/.env` sourced:
+From the worktree root, with the workspace's `.env` sourced (TMPDIR, UV_CACHE_DIR):
 
 ```
 sbatch -p priority --time=00:30:00 --gres=gpu:4 -o measured/logs/%j.out bench/slurm/kvaudit.sbatch vllm <L>   # 8192 32768 131072 524288
