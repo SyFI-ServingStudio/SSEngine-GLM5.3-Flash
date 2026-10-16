@@ -277,9 +277,8 @@ def summarize(root: Path, out: Path) -> Path:
         parts.append("")
     path = out / "scheduler.md"
     notes = ""
-    if path.exists() and "## Notes" in path.read_text():
-        text = path.read_text()
-        notes = text[text.index("## Notes"):]
+    if path.exists() and (m := re.search(r"^## Notes$", path.read_text(), re.M)):
+        notes = path.read_text()[m.start():]
     path.write_text("\n".join(parts) + ("\n" + notes if notes else ""))
     return path
 
