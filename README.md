@@ -1,8 +1,10 @@
 # pp-impl: GLM-5.3-Flash NVFP4 · PP4 on B200, real implementation
 
-Implements the sim-to-real handoff `glm53_flash_pp4_b200_v1` (ServingStudioSim branch `pp-main`,
-`doc/handoff/glm53_flash_pp4_b200_v1/`, frozen commit `7bb224a6`). The handoff's README, contract and milestone
-files 2–7 are the specification; its `data/` holds the targets.
+Implements the sim-to-real handoff `glm53_flash_pp4_b200_v2` (ServingStudioSim commit `5153041a`,
+`doc/handoff/glm53_flash_pp4_b200_v2/`), the frozen handoff in use; v2 replaces `glm53_flash_pp4_b200_v1`
+(frozen `7bb224a6`) with the whole-context prefix-hit rule, its session targets and a refit microbatch fit. The
+handoff's README, contract and milestone files 2–7 are the specification; its `data/` holds the targets
+(`bench/common.py` `HANDOFF`: `third_party/handoff`, or `PPIMPL_HANDOFF`).
 
 ## Provenance (fixed before any code)
 

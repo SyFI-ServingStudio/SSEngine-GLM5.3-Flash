@@ -11,7 +11,8 @@ One environment for the repo and every lane worktree under `lanes/`, in the main
 |---|---|
 | `.venv` | Python 3.12 venv (uv), the packages of `env/requirements.lock` |
 | `third_party/vllm` | the vLLM fork at `892da0822f`, installed editable: `import vllm` resolves here |
-| `third_party/ServingStudioSim` | ServingStudioSim at `820adda0` (branch `pp-main`): the handoff package and req-frontend (`PPIMPL_SIM` overrides it) |
+| `third_party/handoff` | the frozen handoff in use: `doc/handoff/glm53_flash_pp4_b200_v2` of ServingStudioSim at `5153041a` (`PPIMPL_HANDOFF` overrides it) |
+| `third_party/ServingStudioSim` | ServingStudioSim at `820adda0` (branch `pp-main`): req-frontend (`PPIMPL_SIM` overrides it) |
 | `third_party/sim_7bb224a6/profiling` | the profiler package at the handoff's frozen commit `7bb224a6` (`git archive`): input builders and references for the M1/M2 checks |
 | `third_party/enwik9` | the prompt corpus (`PPIMPL_ENWIK9` overrides it) |
 | `third_party/wheels` | the causal-conv1d wheel built here, reused when the venv is rebuilt |

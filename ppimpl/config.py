@@ -1,4 +1,5 @@
-"""Design constants of handoff glm53_flash_pp4_b200_v1 and the run config (`python -m ppimpl serve --config`)."""
+"""Design constants of handoff glm53_flash_pp4_b200_v2 (the same as v1's) and the run config
+(`python -m ppimpl serve --config`)."""
 
 import os
 from pathlib import Path

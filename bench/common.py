@@ -15,10 +15,11 @@ ROOT = Path(__file__).resolve().parents[1]
 # under lanes/.
 MAIN = ROOT.parents[1] if ROOT.parent.name == "lanes" else ROOT
 MEASURED = ROOT / "measured"
-# A ServingStudioSim checkout of branch pp-main (env/make_env.sh clones it): the handoff package (read-only: data/
-# traces and targets) and req-frontend, the client.
+# A ServingStudioSim checkout of branch pp-main (env/make_env.sh clones it): req-frontend, the client.
 SIM = Path(os.environ.get("PPIMPL_SIM") or MAIN / "third_party" / "ServingStudioSim")
-HANDOFF = SIM / "doc" / "handoff" / "glm53_flash_pp4_b200_v1"
+# The frozen handoff in use (read-only: data/ traces, targets and the microbatch fit): glm53_flash_pp4_b200_v2 at
+# ServingStudioSim 5153041a, linked at third_party/handoff (PPIMPL_HANDOFF overrides it).
+HANDOFF = Path(os.environ.get("PPIMPL_HANDOFF") or MAIN / "third_party" / "handoff")
 REQ_FRONTEND = SIM / "alignment" / "load_generator" / "req-frontend"
 # The prompt corpus (http://mattmahoney.net/dc/enwik9.zip, unzipped; env/make_env.sh fetches it).
 ENWIK9 = Path(os.environ.get("PPIMPL_ENWIK9") or MAIN / "third_party" / "enwik9")
