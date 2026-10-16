@@ -174,3 +174,11 @@ Stage time / fit by microbatch tokens 0–255 / 256–1023 / 1024–8191 / 8192 
   At the measured 2-3 ms, 4 in flight is within 0.3% of 5 in flight for both steps (the replay's run-to-run spread is
   of that order). It loses 0.8% only at 7 ms (budget's 4,096-token microbatches). Pacing (a152856, off, no run
   names) is kept in the code but not used.
+- **Stage balance (stages 2/3 slower than the fit's ratio): power cap, per stage.** Under no sustained load the stages
+  match the fit equally (force checks, 1,024-8,191-token bin: s0 / s1 / s2 / s3 x0.98 / 1.00 / 1.00 / 1.00). In the
+  session runs, every GPU sits at its 1,000 W cap for 93-96% of busy samples. The stages that draw more power clock
+  lower:
+  - 7709 (GPUs 4-7): SM 1603 / 1624 / 1606 / 1592 MHz at 932 / 924 / 936 / 936 W;
+  - 7730 (GPUs 0-3): SM 1628 / 1601 / 1546 / 1579 MHz at 950 / 950 / 963 / 964 W.
+  Stage time / fit follows the clocks (7730: s1 x1.049, s2 x1.097). The sim applies one x1.06 to every stage, so it
+  keeps stage 0 the slowest. Not a software fix; with 4 in flight the imbalance no longer turns into queueing.
