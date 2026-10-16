@@ -162,7 +162,7 @@ def main() -> None:
     ap.add_argument("--out", type=Path, default=C.MEASURED / "kvaudit.md")
     ap.add_argument("--header", type=Path, default=None, help="markdown put before the tables")
     a = ap.parse_args()
-    lengths = a.lengths or sorted(int(p.name) for p in C.OUT.iterdir() if (p / "compare.json").exists())
+    lengths = a.lengths or sorted(int(p.name) for p in C.OUT.iterdir() if p.name.isdigit() and (p / "compare.json").exists())
     lines = [a.header.read_text().rstrip(), ""] if a.header else ["# KV-cache audit", ""]
     all_flags = []
     for L in lengths:
