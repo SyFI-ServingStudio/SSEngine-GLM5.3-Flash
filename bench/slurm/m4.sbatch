@@ -11,7 +11,8 @@
 # 2x the baseline per stage, KL within 4x, top-1 equal), prefix_check with P + 1/2/3
 # (prefix_check_unaligned), then a smoke of prefix_n400's first ~2 min (client limit 3m incl. ~45 s tokenization:
 # prefix_smoke_n400) that must end with failed=0. bench/run.py stops any run at the first fault (server or worker
-# traceback, server exit, client failed > 0).
+# traceback, server exit, client failed > 0). SKIP_KVCHECK=1 and CHECK_MODES=off resume a preflight whose kvcheck and
+# cache-on half passed (the cache-on rounds are read from prefix_check_unaligned_on/).
 # check: bench/prefix_check.py (round-1 tokens, cache on vs off, ~6 min). bringup: prefix_bringup (20 min) under
 # Nsight Systems, traced from microbatch NSYS_MBS (default 564:631: the last round-0 chunk and round 1 of session
 # 34, P 512k A 1k, and all of session 35, P 512k A 8k; microbatch 0 is req-frontend's preflight). prefix_n<N>: the
@@ -31,9 +32,13 @@ nvidia-smi --query-gpu=index,pci.bus_id,memory.used --format=csv,noheader
 case $WHAT in
   check) $PY -m bench.prefix_check --out "$R" --port "$P"; rc=$? ;;
   preflight)
-    $PY -m bench.kvcheck --prompt-len 32768 --chunk 8000 --chunk-b 8192 --exact chunked_b,whole_filler; rc=$?
-    (( rc == 0 )) && { $PY -m bench.kvcheck --prompt-len 40000 --chunk 8001 --chunk-b 8190 --noise-len 32768; rc=$?; }
-    (( rc == 0 )) && { $PY -m bench.prefix_check --out "$R" --port "$P" --p-shift 1,2,3 --name prefix_check_unaligned; rc=$?; }
+    rc=0
+    if [ -z "${SKIP_KVCHECK:-}" ]; then
+      $PY -m bench.kvcheck --prompt-len 32768 --chunk 8000 --chunk-b 8192 --exact chunked_b,whole_filler; rc=$?
+      (( rc == 0 )) && { $PY -m bench.kvcheck --prompt-len 40000 --chunk 8001 --chunk-b 8190 --noise-len 32768; rc=$?; }
+    fi
+    (( rc == 0 )) && { $PY -m bench.prefix_check --out "$R" --port "$P" --p-shift 1,2,3 --name prefix_check_unaligned \
+                         --modes "${CHECK_MODES:-on,off}"; rc=$?; }
     (( rc == 0 )) && { $PY -m bench.run prefix_n400 --inline --gpus "$G" --port "$P" --out-root "$R" --client-limit 3m \
                          --run-name prefix_smoke_n400; rc=$?; }
     ;;

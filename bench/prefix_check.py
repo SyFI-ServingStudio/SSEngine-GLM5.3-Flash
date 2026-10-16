@@ -33,7 +33,7 @@ import httpx
 import numpy as np
 import yaml
 
-from bench.common import ENWIK9, HANDOFF, ROOT
+from bench.common import ENWIK9, HANDOFF, ROOT, free_port_block
 from bench.run import CHECKPOINT, PYTHON, REAL_FORM_LEAD_MS, step, stop, wait_health
 
 STRIDE = 9_973
@@ -117,6 +117,8 @@ def main():
     ap.add_argument("--cpu", action="store_true")
     ap.add_argument("--p-shift", help="comma-separated tokens added to P, cycled over the sessions")
     ap.add_argument("--name", default="prefix_check")
+    ap.add_argument("--modes", default="on,off",
+                    help="which servers to run; a mode left out is read from <name>_<mode>/check_rounds.jsonl")
     a = ap.parse_args()
     sess = sessions_of(a.trace)
     if a.sessions:
@@ -133,9 +135,15 @@ def main():
     job = os.environ.get("SLURM_JOB_ID")
     port = a.port or (20000 + int(job) % 120 * 100 + 50 if job else 18550)
     res = {}
+    modes = a.modes.split(",")
     for i, keep in enumerate((True, False)):
-        res[keep] = run_mode(a.out / f"{a.name}_{'on' if keep else 'off'}", keep, sess, pool, port + 10 * i, a.fake,
-                             a.cpu)
+        mode_dir = a.out / f"{a.name}_{'on' if keep else 'off'}"
+        if ("on" if keep else "off") not in modes:
+            res[keep] = [json.loads(x) for x in (mode_dir / "check_rounds.jsonl").read_text().splitlines()]
+            assert [r["P"] for r in res[keep]] == [s["P"] for s in sess], f"{mode_dir}: other sessions"
+            continue
+        res[keep] = run_mode(a.out / f"{a.name}_{'on' if keep else 'off'}", keep, sess, pool,
+                             free_port_block(port + 10 * i), a.fake, a.cpu)
     on, off = res[True], res[False]
     lines = []
     for x, y in zip(on, off):

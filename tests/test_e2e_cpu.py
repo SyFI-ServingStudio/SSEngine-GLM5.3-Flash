@@ -144,3 +144,31 @@ def test_worker_failure_stops_server(tmp_path):
     srv.proc.wait(30)                                       # the control thread notices and stops the server
     assert "worker 2 exited" in (tmp_path / "run/server.log").read_text()
     srv.stop()
+
+
+def test_start_failure_reports_its_cause(tmp_path):
+    """A port of the server's block already taken (7476: another process held the intake port): the server exits
+    with the bind error, and stopping the half-started controller does not hide it."""
+    import socket
+
+    port = free_port_block(10)
+    with socket.socket() as hold:
+        hold.bind(("127.0.0.1", port + 1 + 2 + 4))   # intake_addr: base_port + 2 + num_stages
+        hold.listen()
+        srv = Server(tmp_path / "run", port, intake_procs=2, **CPU)
+        srv.proc.wait(120)
+    log = (tmp_path / "run/server.log").read_text()
+    assert srv.proc.returncode != 0
+    assert "Address already in use" in log and "AttributeError" not in log, log
+
+
+def test_free_port_block_skips_held_ports():
+    import socket
+
+    from bench.common import free_port_block as pick
+
+    base = free_port_block(10)
+    with socket.socket() as hold:
+        hold.bind(("127.0.0.1", base + 7))
+        hold.listen()
+        assert pick(base) == base + 10 or pick(base) > base + 7
