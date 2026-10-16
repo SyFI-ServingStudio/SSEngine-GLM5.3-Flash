@@ -4,6 +4,8 @@
 #   sbatch -p priority --time=00:30:00 --gres=gpu:4 -o measured/logs/%j.out bench/slurm/kvaudit.sbatch vllm 8192
 #   sbatch -p priority --time=00:30:00 --gres=gpu:4 -o measured/logs/%j.out bench/slurm/kvaudit.sbatch ours 8192
 #   .venv/bin/python -m bench.kvaudit.compare --length 8192 [--device cuda] [--delete]
+#   sbatch -p priority --time=00:15:00 --gres=gpu:1 -o measured/logs/%j.out bench/slurm/kvaudit.sbatch probe 131072
+# `probe` runs bench/kvaudit/kda_probe.py (KDA layers 0-2, four kernels + float64 on identical inputs) on 1 GPU.
 # `ours+compare` runs the compare on GPU 0 after our side when the vLLM dumps are already there.
 #SBATCH -J ppm-kvaudit
 set -uo pipefail
@@ -18,6 +20,7 @@ case $SIDE in
   ours+compare)
     $PY -m bench.kvaudit.ours --length "$L" "$@"; rc=$?
     if [ $rc = 0 ]; then $PY -m bench.kvaudit.compare --length "$L" --device cuda; rc=$?; fi ;;
+  probe) $PY -m bench.kvaudit.kda_probe --length "$L" "$@"; rc=$? ;;
   compare) $PY -m bench.kvaudit.compare --length "$L" --device cuda "$@"; rc=$? ;;
   *) echo "unknown side $SIDE"; rc=2 ;;
 esac

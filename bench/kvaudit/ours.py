@@ -72,7 +72,7 @@ def _worker(rank: int, L: int, port: int, out_root: str, only: list[str] | None)
     todo = [c for c in cs.ours if not only or c.name in only]
     max_mb = max(n for c in todo for r in c.rounds for n in r)
     maxN = max(c.tokens for c in todo)
-    nblocks = 1 + sum(-(-c.tokens // B) + 6 for c in todo)
+    nblocks = max(24, 1 + sum(-(-c.tokens // B) + 6 for c in todo))   # >= what StageModel.warmup's plans use
     dev = torch.device("cuda", rank)
     torch.cuda.set_device(dev)
     pipe = open_pipe(RunConfig(port=port, scheduler=SchedulerConfig(mb_tokens=max_mb)), rank, dev, HIDDEN_WIDTH)
@@ -142,7 +142,11 @@ def main() -> None:
     a = ap.parse_args()
     import torch.multiprocessing as mp
 
-    port = 23000 + (int(JOB) % 100) * 100 if JOB.isdigit() else 23000
+    from bench.common import free_port_block
+
+    # the pipe's torch.distributed rendezvous binds base_port + 1 + stages: probe a free block (other users hold 20000s ports)
+    port = free_port_block(23000 + (int(JOB) % 100) * 100 if JOB.isdigit() else 23000)
+    print(f"[kvaudit-ours] port block {port}", flush=True)
     out = a.out or C.DUMPS / str(a.length)
     mp.spawn(_worker, args=(a.length, port, str(out), a.only), nprocs=4, join=True)
 
