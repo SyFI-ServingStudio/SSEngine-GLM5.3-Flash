@@ -24,8 +24,12 @@ GAP_S=${GAP_S:-45}
 mkdir -p "$OUT"
 PORT=$((20000 + SLURM_JOB_ID % 120 * 100 + 50)); PROXY_PORT=$((PORT + 1))
 MODEL=glm53-flash-nvfp4
+# KDA prefill: Triton for token references (the user's rule). The fork's pinned FlashKDA (b59532f, before upstream
+# 17a037d) rounds the KDA state to bf16 every 16 tokens: wrong above ~24k of context. Triton needs
+# max_num_batched_tokens < 262144 (16384 is vLLM's B200 default, stated here). KDA_PREFILL=flashkda for a timing run.
+KDA_PREFILL=${KDA_PREFILL:-triton}
 {
-  echo "job=$SLURM_JOB_ID cvd=$CUDA_VISIBLE_DEVICES start=$(date -Is) port=$PORT proxy=$PROXY_PORT traces=${TRACES:-sessions $SESSIONS}"
+  echo "job=$SLURM_JOB_ID cvd=$CUDA_VISIBLE_DEVICES start=$(date -Is) port=$PORT proxy=$PROXY_PORT traces=${TRACES:-sessions $SESSIONS} kda_prefill=$KDA_PREFILL"
   echo "uptime: $(uptime)"
   echo "fork=$(git -C $MAIN/third_party/vllm rev-parse HEAD) req-frontend=$(git -C $RF rev-parse HEAD)"
   nvidia-smi --query-gpu=index,name,memory.used,memory.total,utilization.gpu --format=csv
@@ -40,7 +44,8 @@ compressed_bringup(Path('$HANDOFF/data/bringup/prefix_sessions.csv'), Path('$OUT
 
 SERVE=(serve "$SNAP" --served-model-name "$MODEL" --tensor-parallel-size 4 --enable-expert-parallel
   --kv-cache-dtype fp8_e4m3 --max-model-len 1048576 --no-enable-prefix-caching --language-model-only
-  --tokens-only --enable-prompt-tokens-details --host 127.0.0.1 --port "$PORT")
+  --tokens-only --enable-prompt-tokens-details --kda-prefill-backend "$KDA_PREFILL" --max-num-batched-tokens 16384
+  --host 127.0.0.1 --port "$PORT")
 echo "$PY -m vllm.entrypoints.cli.main ${SERVE[*]}" > "$OUT/serve_cmd.txt"
 srun --overlap --gres=gpu:4 -n1 $PY -m vllm.entrypoints.cli.main "${SERVE[@]}" > "$OUT/server.log" 2>&1 &
 SERVER=$!
