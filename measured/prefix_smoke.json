@@ -172,7 +172,8 @@
    "s0_idle_while_waiting_gaps": 1722,
    "s0_idle_arrival_to_start_s": 2.37308520700007,
    "s0_idle_arrivals": 292
-  }
+  },
+  "cache_kinds": null
  },
  {
   "run": "prefix_smoke_n400_7569",
@@ -347,6 +348,7 @@
    "s0_idle_while_waiting_gaps": 1714,
    "s0_idle_arrival_to_start_s": 3.371700681000001,
    "s0_idle_arrivals": 403
-  }
+  },
+  "cache_kinds": null
  }
 ]
