@@ -288,9 +288,33 @@ def execute(run_dir: Path, server_cfg: dict, client_cfg: dict, *, port: int, met
     return meta
 
 
+def compressed_bringup(src: Path, out: Path, sessions: list[int] | None, gap_s: float) -> Path:
+    """The bring-up sessions `sessions` (all if None) with session k starting gap_s after session k-1, instead of
+    every 30 s: the GPUs are not left idle for minutes (the cluster stops idle GPU jobs), and with gap_s above the
+    longest session (512k + 8k: 4.4 s + 10 s tool wait + 0.3 s) sessions still never overlap. Rounds and tool waits
+    are unchanged. req-frontend gives a session its corpus offset by its position in the file, so a subset gets other
+    prompts than the full trace."""
+    rows = src.read_text().splitlines()
+    head = rows[0].split(",")
+    at, sid = head.index("arrival_time_ms"), head.index("session_id")
+    order = []
+    for row in rows[1:]:
+        k = int(row.split(",")[sid])
+        if (sessions is None or k in sessions) and k not in order:
+            order.append(k)
+    lines = [rows[0]]
+    for row in rows[1:]:
+        f = row.split(",")
+        if int(f[sid]) in order:
+            f[at] = f"{gap_s * 1e3 * order.index(int(f[sid])):.6f}"
+            lines.append(",".join(f))
+    out.write_text("\n".join(lines) + "\n")
+    return out
+
+
 def run_named(name: str, fake: bool, port: int, out_root: Path, args) -> dict:
     kind, length = parse_name(name)
-    run_dir = out_root / name
+    run_dir = out_root / (args.run_name or name)
     if kind in ("one", "saturated"):
         return run_iteration(name, kind, length, fake, port, run_dir, args)
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -299,6 +323,9 @@ def run_named(name: str, fake: bool, port: int, out_root: Path, args) -> dict:
         trace, ccfg = HANDOFF / "data/sessions_2ps.csv", {"max_concurrency": length}
     else:
         trace, ccfg = HANDOFF / "data/bringup/prefix_sessions.csv", {}   # no max_concurrency (5_prefix_cache.md §5)
+        if args.gap_s:
+            only = [int(x) for x in args.sessions.split(",")] if args.sessions else None
+            trace = compressed_bringup(trace, run_dir / "bringup_sessions.csv", only, args.gap_s)
     if args.trace:
         trace = Path(args.trace).resolve()
     extra = {"keep_sessions": True, "scheduler": {"mb_tokens": 8192}}
@@ -362,7 +389,7 @@ def submit(args) -> None:
         inner += ["--intake-procs", str(args.intake_procs)]
     if args.nsys_mbs:
         inner += ["--nsys-mbs", args.nsys_mbs]
-    for opt in ("trace", "client_limit", "pool_tokens", "token_pool_limit"):
+    for opt in ("trace", "client_limit", "pool_tokens", "token_pool_limit", "gap_s", "sessions", "run_name"):
         if getattr(args, opt):
             inner += [f"--{opt.replace('_', '-')}", str(getattr(args, opt))]
     if args.out_root:
@@ -403,6 +430,9 @@ def main():
     ap.add_argument("--out-root", help="runs root (default measured/runs, or measured/runs/fake[_cpu])")
     ap.add_argument("--cpu", action="store_true", help="with --fake --inline: stages on CPU (gloo), to check the harness")
     ap.add_argument("--trace", help="prefix/session runs: another trace (harness checks)")
+    ap.add_argument("--gap-s", type=float, help="prefix_bringup: sessions gap_s apart instead of 30 s (compressed_bringup)")
+    ap.add_argument("--sessions", help="prefix_bringup with --gap-s: only these session ids (comma-separated)")
+    ap.add_argument("--run-name", help="run directory name (default: the run name)")
     ap.add_argument("--client-limit", help="prefix/session runs: `timeout` for the client (default 22m for prefix_n<N>)")
     ap.add_argument("--pool-tokens", type=int, help="prefix/session runs: cap the KV pool (harness checks)")
     ap.add_argument("--token-pool-limit", type=int, help="req-frontend corpus.token_pool_limit (harness checks)")
