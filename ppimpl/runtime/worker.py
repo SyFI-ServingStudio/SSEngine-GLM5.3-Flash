@@ -113,12 +113,14 @@ class HostProfile:
 class FirstUse:
     """After `Ready`: vLLM's JIT monitor (Triton, CuTeDSL and TileLang compiles, Triton autotuning; verbose: the
     specialization) plus, per Triton compile or disk-cache load, the microbatch and the host time it took: "stage S
-    mb M: first use after warm-up: triton <kernel> T ms". Warm-up is meant to have run every variant
-    (StageModel.warmup); each such line is one it missed. The hooks run only on a compile path, never on a cached
+    mb M: first use after warm-up: triton <kernel> T ms", also appended to `jit_stage<S>.jsonl` in the run dir.
+    Warm-up is meant to have run every variant (StageModel.warmup); each such line is one it missed, and fails the
+    run (bench/run.py). The hooks run only on a compile path, never on a cached
     launch."""
 
-    def __init__(self, stage: int):
+    def __init__(self, stage: int, run_dir: str | None = None):
         self.stage, self.mb, self.t0 = stage, None, {}
+        self.log = None if run_dir is None else Path(run_dir) / f"jit_stage{stage}.jsonl"
 
     def install(self):
         try:
@@ -140,6 +142,9 @@ class FirstUse:
         ms = -1.0 if t is None else 1e3 * (time.perf_counter() - t)
         name = getattr(kw.get("fn"), "name", "?")
         print(f"stage {self.stage} mb {self.mb}: first use after warm-up: triton {name} {ms:.1f} ms", flush=True)
+        if self.log is not None:          # read by bench/run.py: any line fails the run (run_failure)
+            with open(self.log, "a") as f:
+                f.write(json.dumps({"stage": self.stage, "mb": self.mb, "kernel": name, "ms": round(ms, 1)}) + "\n")
 
 
 class Reporter(threading.Thread):
@@ -217,7 +222,7 @@ def run_worker(cfg: RunConfig, stage: int):   # makes inference tensors, which a
         hostprof = HostProfile(stage, cfg.run_dir)
         stamps = WorkerStamps(stage, cfg.run_dir, model)
         print(f"stage {stage} cpus: {cpu_list(cpus) if cpus else 'not pinned'}, threads {threads()}", flush=True)
-        first_use = FirstUse(stage)
+        first_use = FirstUse(stage, cfg.run_dir)
         if cuda:
             first_use.install()
         reporter.q.put(Ready(stage, model.num_blocks))

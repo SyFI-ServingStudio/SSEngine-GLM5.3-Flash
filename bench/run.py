@@ -287,6 +287,12 @@ def execute(run_dir: Path, server_cfg: dict, client_cfg: dict, *, port: int, met
         m = subprocess.run([PYTHON, str(HANDOFF / "data/microbatch_fit.py"), "check", str(mbs)], capture_output=True,
                            text=True)
         (run_dir / "microbatch_check.txt").write_text(m.stdout + m.stderr)
+    jit = in_run_jit(run_dir)
+    meta["in_run_jit"] = jit
+    if mbs.exists():
+        with open(run_dir / "microbatch_check.txt", "a") as f:
+            f.write(f"in-run JIT compiles (must be 0): {jit['compiles']}"
+                    + (f" by stage {jit['by_stage']}; " + "; ".join(jit['kernels']) if jit["compiles"] else "") + "\n")
     (run_dir / "run.json").write_text(json.dumps(meta, indent=1) + "\n")
     report = ["-m", "bench.prefix", "run", str(run_dir)] if meta.get("kind") not in ("one", "saturated") \
         else ["-m", "bench.report", str(run_dir)]
@@ -541,10 +547,26 @@ def main():
         raise SystemExit(1)
 
 
+def in_run_jit(run_dir: Path) -> dict:
+    """Kernels compiled after warm-up (ppimpl/runtime/worker.py FirstUse: jit_stage<S>.jsonl): count, by stage, and
+    the distinct (microbatch, kernel) pairs of the first stage that compiled any."""
+    rows = [json.loads(line) for f in sorted(run_dir.glob("jit_stage[0-9].jsonl")) for line in f.read_text().splitlines()
+            if line.strip()]
+    by_stage: dict[int, int] = {}
+    for r in rows:
+        by_stage[r["stage"]] = by_stage.get(r["stage"], 0) + 1
+    first = min(by_stage, default=None)
+    return {"compiles": len(rows), "by_stage": by_stage,
+            "kernels": [f"mb {r['mb']} {r['kernel']} {r['ms']} ms" for r in rows if r["stage"] == first]}
+
+
 def run_failure(meta: dict, run_dir: Path) -> str | None:
-    """Why a finished run counts as failed (the job's exit status), or None."""
+    """Why a finished run counts as failed (the job's exit status), or None. Any kernel compiled after warm-up
+    fails it: a compile stalls the whole pipeline (smoke 7658: 0.3-3.3 s each)."""
     if meta.get("fail_fast"):
         return f"stopped early: {meta['fail_fast']}"
+    if (jit := meta.get("in_run_jit")) and jit["compiles"]:
+        return f"in-run JIT: {jit['compiles']} compiles after warm-up, by stage {jit['by_stage']}"
     if meta.get("client_returncode") != 0:
         return f"client exited with {meta.get('client_returncode')}"
     tc = run_dir / "token_check.json"

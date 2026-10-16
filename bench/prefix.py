@@ -128,7 +128,7 @@ def replay_window(run_dir: Path, n: int, window_ms: float) -> dict | None:
             **window_metrics(real_arrays(out / "requests.jsonl"), window_ms)}
 
 
-FIT_BINS = [(0, 1024), (1024, 4096), (4096, 8192), (8192, 8193)]
+FIT_BINS = [(0, 256), (256, 1024), (1024, 8192), (8192, 8193)]
 
 
 def stage_fit(run_dir: Path) -> dict:
@@ -215,7 +215,8 @@ def smoke(run_dir: Path, n: int) -> dict:
             "target": None if sim is None else window_metrics(sim_arrays(sim), window),
             "target_source": None if sim is None else sim["source"],
             "replay": replay_window(run_dir, n, window), "stage_fit": stage_fit(run_dir),
-            "cache_kinds": cache_kinds(run_dir), "form_to_enqueue": form_to_enqueue(run_dir)}
+            "cache_kinds": cache_kinds(run_dir), "form_to_enqueue": form_to_enqueue(run_dir),
+            "in_run_jit": in_run_jit(run_dir)}
 
 
 def smoke_md(rows: list[dict]) -> str:
@@ -240,6 +241,12 @@ def smoke_md(rows: list[dict]) -> str:
                        f"{rp['new_tokens_per_s'] / 1e3:.1f}k | {100 * rp['prefix_hit_share']:.2f}% | "
                        + " / ".join(f"{tr[p]:.2f}" for p in ("p50", "p90", "p99")) + " ("
                        + " / ".join(f"x{_r(tr[p], ts[p])}" for p in ("p50", "p90", "p99")) + " of target) |")
+    jits = [x for x in rows if x.get("in_run_jit") is not None]
+    if jits:
+        out += ["", "Kernels compiled after warm-up (worker jit_stage<S>.jsonl; any fails the run): "
+                + "; ".join(f"{x['run']} {x['in_run_jit']['compiles']}" + (f" (by stage {x['in_run_jit']['by_stage']})"
+                                                                           if x["in_run_jit"]["compiles"] else "")
+                            for x in jits) + "."]
     kinds = [x for x in rows if x.get("cache_kinds")]
     if kinds:
         out += ["", "Prefix cache per round (server_requests.jsonl hit_kind): rounds by kind, tokens recomputed "
@@ -462,7 +469,15 @@ def sessions(run_dir: Path) -> dict:
             "prefix_shortfall_tokens": sum(c["shortfall"] for c in client.values()),
             "rounds_sent": len(client), "rounds_failed": sum(not c["ok"] for c in client.values()),
             "server_answered": len(sreq), "microbatches": len({m["index"] for m in mbs}),
-            "microbatch_check": microbatch_check(mbs), "cache_kinds": cache_kinds(run_dir)}
+            "microbatch_check": microbatch_check(mbs), "cache_kinds": cache_kinds(run_dir),
+            "in_run_jit": in_run_jit(run_dir)}
+
+
+def in_run_jit(run_dir: Path) -> dict:
+    """Kernels compiled after warm-up (bench/run.py in_run_jit; any fails the run)."""
+    from bench.run import in_run_jit as jit
+
+    return jit(run_dir)
 
 
 def cache_kinds(run_dir: Path) -> dict | None:

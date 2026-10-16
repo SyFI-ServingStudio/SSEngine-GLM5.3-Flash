@@ -1,8 +1,10 @@
 """CPU tests of what keeps Triton compiles out of a run: the g0 table width classes (ppimpl/model/metadata.py), the
-served shapes warm-up runs (ppimpl/model/stage.py)."""
+served shapes warm-up runs (ppimpl/model/stage.py), and in-run compiles failing the run (bench/run.py)."""
 
+import json
 from types import SimpleNamespace as NS
 
+from bench.run import in_run_jit, run_failure
 from ppimpl.model.metadata import StageMetadata
 from ppimpl.model.stage import StageModel
 
@@ -47,3 +49,12 @@ def test_served_shapes_skip_what_a_small_pool_cannot_hold():
     for _, s in StageModel._warm_served_shapes(m):
         assert sum(-(-(st + n) // B) + 6 for st, n in s) <= 63
 
+
+def test_any_compile_after_warm_up_fails_the_run(tmp_path):
+    assert in_run_jit(tmp_path)["compiles"] == 0
+    assert run_failure({"client_returncode": 0}, tmp_path) is None
+    (tmp_path / "jit_stage1.jsonl").write_text(
+        json.dumps({"stage": 1, "mb": 880, "kernel": "_split_count_kernel", "ms": 77.5}) + "\n")
+    jit = in_run_jit(tmp_path)
+    assert jit == {"compiles": 1, "by_stage": {1: 1}, "kernels": ["mb 880 _split_count_kernel 77.5 ms"]}
+    assert "in-run JIT" in run_failure({"client_returncode": 0, "in_run_jit": jit}, tmp_path)
