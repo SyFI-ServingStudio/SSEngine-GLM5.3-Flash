@@ -175,6 +175,32 @@ def stage_fit(run_dir: Path) -> dict:
     return out
 
 
+def form_to_enqueue(run_dir: Path) -> dict | None:
+    """Stage 0's host time from a plan's forming (plans.jsonl dispatch_ms) to its forward returning with all its GPU
+    work enqueued (mb_host.jsonl), split at the worker's receipt of the plan and its forward call; for the plans formed
+    while another ran on stage 0 (queued), how often the enqueue came after that one's stage-0 end (the GPU waited on
+    the host) and by how much. What form_lead_ms has to cover."""
+    if not (run_dir / "mb_host.jsonl").exists():
+        return None
+    plans = {p["index"]: p for p in read_jsonl(run_dir / "plans.jsonl")}
+    host = {h["index"]: h["host_ms"] for h in read_jsonl(run_dir / "mb_host.jsonl") if h["stage"] == 0}
+    s0 = {m["index"]: (m["start_ms"], m["start_ms"] + m["compute_ms"]) for m in read_jsonl(run_dir / "microbatches.jsonl")
+          if m["stage"] == 0}
+    idx = sorted(i for i in host if i in plans and i in s0)
+    pct = lambda v: {p: float(np.percentile(v, q)) for p, q in (("p50", 50), ("p90", 90), ("p99", 99))} if len(v) else None  # noqa: E731
+    total = np.array([host[i][2] - plans[i]["dispatch_ms"] for i in idx])
+    recv = np.array([host[i][0] - plans[i]["dispatch_ms"] for i in idx])
+    fwd = np.array([host[i][2] - host[i][1] for i in idx])
+    late = []
+    for a, b in zip(idx, idx[1:]):
+        if plans[b]["queued"]:
+            late.append(host[b][2] - s0[a][1])     # > 0: stage 0 ended before this plan was all enqueued
+    late = np.array(late)
+    return {"microbatches": len(idx), "form_to_enqueued_ms": pct(total), "form_to_received_ms": pct(recv),
+            "forward_host_ms": pct(fwd), "queued": len(late), "queued_late": int((late > 0).sum()),
+            "queued_late_ms": pct(late[late > 0])}
+
+
 def smoke(run_dir: Path, n: int) -> dict:
     """A short sessions run (bench/run.py --client-limit) against the target run cut to the same window: from the
     first submit to the last first token the client logged (it logs no round still waiting when it stops); beside
@@ -188,7 +214,7 @@ def smoke(run_dir: Path, n: int) -> dict:
             "target": None if sim is None else window_metrics(sim_arrays(sim), window),
             "target_source": None if sim is None else sim["source"],
             "replay": replay_window(run_dir, n, window), "stage_fit": stage_fit(run_dir),
-            "cache_kinds": cache_kinds(run_dir)}
+            "cache_kinds": cache_kinds(run_dir), "form_to_enqueue": form_to_enqueue(run_dir)}
 
 
 def smoke_md(rows: list[dict]) -> str:
@@ -224,6 +250,17 @@ def smoke_md(rows: list[dict]) -> str:
             out.append(f"| {x['run']} | " + ", ".join(f"{k} {v}" for k, v in sorted(c["by_kind"].items()))
                        + f" | {c['superseded_recomputed_tokens']:,} | {c['evicted_recomputed_tokens']:,} | "
                        f"{c['admit_waits']} (max {c['admit_wait_ms_max']:.0f} ms) |")
+    forms = [x for x in rows if x.get("form_to_enqueue")]
+    if forms:
+        out += ["", "Stage 0, plan formed -> its forward returned with all GPU work enqueued (ms, p50 / p90 / p99); of the "
+                "plans formed while another ran, how many were enqueued after that one's stage-0 end (late, by how much):",
+                "", "| Run | Formed → enqueued | Formed → received | Forward host | Queued plans late | Late by |",
+                "|---|---|---|---|---|---|"]
+        f3 = lambda d: " / ".join(f"{d[p]:.1f}" for p in ("p50", "p90", "p99")) if d else "–"   # noqa: E731
+        for x in forms:
+            f = x["form_to_enqueue"]
+            out.append(f"| {x['run']} | {f3(f['form_to_enqueued_ms'])} | {f3(f['form_to_received_ms'])} | "
+                       f"{f3(f['forward_host_ms'])} | {f['queued_late']} / {f['queued']} | {f3(f['queued_late_ms'])} |")
     fits = [x for x in rows if x.get("stage_fit")]
     if fits:
         f0 = fits[0]["stage_fit"]
