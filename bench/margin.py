@@ -45,7 +45,59 @@ def _top(logits, k=5):
             "margin": round(float(v[0] - v[1]), 4)}
 
 
-def _worker(rank: int, cases: list[dict], repeats: int, port: int, out: str) -> None:
+TRACE = {"on": False, "rows": 0, "calls": [], "decode": []}   # --trace-topk: the indexer top-k rows of each is_last microbatch
+
+
+def _install_topk_trace() -> None:
+    """Wrap the fork's kpool indexer (as an eager break, so CUDA-graph replays call it too): while TRACE is on, keep
+    sha1 of each layer's top-k rows of the microbatch's real tokens, as returned (set and order) and sorted (set)."""
+    import hashlib
+
+    import vllm.models.glm5next.nvidia.sparse_indexer as si
+    from vllm.compilation.breakable_cudagraph import eager_break_during_capture
+
+    orig = getattr(si.sparse_attn_indexer_kpool, "__wrapped__", si.sparse_attn_indexer_kpool)
+
+    def hooked(*args, **kwargs):
+        r = orig(*args, **kwargs)
+        if TRACE["on"]:
+            rows = r[:TRACE["rows"]].cpu()
+            TRACE["calls"].append([hashlib.sha1(rows.numpy().tobytes()).hexdigest()[:16],
+                                   hashlib.sha1(rows.sort(dim=-1).values.numpy().tobytes()).hexdigest()[:16]])
+        return r
+
+    si.sparse_attn_indexer_kpool = eager_break_during_capture(hooked)
+    orig_get = si.get_indexer_topk
+
+    def get_topk(backend):
+        fn = orig_get(backend)
+
+        def traced(logits, seq_lens, next_n, dst, k, *rest):
+            fn(logits, seq_lens, next_n, dst, k, *rest)
+            if TRACE["on"]:      # decode path: pool logits, pool-granular seq_lens, select k pools per row
+                lens = seq_lens.reshape(-1).tolist() if seq_lens.ndim == 2 else \
+                    [int(L) for L in seq_lens.tolist() for _ in range(next_n)]
+                lg, d = logits.float().cpu(), dst.cpu()
+                rows = []
+                for r, L in enumerate(lens):
+                    v = lg[r, :L]
+                    kth = float(v.topk(min(k, L)).values[-1])
+                    rows.append({"keys": L, "ties_at_kth": int((v == kth).sum()),
+                                 "above_kth": int((v > kth).sum())})
+                TRACE["decode"].append([hashlib.sha1(b"".join(lg[r, :L].numpy().tobytes()
+                                                             for r, L in enumerate(lens))).hexdigest()[:16],
+                                        hashlib.sha1(d.numpy().tobytes()).hexdigest()[:16],
+                                        hashlib.sha1(d.sort(dim=-1).values.numpy().tobytes()).hexdigest()[:16],
+                                        rows])
+
+        return traced
+
+    si.get_indexer_topk = get_topk
+
+
+def _worker(rank: int, cases: list[dict], repeats: int, port: int, out: str, trace_topk: bool = False) -> None:
+    import hashlib
+
     import numpy as np
     import torch
     from ppimpl.config import HIDDEN_WIDTH, RunConfig, SchedulerConfig
@@ -55,6 +107,9 @@ def _worker(rank: int, cases: list[dict], repeats: int, port: int, out: str) -> 
 
     dev = torch.device("cuda", rank)
     torch.cuda.set_device(dev)
+    if trace_topk:
+        _install_topk_trace()
+    traces = []
     toks = {c["name"]: np.load(c["file"]).astype(np.int64).tolist() for c in cases}
     L = max(len(t) for t in toks.values())
     nkv = -(-L // 8576)
@@ -73,6 +128,7 @@ def _worker(rank: int, cases: list[dict], repeats: int, port: int, out: str) -> 
                     plan = NS(mb_id=i, chunks=[NS(req_id="p", start=s, num_tokens=n, kv_blocks=kv,
                                                   state_blocks=st, is_last=last, token_ids=t[s:s + n])])
                     hidden = pipe.recv(n, HIDDEN_WIDTH) if rank > 0 else None
+                    TRACE.update(on=trace_topk and last, rows=n, calls=[], decode=[])
                     if rank < 3:
                         o = m.forward(plan, hidden)
                         done = torch.cuda.Event()
@@ -80,6 +136,10 @@ def _worker(rank: int, cases: list[dict], repeats: int, port: int, out: str) -> 
                         if hidden is not None:
                             pipe.release()
                         pipe.send(o, done)
+                        if TRACE["on"]:
+                            traces.append({"case": c["name"], "repeat": rep, "position": s + n - 1,
+                                           "topk": TRACE["calls"], "decode": TRACE["decode"]})
+                        TRACE["on"] = False
                         continue
                     b = m.prepare(plan)
                     with set_forward_context(b.attn, m.vc, num_tokens=b.num_tokens, slot_mapping=b.slots):
@@ -90,14 +150,21 @@ def _worker(rank: int, cases: list[dict], repeats: int, port: int, out: str) -> 
                     pipe.release()
                     if last:
                         res.append({"case": c["name"], "repeat": rep, "position": s + n - 1,
-                                    "token": int(lb.argmax()), "bf16": _top(lb), "fp32": _top(lf)})
+                                    "token": int(lb.argmax()), "bf16": _top(lb), "fp32": _top(lf),
+                                    "logits_sha1": hashlib.sha1(lf.float().cpu().numpy().tobytes()).hexdigest()[:16]})
+                        if TRACE["on"]:
+                            traces.append({"case": c["name"], "repeat": rep, "position": s + n - 1,
+                                           "topk": TRACE["calls"], "decode": TRACE["decode"]})
                         print(f"[margin] {c['name']} repeat {rep} pos {s + n - 1}: token {int(lb.argmax())} "
                               f"margin bf16 {res[-1]['bf16']['margin']} fp32 {res[-1]['fp32']['margin']} "
                               f"({time.time() - t0:.1f} s)", flush=True)
+                    TRACE["on"] = False
                 torch.cuda.synchronize()
+    Path(out).parent.mkdir(parents=True, exist_ok=True)
     if rank == 3:
-        Path(out).parent.mkdir(parents=True, exist_ok=True)
         Path(out).write_text(json.dumps(res, indent=1) + "\n")
+    if trace_topk:
+        Path(out).with_suffix(f".topk{rank}.json").write_text(json.dumps(traces) + "\n")
     pipe.close()
 
 
@@ -110,6 +177,9 @@ def main() -> None:
                     help="exit 1 unless, for every case with `expect_top2` and in every repeat, the last position's "
                          "top 2 hold those tokens and its top-2 margin is below --min-margin (a near tie)")
     ap.add_argument("--min-margin", type=float, default=3.0)
+    ap.add_argument("--trace-topk", action="store_true",
+                    help="also hash every indexer layer's top-k rows (as returned and sorted) and the FP32 logits "
+                         "of each is_last microbatch; prints how many distinct values each case gives over repeats")
     a = ap.parse_args()
     import torch.multiprocessing as mp
 
@@ -118,9 +188,53 @@ def main() -> None:
     port = 21500 + (int(JOB) % 100) * 100 if JOB.isdigit() else 21500
     from bench.common import free_port_block
     port = free_port_block(port)
-    mp.spawn(_worker, args=(cases, a.repeats, port, str(out)), nprocs=4, join=True)
+    mp.spawn(_worker, args=(cases, a.repeats, port, str(out), a.trace_topk), nprocs=4, join=True)
+    if a.trace_topk:
+        print(json.dumps(variation(Path(out)), indent=1), flush=True)
     if a.judge:
         raise SystemExit(judge(cases, json.loads(Path(out).read_text()), a.min_margin))
+
+
+def variation(out: Path) -> dict:
+    """Per case and is_last position, over the repeats: distinct FP32 logits, tokens, and per stage the layers whose
+    top-k rows differ as returned (set or order) and as sorted (set)."""
+    res = json.loads(out.read_text())
+    rep: dict = {}
+    for r in res:
+        k = f"{r['case']}@{r['position']}"
+        e = rep.setdefault(k, {"repeats": 0, "logits": set(), "tokens": set(), "margins": set()})
+        e["repeats"] += 1
+        e["logits"].add(r["logits_sha1"])
+        e["tokens"].add(r["token"])
+        e["margins"].add(r["bf16"]["margin"])
+    for st in range(4):
+        f = out.with_suffix(f".topk{st}.json")
+        if not f.exists():
+            continue
+        by: dict = {}
+        for t in json.loads(f.read_text()):
+            by.setdefault(f"{t['case']}@{t['position']}", []).append(t["topk"])
+        for k, runs in by.items():
+            layers = len(runs[0])
+            order = [i for i in range(layers) if len({r[i][0] for r in runs}) > 1]
+            sets = [i for i in range(layers) if len({r[i][1] for r in runs}) > 1]
+            dec = [t for t in json.loads(f.read_text()) if f"{t['case']}@{t['position']}" == k]
+            dv = {}
+            if dec and dec[0]["decode"]:
+                nl = len(dec[0]["decode"])
+                dv = {"decode_layers": nl,
+                      "decode_logits_vary": [i for i in range(nl) if len({d["decode"][i][0] for d in dec}) > 1],
+                      "decode_topk_order_or_set_vary": [i for i in range(nl)
+                                                        if len({d["decode"][i][1] for d in dec}) > 1],
+                      "decode_topk_set_vary": [i for i in range(nl) if len({d["decode"][i][2] for d in dec}) > 1],
+                      "max_ties_at_kth": max(r["ties_at_kth"] for d in dec for x in d["decode"] for r in x[3])}
+            rep.setdefault(k, {})[f"stage{st}"] = {"layers": layers, "order_or_set_varies": order,
+                                                  "set_varies": sets, **dv}
+    for e in rep.values():
+        for f in ("logits", "tokens", "margins"):
+            if f in e:
+                e[f] = sorted(e[f]) if f != "logits" else len(e[f])
+    return rep
 
 
 def judge(cases: list[dict], res: list[dict], min_margin: float) -> int:

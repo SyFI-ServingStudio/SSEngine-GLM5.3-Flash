@@ -11,7 +11,7 @@
 # 2x the baseline per stage, KL within 4x, top-1 equal), prefix_check with P + 1/2/3
 # (prefix_check_unaligned), then a smoke of prefix_n400's first ~2 min (client limit 3m incl. ~45 s tokenization:
 # prefix_smoke_n400) that must end with failed=0. bench/run.py stops any run at the first fault (server or worker
-# traceback, server exit, client failed > 0). margin: bench/margin.py on CASES (top-2 margins, repeats). SKIP_KVCHECK=1 and CHECK_MODES=off resume a preflight whose kvcheck and
+# traceback, server exit, client failed > 0). margin: bench/margin.py on CASES (top-2 margins, repeats; MARGIN_ARGS=--trace-topk). SKIP_KVCHECK=1 and CHECK_MODES=off resume a preflight whose kvcheck and
 # cache-on half passed (the cache-on rounds are read from prefix_check_unaligned_on/); SKIP_CHECK=1 skips the prefix
 # check too. Token differences between the cache-on and cache-off servers go to the margin rule (bench/margin.py
 # --judge: each side's token in the top 2, margin < 3 nats).
@@ -47,7 +47,7 @@ case $WHAT in
     (( rc == 0 )) && { $PY -m bench.run prefix_n400 --inline --gpus "$G" --port "$P" --out-root "$R" --client-limit 3m \
                          --run-name prefix_smoke_n400; rc=$?; }
     ;;
-  margin) $PY -m bench.margin "${CASES:-measured/margins/cases_unaligned.json}" --repeats "${REPEATS:-3}"; rc=$? ;;
+  margin) $PY -m bench.margin "${CASES:-measured/margins/cases_unaligned.json}" --repeats "${REPEATS:-3}" ${MARGIN_ARGS:-}; rc=$? ;;
   bringup) $PY -m bench.run prefix_bringup --inline --nsys --nsys-mbs "${NSYS_MBS:-564:631}" --gpus "$G" --port "$P" \
              --out-root "$R" ${BRINGUP_ARGS:-}; rc=$? ;;
   prefix_n*) $PY -m bench.run "$WHAT" --inline --gpus "$G" --port "$P" --out-root "$R"; rc=$? ;;
