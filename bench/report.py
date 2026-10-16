@@ -72,8 +72,6 @@ def trace_request(tr: dict, mb_ids: list[int], nstages: int) -> dict | None:
         xs = [g["stages"][s] for g in got]
         stages.append({"stage": s, "start_ms": xs[0]["start_ms"], "end_ms": xs[-1]["end_ms"],
                        "compute_ms": sum(x["compute_ms"] for x in xs), "gaps_ms": sum(x["gaps_ms"] for x in xs),
-                       "nccl_recv_ms": _sum_opt(x["nccl_recv_ms"] for x in xs),
-                       "nccl_send_ms": _sum_opt(x["nccl_send_ms"] for x in xs),
                        "host_lead_ms": xs[0].get("host_lead_ms"), "launch_ms": _sum_opt(x.get("launch_ms") for x in xs)})
     return {"stages": stages, "span": stages[-1]["end_ms"] - stages[0]["start_ms"]}
 
@@ -131,8 +129,7 @@ def one_request(run_dir: Path, meta: dict) -> list[dict]:
                           host_lead_ms=ts["host_lead_ms"], launch_ms=ts["launch_ms"])
             for se in line["sends"]:
                 a, b = t["stages"][se["after_stage"]], t["stages"][se["after_stage"] + 1]
-                se.update(event_ms=se["ms"], ms=b["start_ms"] - a["end_ms"], nccl_send_ms=a["nccl_send_ms"],
-                          nccl_recv_ms=b["nccl_recv_ms"])
+                se.update(event_ms=se["ms"], ms=b["start_ms"] - a["end_ms"])
             line.update(event_gpu_span_ms=span, gpu_span_ms=t["span"], source="nsys")
             if c["ttft_ms"] is not None:
                 line["host_ms"] = c["ttft_ms"] - t["span"]
@@ -290,23 +287,21 @@ def iteration_md(one: list[dict], sat: list[dict], title: str) -> str:
                     + [_f(t["ttft_ms"]), _f(t["ttft_ms"]), "0"]) + " |")
         traced = [r for r in one if r.get("source") == "nsys"]
         if traced:
-            out += ["", "From the nsys trace (mean over runs, ms): gaps between kernels inside each stage, NCCL kernel "
-                    "time per send, and CUDA-event / trace stage compute.", "",
-                    "| Prompt | Gaps 0 / 1 / 2 / 3 | NCCL send 0 / 1 / 2 | NCCL recv 1 / 2 / 3 | Event / trace 0 / 1 / 2 / 3 "
-                    "| Host lead 0 / 1 / 2 / 3 | Launch 0 / 1 / 2 / 3 |",
-                    "|---|---|---|---|---|---|---|"]
+            out += ["", "From the nsys trace (mean over runs, ms): gaps between kernels inside each stage, and "
+                    "CUDA-event / trace stage compute.", "",
+                    "| Prompt | Gaps 0 / 1 / 2 / 3 | Event / trace 0 / 1 / 2 / 3 | Host lead 0 / 1 / 2 / 3 "
+                    "| Launch 0 / 1 / 2 / 3 |",
+                    "|---|---|---|---|---|"]
             for L in sorted({r["prompt_tokens"] for r in traced}):
                 rs = [r for r in traced if r["prompt_tokens"] == L]
                 ns = len(rs[0]["stages"])
                 g = [np.mean([r["stages"][s]["gaps_ms"] for r in rs]) for s in range(ns)]
-                snd = [_mean_opt([r["sends"][s].get("nccl_send_ms") for r in rs]) for s in range(ns - 1)]
-                rcv = [_mean_opt([r["sends"][s].get("nccl_recv_ms") for r in rs]) for s in range(ns - 1)]
                 ev = [np.mean([r["stages"][s]["event_compute_ms"] / r["stages"][s]["compute_ms"] for r in rs])
                       for s in range(ns)]
                 lead = [_mean_opt([r["stages"][s].get("host_lead_ms") for r in rs]) for s in range(ns)]
                 launch = [_mean_opt([r["stages"][s].get("launch_ms") for r in rs]) for s in range(ns)]
-                out.append(f"| {L // 1024}k | " + " / ".join(_f(x) for x in g) + " | " + " / ".join(_f(x) for x in snd)
-                           + " | " + " / ".join(_f(x) for x in rcv) + " | " + " / ".join(f"{x:.3f}" for x in ev)
+                out.append(f"| {L // 1024}k | " + " / ".join(_f(x) for x in g)
+                           + " | " + " / ".join(f"{x:.3f}" for x in ev)
                            + " | " + " / ".join(_f(x) for x in lead) + " | " + " / ".join(_f(x) for x in launch) + " |")
         parts = [r for r in one if r.get("host_parts_ms")]
         if parts:

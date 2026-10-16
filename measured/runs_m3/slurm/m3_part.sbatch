@@ -2,7 +2,7 @@
 #SBATCH -J ppimpl-m3-part
 #SBATCH --gres=gpu:4
 #SBATCH -o /raid/kanzhu/ServingStudio/pp-impl/measured/runs_m3/slurm/%j.out
-# Part of the final M3 run on the main tree's defaults (transport ce, intake_procs 4, CUDA graphs), one 4-GPU server.
+# Part of the final M3 run on the main tree's defaults (CE transport, intake_procs 4, CUDA graphs), one 4-GPU server.
 # The run names come from RUNS; partition and --time from the sbatch command line. Same output root as m3_final, so
 # `bench/report.py --summarize measured/runs_m3 --out measured` writes measured/iteration.md over all parts.
 #   RUNS="one_1k one_2k" sbatch -p priority --time=00:20:00 measured/runs_m3/slurm/m3_part.sbatch
@@ -19,7 +19,7 @@ G=${CUDA_VISIBLE_DEVICES:-0,1,2,3}
 P=$((20000 + ${SLURM_JOB_ID:-0} % 120 * 100))
 echo "== $(date -Is) $(git log --oneline -1) host $(hostname) gpus $G port $P runs: $RUNS"
 uptime
-$PY -c "from ppimpl.config import RunConfig as C; c=C(); print('   defaults:', {k: getattr(c, k, None) for k in ('transport', 'intake_procs', 'cuda_graphs', 'compute_sms', 'max_in_flight')})"
+$PY -c "from ppimpl.config import RunConfig as C; c=C(); print('   defaults:', {k: getattr(c, k, None) for k in ('intake_procs', 'cuda_graphs', 'max_in_flight')})"
 [ -n "${DRY:-}" ] || nvidia-smi --query-gpu=index,pci.bus_id,memory.used --format=csv,noheader
 rc=0; first=1
 for n in $RUNS; do

@@ -4,7 +4,7 @@
 #SBATCH --time=00:50:00
 #SBATCH -p main
 #SBATCH -o /raid/kanzhu/ServingStudio/pp-impl/measured/runs_m3/slurm/%j.out
-# Final M3 run on the main tree's defaults (transport ce, intake_procs 4, CUDA graphs): every one_<L> and every
+# Final M3 run on the main tree's defaults (CE transport, intake_procs 4, CUDA graphs): every one_<L> and every
 # saturated_<L>, 1k..128k. Two 4-GPU servers side by side: half A = GPUs 0-3 on NUMA node 0's CPUs, half B = GPUs 4-7
 # on node 1's. A runs saturated 1k..32k while B runs one_1k..one_128k; then saturated_64k and _128k run on A alone
 # (B idle). Each run.json records half, gpus and run_cpus. Ends with measured/iteration.md (bench/report.py).
@@ -32,7 +32,7 @@ CA=$(cpus_of_node 0); CB=$(cpus_of_node 1)
 P=$((20000 + ${SLURM_JOB_ID:-0} % 120 * 100))
 echo "== $(date -Is) $(git log --oneline -1) host $(hostname) gpus A=$GA B=$GB ports A=$P B=$((P+50))"
 echo "   cpus A=$CA"; echo "   cpus B=$CB"; uptime
-$PY -c "from ppimpl.config import RunConfig as C; c=C(); print('   defaults:', {k: getattr(c, k, None) for k in ('transport', 'intake_procs', 'cuda_graphs', 'compute_sms', 'max_in_flight')})"
+$PY -c "from ppimpl.config import RunConfig as C; c=C(); print('   defaults:', {k: getattr(c, k, None) for k in ('intake_procs', 'cuda_graphs', 'max_in_flight')})"
 [ -n "${DRY:-}" ] || nvidia-smi --query-gpu=index,pci.bus_id,memory.used --format=csv,noheader
 
 half() {   # half <A|B> <run names...>: one bench/run.py per name (fresh ports per call), into $R

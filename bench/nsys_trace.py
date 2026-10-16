@@ -3,13 +3,12 @@
   python -m bench.nsys_trace <run dir>       reads <run dir>/trace.sqlite (`nsys export --type sqlite`), writes trace.json
 
 Attribution: each worker wraps a plan in the NVTX range `stage <s> mb <id>` (ppimpl/runtime/worker.py). A CUDA API
-call made inside that range on the worker's thread (kernel launch, graph launch, NCCL's launch) carries a correlation
+call made inside that range on the worker's thread (kernel launch, graph launch) carries a correlation
 id; the kernels with that id (graph-node kernels share their graph launch's id) belong to that (stage, microbatch).
 
 Per (microbatch, stage), times in ms, by the 4_iteration.md §6 GPU-trace definitions:
-- `start_ms` / `end_ms`: first compute-kernel start / last compute-kernel end (NCCL kernels excluded), from the first
+- `start_ms` / `end_ms`: first kernel start / last kernel end, from the first
   traced stage-0 kernel; `compute_ms` = end - start; `busy_ms`: union of the kernels; `gaps_ms` = compute - busy;
-- `nccl_recv_ms` / `nccl_send_ms`: durations of the NCCL kernels launched before / after the compute launches;
 - `host_lead_ms`: first compute kernel's GPU start - the host call that launched it (how far the host runs ahead);
   `launch_ms`: host time from the first to the last compute launch (the host cost of launching the stage);
 - per microbatch: `sends` (stage s last kernel end -> stage s+1 first kernel start) and `gpu_span_ms`.
@@ -43,10 +42,6 @@ def merged_ns(intervals: list[tuple[int, int]]) -> int:
         else:
             cur_e = max(cur_e, e)
     return total + (cur_e - cur_s if cur_e is not None else 0)
-
-
-def is_nccl(name: str) -> bool:
-    return "nccl" in name.lower()
 
 
 def load(db: Path):
@@ -96,21 +91,16 @@ def load(db: Path):
 
 
 def stage_numbers(kernels: list) -> dict:
-    comp = [k for k in kernels if not is_nccl(k[2])]
-    nccl = [k for k in kernels if is_nccl(k[2])]
+    comp = kernels
     if not comp:
         return {}
     first_launch = min(k[4] for k in comp)
     first = min(comp, key=lambda k: k[0])
     start, end = first[0], max(k[1] for k in comp)
     busy = merged_ns([(k[0], k[1]) for k in comp])
-    recv = [k for k in nccl if k[4] < first_launch]
-    send = [k for k in nccl if k[4] >= first_launch]
     return {"start_ns": start, "end_ns": end, "compute_ms": (end - start) / 1e6, "busy_ms": busy / 1e6,
             "gaps_ms": (end - start - busy) / 1e6, "kernels": len(comp),
-            "host_lead_ms": (start - first[4]) / 1e6, "launch_ms": (max(k[4] for k in comp) - first_launch) / 1e6,
-            "nccl_recv_ms": sum(k[1] - k[0] for k in recv) / 1e6 if recv else None,
-            "nccl_send_ms": sum(k[1] - k[0] for k in send) / 1e6 if send else None}
+            "host_lead_ms": (start - first[4]) / 1e6, "launch_ms": (max(k[4] for k in comp) - first_launch) / 1e6}
 
 
 def manifest_class(stage: int, demangled: str) -> dict:

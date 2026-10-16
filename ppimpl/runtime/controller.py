@@ -119,8 +119,6 @@ class Controller:
         pkg_root = str(Path(__file__).resolve().parents[2])
         env = {**os.environ, "PYTHONUNBUFFERED": "1",
                "PYTHONPATH": os.pathsep.join(filter(None, [pkg_root, os.environ.get("PYTHONPATH")]))}
-        if cfg.transport == "nccl" and cfg.nccl_channels:   # see RunConfig.compute_sms
-            env |= {"NCCL_MAX_NCHANNELS": str(cfg.nccl_channels), "NCCL_MAX_P2P_NCHANNELS": str(cfg.nccl_channels)}
         for s in range(self.n):
             log = open(self.run_dir / f"worker{s}.log", "w")
             self.procs.append(subprocess.Popen(

@@ -12,11 +12,10 @@ A change to it goes through the orchestrator.
   zmq ROUTER/DEALER, answers coming back the same way; with `intake_procs: 0` the controller serves HTTP itself.
 - Control: controller → each worker one zmq PUSH socket (plans, in order); workers → controller one zmq PULL socket
   (reports). Messages are msgspec structs (below), msgpack-encoded.
-- Activations: worker s → worker s+1 by copy engine into a K-slot ring on the receiver (CUDA IPC; ordered by
-  cuStreamWaitValue32 / cuStreamWriteValue32 flags; `transport: ce`, the default), or by NCCL point-to-point
-  (`transport: nccl`; gloo on CPU). Start-up barriers and the IPC handle exchange use `torch.distributed` (gloo for
-  ce; world size 4, rank = stage). Every worker processes plans in `mb_id` order, so sends and receives match without
-  tags.
+- Activations: worker s → worker s+1 by copy engine into a K-slot ring on the receiver (`CePipe`: CUDA IPC, ordered
+  by cuStreamWaitValue32 / cuStreamWriteValue32 flags, no kernels; on CPU, gloo send/recv, `GlooPipe`). Start-up
+  barriers and the IPC handle exchange use `torch.distributed` (gloo; world size 4, rank = stage). Every worker
+  processes plans in `mb_id` order, so sends and receives match without tags.
 
 ## Block-id space
 

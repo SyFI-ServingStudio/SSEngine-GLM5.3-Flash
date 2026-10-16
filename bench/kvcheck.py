@@ -2,7 +2,7 @@
 
     python -m bench.kvcheck [--prompt-len 32768] [--chunk 8000]     # 4 GPUs
 
-Four processes, one `StageModel` each, joined by the serving transport (`open_pipe`: RunConfig's default, the CE
+Four processes, one `StageModel` each, joined by the serving transport (`open_pipe`: the CE
 ring), as in the runtime. Stages 0-2 run `StageModel.forward` with CUDA graphs on (chunks up to 8,192 tokens replay
 a graph); stage 3 runs the same layers eagerly and returns the last position's logits (graph replay equals eager,
 GPU test f). The same prompt (the first L tokens of enwik9) runs as:
@@ -87,8 +87,8 @@ def _worker(rank: int, L: int, chunk: int, port: int) -> None:
     t0 = time.time()
     m = StageModel(bench_config(L + FILLER, cuda_graphs=True), rank, dev, num_blocks=NUM_BLOCKS,
                    max_model_len=L + 8576, cuda_graphs=rank < 3)   # stage 3 eager: it returns logits
-    print(f"[kvcheck] rank {rank} layers {m.layer_range} built in {time.time() - t0:.0f} s, transport "
-          f"{rc.transport}, graphs {getattr(m, 'graph_info', None)}", flush=True)
+    print(f"[kvcheck] rank {rank} layers {m.layer_range} built in {time.time() - t0:.0f} s, "
+          f"graphs {getattr(m, 'graph_info', None)}", flush=True)
     ids = enwik9_tokens(CHECKPOINT, L + 8 * FILLER)
     tokens, fillers = ids[:L], [ids[L + FILLER * i:L + FILLER * (i + 1)] for i in range(8)]
     last_start = (L - 1) // chunk * chunk          # first token of the prompt's last chunk
@@ -140,8 +140,7 @@ def _worker(rank: int, L: int, chunk: int, port: int) -> None:
                             "finite": bool(torch.isfinite(x).all())}
     OUT.mkdir(parents=True, exist_ok=True)
     path = OUT / f"kvcheck_{L}_rank{rank}_{JOB}.json"
-    path.write_text(json.dumps({"stage": rank, "prompt_tokens": L, "chunk": chunk, "transport": rc.transport,
-                                "variants": report}, indent=1))
+    path.write_text(json.dumps({"stage": rank, "prompt_tokens": L, "chunk": chunk, "variants": report}, indent=1))
     print(f"[kvcheck] rank {rank}: {json.dumps(report)}", flush=True)
     pipe.close()
 

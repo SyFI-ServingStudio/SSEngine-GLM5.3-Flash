@@ -1,9 +1,9 @@
 """Control messages (msgspec, msgpack over zmq) and the stage-to-stage activation pipes.
 
 Interface: ppimpl/runtime/README.md. Controller -> worker s: one PUSH/PULL pair per worker, plans in mb_id order.
-Workers -> controller: one PULL socket at the controller. Activations go worker s -> s+1 by NCCL p2p (Pipe; gloo on
-CPU) or by copy engine into the receiver's ring (CePipe, RunConfig.transport "ce"); every worker handles plans in mb_id
-order, so sends and receives match without tags.
+Workers -> controller: one PULL socket at the controller. Activations go worker s -> s+1 by copy engine into the
+receiver's ring (CePipe; on CPU by gloo, GlooPipe); every worker handles plans in mb_id order, so sends and receives
+match without tags.
 """
 
 import ctypes
@@ -105,75 +105,31 @@ def report_socket(ctx: zmq.Context, report_addr: str) -> zmq.Socket:
 
 # --- activations ----------------------------------------------------------------------------------------------------
 
-class Pipe:
-    """Point-to-point activations between neighbouring stages.
+class GlooPipe:
+    """CPU stages (tests, `device: cpu`): activations between neighbouring stages by gloo send/recv."""
 
-    recv(): posts the receive on its own stream, so it can land while the stage still computes the previous
-    microbatch; the compute stream then waits for it on the GPU (no host sync).
-    send(): issued on a side stream after the stage's end event, so the next plan's compute is not blocked by it.
-    """
-
-    def __init__(self, stage: int, num_stages: int, device: torch.device, init_method: str):
-        self.stage, self.num_stages, self.device = stage, num_stages, device
-        self.cuda = device.type == "cuda"
-        # No device_id (eager init): lazily created p2p communicators are per pair, so the receive from s-1 and the
-        # send to s+1 run on different NCCL streams and the receive can land while the send waits for compute.
-        dist.init_process_group("nccl" if self.cuda else "gloo", init_method=init_method, rank=stage,
-                                world_size=num_stages)
-        self.recv_stream = torch.cuda.Stream(device) if self.cuda else None
-        self.send_stream = torch.cuda.Stream(device) if self.cuda else None
+    def __init__(self, stage: int, num_stages: int, init_method: str):
+        self.stage, self.num_stages = stage, num_stages
+        dist.init_process_group("gloo", init_method=init_method, rank=stage, world_size=num_stages)
         self._sends: deque = deque()   # (work, tensor): keep sent tensors alive until the send completes
-        self._connect()
-
-    def _connect(self):
-        """Pass one small tensor down the chain, so each pair creates its communicator now (about a second each)
-        and not inside the first microbatch."""
-        t = torch.zeros(1, device=self.device)
-        if self.stage > 0:
-            dist.recv(t, self.stage - 1)
-        if self.stage < self.num_stages - 1:
-            dist.send(t, self.stage + 1)
-        if self.cuda:
-            torch.cuda.synchronize(self.device)
 
     def recv(self, num_tokens: int, width: int) -> torch.Tensor:
-        src = self.stage - 1
-        if not self.cuda:
-            buf = torch.empty(num_tokens, width, dtype=torch.bfloat16)
-            dist.recv(buf, src)
-            return buf
-        with torch.cuda.stream(self.recv_stream):
-            buf = torch.empty(num_tokens, width, dtype=torch.bfloat16, device=self.device)
-            work = dist.irecv(buf, src)
-        work.wait()                                   # current (compute) stream waits on the receive; host goes on
-        buf.record_stream(torch.cuda.current_stream(self.device))
+        buf = torch.empty(num_tokens, width, dtype=torch.bfloat16)
+        dist.recv(buf, self.stage - 1)
         return buf
 
-    def send(self, hidden: torch.Tensor, after: "torch.cuda.Event | None"):
-        dst = self.stage + 1
-        self._reap()
-        if not self.cuda:
-            self._sends.append((dist.isend(hidden, dst), hidden))
-            return
-        with torch.cuda.stream(self.send_stream):
-            self.send_stream.wait_event(after)
-            work = dist.isend(hidden, dst)
-        hidden.record_stream(self.send_stream)
-        self._sends.append((work, hidden))
+    def send(self, hidden: torch.Tensor, after=None):
+        while self._sends and self._sends[0][0].is_completed():
+            self._sends.popleft()
+        self._sends.append((dist.isend(hidden, self.stage + 1), hidden))
 
     def release(self):
         pass
-
-    def _reap(self):
-        while self._sends and self._sends[0][0].is_completed():
-            self._sends.popleft()
 
     def close(self):
         for work, _ in self._sends:
             work.wait()
         self._sends.clear()
-        if self.cuda:
-            torch.cuda.synchronize(self.device)
         dist.destroy_process_group()
 
 
@@ -186,7 +142,7 @@ class CePipe:
 
     n counts microbatches from 1 on both sides, slot = (n-1) % K. ready[] lives on the receiver and free[] on the
     sender, so each side spins on its own memory and writes the other's over NVLink. Handles are exchanged once, at
-    start-up, over gloo, which also serves the barriers; NCCL is not used.
+    start-up, over gloo, which also serves the barriers.
     """
 
     RING_BYTES = 4 << 30   # K = max_in_flight + 1 slots of mb_tokens rows, fewer when that exceeds this (one-request
@@ -306,9 +262,7 @@ class _DevMem:
 
 
 def open_pipe(cfg, stage: int, device: torch.device, width: int):
-    if cfg.transport not in ("nccl", "ce"):
-        raise ValueError(f"transport {cfg.transport!r}: nccl or ce")
-    if cfg.transport == "ce" and device.type == "cuda":
+    if device.type == "cuda":
         return CePipe(stage, cfg.num_stages, device, cfg.dist_init_method(), cfg.max_in_flight,
                       cfg.scheduler.mb_tokens, width)
-    return Pipe(stage, cfg.num_stages, device, cfg.dist_init_method())
+    return GlooPipe(stage, cfg.num_stages, cfg.dist_init_method())

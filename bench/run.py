@@ -196,7 +196,7 @@ def execute(run_dir: Path, server_cfg: dict, client_cfg: dict, *, port: int, met
     argv = client_argv(run_dir / "client.yaml")
     (run_dir / "client_command.txt").write_text(shlex.join(argv) + "\n")
     meta = {**meta, "port": port, "job_id": os.environ.get("SLURM_JOB_ID"), "host": os.uname().nodename,
-            "gpus": os.environ.get("CUDA_VISIBLE_DEVICES"), "half": os.environ.get("PPIMPL_HALF"),
+            "gpus": os.environ.get("CUDA_VISIBLE_DEVICES"),
             "run_cpus": cpu_list(os.sched_getaffinity(0)),
             "ppimpl_commit": git_rev(ROOT), "req_frontend_commit": git_rev(REQ_FRONTEND)}
     uptime = subprocess.run(["uptime"], capture_output=True, text=True).stdout.strip()
@@ -270,8 +270,6 @@ def run_named(name: str, fake: bool, port: int, out_root: Path, args) -> dict:
             extra["profile_mbs"] = window
     if fake and args.us_per_token is not None:
         extra["fake"] = {"us_per_token": args.us_per_token}
-    if args.transport:
-        extra["transport"] = args.transport
     if args.intake_procs is not None:
         extra["intake_procs"] = args.intake_procs
     if args.cpu:    # harness check without GPUs: gloo, small activations
@@ -293,8 +291,6 @@ def submit(args) -> None:
         inner += ["--us-per-token", str(args.us_per_token)]
     if args.nsys:
         inner.append("--nsys")
-    if args.transport:
-        inner += ["--transport", args.transport]
     if args.intake_procs is not None:
         inner += ["--intake-procs", str(args.intake_procs)]
     if args.nsys_mbs:
@@ -328,7 +324,6 @@ def main():
     ap.add_argument("--dependency", help="Slurm dependency, e.g. afterany:7034")
     ap.add_argument("--port", type=int)
     ap.add_argument("--us-per-token", type=float, help="FakeStageModel stage time per token")
-    ap.add_argument("--transport", choices=["nccl", "ce"], help="RunConfig.transport (default: the config's)")
     ap.add_argument("--intake-procs", type=int, help="RunConfig.intake_procs (0: HTTP in the controller process)")
     ap.add_argument("--gpus", help="with --inline: CUDA_VISIBLE_DEVICES for the server, run without srun steps (two "
                                    "servers side by side in one 8-GPU job; start this under taskset for its CPUs)")
