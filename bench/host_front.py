@@ -203,18 +203,32 @@ def stamps(model, plan, hidden, dev, reps: int) -> dict:
         e.capture.segments[:] = [wrap(i, f) for i, f in enumerate(orig)]
     builders = {type(ag.get_metadata_builder()) for _, ag in model.meta.groups}
     st = Stamps(STAMPS, [(f"{c.__name__}.build", c.build) for c in builders])
+    import gc
+    gct: dict = {}
+    gc_t0 = [0]
+
+    def gc_cb(phase, info):
+        if phase == "start":
+            gc_t0[0] = time.perf_counter_ns()
+        else:
+            g = f"gc gen{info['generation']}"
+            gct[g] = gct.get(g, 0) + time.perf_counter_ns() - gc_t0[0]
+            gct[g + " n"] = gct.get(g + " n", 0) + 1
     host = []
     for r in range(reps + 3):
         torch.cuda.synchronize(dev)
         seg_t.append([])
         if r >= 3:
             st.on()
+            if r == 3:
+                gc.callbacks.append(gc_cb)
         t0[0] = time.perf_counter_ns()
         with torch.inference_mode():
             model.forward(plan, hidden)
         host.append((time.perf_counter_ns() - t0[0]) / 1e6)
         st.off()
         torch.cuda.synchronize(dev)
+    gc.callbacks.remove(gc_cb)
     if e is not None:
         e.capture.segments[:] = orig
     kinds = ["graph" if getattr(f, "__name__", "") == "replay" else "eager" for f in (orig if e else [])]
@@ -226,11 +240,13 @@ def stamps(model, plan, hidden, dev, reps: int) -> dict:
            "segments": [{"i": i, "kind": kinds[i] if i < len(kinds) else "?",
                          "start_ms": round(statistics.median(v), 3)} for i, v in sorted(starts.items())],
            "functions": {q: {"ms_per_forward": round(st.total[q] / 1e6 / reps, 3),
-                             "calls_per_forward": st.calls[q] / reps} for q in sorted(st.total, key=lambda q: -st.total[q])}}
+                             "calls_per_forward": st.calls[q] / reps} for q in sorted(st.total, key=lambda q: -st.total[q])},
+           "gc": {g: (round(v / 1e6 / reps, 4) if not g.endswith(" n") else v / reps) for g, v in sorted(gct.items())}}
     print(f"[host_front] stamps: forward host {out['host_ms']:.3f} ms (monitored); segment starts (ms):", flush=True)
     print("  " + "  ".join(f"{d['i']}{d['kind'][0]}@{d['start_ms']:.3f}" for d in out["segments"]), flush=True)
     for q, v in out["functions"].items():
         print(f"  {v['ms_per_forward']:7.3f} ms  {v['calls_per_forward']:5.1f}x  {q}", flush=True)
+    print(f"  gc per forward (ms, collections): {out['gc']}", flush=True)
     return out
 
 
