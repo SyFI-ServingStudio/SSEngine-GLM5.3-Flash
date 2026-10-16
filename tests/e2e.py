@@ -26,8 +26,11 @@ class Server:
         (run_dir / "server.yaml").write_text(yaml.safe_dump(cfg))
         self.log = open(run_dir / "server.log", "w")
         env = {k: v for k, v in os.environ.items() if k != "SLURM_JOB_ID"}
+        # its own session: the server, its workers and intake processes form one process group that kill_group()
+        # ends, so no test leaves them behind (test_worker_failure_stops_server leaked servers holding its ports)
         self.proc = subprocess.Popen([sys.executable, "-m", "ppimpl", "serve", "--config", str(run_dir / "server.yaml")],
-                                     cwd=ROOT, stdout=self.log, stderr=subprocess.STDOUT, env=env)
+                                     cwd=ROOT, stdout=self.log, stderr=subprocess.STDOUT, env=env,
+                                     start_new_session=True)
 
     def wait_ready(self, timeout_s=300):
         t = time.monotonic()
@@ -41,6 +44,16 @@ class Server:
             time.sleep(0.3)
         raise TimeoutError("server not ready")
 
+    def kill_group(self):
+        """SIGKILL whatever is left of the server's process group (a finalizer: safe to call at any time, twice)."""
+        try:
+            os.killpg(self.proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        if self.proc.poll() is None:
+            self.proc.wait(10)
+        self.log.close()
+
     def stop(self):
         if self.proc.poll() is None:
             self.proc.send_signal(signal.SIGTERM)
@@ -48,7 +61,8 @@ class Server:
                 self.proc.wait(60)
             except subprocess.TimeoutExpired:
                 self.proc.kill()
-        self.log.close()
+                self.proc.wait(10)
+        self.kill_group()
         # uvicorn re-raises the SIGTERM it handled once it has shut down: -15 is a clean stop
         return 0 if self.proc.returncode == -signal.SIGTERM else self.proc.returncode
 

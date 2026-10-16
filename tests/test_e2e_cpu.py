@@ -132,10 +132,11 @@ def test_burst_does_not_delay_reports(tmp_path):
     assert max(first) < 10 and lags[len(lags) // 2] < 5
 
 
-def test_worker_failure_stops_server(tmp_path):
+def test_worker_failure_stops_server(tmp_path, request):
     import subprocess
     port = free_port_block()
     srv = Server(tmp_path / "run", port, **CPU)
+    request.addfinalizer(srv.kill_group)                     # also when an assert or the wait below fails
     srv.wait_ready()
     workers = subprocess.run(["pgrep", "-P", str(srv.proc.pid), "-f", "ppimpl worker"], capture_output=True,
                              text=True).stdout.split()
