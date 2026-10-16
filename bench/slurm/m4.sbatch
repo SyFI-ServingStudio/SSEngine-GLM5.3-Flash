@@ -24,7 +24,8 @@
 # check: bench/prefix_check.py (round-1 tokens, cache on vs off, ~6 min). bringup: prefix_bringup (20 min) under
 # Nsight Systems, traced from microbatch NSYS_MBS (default 564:631: the last round-0 chunk and round 1 of session
 # 34, P 512k A 1k, and all of session 35, P 512k A 8k; microbatch 0 is req-frontend's preflight). prefix_n<N>: the
-# 20-minute session run at N. BRINGUP_ARGS adds bench/run.py options to bringup, e.g. "--gap-s 17 --sessions 30,31
+# 20-minute session run at N. M5 (6_scheduler.md, OUT=measured/runs_m5): sched_check_<step>, force_check_<step> and
+# sched_<step>_n<N> (step plain, srpt8k, budget, even or good; bench/run.py), then `python -m bench.sched summarize`. BRINGUP_ARGS adds bench/run.py options to bringup, e.g. "--gap-s 17 --sessions 30,31
 # --run-name prefix_bringup_rest" (sessions 17 s apart: the cluster stops GPU jobs idle for 10 min). Then `python -m bench.prefix summarize measured/runs_m4 --out measured`.
 #SBATCH -J ppimpl
 #SBATCH --gres=gpu:4
@@ -34,7 +35,7 @@ R=$ROOT/${OUT:-measured/runs_m4}
 mkdir -p "$R/slurm"
 G=${CUDA_VISIBLE_DEVICES:-0,1,2,3}
 P=$((20000 + ${SLURM_JOB_ID:-0} % 120 * 100))
-WHAT=${1:?check, preflight, margin, resume_nsys, bringup or prefix_n<N>}
+WHAT=${1:?check, preflight, margin, resume_nsys, bringup, prefix_n<N>, sched_check_<step>, force_check_<step> or sched_<step>_n<N>}
 echo "== $(date -Is) gpus $G port $P: $WHAT"
 nvidia-smi --query-gpu=index,pci.bus_id,memory.used --format=csv,noheader
 if [ -n "${SAMPLE:-}" ]; then   # GPU clocks, power, temperature and throttle reasons every 200 ms, for the whole job
@@ -93,7 +94,8 @@ case $WHAT in
     ;;
   bringup) $PY -m bench.run prefix_bringup --inline --nsys --nsys-mbs "${NSYS_MBS:-564:631}" --gpus "$G" --port "$P" \
              --out-root "$R" ${BRINGUP_ARGS:-}; rc=$? ;;
-  prefix_n*) $PY -m bench.run "$WHAT" --inline --gpus "$G" --port "$P" --out-root "$R"; rc=$? ;;
+  prefix_n*|sched_check_*|force_check_*|sched_*_n*)
+    $PY -m bench.run "$WHAT" --inline --gpus "$G" --port "$P" --out-root "$R"; rc=$? ;;
   *) echo "unknown: $WHAT"; exit 2 ;;
 esac
 uptime

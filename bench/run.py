@@ -5,7 +5,9 @@
   ... --nsys [--nsys-mbs a:b|all]     the server under Nsight Systems -> trace.nsys-rep, trace.sqlite, trace.json
 
 Names: one_<L>, saturated_<L> (4_iteration.md), L in 1k..128k; prefix_bringup and prefix_n<N> (5_prefix_cache.md,
-prefix cache on: `keep_sessions`). Session runs (prefix_n<N>) run the client under `timeout 22m`: 1_contract.md §2.2
+prefix cache on: `keep_sessions`); sched_check_<step>, force_check_<step> and sched_<step>_n<N> (6_scheduler.md, step
+one of ppimpl.config.SCHEDULER_STEPS: plain, srpt8k, budget, even, good; prefix_n<N> is sched_plain_n<N>).
+Session runs (prefix_n<N>, sched_<step>_n<N>) run the client under `timeout 22m`: 1_contract.md §2.2
 says 20 min, but req-frontend first spends ~45 s tokenizing the corpus (measured, loaded host) and t = 0 is its first
 submit; rounds answered after 20 min are not counted (data/metrics.py), so the extra 2 min change no number.
 The cache on/off token check is bench/prefix_check.py. Each run gets a fresh server; the server and the
@@ -29,10 +31,11 @@ import traceback
 import urllib.request
 from pathlib import Path
 
+import msgspec
 import yaml
 
 from bench.common import ENWIK9, HANDOFF, REQ_FRONTEND, ROOT, free_port_block
-from ppimpl.config import CHECKPOINT
+from ppimpl.config import CHECKPOINT, SCHEDULER_STEPS
 from ppimpl.runtime.cpus import cpu_list
 
 CLIENT_BIN = Path(os.environ.get("PPIMPL_REQ_FRONTEND_BIN", ROOT / "build/req-frontend/release/session_runner"))
@@ -53,11 +56,29 @@ def parse_name(name: str) -> tuple[str, int]:
         return name.removeprefix("prefix_"), 0
     if m := re.fullmatch(r"prefix_n(\d+)", name):
         return "sessions", int(m.group(1))
+    if (m := re.fullmatch(r"(sched_check|force_check)_(\w+)", name)) and m.group(2) in SCHEDULER_STEPS:
+        return m.group(1), 0
+    if (m := re.fullmatch(r"sched_(\w+)_n(\d+)", name)) and m.group(1) in SCHEDULER_STEPS:
+        return "sessions", int(m.group(2))
     m = re.fullmatch(r"(one|saturated)_(\d+)k", name)
     if not m:
         raise SystemExit(f"unknown run name {name!r}: one_<L> or saturated_<L>, L in 1k..128k; "
-                         f"{', '.join(PREFIX_RUNS)}; prefix_n<N>")
+                         f"{', '.join(PREFIX_RUNS)}; prefix_n<N>; sched_check_<step>, force_check_<step>, "
+                         f"sched_<step>_n<N>, step in {', '.join(SCHEDULER_STEPS)}")
     return m.group(1), int(m.group(2)) * 1024
+
+
+def sched_step(name: str) -> str:
+    """The scheduler step of a run name (6_scheduler.md §2): plain unless the name gives one."""
+    m = re.fullmatch(r"(?:sched_check|force_check)_(\w+)|sched_(\w+)_n\d+", name)
+    return (m.group(1) or m.group(2)) if m else "plain"
+
+
+def hold_for(trace: Path) -> int:
+    """Requests of the trace at t = 0: the scheduling check queues them all before the first microbatch."""
+    rows = trace.read_text().splitlines()
+    col = rows[0].split(",").index("arrival_time")
+    return sum(float(r.split(",")[col]) == 0 for r in rows[1:] if r.strip())
 
 
 # The queued plan forms this long before stage 0 frees: stage 0's host time from a plan's forming to its forward
@@ -294,8 +315,10 @@ def execute(run_dir: Path, server_cfg: dict, client_cfg: dict, *, port: int, met
             f.write(f"in-run JIT compiles (must be 0): {jit['compiles']}"
                     + (f" by stage {jit['by_stage']}; " + "; ".join(jit['kernels']) if jit["compiles"] else "") + "\n")
     (run_dir / "run.json").write_text(json.dumps(meta, indent=1) + "\n")
-    report = ["-m", "bench.prefix", "run", str(run_dir)] if meta.get("kind") not in ("one", "saturated") \
-        else ["-m", "bench.report", str(run_dir)]
+    kind = meta.get("kind")
+    report = (["-m", "bench.report", str(run_dir)] if kind in ("one", "saturated")
+              else ["-m", "bench.sched", "check", str(run_dir)] if kind in ("sched_check", "force_check")
+              else ["-m", "bench.prefix", "run", str(run_dir)])
     rep = subprocess.run([PYTHON, *report], cwd=ROOT, capture_output=True, text=True)
     print(rep.stdout + rep.stderr, flush=True)
     return meta
@@ -391,7 +414,13 @@ def run_named(name: str, fake: bool, port: int, out_root: Path, args) -> dict:
         return run_iteration(name, kind, length, fake, port, run_dir, args)
     run_dir.mkdir(parents=True, exist_ok=True)
     fmt = "text-generation-session-execution-v2"
-    if kind == "sessions":
+    step = sched_step(name)
+    hold = 0
+    if kind in ("sched_check", "force_check"):   # 6_scheduler.md §1: independent prompts, no max_concurrency
+        trace, ccfg, fmt = HANDOFF / "data/bringup" / f"{kind}.csv", {}, "text-generation-independent"
+        if kind == "sched_check":
+            hold = hold_for(trace)
+    elif kind == "sessions":
         trace, ccfg = HANDOFF / "data/sessions_2ps.csv", {"max_concurrency": length}
     else:
         trace, ccfg = HANDOFF / "data/bringup/prefix_sessions.csv", {}   # no max_concurrency (5_prefix_cache.md §5)
@@ -400,7 +429,9 @@ def run_named(name: str, fake: bool, port: int, out_root: Path, args) -> dict:
             trace = compressed_bringup(trace, run_dir / "bringup_sessions.csv", only, args.gap_s)
     if args.trace:
         trace = Path(args.trace).resolve()
-    extra = {"keep_sessions": True, "scheduler": {"mb_tokens": 8192}}
+    extra = {"keep_sessions": True, "scheduler": msgspec.to_builtins(SCHEDULER_STEPS[step])}
+    if hold:
+        extra["hold_requests"] = hold
     if fake and args.us_per_token is not None:
         extra["fake"] = {"us_per_token": args.us_per_token}
     if args.intake_procs is not None:
@@ -421,7 +452,7 @@ def run_named(name: str, fake: bool, port: int, out_root: Path, args) -> dict:
                                                 token_pool_limit=args.token_pool_limit),
                    port=port, gpus=None if args.cpu else 4,
                    meta={"name": name, "kind": kind, "max_concurrency": ccfg.get("max_concurrency"), "fake": fake,
-                         "trace": str(trace)},
+                         "trace": str(trace), "scheduler_step": step},
                    client_timeout_s=max(args.client_timeout, (SESSION_MINUTES + 5) * 60), nsys=args.nsys,
                    client_limit=args.client_limit or limit)
 
