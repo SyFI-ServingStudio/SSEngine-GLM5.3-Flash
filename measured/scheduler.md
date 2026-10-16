@@ -7,7 +7,7 @@ Real runs (bench/run.py, each on a freshly started server) against the handoff v
 | Step | Run | Microbatches | Chunk for chunk | First difference | TTFT 128k / 32k / 8k alone / 1k alone (ms) | Worst TTFT deviation | In-run JIT |
 |---|---|---|---|---|---|---|---|
 | 0 plain | sched_check_plain_7708 | 28 / 28 | yes | – | 1142 vs 1118 / 1376 vs 1344 / 212 vs 224 / 52 vs 52 | 5.3% | 0 |
-| 1 shortest first | sched_check_srpt8k_7733 | 28 / 28 | yes | – | 1697 vs 1679 / 729 vs 729 / 209 vs 224 / 53 vs 52 | 6.4% | 0 |
+| 1 shortest first | sched_check_srpt8k_7741 | 28 / 28 | yes | – | 1713 vs 1679 / 734 vs 729 / 209 vs 224 / 52 vs 52 | 6.5% | 0 |
 | 2 load budget | sched_check_budget_7733 | 55 / 55 | yes | – | 1847 vs 1742 / 743 vs 711 / 152 vs 155 / 52 vs 52 | 6.0% | 0 |
 | 3 even split | sched_check_even_7738 | 58 / 58 | yes | – | 1847 vs 1742 / 743 vs 711 / 131 vs 132 / 51 vs 51 | 6.1% | 0 |
 | 4 force-schedule | sched_check_good_7738 | 58 / 58 | yes | – | 1934 vs 1742 / 827 vs 711 / 132 vs 132 / 51 vs 51 | 68.1% | 0 |
@@ -38,6 +38,8 @@ Real runs (bench/run.py, each on a freshly started server) against the handoff v
 | └ sim x1.06 | | | 26.2 | 91.1k | 111.1k | 98.83% | 0.16 / 0.48 / 1.99 / 304.2 (measured x2.93 / x1.85 / x2.01) | 23 | | |
 | 3 even split | 500 | sched_even_n500_7741 | 27.3 vs 28.6 (x0.95) | 99.1k vs 102.9k (x0.96) | 116.3k vs 124.5k (x0.93) | 99.00% vs 98.83% | 0.19 / 0.74 / 6.61 / 647.8 vs 0.16 / 0.60 / 4.38 / 579.6 (x1.22 / x1.25 / x1.51) | 159 vs 159 | 93 / 85 / 92 / 91% vs 93 / 89 / 91 / 92% | 0 |
 | └ sim x1.06 | | | 28.0 | 101.4k | 120.1k | 98.95% | 0.18 / 0.70 / 6.59 / 610.2 (measured x1.06 / x1.05 / x1.00) | 162 | | |
+| 4 force-schedule | 400 | sched_good_n400_7742 | 24.4 vs 25.6 (x0.95) | 84.8k vs 89.4k (x0.95) | 107.2k vs 113.7k (x0.94) | 98.60% vs 98.55% | 0.18 / 1.16 / 27.75 / 66.4 vs 0.15 / 0.81 / 9.85 / 63.7 (x1.17 / x1.44 / x2.82) | 236 vs 165 | 90 / 83 / 90 / 89% vs 90 / 87 / 89 / 90% | 0 |
+| └ sim x1.06 | | | 25.2 | 87.8k | 111.0k | 98.60% | 0.16 / 1.06 / 18.73 / 63.3 (measured x1.09 / x1.10 / x1.48) | 223 | | |
 
 Stage time / fit by microbatch tokens 0–255 / 256–1023 / 1024–8191 / 8192 / 8193–32768; hit kinds; GPU busy SM MHz / W / power-capped share:
 
@@ -49,6 +51,7 @@ Stage time / fit by microbatch tokens 0–255 / 256–1023 / 1024–8191 / 8192 
 | 2 load budget | 500 | s0: x1.280 / x1.212 / x1.042 / – / x1.026; s1: x0.915 / x1.078 / x1.049 / – / x1.009; s2: x0.908 / x1.088 / x1.097 / – / x1.066; s3: x0.977 / x1.089 / x1.077 / – / x1.043 | evicted 265, full 33380, none_first_round 1618, superseded 395 | g0: 1645 / 927 / 96%; g1: 1618 / 929 / 96%; g2: 1566 / 942 / 96%; g3: 1596 / 943 / 96% |
 | 3 even split | 400 | s0: x1.264 / x1.153 / x1.042 / – / x1.039; s1: x0.920 / x1.028 / x1.029 / – / x0.992; s2: x0.909 / x1.025 / x1.071 / – / x1.042; s3: x0.983 / x1.023 / x1.053 / – / x1.023 | full 4041, none_first_round 459, superseded 7 | g0: 1709 / 828 / 86%; g1: 1685 / 829 / 86%; g2: 1650 / 835 / 85%; g3: 1670 / 834 / 86% |
 | 3 even split | 500 | s0: x1.232 / x1.164 / x1.070 / – / x1.042; s1: x0.892 / x1.032 / x1.038 / – / x1.002; s2: x0.934 / x1.040 / x1.094 / – / x1.056; s3: x0.937 / x1.029 / x1.076 / – / x1.037 | evicted 255, full 33191, none_first_round 1618, superseded 393 | g0: 1663 / 932 / 96%; g1: 1635 / 929 / 97%; g2: 1572 / 940 / 97%; g3: 1604 / 942 / 97% |
+| 4 force-schedule | 400 | s0: x1.453 / x1.163 / x1.064 / – / x1.042; s1: x0.890 / x1.033 / x1.036 / – / x0.996; s2: x0.932 / x1.041 / x1.088 / – / x1.046; s3: x0.934 / x1.030 / x1.068 / – / x1.028 | evicted 145, full 29164, none_first_round 1362, superseded 351 | g0: 1692 / 913 / 94%; g1: 1652 / 916 / 95%; g2: 1596 / 927 / 96%; g3: 1622 / 929 / 96% |
 
 ## Notes
 
