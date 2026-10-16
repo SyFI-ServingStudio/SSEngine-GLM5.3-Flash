@@ -1,4 +1,4 @@
-{"step": "plain", "run": "force_check_plain_7738", "long_ttft_s": 0.64, "short_ttft_s": {"p50": 15.798, "p90": 28.107, "p99": 30.886, "max": 32.282}, "last_token_s": 112.247, "microbatches": 2005}
+{"step": "plain", "run": "force_check_plain_7742", "long_ttft_s": 0.41, "short_ttft_s": {"p50": 15.421, "p90": 27.719, "p99": 30.483, "max": 30.809}, "last_token_s": 110.774, "microbatches": 2005}
 {"step": "srpt8k", "run": "force_check_srpt8k_7708", "long_ttft_s": 108.714, "short_ttft_s": {"p50": 14.196, "p90": 25.677, "p99": 28.27, "max": 28.576}, "last_token_s": 108.715, "microbatches": 2005}
 {"step": "budget", "run": "force_check_budget_7708", "long_ttft_s": 106.06, "short_ttft_s": {"p50": 15.152, "p90": 21.803, "p99": 25.36, "max": 25.846}, "last_token_s": 106.061, "microbatches": 1349}
 {"step": "even", "run": "force_check_even_7738", "long_ttft_s": 107.803, "short_ttft_s": {"p50": 16.294, "p90": 22.879, "p99": 27.057, "max": 27.557}, "last_token_s": 107.804, "microbatches": 1276}
