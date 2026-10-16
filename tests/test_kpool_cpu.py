@@ -128,3 +128,23 @@ def test_heads_host_rows():
     assert rows.tolist() == [[8, 8, 9, 10], [19, 19, 20, 21]]
     assert ring.tolist() == [[True, False, False, False], [True, False, False, False]]
     assert blocks.tolist() == [8, 10] and last.tolist() == [10, 21]
+
+
+def test_heads_suffix_equals_heads_of_the_prefill_slice():
+    """Heads built for every request before the H2D copy, then cut to the indexer's prefill requests, equal the heads
+    built for those requests directly (random batches, every decode/prefill split)."""
+    rng = np.random.default_rng(0)
+    for _ in range(200):
+        R = int(rng.integers(1, 7))
+        starts = rng.integers(0, 40, R)
+        q_lens = rng.integers(1, 12, R)
+        qsl = np.concatenate([[0], np.cumsum(q_lens)])
+        tails = rng.integers(0, 50, R)
+        allh, req = pp_patch.kpool_heads_all(starts, q_lens, qsl[:-1], tails, KPOOL)
+        for nd in range(R + 1):
+            want = pp_patch.kpool_heads(starts, q_lens, qsl[:-1], tails, nd, int(qsl[nd]), KPOOL)
+            got = pp_patch.kpool_heads_suffix(allh, req, nd, int(qsl[nd]))
+            assert (want is None) == (got is None)
+            if want is not None:
+                for a, b in zip(want, got):
+                    np.testing.assert_array_equal(a, b)

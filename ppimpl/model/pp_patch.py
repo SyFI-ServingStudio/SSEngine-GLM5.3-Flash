@@ -422,6 +422,26 @@ def kpool_heads(starts, q_lens, row_starts, tail_blocks, first: int, row0: int, 
             np.asarray(last, dtype=np.int64))
 
 
+def kpool_heads_all(starts, q_lens, row_starts, tail_blocks, kpool: int):
+    """`kpool_heads` of every request, rows counted from the batch's first row, and each head's request: built
+    before the microbatch's one H2D copy, when the indexer's split into decodes and prefills is not known yet."""
+    h = kpool_heads(starts, q_lens, row_starts, tail_blocks, 0, 0, kpool)
+    req = [r for r in range(len(starts)) if int(starts[r]) % kpool and int(q_lens[r]) >= kpool - int(starts[r]) % kpool]
+    return h, req
+
+
+def kpool_heads_suffix(heads, req: list[int], first: int, row0: int):
+    """The heads of requests `first..` with rows counted from `row0` (the indexer's prefill slice), from
+    `kpool_heads_all`: a suffix of its arrays (numpy or device tensors, no copy but the row offsets), or None."""
+    import bisect
+
+    i = bisect.bisect_left(req, first)
+    if heads is None or i == len(req):
+        return None
+    rows, ring, blocks, last = (a[i:] for a in heads)
+    return (rows - row0 if row0 else rows), ring, blocks, (last - row0 if row0 else last)
+
+
 def kpool_compress_insert(k, gate_score, ape, kv_cache, slot_mapping, kpool, head_dim, round_scale, *, ops=None):
     """`sparse_indexer._kpool_compress_insert`, with straddling pools masked out and handed to the tail seed."""
     ops = ops or _ORIG_KPOOL["ops"]
