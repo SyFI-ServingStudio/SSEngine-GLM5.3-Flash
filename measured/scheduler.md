@@ -152,7 +152,7 @@ Stage time / fit by microbatch tokens 0–255 / 256–1023 / 1024–8191 / 8192 
   | real stage balance (1.042 / 1.049 / 1.097 / 1.077), 4 in flight | 27.56 | 0.176 / 0.715 / 5.06 | 4.2 |
   | real stage balance, 5 in flight (as the server) | 27.52 | 0.210 / 0.836 / 5.09 | 40.7 |
   | real stage balance, 5 in flight, pacing 2 ms | 27.53 | 0.174 / 0.714 / 5.58 | 2.5 |
-  | real 7730 | 27.54 | 0.212 / 0.716 / 7.16 (19 min window) | 21.0 |
+  | real 7730 | 27.54 | 0.22 / 0.73 / 4.70 | 21.0 |
 
   srpt8k N=400 (stage balance 1.040 / 1.022 / 1.060 / 1.063): 5 in flight 0.313 / 0.393 / 1.87, real 0.33 / 0.41 /
   1.94. With pacing 2 ms: 0.272 / 0.363 / 1.91, against sim x1.06 0.27 / 0.36 / 2.02. Throughput is unchanged
