@@ -155,7 +155,7 @@ def fp64_reference(q, k, v, g, beta, a_log, dt_bias, lb, scale, on_out, block: i
     return S
 
 
-def run_layer(attn, cap: dict, heads: list[int], dev) -> dict:
+def run_layer(attn, cap: dict, heads: list[int], dev, seg: int) -> dict:
     import vllm._flashkda_C  # noqa: F401
     from vllm.models.glm5next.nvidia.ops.third_party.kda import chunk_kda_with_fused_gate
 
@@ -163,46 +163,63 @@ def run_layer(attn, cap: dict, heads: list[int], dev) -> dict:
     lb, scale = cap["lb"], cap["scale"]
     q, k, v, g = (cap[n].to(dev).unsqueeze(0) for n in ("q", "k", "v", "g"))
     beta = cap["beta"].to(dev).unsqueeze(0)
-    cu = torch.tensor([0, T], dtype=torch.int32, device=dev)
     zero = lambda: torch.zeros(1, H, D, D, dtype=torch.float32, device=dev)  # noqa: E731
     outs = {"flashinfer": (cap["out"], cap["final"])}       # output on the host
     secs: dict = {}
     mutated: dict = {}
     work: list = []
 
-    def ins():
-        """Fresh copies of the inputs for one kernel (a kernel may write its inputs); remembered for changed()."""
-        work[:] = [x.clone() for x in (q, k, v, g, beta)]
+    def ins(s: int, e: int):
+        """Fresh copies of tokens [s, e) of the inputs for one call (a kernel may write its inputs)."""
+        work[:] = [x[:, s:e].clone() for x in (q, k, v, g, beta)]
         return work
 
-    def changed() -> list[str]:
+    def changed(s: int, e: int) -> list[str]:
         torch.cuda.synchronize()
-        return [n for n, a, b in zip("q k v g beta".split(), work, (q, k, v, g, beta)) if not torch.equal(a, b)]
+        return [n for n, a, b in zip("q k v g beta".split(), work, (q, k, v, g, beta)) if not torch.equal(a, b[:, s:e])]
+
+    def cu_of(n: int):
+        return torch.tensor([0, n], dtype=torch.int32, device=dev)
     with torch.inference_mode():
+        # vLLM's prefill calls: `seg` tokens per call (its max_num_batched_tokens), each continuing from the previous
+        # call's final state
+        segs = [(s, min(T, s + seg)) for s in range(0, T, seg)]
         t0 = time.time()
-        ws = torch.empty(torch.ops._flashkda_C.get_workspace_size(T, H, 1), dtype=torch.uint8, device=dev)
-        o = torch.empty(1, T, H, D, dtype=q.dtype, device=dev)
-        fin = torch.empty(1, H, D, D, dtype=torch.float32, device=dev)
-        torch.ops._flashkda_C.fwd(*ins(), scale, o, ws, attn.A_log.view(-1), attn.dt_bias.view(-1, D), lb,
-                                  zero(), fin, cu, None, None)
-        mutated["flashkda"] = changed()
-        torch.cuda.synchronize()
-        outs["flashkda"] = (o[0].cpu(), fin[0])
+        ws = torch.empty(torch.ops._flashkda_C.get_workspace_size(seg, H, 1), dtype=torch.uint8, device=dev)
+        o_host = torch.empty(T, H, D, dtype=q.dtype)
+        state = zero()
+        written = set()
+        for s, e in segs:
+            qi, ki, vi, gi, bi = ins(s, e)
+            o = torch.empty(1, e - s, H, D, dtype=q.dtype, device=dev)
+            fin = torch.empty(1, H, D, D, dtype=torch.float32, device=dev)
+            torch.ops._flashkda_C.fwd(qi, ki, vi, gi, bi, scale, o, ws, attn.A_log.view(-1), attn.dt_bias.view(-1, D),
+                                      lb, state, fin, cu_of(e - s), None, None)
+            written |= set(changed(s, e))
+            o_host[s:e] = o[0].cpu()
+            state = fin
+        mutated["flashkda"] = sorted(written)
+        outs["flashkda"] = (o_host, state[0])
         secs["flashkda"] = time.time() - t0
         del ws, o
 
         t0 = time.time()
-        qi, ki, vi, gi, bi = ins()
-        o, fin = chunk_kda_with_fused_gate(q=qi, k=ki, v=vi, raw_g=gi, beta=torch.sigmoid(bi.float()), A_log=attn.A_log,
-                                           g_bias=attn.dt_bias, scale=scale, initial_state=zero(),
-                                           output_final_state=True, use_qk_l2norm_in_kernel=True, cu_seqlens=cu,
-                                           safe_gate=True, lower_bound=lb)
-        mutated["triton_chunk"] = changed()
-        del qi, ki, vi, gi, bi
-        torch.cuda.synchronize()
-        outs["triton_chunk"] = (o.reshape(T, H, D).cpu(), fin[0])
+        o_host = torch.empty(T, H, D, dtype=q.dtype)
+        state = zero()
+        written = set()
+        for s, e in segs:
+            qi, ki, vi, gi, bi = ins(s, e)
+            o, state = chunk_kda_with_fused_gate(q=qi, k=ki, v=vi, raw_g=gi, beta=torch.sigmoid(bi.float()),
+                                                 A_log=attn.A_log, g_bias=attn.dt_bias, scale=scale,
+                                                 initial_state=state, output_final_state=True,
+                                                 use_qk_l2norm_in_kernel=True, cu_seqlens=cu_of(e - s), safe_gate=True,
+                                                 lower_bound=lb)
+            written |= set(changed(s, e))
+            o_host[s:e] = o.reshape(e - s, H, D).cpu()
+        mutated["triton_chunk"] = sorted(written)
+        outs["triton_chunk"] = (o_host, state[0])
         secs["triton_chunk"] = time.time() - t0
-        del o
+        del o, qi, ki, vi, gi, bi
 
         t0 = time.time()
         stats = {n: ErrStats(T, H, dev) for n in outs}
@@ -335,7 +352,9 @@ def selftest(dev, T: int = 1024, H: int = 64) -> dict:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--length", type=int, default=131072)
-    ap.add_argument("--chunk", type=int, default=16384)
+    ap.add_argument("--chunk", type=int, default=16384, help="our microbatch tokens for the capture")
+    ap.add_argument("--kernel-chunk", type=int, default=16384,
+                    help="tokens per FlashKDA / Triton call (vLLM's max_num_batched_tokens in the audit)")
     ap.add_argument("--selftest-only", action="store_true", help="only the conventions check on random inputs")
     ap.add_argument("--heads", "--fp64-heads", dest="heads", default="0:10,1:45,1:7,2:56",
                     help="layer:head pairs reported per bin (the audit's worst heads + a median one)")
@@ -363,10 +382,10 @@ def main() -> None:
     print(f"[kda-probe] L={L} chunk {chunk}: layers {KDA_PROBE_LAYERS} captured in {time.time() - t0:.1f} s; "
           f"q {tuple(caps[0]['q'].shape)}, dtypes {caps[0]['dtypes']}, lower bound {caps[0]['lb']}, "
           f"scale {caps[0]['scale']}", flush=True)
-    out["chunk"] = chunk
+    out["chunk"], out["kernel_chunk"] = chunk, a.kernel_chunk
     for i, layer in enumerate(KDA_PROBE_LAYERS):
         assert m.layers[layer].layer_kind == "kda"
-        r = run_layer(m.layers[layer].self_attn, caps[i], heads.get(layer, []), dev)
+        r = run_layer(m.layers[layer].self_attn, caps[i], heads.get(layer, []), dev, a.kernel_chunk)
         caps[i] = None
         torch.cuda.empty_cache()
         out["layers"][layer] = r

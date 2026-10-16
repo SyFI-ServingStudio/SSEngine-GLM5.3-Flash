@@ -66,7 +66,9 @@ def _setup(self) -> dict:
             "num_blocks": int(cfg.num_blocks), "topk_hooks": hooks,
             "groups": [[type(g.kv_cache_spec).__name__, len(g.layer_names), g.layer_names[0]]
                        for g in cfg.kv_cache_groups],
-            "runner": type(runner).__name__}
+            "runner": type(runner).__name__,
+            "kda_prefill_backends": sorted({m.kda_prefill_backend for m in runner.model.modules()
+                                            if hasattr(m, "kda_prefill_backend")})}
 
 
 def _topk_start(self, T: int) -> None:
@@ -119,6 +121,8 @@ def main() -> None:
     ap.add_argument("--length", type=int, required=True)
     ap.add_argument("--out", type=Path, default=None)
     ap.add_argument("--only", nargs="*", default=None, help="case names to run (default: all of the length)")
+    ap.add_argument("--kda-prefill-backend", default="auto", choices=("auto", "triton", "flashkda"),
+                    help="the fork's --kda-prefill-backend (auto = FlashKDA on SM100)")
     a = ap.parse_args()
     import torch
     from vllm import LLM, SamplingParams
@@ -132,7 +136,8 @@ def main() -> None:
     t0 = time.time()
     llm = LLM(model=CHECKPOINT, tensor_parallel_size=4, enable_expert_parallel=True, kv_cache_dtype="fp8_e4m3",
               language_model_only=True, max_model_len=maxN + 64, enable_prefix_caching=False, enforce_eager=True,
-              max_num_batched_tokens=16384, max_logprobs=-1, seed=0)
+              max_num_batched_tokens=16384, max_logprobs=-1, seed=0,
+              kda_prefill_backend=None if a.kda_prefill_backend == "auto" else a.kda_prefill_backend)
     info = llm.collective_rpc(_setup)
     print(f"[kvaudit-vllm] engine up in {time.time() - t0:.0f} s: {json.dumps(info[0])}", flush=True)
     vocab = llm.llm_engine.model_config.get_vocab_size()

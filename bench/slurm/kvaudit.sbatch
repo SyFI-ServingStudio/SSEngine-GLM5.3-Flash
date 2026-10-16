@@ -21,6 +21,7 @@ case $SIDE in
     $PY -m bench.kvaudit.ours --length "$L" "$@"; rc=$?
     if [ $rc = 0 ]; then $PY -m bench.kvaudit.compare --length "$L" --device cuda; rc=$?; fi ;;
   probe) $PY -m bench.kvaudit.kda_probe --length "$L" "$@"; rc=$? ;;
+  fault) $PY -m bench.kvaudit.kda_fault --tokens "$L" "$@"; rc=$? ;;
   compare) $PY -m bench.kvaudit.compare --length "$L" --device cuda "$@"; rc=$? ;;
   *) echo "unknown side $SIDE"; rc=2 ;;
 esac

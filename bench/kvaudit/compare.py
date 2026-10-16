@@ -250,13 +250,14 @@ def main() -> None:
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--delete", action="store_true", help="remove the dumps after writing compare.json")
     ap.add_argument("--threads", type=int, default=16, help="CPU threads (shared host)")
+    ap.add_argument("--tag", default="", help="suffix of the output directory (OUT/<length><tag>)")
     a = ap.parse_args()
     torch.set_grad_enabled(False)
     torch.set_num_threads(a.threads)
     root = a.dumps or C.DUMPS / str(a.length)
     dumps = Dumps(root, a.device)
     cs = C.cases(a.length)
-    out_dir = C.OUT / str(a.length)
+    out_dir = C.OUT / f"{a.length}{a.tag}"
     out_dir.mkdir(parents=True, exist_ok=True)
     res = {"length": a.length, "pairs": []}
     have = {p.name for p in root.iterdir() if (p / "meta.json").exists()}
