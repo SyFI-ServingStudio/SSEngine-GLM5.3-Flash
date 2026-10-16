@@ -67,13 +67,14 @@ def test_graph_replay_matches_eager(stage):
     assert r["pass"], [c for c in r["cases"] if not all(c[k] for k in keys)]
 
 
-@pytest.mark.parametrize("rows,width,two_requests", [(8192, 2048, False), (32768, 8192, False), (300, 700, True)])
+@pytest.mark.parametrize("rows,width,two_requests", [(8192, 2048, False), (32768, 8192, False), (300, 700, True),
+                                                     (3, 131072, False)])
 def test_topk_canonical_matches_reference(rows, width, two_requests):
     """(g) ties at the k-th value (logits rounded to 0.1), rows of fewer and more keys than k, keys starting
     mid-row."""
     import torch
 
-    from ppimpl.model.topk_canon import canonical_topk_torch, canonicalize
+    from ppimpl.model.topk_canon import canonical_topk_torch, canonicalize, canonicalize_split
 
     dev, k = torch.device("cuda", 0), 512
     g = torch.Generator(device=dev).manual_seed(0)
@@ -87,6 +88,40 @@ def test_topk_canonical_matches_reference(rows, width, two_requests):
     dst[dst + ks[:, None] >= ke[:, None]] = -1
     ref = dst.clone()
     canonical_topk_torch(lg, ks, ke, ref, k)
-    for start in (dst.clone(), dst.flip(1).contiguous()):
-        canonicalize(lg, ks, ke, start, k)
-        assert torch.equal(start, ref)
+    for fn in (canonicalize, canonicalize_split, lambda *a: canonicalize_split(*a, span=1024)):
+        for start in (dst.clone(), dst.flip(1).contiguous()):
+            fn(lg, ks, ke, start, k)
+            assert torch.equal(start, ref)
+
+
+@pytest.mark.parametrize("rows,next_n,width", [(1, 1, 32768), (3, 3, 131072), (64, 1, 8192), (128, 2, 4096)])
+def test_decode_topk_canonical(rows, next_n, width):
+    """(g) the indexer's decode top-k (cooperative up to 64 rows, persistent above) through
+    `pp_patch.canonical_decode_topk`: ties at the k-th value (logits rounded to 0.1), causal row ends from (B, 1)
+    seq_lens, rows of fewer keys than k; equal to the torch reference whatever order the kernel left."""
+    import torch
+
+    from ppimpl.model import pp_patch
+    from ppimpl.model.topk_canon import canonical_topk_torch
+    from vllm.model_executor.layers import indexer_topk
+
+    pp_patch._ORIG_DECODE_TOPK = pp_patch._ORIG_DECODE_TOPK or indexer_topk.get_indexer_topk
+    dev, k = torch.device("cuda", 0), 512
+    torch.cuda.set_device(dev)
+    g = torch.Generator(device=dev).manual_seed(rows)
+    lg = torch.randn(rows, width, device=dev, generator=g).round(decimals=1)
+    b = rows // next_n
+    seq = torch.linspace(width // 2, width, b, device=dev).to(torch.int32).reshape(b, 1)
+    if b > 1:
+        seq[0] = k // 2                               # a row of fewer keys than k
+    ke = indexer_topk.SparseIndexerTopk._row_ends(seq, next_n, rows)
+    ref = torch.full((rows, k), -1, dtype=torch.int32, device=dev)
+    canonical_topk_torch(lg, torch.zeros_like(ke), ke, ref, k)
+    from vllm.v1.worker.workspace import init_workspace_manager
+
+    init_workspace_manager(dev)
+    run = pp_patch.canonical_decode_topk("auto")
+    for _ in range(3):
+        dst = torch.full((rows, k), -7, dtype=torch.int32, device=dev)
+        run(lg, seq, next_n, dst, k, int(seq.max()))
+        assert torch.equal(dst, ref)

@@ -93,3 +93,89 @@ def canonicalize(logits, ks, ke, dst: torch.Tensor, k: int) -> None:
     assert dst.dtype == torch.int32 and dst.stride(1) == 1 and logits.stride(1) == 1, (dst.dtype, dst.stride())
     _canonical_topk_kernel[(n,)](logits, logits.stride(0), ks, ke, dst, dst.stride(0),
                                  K=k, KP=triton.next_power_of_2(k), BLOCK=1024, num_warps=4)
+
+
+if triton is not None:
+    @triton.jit
+    def _split_count_kernel(logits_ptr, stride_l, ks_ptr, ke_ptr, dst_ptr, stride_d, kth_ptr, cnt_ptr, NB,
+                            K: tl.constexpr, KP: tl.constexpr, SPAN: tl.constexpr, BLOCK: tl.constexpr):
+        r = tl.program_id(0).to(tl.int64)
+        b = tl.program_id(1)
+        lo = tl.load(ks_ptr + r).to(tl.int32)
+        hi = tl.load(ke_ptr + r).to(tl.int32)
+        row = logits_ptr + r * stride_l
+        offs_k = tl.arange(0, KP)
+        sel = tl.load(dst_ptr + r * stride_d + offs_k, mask=offs_k < K, other=-1)
+        valid = sel >= 0
+        kth = tl.min(tl.load(row + lo + sel, mask=valid, other=float("inf")), axis=0)
+        if b == 0:
+            tl.store(kth_ptr + r, kth)
+            tl.store(cnt_ptr + r * (2 * NB + 1) + 2 * NB, tl.sum(valid.to(tl.int32), axis=0))
+        above = tl.zeros((), dtype=tl.int32)
+        ties = tl.zeros((), dtype=tl.int32)
+        for c0 in range(lo + b * SPAN, tl.minimum(hi, lo + (b + 1) * SPAN), BLOCK):
+            cols = c0 + tl.arange(0, BLOCK)
+            m = (cols < hi) & (cols < lo + (b + 1) * SPAN)
+            x = tl.load(row + cols, mask=m, other=float("-inf"))
+            above += tl.sum(((x > kth) & m).to(tl.int32), axis=0)
+            ties += tl.sum(((x == kth) & m).to(tl.int32), axis=0)
+        tl.store(cnt_ptr + r * (2 * NB + 1) + 2 * b, above)
+        tl.store(cnt_ptr + r * (2 * NB + 1) + 2 * b + 1, ties)
+
+    @triton.jit
+    def _split_write_kernel(logits_ptr, stride_l, ks_ptr, ke_ptr, dst_ptr, stride_d, kth_ptr, cnt_ptr, NB,
+                            K: tl.constexpr, KP: tl.constexpr, NBP: tl.constexpr, SPAN: tl.constexpr,
+                            BLOCK: tl.constexpr):
+        r = tl.program_id(0).to(tl.int64)
+        b = tl.program_id(1)
+        lo = tl.load(ks_ptr + r).to(tl.int32)
+        hi = tl.load(ke_ptr + r).to(tl.int32)
+        row = logits_ptr + r * stride_l
+        drow = dst_ptr + r * stride_d
+        kth = tl.load(kth_ptr + r)
+        crow = cnt_ptr + r * (2 * NB + 1)
+        n_valid = tl.load(crow + 2 * NB)
+        ib = tl.arange(0, NBP)
+        ab = tl.load(crow + 2 * ib, mask=ib < NB, other=0)
+        tb = tl.load(crow + 2 * ib + 1, mask=ib < NB, other=0)
+        need = n_valid - tl.sum(ab, axis=0)                      # ties to keep, lowest columns first
+        ties_before = tl.cumsum(tb, axis=0) - tb                 # exclusive, per block
+        taken_t = tl.minimum(tl.maximum(need - ties_before, 0), tb)
+        before = ib < b
+        pos = tl.sum(tl.where(before, ab + taken_t, 0), axis=0)
+        ties = tl.sum(tl.where(before, tb, 0), axis=0)
+        total = tl.sum(ab + taken_t, axis=0)
+        for c0 in range(lo + b * SPAN, tl.minimum(hi, lo + (b + 1) * SPAN), BLOCK):
+            cols = c0 + tl.arange(0, BLOCK)
+            m = (cols < hi) & (cols < lo + (b + 1) * SPAN)
+            x = tl.load(row + cols, mask=m, other=float("-inf"))
+            tie = ((x == kth) & m).to(tl.int32)
+            take = ((x > kth) & m) | ((tie != 0) & (tl.cumsum(tie, axis=0) + ties <= need))
+            slot = tl.cumsum(take.to(tl.int32), axis=0) - 1 + pos
+            tl.store(drow + slot, cols - lo, mask=take)
+            pos += tl.sum(take.to(tl.int32), axis=0)
+            ties += tl.sum(tie, axis=0)
+        if b == 0:
+            offs_k = tl.arange(0, KP)
+            tl.store(drow + offs_k, tl.full((KP,), -1, tl.int32), mask=(offs_k >= total) & (offs_k < K))
+
+
+def canonicalize_split(logits, ks, ke, dst: torch.Tensor, k: int, span: int = 4096) -> None:
+    """`canonicalize` for few, long rows (the indexer's decode path: one row per decode token, up to 131k pools at
+    512k): each row's keys in `span`-column pieces, one program each; a count pass (keys above / equal to the k-th
+    value per piece), then a write pass that places each piece's kept keys at its prefix offset. Same result."""
+    n = dst.shape[0]
+    if n == 0:
+        return
+    if triton is None or not dst.is_cuda:
+        canonical_topk_torch(logits, ks, ke, dst, k)
+        return
+    assert dst.dtype == torch.int32 and dst.stride(1) == 1 and logits.stride(1) == 1, (dst.dtype, dst.stride())
+    nb = max(1, -(-logits.shape[1] // span))
+    kth = torch.empty(n, dtype=logits.dtype, device=dst.device)
+    cnt = torch.empty((n, 2 * nb + 1), dtype=torch.int32, device=dst.device)
+    kp = triton.next_power_of_2(k)
+    _split_count_kernel[(n, nb)](logits, logits.stride(0), ks, ke, dst, dst.stride(0), kth, cnt, nb,
+                                 K=k, KP=kp, SPAN=span, BLOCK=1024, num_warps=4)
+    _split_write_kernel[(n, nb)](logits, logits.stride(0), ks, ke, dst, dst.stride(0), kth, cnt, nb,
+                                 K=k, KP=kp, NBP=triton.next_power_of_2(nb), SPAN=span, BLOCK=1024, num_warps=4)

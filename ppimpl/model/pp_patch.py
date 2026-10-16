@@ -17,6 +17,7 @@ kernel a stage launches must be the manifest's for its position, with no fallbac
 | `route_hc_expand` | glm5next `model.hc_expand` (vLLM), process-wide | one vectorized concatenation; the fork's broadcast copy ran at ~1 TB/s (M2: input_head x3.3) | M2 `input_head` time (issues.md, "M2 results") |
 | `route_kda` | each KDA layer's `Glm5NextLinearAttention._forward` (vLLM) | Dao causal-conv1d (config 4) + FlashInfer persistent `recurrent_kda` (config 5) on our state blocks, as the design prices | manifest check (configs 4, 5); `bench/kvcheck.py` |
 | `install_topk_router` | `torch.ops._C.top_k_per_row_prefill` and `indexer.build_prefill_chunk_metadata` (vLLM), process-wide | per shape, DeepSelect or vLLM's kernel, whichever row is faster (configs 20/21); `topk_canon` makes the answer deterministic | manifest check (configs 20/21); `test_model_cpu.py::test_topk_choice_matches_the_faster_row_at_every_profiled_shape`; GPU test g |
+| `install_decode_topk_canon` | glm5next `sparse_indexer.get_indexer_topk` (vLLM), process-wide | the indexer's decode top-k (1-token chunks) returns its set in a varying order: `topk_canon` fixes set and order, as on the prefill path | `test_model_gpu.py::test_decode_topk_canonical`; `bench/margin.py --trace-topk` (issues.md, job 7522) |
 | `install_kpool_unaligned` | glm5next `sparse_indexer._kpool_compress_insert` and `kpool_compress.kpool_seed_tail_cache` (vLLM), process-wide | a chunk may start inside a 4-token indexer pool (prefix hits resume at the kept prompt's length); the fork's insert assumes pool-aligned starts. The straddling pool is written from the tail ring + batch rows with the same kernel | `test_kpool_cpu.py` (reference ops); `test_kpool_gpu.py` (fork ops, cache bytes bitwise vs unsplit) |
 | `install_sparse_mla_split` | `flashinfer.decode.trtllm_batch_decode_with_kv_cache_mla`, process-wide | a launch over 32,768 rows returns without doing the work on B200; split as the target does (issues.md, "M2 results") | M2 `dsa_moe` at 64k/128k |
 | `install_autotune_memo` | FlashInfer `AutoTuner.choose_one`, process-wide | host time: memoize the tactic lookup outside tuning (same answer) | `test_host_trims_cpu.py::test_autotune_memo_matches_and_returns_callers_runner` |
@@ -32,6 +33,7 @@ priorities `StageModel` sets as vLLM's worker does.
 from __future__ import annotations
 
 import contextlib
+import functools
 import json
 import re
 import types
@@ -340,6 +342,37 @@ def install_topk_router() -> None:
         return md
 
     idx.build_prefill_chunk_metadata = build_and_route
+
+
+_ORIG_DECODE_TOPK = None
+DECODE_TOPK_CANON = True      # bench/margin.py cases may turn it off (the before/after of the same process)
+
+
+def canonical_decode_topk(backend: str):
+    """vLLM's decode top-k (`indexer_topk.get_indexer_topk`), then `topk_canon`: the same set and order for the same
+    logits, as on the prefill path. The cooperative kernel (up to 64 rows) returns the right set in an order that
+    varies run to run (measured/issues.md, job 7522), and the sparse attention sums in that order. Rows end where the
+    kernels end them; few long rows, so the split canonicalization."""
+    fn = _ORIG_DECODE_TOPK(backend)
+
+    def run(logits, seq_lens, next_n, dst, k, max_seq_len):
+        fn(logits, seq_lens, next_n, dst, k, max_seq_len)
+        if DECODE_TOPK_CANON and logits.shape[1] > k:
+            ke = fn._row_ends(seq_lens, next_n, logits.shape[0])
+            topk_canon.canonicalize_split(logits, torch.zeros_like(ke), ke, dst, k)
+
+    return run
+
+
+def install_decode_topk_canon() -> None:
+    """Canonicalize the glm5next indexer's decode top-k (chunks of at most 256 tokens take that path)."""
+    global _ORIG_DECODE_TOPK
+    import vllm.models.glm5next.nvidia.sparse_indexer as si
+
+    if _ORIG_DECODE_TOPK is not None:
+        return
+    _ORIG_DECODE_TOPK = si.get_indexer_topk
+    si.get_indexer_topk = functools.cache(canonical_decode_topk)
 
 
 # ---------------------------------------------------------------- kpool indexer: chunks that start inside a pool

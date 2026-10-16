@@ -226,6 +226,7 @@ class StageModel:
                 pp_patch.route_kda(layer.self_attn)
         pp_patch.install_topk_router()
         pp_patch.install_kpool_unaligned()
+        pp_patch.install_decode_topk_canon()
         pp_patch.install_sparse_mla_split()
         # host trims (no kernel or argument changes): env cache, FlashInfer tactic memo / mm_fp4 skip_check, plain
         # parameters
