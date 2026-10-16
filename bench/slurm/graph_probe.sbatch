@@ -18,12 +18,21 @@ wave() {   # wave name "args0" "args1" ...: one process per GPU, wait for all
   done
   for j in "${!pids[@]}"; do wait ${pids[$j]}; echo "   $name $j rc=$? $(grep -h '\[graph_probe\]\|\[graphs\]\|Error:\|error:' $OUT/${name}_$j.log | tail -2 | cut -c1-300)"; done
 }
-wave w1 "$PY -m bench.graph_probe --stage 0 --buckets 7168" "$PY -m bench.graph_probe --stage 0 --buckets 6144" \
-        "$PY -m bench.graph_probe --stage 0 --buckets 5120" "$PY -m bench.graph_probe --stage 0 --buckets 3072"
-wave w2 "$PY -m bench.graph_probe --stage 0 --buckets 1536" "$PY -m bench.graph_probe --stage 0 --buckets 8192" \
-        "env CUDA_LAUNCH_BLOCKING=1 $PY -m bench.graph_probe --stage 0 --eager 7168" \
-        "env CUDA_LAUNCH_BLOCKING=1 $PY -m bench.graph_probe --stage 0 --eager 3000"
+GP="$PY -m bench.graph_probe --stage 0"
+B57=128,256,512,1024,1536,2048,3072,4096,5120,6144,7168,8192   # 57ceead's buckets
+if [ "${SET:-1}" = 1 ]; then
+wave w1 "$GP --buckets 7168" "$GP --buckets 6144" \
+        "$GP --buckets 5120" "$GP --buckets 3072"
+wave w2 "$GP --buckets 1536" "$GP --buckets 8192" \
+        "env CUDA_LAUNCH_BLOCKING=1 $GP --eager 7168" \
+        "env CUDA_LAUNCH_BLOCKING=1 $GP --eager 3000"
 wave graphs "$PY -m bench.graphs --stage 0 --out $OUT/graphs_s0.json" "$PY -m bench.graphs --stage 1 --out $OUT/graphs_s1.json" \
         "$PY -m bench.graphs --stage 2 --out $OUT/graphs_s2.json" "$PY -m bench.graphs --stage 3 --out $OUT/graphs_s3.json"
-for s in 0 1 2 3; do python3 -c "import json,sys; r=json.load(open('$OUT/graphs_s$s.json')); print('graphs stage $s pass', r['pass'])" 2>&1 | tail -1; done
+else   # SET=2: as the server builds a stage (whole KV pool, every bucket in one capture_graphs call)
+wave s2a "$GP --full-pool --together --buckets $B57" "$GP --full-pool --together --buckets 128,256,512,1024,2048,4096,8192" \
+         "$GP --together --buckets $B57" "$GP --full-pool --together --buckets 8192,7168"
+wave s2b "$GP --full-pool --together --buckets 8192,4096,3072" "$GP --full-pool --together --buckets 2048,1536,1024" \
+         "$GP --full-pool --together --buckets 6144,5120,4096" "$GP --full-pool --buckets 7168"
+fi
+[ "${SET:-1}" = 1 ] && for s in 0 1 2 3; do python3 -c "import json,sys; r=json.load(open('$OUT/graphs_s$s.json')); print('graphs stage $s pass', r['pass'])" 2>&1 | tail -1; done
 echo "== done $(date -Is) uptime $(uptime)"
