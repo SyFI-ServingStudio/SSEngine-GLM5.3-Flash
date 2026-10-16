@@ -5,7 +5,7 @@
 # job 7029), prefix caching off, so every round is a full prefill. One server; the session traces TRACES
 # (space-separated, e.g. the bench/targets_ext/*_w1s_compressed_p*.csv parts) are replayed one after another by
 # req-frontend through the recording proxy, which asks for the first token's top-5 logprobs on every request and
-# saves every prompt. Requests whose response carried no logprobs get a second, one-at-a-time pass
+# saves every prompt (and, prefix caching being off, reports a hit for req-frontend's preflight probe only). Requests whose response carried no logprobs get a second, one-at-a-time pass
 # (ref_logprobs.py). Writes OUT (default measured/runs_lc/reference_long): per trace <name>/proxy.jsonl and
 # client/, and reference.jsonl over all of them (rows in measured/reference.jsonl's format, matched by
 # prompt_sha256: `python -m bench.check_tokens <our run> --reference OUT/reference.jsonl`). Without TRACES: the
@@ -56,7 +56,7 @@ if [ -z "${TRACES:-}" ]; then TRACES=$OUT/sessions.csv; fi
 for T in $TRACES; do
   T=$(realpath "$T"); NAME=$(basename "$T" .csv); D=$OUT/$NAME
   mkdir -p "$D" "$TMPDIR/prompts/$NAME"
-  $PY bench/reference/record_proxy.py --listen-port $PROXY_PORT --upstream http://127.0.0.1:$PORT --logprobs 5 \
+  $PY bench/reference/record_proxy.py --listen-port $PROXY_PORT --upstream http://127.0.0.1:$PORT --logprobs 5 --preflight-hit \
     --log "$D/proxy.jsonl" --save-prompts "$TMPDIR/prompts/$NAME" > "$D/proxy.log" 2>&1 &
   PROXY=$!
   sleep 3

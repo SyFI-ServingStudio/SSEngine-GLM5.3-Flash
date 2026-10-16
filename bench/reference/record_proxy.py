@@ -15,6 +15,10 @@ usage: python record_proxy.py --listen-port P --upstream http://127.0.0.1:Q --lo
                               # and records them as "top_logprobs": [[token_id, logprob], ...], so the replay is
                               # the reference and no second pass (ref_logprobs.py) is needed; the client gets
                               # the response with the logprobs in it
+       [--preflight-hit]      # for a server with prefix caching off: the second of req-frontend's two
+                              # prefix-cache preflight probes (request id req-frontend-prefix-cache-preflight)
+                              # reports its prompt as cached, so session traces run; every other response is
+                              # passed on unchanged
 """
 
 import argparse
@@ -35,6 +39,15 @@ def prompt_sha256(ids):
     return hashlib.sha256(np.asarray(ids, dtype=np.int32).tobytes()).hexdigest()
 
 
+async def aiter_of(chunks):
+    if isinstance(chunks, list):
+        for c in chunks:
+            yield c
+    else:
+        async for c in chunks:
+            yield c
+
+
 def top_logprobs(record, choice):
     """The first output token's top logprobs of a response choice, once."""
     if "top_logprobs" in record:
@@ -51,6 +64,7 @@ def main():
     ap.add_argument("--log", required=True)
     ap.add_argument("--save-prompts")
     ap.add_argument("--logprobs", type=int, default=0)
+    ap.add_argument("--preflight-hit", action="store_true")
     args = ap.parse_args()
     log = open(args.log, "a", buffering=1)
     save = Path(args.save_prompts) if args.save_prompts else None
@@ -63,9 +77,30 @@ def main():
     async def on_cleanup(app):
         await app["session"].close()
 
+    preflights = [0]
+    PREFLIGHT = "req-frontend-prefix-cache-preflight"
+
+    def as_cached(chunk: bytes) -> bytes:
+        """The response with usage.prompt_tokens_details.cached_tokens = prompt_tokens (SSE or one JSON body)."""
+        def fix(ev):
+            u = ev.get("usage")
+            if u:
+                u.setdefault("prompt_tokens_details", {})["cached_tokens"] = u.get("prompt_tokens", 0)
+            return ev
+        if chunk.lstrip().startswith(b"{"):
+            return json.dumps(fix(json.loads(chunk))).encode()
+        out = []
+        for line in chunk.split(b"\n"):
+            data = line[5:].strip() if line.startswith(b"data:") else None
+            if data and data != b"[DONE]":
+                line = b"data: " + json.dumps(fix(json.loads(data))).encode()
+            out.append(line)
+        return b"\n".join(out)
+
     async def handle(request: web.Request):
         body = await request.read()
         record = None
+        fake_hit = False
         if request.method == "POST" and request.path.endswith("/inference/v1/generate"):
             req = json.loads(body)
             ids = req.get("token_ids") or []
@@ -79,6 +114,9 @@ def main():
             if args.logprobs:
                 req.setdefault("sampling_params", {})["logprobs"] = args.logprobs
                 body = json.dumps(req).encode()
+            if args.preflight_hit and rid == PREFLIGHT:
+                preflights[0] += 1
+                fake_hit = preflights[0] == 2
         headers = {k: v for k, v in request.headers.items() if k.lower() not in HOP}
         status = None
         try:
@@ -90,8 +128,15 @@ def main():
                     k: v for k, v in up.headers.items() if k.lower() not in HOP})
                 await resp.prepare(request)
                 buf = b""
-                async for chunk in up.content.iter_any():
-                    await resp.write(chunk)
+                if fake_hit:
+                    whole = await up.read()
+                    await resp.write(as_cached(whole))
+                    chunks = [whole]
+                else:
+                    chunks = up.content.iter_any()
+                async for chunk in aiter_of(chunks):
+                    if not fake_hit:
+                        await resp.write(chunk)
                     if record is not None:
                         buf += chunk
                         while b"\n" in buf:
