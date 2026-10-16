@@ -106,16 +106,88 @@ def sim_rounds(n: int, setting: str = "plain_hbm") -> dict | None:
         return json.load(fh)
 
 
+def replay_window(run_dir: Path, n: int, window_ms: float) -> dict | None:
+    """Our engine (scheduler, KV) on CPU with the handoff's fit stage times (bench/replay.py sessions), set up as the
+    run's server was (scheduler step, dispatch_ahead, form_lead_ms, max_in_flight; the realizable hit rule), cut to
+    the smoke's window: what the run's scheduling gives at the fit's compute. Written once to <run dir>/replay_fit/."""
+    import msgspec
+    import yaml
+
+    from bench.replay import run_sessions
+    from ppimpl.config import SCHEDULER_STEPS
+
+    cfg = yaml.safe_load((run_dir / "server_config.yaml").read_text())
+    step = next((k for k, v in SCHEDULER_STEPS.items() if msgspec.structs.asdict(v) == cfg["scheduler"]), None)
+    if step is None:
+        return None
+    out = run_dir / "replay_fit"
+    if not (out / "requests.jsonl").exists():
+        run_sessions(step, n, out, minutes=window_ms / 60e3 + 0.25, dispatch_ahead=cfg["dispatch_ahead"],
+                     form_lead_ms=cfg["form_lead_ms"], max_in_flight=cfg["max_in_flight"])
+    return {"step": step, "dispatch_ahead": cfg["dispatch_ahead"], "form_lead_ms": cfg["form_lead_ms"],
+            **window_metrics(real_arrays(out / "requests.jsonl"), window_ms)}
+
+
+FIT_BINS = [(0, 1024), (1024, 4096), (4096, 8192), (8192, 8193)]
+
+
+def stage_fit(run_dir: Path) -> dict:
+    """Per stage and microbatch size (tokens), the run's summed compute over the handoff's fit for the same
+    microbatches (microbatch_fit.json: a + b tokens + c pairs), and stage 0's idle time while a round was waiting
+    (it had arrived and its first chunk had not started): gaps between stage 0's microbatches, from the gap's start or
+    the round's arrival."""
+    from bench.replay import StageModel
+
+    fit = StageModel(HANDOFF)
+    mbs = [m for m in read_jsonl(run_dir / "microbatches.jsonl") if not any(q["id"] == PREFLIGHT for q in m["requests"])]
+    out = {"bins": [f"[{lo}, {hi})" if hi != 8193 else "8192" for lo, hi in FIT_BINS], "stages": []}
+    for s in range(4):
+        row = []
+        for lo, hi in FIT_BINS:
+            ms = [m for m in mbs if m["stage"] == s and lo <= sum(q["append"] for q in m["requests"]) < hi]
+            meas = sum(m["compute_ms"] for m in ms)
+            want = sum(fit.fit_ms(s, [(q["id"], q["prefix"], q["append"]) for q in m["requests"]]) for m in ms)
+            row.append({"n": len(ms), "measured_s": meas / 1e3, "fit_s": want / 1e3,
+                        "ratio": meas / want if want else None})
+        out["stages"].append(row)
+    rows = [r for r in read_jsonl(run_dir / "server_requests.jsonl")
+            if r.get("first_dispatch_ms") is not None and r["id"] != PREFLIGHT]
+    s0 = sorted((m["start_ms"], m["start_ms"] + m["compute_ms"], m) for m in mbs if m["stage"] == 0)
+    first = {}
+    for a, _, m in s0:
+        for q in m["requests"]:
+            first.setdefault(q["id"], a)
+    waits = sorted((r["arrival_ms"], first[r["id"]]) for r in rows if r["id"] in first)
+    idle, gaps, adm, adm_n = 0.0, 0, 0.0, 0
+    for (_, e, _), (a, _, _) in zip(s0, s0[1:]):
+        if a <= e:
+            continue
+        if any(w0 <= e < w1 for w0, w1 in waits):            # a round was already waiting when stage 0 went idle
+            idle += a - e
+            gaps += 1
+        else:                                               # a round arrived while stage 0 was idle: its latency
+            lo = min((w0 for w0, w1 in waits if e < w0 < a and w1 >= a), default=None)
+            if lo is not None:
+                adm += a - lo
+                adm_n += 1
+    out.update(s0_idle_while_waiting_s=idle / 1e3, s0_idle_while_waiting_gaps=gaps,
+               s0_idle_arrival_to_start_s=adm / 1e3, s0_idle_arrivals=adm_n)
+    return out
+
+
 def smoke(run_dir: Path, n: int) -> dict:
     """A short sessions run (bench/run.py --client-limit) against the target run cut to the same window: from the
-    first submit to the last first token the client logged (it logs no round still waiting when it stops)."""
+    first submit to the last first token the client logged (it logs no round still waiting when it stops); beside
+    them our engine's replay with the fit's stage times over the same window (scheduling alone), and the run's stage
+    time over the fit by microbatch size (compute alone)."""
     real = real_arrays(run_dir / "requests.jsonl")
     window = float(real[1].max()) + 1e-3      # the last logged first token counts
     sim = sim_rounds(n)
     return {"run": run_dir.name, "max_sessions": n, "window_s": window / 1e3,
             "measured": window_metrics(real, window),
             "target": None if sim is None else window_metrics(sim_arrays(sim), window),
-            "target_source": None if sim is None else sim["source"]}
+            "target_source": None if sim is None else sim["source"],
+            "replay": replay_window(run_dir, n, window), "stage_fit": stage_fit(run_dir)}
 
 
 def smoke_md(rows: list[dict]) -> str:
@@ -132,6 +204,30 @@ def smoke_md(rows: list[dict]) -> str:
                    f"{m['new_tokens_per_s'] / 1e3:.1f}k / {t.get('new_tokens_per_s', float('nan')) / 1e3:.1f}k | "
                    f"{100 * m['prefix_hit_share']:.2f}% / {100 * t.get('prefix_hit_share', float('nan')):.2f}% | "
                    f"{ttft} |")
+        rp = x.get("replay")
+        if rp and ts:
+            tr = rp["ttft_s"]
+            out.append(f"| └ replay (our engine, fit times; {rp['step']}, dispatch_ahead {rp['dispatch_ahead']}, form lead "
+                       f"{rp['form_lead_ms']:g} ms) | | | {rp['rounds']} | {rp['rounds_per_s']:.2f} | "
+                       f"{rp['new_tokens_per_s'] / 1e3:.1f}k | {100 * rp['prefix_hit_share']:.2f}% | "
+                       + " / ".join(f"{tr[p]:.2f}" for p in ("p50", "p90", "p99")) + " ("
+                       + " / ".join(f"x{_r(tr[p], ts[p])}" for p in ("p50", "p90", "p99")) + " of target) |")
+    fits = [x for x in rows if x.get("stage_fit")]
+    if fits:
+        f0 = fits[0]["stage_fit"]
+        out += ["", "Stage time / fit (microbatch_fit.json) by microbatch size in tokens, summed over the run's "
+                "microbatches (n); stage 0 idle while a round was already waiting (gaps), and from a round's arrival on an idle "
+                "stage 0 to its start (arrivals):", "",
+                "| Run | Stage | " + " | ".join(f0["bins"]) + " | Stage 0 idle, waiting | Stage 0 idle, arrival to start |",
+                "|---|---|" + "---|" * len(f0["bins"]) + "---|---|"]
+        for x in fits:
+            f = x["stage_fit"]
+            for s, row in enumerate(f["stages"]):
+                cells = [f"x{c['ratio']:.3f} ({c['n']}; {c['measured_s'] - c['fit_s']:+.1f} s)" if c["ratio"] else "–"
+                         for c in row]
+                idle = (f"{f['s0_idle_while_waiting_s']:.2f} s ({f['s0_idle_while_waiting_gaps']} gaps) | "
+                        f"{f['s0_idle_arrival_to_start_s']:.2f} s ({f['s0_idle_arrivals']} arrivals)" if s == 0 else " | ")
+                out.append(f"| {x['run']} | {s} | " + " | ".join(cells) + f" | {idle} |")
     return "\n".join(out)
 
 
