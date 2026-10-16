@@ -366,7 +366,8 @@ class Controller:
     def _from_intake(self, frames: list[bytes]):
         ident, kind = frames[0], frames[1]
         if kind == b"Q":
-            key, req_id, arrival_ns = self.unpack.decode(frames[2])
+            recv_ns = time.time_ns()
+            key, req_id, arrival_ns, *stamps = self.unpack.decode(frames[2])
             ids = np.frombuffer(frames[3], np.int32)
             why = self.failed or (None if self.sched.kv.fits_ever(len(ids))
                                   else f"prompt of {len(ids)} tokens does not fit the KV pool")
@@ -380,7 +381,7 @@ class Controller:
             while req_id in self.live:
                 req_id, k = f"{base}#{k}", k + 1
             self.live.add(req_id)
-            self._admit(req_id, ids, arrival_ns, Remote(ident, key))
+            self._admit(req_id, ids, arrival_ns, Remote(ident, key), (*stamps, recv_ns))
         elif kind == b"D":
             req_id, sent_ns = self.unpack.decode(frames[2])
             self.log_response(self.answered.pop(req_id), sent_ns)
@@ -392,19 +393,31 @@ class Controller:
         elif kind == b"S":   # /shutdown at an intake: the serve process stops on SIGTERM (ppimpl/serve/server.py)
             os.kill(os.getpid(), signal.SIGTERM)
 
-    def _admit(self, req_id: str, token_ids, arrival_ns: int, fut: asyncio.Future):
+    def _admit(self, req_id: str, token_ids, arrival_ns: int, fut: asyncio.Future, stamps: tuple = ()):
+        """`stamps` (intake requests): host ns of body read, ids parsed, received here; logged as `host_ms`."""
         if not isinstance(token_ids, np.ndarray):
             token_ids = np.asarray(token_ids, np.int32)
         req = Request(req_id, len(token_ids), arrival_ns, token_ids)
-        self.reqs[req_id] = (req, fut, {"id": req_id, "seq": self.next_seq, "prompt_tokens": len(token_ids),
-                                        "arrival_ms": self._ms(arrival_ns), "_prompt": token_ids})
+        info = {"id": req_id, "seq": self.next_seq, "prompt_tokens": len(token_ids),
+                "arrival_ms": self._ms(arrival_ns), "_prompt": token_ids}
+        self.reqs[req_id] = (req, fut, info)
         self.next_seq += 1
+        try:
+            self._admit_inner(req, info)
+        finally:
+            if len(stamps) == 3:     # phases of arrival -> admitted, ms from the arrival
+                info["host_ms"] = {k: round((t - arrival_ns) / 1e6, 3) for k, t in
+                                   zip(("body", "parsed", "received", "admitted"), (*stamps, time.time_ns()))}
+
+    def _admit_inner(self, req: Request, info: dict):
+        req_id = req.req_id
+        token_ids = req.token_ids
         if self.sched.kv.keep_sessions:
             req.session = self.sched.kv.find_session(token_ids)
             tok = self.sched.kv.repeat_token(req)
             if tok is not None:      # the same prompt as a kept context: its token, nothing computed
                 req.cached = req.num_tokens
-                self.reqs[req_id][2]["repeat"] = True
+                info["repeat"] = True
                 done = self._reply(req, tok, time.time_ns())
                 if done:
                     self.loop.call_soon_threadsafe(self._answered, done)

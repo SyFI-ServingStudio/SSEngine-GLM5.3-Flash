@@ -1,10 +1,12 @@
 """Intake process (RunConfig.intake_procs > 0): one of N HTTP servers on the same port (SO_REUSEPORT, the kernel
-spreads connections over them), like vLLM's api-server-count. It parses a request's token ids into int32 bytes and
+spreads connections over them), like vLLM's api-server-count. It parses a request's token ids into int32 bytes
+(ppimpl/serve/ids.py) and
 passes them to the controller's control thread over zmq; the token comes back the same way. The controller process
 then serves no HTTP, so a burst of requests no longer queues behind one event loop.
 
 DEALER (identity = index) <-> controller ROUTER (RunConfig.intake_addr), frames:
-  intake -> controller: [b"R"] ready | [b"Q", msgpack (key, req_id, arrival_ns), int32 ids] request
+  intake -> controller: [b"R"] ready | [b"Q", msgpack (key, req_id, arrival_ns, body_ns, parsed_ns), int32 ids] request
+                        (body_ns: body read; parsed_ns: ids parsed, just before the send)
                         | [b"D", msgpack (req_id, response_ns)] response sent | [b"S"] /shutdown
   controller -> intake: [b"G"] all intakes ready (/health 200 from now on)
                         | [b"A", msgpack (key, req_id, token, cached tokens)] | [b"E", msgpack (key, why)]
@@ -16,7 +18,6 @@ import signal
 import socket
 import time
 import uuid
-import warnings
 
 import msgspec
 import numpy as np
@@ -25,6 +26,7 @@ import zmq
 import zmq.asyncio
 
 from ppimpl.config import RunConfig
+from ppimpl.serve import ids as ids_mod
 from ppimpl.serve.http import SamplingParams, error, json_body, read_body, reply, sse_body
 
 
@@ -36,29 +38,32 @@ class RawRequest(msgspec.Struct):
     rid: str | None = None
 
 
-def parse_ids(raw) -> np.ndarray:
-    """A JSON array of ints (msgspec.Raw) -> int32 array; ValueError for anything else."""
-    text = bytes(raw)
-    if text[:1] != b"[":
-        raise ValueError("token_ids: not a list")
-    inner = text[1:-1]
-    if not inner.strip():
-        return np.zeros(0, np.int32)
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")    # numpy warns (and stops early) on what is not an int list
-        try:
-            ids = np.fromstring(inner, dtype=np.int64, sep=",")
-        except (DeprecationWarning, ValueError) as e:
-            raise ValueError(f"token_ids: {e}") from None
-    if len(ids) != inner.count(b",") + 1 or (len(ids) and (ids.min() < 0 or ids.max() >= 2**31)):
-        raise ValueError("token_ids: not a list of int32 ids")
-    return ids.astype(np.int32)
+class RestRequest(msgspec.Struct):
+    """The body with its token array cut out (`ids.parse_fast`): token_ids must decode to []."""
+    token_ids: list[int]
+    sampling_params: SamplingParams = msgspec.field(default_factory=SamplingParams)
+    stream: bool = False
+    model: str | None = None
+    rid: str | None = None
+
+
+parse_ids = ids_mod.parse_slow_ids
+
+
+def parse_body(raw: bytes, dec: msgspec.json.Decoder, rest_dec: msgspec.json.Decoder):
+    """(request, int32 ids): the fast path of ppimpl/serve/ids.py, else msgspec + numpy (same answer, or the error)."""
+    got = ids_mod.parse_fast(raw, rest_dec)
+    if got is not None:
+        return got
+    body = dec.decode(raw)
+    return body, parse_ids(body.token_ids)
 
 
 class Intake:
     def __init__(self, cfg: RunConfig, index: int):
         self.cfg, self.index = cfg, index
         self.dec = msgspec.json.Decoder(RawRequest)
+        self.rest_dec = msgspec.json.Decoder(RestRequest)
         self.pack = msgspec.msgpack.Encoder()
         self.unpack = msgspec.msgpack.Decoder()
         self.pending: dict[int, asyncio.Future] = {}
@@ -88,6 +93,7 @@ class Intake:
                 self.sock.setsockopt(zmq.SNDHWM, 0)
                 self.sock.setsockopt(zmq.RCVHWM, 0)
                 self.sock.connect(self.cfg.intake_addr())
+                ids_mod.warm()
                 await self.sock.send_multipart([b"R"])
                 self.tasks = [asyncio.create_task(self._answers()), asyncio.create_task(self._watch_parent())]
             await send({"type": f"lifespan.{kind}.complete"})
@@ -124,9 +130,9 @@ class Intake:
     async def _generate(self, scope, receive, send):
         arrival_ns = time.time_ns()
         raw = await read_body(receive)
+        body_ns = time.time_ns()
         try:
-            body = self.dec.decode(raw)
-            ids = parse_ids(body.token_ids)
+            body, ids = parse_body(raw, self.dec, self.rest_dec)
         except (msgspec.ValidationError, msgspec.DecodeError, ValueError) as e:
             return await error(send, str(e))
         if body.sampling_params.max_tokens != 1:
@@ -138,7 +144,8 @@ class Intake:
         key, self.next_key = self.next_key, self.next_key + 1
         fut = asyncio.get_running_loop().create_future()
         self.pending[key] = fut
-        await self.sock.send_multipart([b"Q", self.pack.encode((key, req_id, arrival_ns)), ids.data], copy=False)
+        await self.sock.send_multipart([b"Q", self.pack.encode((key, req_id, arrival_ns, body_ns, time.time_ns())),
+                                        ids.data], copy=False)
         try:
             final_id, tok, cached = await fut
         except RuntimeError as e:
