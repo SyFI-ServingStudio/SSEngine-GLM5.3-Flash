@@ -2,7 +2,7 @@ import msgspec
 import numpy as np
 import pytest
 
-from ppimpl.intake import RawRequest, parse_ids
+from ppimpl.serve.intake import RawRequest, parse_ids
 
 
 def ids_of(body: bytes) -> np.ndarray:

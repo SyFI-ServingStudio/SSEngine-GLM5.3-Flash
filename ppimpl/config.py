@@ -16,7 +16,8 @@ MAX_IN_FLIGHT = 4
 LAYER_SPLIT = [12, 11, 11, 11]
 
 # The weights: Hugging Face nvidia/GLM-5.3-Flash-NVFP4 at this revision, in the hub cache under HF_HOME
-# (`hf download nvidia/GLM-5.3-Flash-NVFP4 --revision <CHECKPOINT_REVISION>`). PPIMPL_CHECKPOINT names another directory.
+# (`hf download nvidia/GLM-5.3-Flash-NVFP4 --revision <CHECKPOINT_REVISION>`). PPIMPL_CHECKPOINT names another
+# directory.
 CHECKPOINT_REPO = "nvidia/GLM-5.3-Flash-NVFP4"
 CHECKPOINT_REVISION = "da920bb0b9f4a06727223a349e55468e38352348"
 CHECKPOINT = os.environ.get("PPIMPL_CHECKPOINT") or str(
@@ -70,7 +71,8 @@ class FakeConfig(msgspec.Struct, forbid_unknown_fields=True):
 class RunConfig(msgspec.Struct, forbid_unknown_fields=True):
     model: str = "fake"               # "fake" (FakeStageModel) or "glm53" (ppimpl.model.stage.StageModel)
     checkpoint: str | None = None
-    device: str = "cuda"              # "cuda": worker s on cuda:s, activations by copy engine (CePipe); "cpu": gloo (tests)
+    device: str = "cuda"              # "cuda": worker s on cuda:s, activations by copy engine (CePipe);
+                                      # "cpu": gloo (tests)
     host: str = "127.0.0.1"
     port: int = 8000                  # HTTP
     control_port: int | None = None   # zmq + torch.distributed ports: control_port .. control_port+5 (default port+1)
@@ -83,8 +85,8 @@ class RunConfig(msgspec.Struct, forbid_unknown_fields=True):
     pool_tokens: int | None = None    # cap on the KV pool, in tokens (1_contract.md §2.3)
     cuda_graphs: bool = True          # glm53: microbatches up to 8192 tokens replay a CUDA graph per power-of-2 bucket
                                       # (padded to it); larger ones run eagerly (ppimpl/model/stage.py)
-    intake_procs: int = 4             # N intake processes on the port; 0: HTTP in the controller process
-                                      # (SO_REUSEPORT) that parse requests and pass them on over zmq (ppimpl/intake.py)
+    intake_procs: int = 4             # HTTP in N intake processes on the port (SO_REUSEPORT) that parse requests and
+                                      # pass them on over zmq (ppimpl/serve/intake.py); 0: HTTP in the controller
     profile_mbs: list[int] | None = None  # [a, b): cudaProfilerStart at mb a, Stop after mb b-1 (bench/run.py --nsys)
     keep_sessions: bool = False       # phase B: exact prefix cache (kept sessions, LRU eviction of whole sessions)
     scheduler: SchedulerConfig = msgspec.field(default_factory=SchedulerConfig)  # mb_tokens: one-request runs set it >= the prompt

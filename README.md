@@ -8,11 +8,12 @@ files 2–7 are the specification; its `data/` holds the targets.
 
 1. **Engine provenance: hybrid.** Our own small engine (scheduler, KV/prefix cache, DRAM/SSD tiers, pipeline
    runtime, server). Kernels and model-layer code are reused from the vLLM fork (`servingstudio-alignment` line,
-   commit `892da0822f`, `vllm/models/glm5next`): imported as a library where it works unchanged, vendored into
-   `ppimpl/` only where we must change it (e.g. the stage split and the mHC hand-off between stages).
+   commit `892da0822f`, `vllm/models/glm5next`), imported as a library. Where a stage needs different behavior (the
+   stage split, the mHC hand-off between stages, the kernel choices of `2_kernels.md`) `ppimpl/model/pp_patch.py`
+   overrides it at run time; its docstring lists every override, why, and the test that proves it still applies.
 2. **Runtime dependencies:** PyTorch, the vLLM fork as a kernel/layer library (its custom ops, FlashInfer, DeepGEMM,
-   DeepSelect, TileLang, causal-conv1d as it pins them), safetensors, FastAPI/Uvicorn (server), pyzmq + msgspec
-   (control messages), NCCL via torch.distributed. Nothing else without a note in this file.
+   DeepSelect, TileLang, causal-conv1d as it pins them), safetensors, Uvicorn (the server is a bare ASGI app), pyzmq +
+   msgspec (control messages), torch.distributed gloo (barriers; activations go over CUDA IPC, `ppimpl/runtime/README.md`). Nothing else without a note in this file.
 3. **Model execution** is owned by `ppimpl` (one process per stage, our forward loop); no vLLM engine,
    scheduler, model runner or KV-cache manager runs.
 4. **Attention backends:** DSA = DeepGEMM `fp8_mqa_logits` + top-k + FlashInfer TRTLLM sparse MLA; KDA = FlashInfer
@@ -26,7 +27,9 @@ Goal: small codebase, maximum reuse.
 
 | Path | Content |
 |---|---|
-| `ppimpl/` | the engine |
-| `bench/` | harnesses that run the handoff's milestones and write `measured/` |
+| `ppimpl/` | the engine: `config.py`, `model/` (one stage on the vLLM fork), `runtime/` (controller, workers, transport), `engine/` (scheduler, KV, tiers), `serve/` (HTTP) |
+| `bench/` | harnesses that run the handoff's milestones and write `measured/` (`python -m bench.<name>`); `bench/slurm/` the job scripts |
+| `env/` | `make_env.sh` builds the environment, `check_env.py` checks it; versions in `ENV.md` |
+| `tests/` | `pytest -q` runs the CPU tests; `-m gpu` the GPU tests |
 | `measured/` | measurements in the handoff's `measured/` format; `issues.md` is the gap log |
 | `lanes/` | per-lane git worktrees (ignored) |

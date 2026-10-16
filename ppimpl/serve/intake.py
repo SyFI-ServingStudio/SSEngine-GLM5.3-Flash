@@ -25,7 +25,7 @@ import zmq
 import zmq.asyncio
 
 from ppimpl.config import RunConfig
-from ppimpl.http import SamplingParams, error, json_body, read_body, reply, sse_body
+from ppimpl.serve.http import SamplingParams, error, json_body, read_body, reply, sse_body
 
 
 class RawRequest(msgspec.Struct):

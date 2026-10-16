@@ -22,6 +22,8 @@ HANDOFF = SIM / "doc" / "handoff" / "glm53_flash_pp4_b200_v1"
 REQ_FRONTEND = SIM / "alignment" / "load_generator" / "req-frontend"
 # The prompt corpus (http://mattmahoney.net/dc/enwik9.zip, unzipped; env/make_env.sh fetches it).
 ENWIK9 = Path(os.environ.get("PPIMPL_ENWIK9") or MAIN / "third_party" / "enwik9")
+# The ServingStudioSim profiler package (`profiling`) at the handoff's frozen commit 7bb224a6 (env/make_env.sh).
+PROFILER = MAIN / "third_party" / "sim_7bb224a6"
 
 KV_BLOCKS = 16           # ceil(131072 / 8576)
 NUM_BLOCKS = 1 + KV_BLOCKS + 6

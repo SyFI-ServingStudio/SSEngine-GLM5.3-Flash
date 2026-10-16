@@ -1,4 +1,4 @@
-"""HTTP pieces shared by the in-process server (ppimpl/server.py) and the intake processes (ppimpl/intake.py)."""
+"""HTTP pieces shared by the in-process server (server.py) and the intake processes (intake.py)."""
 
 import msgspec
 

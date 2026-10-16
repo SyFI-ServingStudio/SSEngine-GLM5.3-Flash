@@ -28,10 +28,10 @@ def main():
     i.add_argument("--index", type=int, required=True)
     a = ap.parse_args()
     if a.cmd == "serve":
-        from ppimpl.server import serve
+        from ppimpl.serve.server import serve
         serve(load_config(a.config, port=a.port, run_dir=a.run_dir))
     elif a.cmd == "intake":
-        from ppimpl.intake import run_intake
+        from ppimpl.serve.intake import run_intake
         run_intake(load_config(a.config), a.index)
     else:
         from ppimpl.runtime.worker import run_worker

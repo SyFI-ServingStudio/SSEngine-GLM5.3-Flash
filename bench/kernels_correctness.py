@@ -22,13 +22,12 @@ import time
 import traceback
 from pathlib import Path
 
-from bench.common import HANDOFF, MAIN
+from bench.common import HANDOFF, MAIN, PROFILER
 
-SIM = MAIN / "third_party" / "sim_7bb224a6"
 SPECS = HANDOFF / "data" / "kernel_specs.jsonl"
 VLLM_TESTS = MAIN / "third_party" / "vllm"
 # neither tree is an installed package: the profiler's `profiling` and the fork's `tests` import from their roots
-for path in (str(SIM), str(VLLM_TESTS)):
+for path in (str(PROFILER), str(VLLM_TESTS)):
     if path not in sys.path:
         sys.path.append(path)
 

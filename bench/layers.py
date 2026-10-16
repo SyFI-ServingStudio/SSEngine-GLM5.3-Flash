@@ -35,12 +35,13 @@ import math
 import os
 import re
 import statistics
+import sys
 import tempfile
 import time
 import traceback
 from pathlib import Path
 
-from bench.common import HANDOFF, MEASURED, NUM_BLOCKS, enwik9_tokens, one_request_plan, sleep_cycles_per_ms
+from bench.common import HANDOFF, MEASURED, NUM_BLOCKS, PROFILER, enwik9_tokens, one_request_plan, sleep_cycles_per_ms
 
 LENGTHS = (1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072)
 TYPES = ("input_head", "first_kda_dense", "kda_dense", "kda_moe", "dsa_moe", "output_head")
@@ -365,6 +366,38 @@ def load_targets() -> dict:
     return out
 
 
+def force_routing(gate, source) -> None:
+    """The MoE gate still runs its GEMM, then hands the experts `source()` (FP32 [>= T, 288] logits) instead of
+    its output; when `source()` is None the real router output goes through."""
+    orig = gate.forward
+
+    def forward(x):
+        out = orig(x)
+        logits = source()
+        if logits is None:
+            return out
+        forced = logits[: x.shape[0]]
+        return (forced, out[1]) if isinstance(out, tuple) else forced
+
+    gate.forward = forward
+
+
+def forced_routing_logits(per_expert_batches: list[int], num_tokens: int, top_k: int, device):
+    """FP32 router logits whose top-k, under DeepSeek-V3 routing with the layer's correction bias, gives exactly
+    `per_expert_batches` tokens per expert (profiling/runners/moe/exact_topk.py builds the assignment). Selected
+    logits saturate the sigmoid at 1 and the others at 0, so a bias spread below 1 cannot change the choice."""
+    import torch
+
+    if str(PROFILER) not in sys.path:     # the frozen profiler tree is not an installed package
+        sys.path.append(str(PROFILER))
+    from profiling.runners.moe.exact_topk import exact_topk_ids
+
+    ids = exact_topk_ids(num_tokens=num_tokens, top_k=top_k, per_expert_batches=tuple(per_expert_batches))
+    logits = torch.full((num_tokens, len(per_expert_batches)), -30.0, dtype=torch.float32, device=device)
+    logits.scatter_(1, torch.tensor(ids, dtype=torch.int64, device=device), 30.0)
+    return logits
+
+
 class Routing:
     """Source of the MoE gates' forced logits; None = real router."""
     logits = None
@@ -543,7 +576,6 @@ def trace_check(parsed: dict) -> dict:
 
 def bench(args) -> None:
     import torch
-    from ppimpl.model import pp_patch
     from ppimpl.model.stage import CHECKPOINT, StageModel, bench_config
 
     targets = load_targets()
@@ -559,7 +591,7 @@ def bench(args) -> None:
     for layer in model.layers:
         gate = getattr(getattr(layer, "mlp", None), "gate", None)
         if gate is not None and hasattr(gate, "e_score_correction_bias"):
-            pp_patch.force_routing(gate, Routing.get)
+            force_routing(gate, Routing.get)
     install_scopes(model)
     cpm = sleep_cycles_per_ms()
     tokens_all = enwik9_tokens(CHECKPOINT, max(lengths))
@@ -572,7 +604,7 @@ def bench(args) -> None:
         tL = time.time()
         plan = one_request_plan(tokens_all[:L])
         counts = targets[(L, "dsa_moe")]["moe_per_expert_batches"]
-        forced = pp_patch.forced_routing_logits(counts, L, 8, dev)
+        forced = forced_routing_logits(counts, L, 8, dev)
         bad = check_forced(model, forced, counts)
         extra_common = {"forced_layers_off": bad, "autotune": bool(args.autotune)}
         try:

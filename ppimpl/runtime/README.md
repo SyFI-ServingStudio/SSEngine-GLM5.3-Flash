@@ -1,8 +1,8 @@
 # runtime: interfaces of phase A
 
 The contract between the controller, the four stage workers and the stage model. The model lane (`ppimpl/model/`)
-and the runtime lane (`ppimpl/runtime/`, `ppimpl/engine/`, `ppimpl/server.py`) build against this file in parallel.
-A change to it goes through the orchestrator.
+and the runtime lane (`ppimpl/runtime/`, `ppimpl/engine/`, `ppimpl/serve/`) build against this file in parallel. A
+change to it goes through the orchestrator.
 
 ## Processes
 

@@ -21,7 +21,7 @@ import msgspec
 import uvicorn
 
 from ppimpl.config import RunConfig
-from ppimpl.http import SamplingParams, error, json_body, read_body, reply, sse_body
+from ppimpl.serve.http import SamplingParams, error, json_body, read_body, reply, sse_body
 from ppimpl.runtime.controller import Controller, RequestError
 
 
@@ -106,7 +106,7 @@ def build_app(cfg: RunConfig) -> App:
 
 def serve(cfg: RunConfig):
     sys.setswitchinterval(0.0005)   # the control thread gets the GIL within 0.5 ms while the event loop takes a burst
-    if cfg.intake_procs:            # HTTP in N intake processes (ppimpl/intake.py); here only the controller
+    if cfg.intake_procs:            # HTTP in N intake processes (ppimpl/serve/intake.py); here only the controller
         import uvloop
         return uvloop.run(_serve_controller(cfg))
     uvicorn.run(build_app(cfg), host=cfg.host, port=cfg.port, loop="uvloop", http="httptools", lifespan="on",
