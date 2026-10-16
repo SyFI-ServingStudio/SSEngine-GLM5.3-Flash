@@ -29,6 +29,20 @@ Measured / target over the same window: from the first submit to the last first 
 | └ replay (our engine, fit times; plain, dispatch_ahead 1, form lead 35 ms) | | | 2067 | 14.12 | 93.5k | 99.73% | 0.41 / 1.22 / 2.09 (x1.12 / x1.08 / x1.12 of target) |
 | prefix_smoke_n400_7569 | 400 | 149 | 2038 / 2105 | 13.64 / 14.08 | 93.7k / 94.7k | 99.72% / 100.00% | 0.46 / 1.83 / 3.32 vs 0.37 / 1.17 / 1.99 (x1.23 / x1.57 / x1.67) |
 | └ replay (our engine, fit times; plain, dispatch_ahead 1, form lead 35 ms) | | | 2090 | 13.98 | 94.5k | 99.74% | 0.41 / 1.25 / 2.20 (x1.11 / x1.07 / x1.11 of target) |
+| prefix_smoke_n400_7658 | 400 | 151 | 2040 / 2153 | 13.50 / 14.25 | 93.9k / 96.1k | 99.72% / 100.00% | 0.48 / 2.19 / 4.27 vs 0.39 / 1.28 / 3.55 (x1.24 / x1.72 / x1.20) |
+| └ replay (our engine, fit times; plain, dispatch_ahead 1, form lead 35 ms) | | | 2142 | 14.18 | 95.9k | 99.74% | 0.42 / 1.39 / 3.57 (x1.10 / x1.08 / x1.01 of target) |
+
+Prefix cache per round (server_requests.jsonl hit_kind): rounds by kind, tokens recomputed because the kept context was superseded or evicted, waits for pool room:
+
+| Run | Rounds by kind | Superseded: recomputed tokens | Evicted: recomputed tokens | Admit waits |
+|---|---|---|---|---|
+| prefix_smoke_n400_7658 | full 1792, none_first_round 307, superseded 5 | 188,750 | 0 | 0 (max 0 ms) |
+
+Stage 0, plan formed -> its forward returned with all GPU work enqueued (ms, p50 / p90 / p99); of the plans formed while another ran, how many were enqueued after that one's stage-0 end (late, by how much):
+
+| Run | Formed → enqueued | Formed → received | Forward host | Queued plans late | Late by |
+|---|---|---|---|---|---|
+| prefix_smoke_n400_7658 | 7.2 / 10.1 / 41.5 | 0.8 / 1.0 / 2.4 | 6.5 / 9.1 / 39.0 | 135 / 1830 | 5.3 / 15.8 / 475.2 |
 
 Stage time / fit (microbatch_fit.json) by microbatch size in tokens, summed over the run's microbatches (n); stage 0 idle while a round was already waiting (gaps), and from a round's arrival on an idle stage 0 to its start (arrivals):
 
@@ -42,6 +56,10 @@ Stage time / fit (microbatch_fit.json) by microbatch size in tokens, summed over
 | prefix_smoke_n400_7569 | 1 | x1.091 (256; +0.2 s) | x1.183 (257; +1.0 s) | x1.195 (151; +1.3 s) | x1.025 (1605; +2.1 s) |  |  |
 | prefix_smoke_n400_7569 | 2 | x1.103 (256; +0.3 s) | x1.214 (257; +1.2 s) | x1.228 (151; +1.5 s) | x1.061 (1605; +5.5 s) |  |  |
 | prefix_smoke_n400_7569 | 3 | x1.102 (256; +0.3 s) | x1.212 (257; +1.2 s) | x1.224 (151; +1.5 s) | x1.064 (1605; +5.8 s) |  |  |
+| prefix_smoke_n400_7658 | 0 | x1.530 (256; +1.2 s) | x1.070 (264; +0.4 s) | x1.136 (167; +1.0 s) | x1.032 (1610; +2.9 s) | 3.80 s (1741 gaps) | 4.93 s (432 arrivals) |
+| prefix_smoke_n400_7658 | 1 | x1.244 (256; +0.6 s) | x1.036 (264; +0.2 s) | x1.138 (167; +1.0 s) | x1.022 (1610; +1.9 s) |  |  |
+| prefix_smoke_n400_7658 | 2 | x1.252 (256; +0.7 s) | x1.063 (264; +0.3 s) | x1.161 (167; +1.2 s) | x1.061 (1610; +5.4 s) |  |  |
+| prefix_smoke_n400_7658 | 3 | x1.270 (256; +0.7 s) | x1.070 (264; +0.4 s) | x1.162 (167; +1.2 s) | x1.049 (1610; +4.4 s) |  |  |
 
 ## Notes
 
