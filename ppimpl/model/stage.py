@@ -224,7 +224,12 @@ class StageModel:
         init_vllm_distributed(device)
         init_workspace_manager(device)
 
-        with set_default_torch_dtype(vc.model_config.dtype), torch.device(device):
+        # vLLM's JIT kernels register their compile-key space while the model is built (as GPUModelRunner's init
+        # does under JitWarmupRegistry.capture); `warmup` compiles every key (`_warm_jit_keys`)
+        from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
+
+        self.jit_registry = JitWarmupRegistry(vc)
+        with set_default_torch_dtype(vc.model_config.dtype), torch.device(device), self.jit_registry.activate():
             with pp_patch.stage_scope(self.layer_range, self.first, self.last):
                 model = initialize_model(vllm_config=vc)
         model.load_weights(pp_patch.stage_weights(Path(ckpt), self.layer_range, self.first, self.last))
@@ -284,6 +289,7 @@ class StageModel:
             if st["cuda_graphs"] if cuda_graphs is None else cuda_graphs:
                 self.capture_graphs()
             self.graph_info["warmup_s"] = warmup_s
+            self.graph_info["jit_warmup"] = self.jit_warmup
 
     def install_host_trims(self) -> dict:
         mods = [m for m in (*self.layers, self.embed, self.norm, self.lm_head) if m is not None]
@@ -363,6 +369,7 @@ class StageModel:
             for mb_id, specs in self._warm_served_shapes():
                 run(NS(mb_id=mb_id, chunks=self._warm_chunks(specs)))
             self._warm_mhc_pre()
+        self._warm_jit_keys()
         torch.cuda.synchronize(self.device)
         pp_patch.clear_autotune_memo()     # tactics may have changed while tuning
 
@@ -422,6 +429,17 @@ class StageModel:
         for i, specs in enumerate(shapes):
             if fits(specs):
                 yield -100 - i, specs
+
+    def _warm_jit_keys(self) -> None:
+        """Compile every compile key vLLM's JIT kernels declare for this model (`JitWarmupRegistry.warmup`, as vLLM's
+        `kernel_warmup` does): each Triton integer argument at 1, divisible by 16 and neither, each pointer 16-byte
+        aligned and not. Shapes alone miss classes the server meets (smoke 7683: BuildPrefillChunkMetadataKernel at
+        an unaligned request slice with a query slice divisible by 16, mb 1095, 72-83 ms on every stage). Keys
+        already compiled by the shapes above are cache hits."""
+        t0 = time.perf_counter()
+        self.jit_registry.warmup()
+        self.jit_warmup = {"registrations": len(self.jit_registry), "s": round(time.perf_counter() - t0, 1)}
+        print(f"stage {self.stage}: JIT key warm-up {self.jit_warmup}", flush=True)
 
     def _warm_mhc_pre(self) -> None:
         """The standalone mHC pre of the stage's first layer (layer 0 after the input head, or after the stage edge)
