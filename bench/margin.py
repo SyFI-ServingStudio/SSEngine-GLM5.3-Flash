@@ -74,14 +74,15 @@ def _install_topk_trace() -> None:
 
         def traced(logits, seq_lens, next_n, dst, k, *rest):
             fn(logits, seq_lens, next_n, dst, k, *rest)
-            if TRACE["on"]:      # decode path: pool logits, pool-granular seq_lens, select k pools per row
-                lens = seq_lens.reshape(-1).tolist() if seq_lens.ndim == 2 else \
-                    [int(L) for L in seq_lens.tolist() for _ in range(next_n)]
+            if TRACE["on"]:
+                # decode path: pool logits, pool-granular seq_lens, select k pools per row
+                TRACE["backend"] = fn.resolve_backend(logits, k, logits.shape[0])
+                lens = fn._row_ends(seq_lens, next_n, logits.shape[0]).tolist()   # the kernels' causal row ends
                 lg, d = logits.float().cpu(), dst.cpu()
                 rows = []
                 for r, L in enumerate(lens):
                     v = lg[r, :L]
-                    kth = float(v.topk(min(k, L)).values[-1])
+                    kth = float(v.topk(min(k, L)).values[-1]) if L else 0.0
                     rows.append({"keys": L, "ties_at_kth": int((v == kth).sum()),
                                  "above_kth": int((v > kth).sum())})
                 TRACE["decode"].append([hashlib.sha1(b"".join(lg[r, :L].numpy().tobytes()
@@ -138,7 +139,8 @@ def _worker(rank: int, cases: list[dict], repeats: int, port: int, out: str, tra
                         pipe.send(o, done)
                         if TRACE["on"]:
                             traces.append({"case": c["name"], "repeat": rep, "position": s + n - 1,
-                                           "topk": TRACE["calls"], "decode": TRACE["decode"]})
+                                           "topk": TRACE["calls"], "decode": TRACE["decode"],
+                                           "backend": TRACE.get("backend")})
                         TRACE["on"] = False
                         continue
                     b = m.prepare(plan)
@@ -154,7 +156,8 @@ def _worker(rank: int, cases: list[dict], repeats: int, port: int, out: str, tra
                                     "logits_sha1": hashlib.sha1(lf.float().cpu().numpy().tobytes()).hexdigest()[:16]})
                         if TRACE["on"]:
                             traces.append({"case": c["name"], "repeat": rep, "position": s + n - 1,
-                                           "topk": TRACE["calls"], "decode": TRACE["decode"]})
+                                           "topk": TRACE["calls"], "decode": TRACE["decode"],
+                                           "backend": TRACE.get("backend")})
                         print(f"[margin] {c['name']} repeat {rep} pos {s + n - 1}: token {int(lb.argmax())} "
                               f"margin bf16 {res[-1]['bf16']['margin']} fp32 {res[-1]['fp32']['margin']} "
                               f"({time.time() - t0:.1f} s)", flush=True)
@@ -227,6 +230,7 @@ def variation(out: Path) -> dict:
                       "decode_topk_order_or_set_vary": [i for i in range(nl)
                                                         if len({d["decode"][i][1] for d in dec}) > 1],
                       "decode_topk_set_vary": [i for i in range(nl) if len({d["decode"][i][2] for d in dec}) > 1],
+                      "backend": dec[0].get("backend"),
                       "max_ties_at_kth": max(r["ties_at_kth"] for d in dec for x in d["decode"] for r in x[3])}
             rep.setdefault(k, {})[f"stage{st}"] = {"layers": layers, "order_or_set_varies": order,
                                                   "set_varies": sets, **dv}
