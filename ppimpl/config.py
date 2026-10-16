@@ -85,8 +85,9 @@ class RunConfig(msgspec.Struct, forbid_unknown_fields=True):
     pool_tokens: int | None = None    # cap on the KV pool, in tokens (1_contract.md §2.3)
     cuda_graphs: bool = True          # glm53: microbatches up to 8192 tokens replay a CUDA graph per power-of-2 bucket
                                       # (padded to it); larger ones run eagerly (ppimpl/model/stage.py)
-    intake_procs: int = 4             # HTTP in N intake processes on the port (SO_REUSEPORT) that parse requests and
-                                      # pass them on over zmq (ppimpl/serve/intake.py); 0: HTTP in the controller
+    intake_procs: int = 16            # HTTP in N intake processes on the port (SO_REUSEPORT) that parse requests and
+                                      # pass them on over zmq (ppimpl/serve/intake.py); 0: HTTP in the controller.
+                                      # 16: first TTFT at 8k 0.25 s vs 0.42 s with 4 (measured/runs_intake)
     profile_mbs: list[int] | None = None  # [a, b): cudaProfilerStart at mb a, Stop after mb b-1 (bench/run.py --nsys)
     keep_sessions: bool = False       # phase B: exact prefix cache (kept sessions, LRU eviction of whole sessions)
     scheduler: SchedulerConfig = msgspec.field(default_factory=SchedulerConfig)  # mb_tokens: one-request runs set it >= the prompt
