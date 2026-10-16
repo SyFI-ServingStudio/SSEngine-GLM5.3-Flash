@@ -227,6 +227,7 @@ class StageModel:
         pp_patch.install_topk_router()
         pp_patch.install_kpool_unaligned()
         pp_patch.install_sparse_mla_split()
+        pp_patch.install_indexer_split()
         # host trims (no kernel or argument changes): env cache, FlashInfer tactic memo / mm_fp4 skip_check, plain
         # parameters
         self.host_trims = self.install_host_trims() if host_trims else None

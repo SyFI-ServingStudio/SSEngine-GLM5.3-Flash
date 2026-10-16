@@ -18,6 +18,7 @@ kernel a stage launches must be the manifest's for its position, with no fallbac
 | `route_kda` | each KDA layer's `Glm5NextLinearAttention._forward` (vLLM) | Dao causal-conv1d (config 4) + FlashInfer persistent `recurrent_kda` (config 5) on our state blocks, as the design prices | manifest check (configs 4, 5); `bench/kvcheck.py` |
 | `install_topk_router` | `torch.ops._C.top_k_per_row_prefill` and `indexer.build_prefill_chunk_metadata` (vLLM), process-wide | per shape, DeepSelect or vLLM's kernel, whichever row is faster (configs 20/21); `topk_canon` makes the answer deterministic | manifest check (configs 20/21); `test_model_cpu.py::test_topk_choice_matches_the_faster_row_at_every_profiled_shape`; GPU test g |
 | `install_kpool_unaligned` | glm5next `sparse_indexer._kpool_compress_insert` and `kpool_compress.kpool_seed_tail_cache` (vLLM), process-wide | a chunk may start inside a 4-token indexer pool (prefix hits resume at the kept prompt's length); the fork's insert assumes pool-aligned starts. The straddling pool is written from the tail ring + batch rows with the same kernel | `test_kpool_cpu.py` (reference ops); `bench/kvcheck.py --chunk 8001` (bitwise vs unsplit) |
+| `install_indexer_split` | `DeepseekV32IndexerMetadataBuilder._split_indexer_prefill_chunks` (vLLM), process-wide | the indexer logits of one prefill go out in calls of at most 2 GiB, query rows in multiples of 512: DeepGEMM's `fp8_mqa_logits` costs the same per 512 query rows at long context, so the fork's greedy split (1,022 + 2 rows at 512k + 1k) paid a whole second call for 2 rows (issues.md, "Long context") | `test_indexer_split_cpu.py`; nsys at 512k |
 | `install_sparse_mla_split` | `flashinfer.decode.trtllm_batch_decode_with_kv_cache_mla`, process-wide | a launch over 32,768 rows returns without doing the work on B200; split as the target does (issues.md, "M2 results") | M2 `dsa_moe` at 64k/128k |
 | `install_autotune_memo` | FlashInfer `AutoTuner.choose_one`, process-wide | host time: memoize the tactic lookup outside tuning (same answer) | `test_host_trims_cpu.py::test_autotune_memo_matches_and_returns_callers_runner` |
 | `install_mm_fp4_skip_check` | `flashinfer.mm_fp4`, process-wide | host time: `skip_check=True` after the warm-up ran the checks | GPU tests c, d (same kernels, same token) |
@@ -436,6 +437,63 @@ def install_kpool_unaligned() -> None:
                    "seed": kops.kpool_seed_tail_cache}
     si._kpool_compress_insert = kpool_compress_insert
     kops.kpool_seed_tail_cache = kpool_seed_tail_cache
+
+
+# ---------------------------------------------------------------- indexer prefill split
+
+INDEXER_MAX_LOGITS_BYTES = 2 << 30   # one call's FP32 logits (the fork's default is 512 MiB)
+INDEXER_ROW_ALIGN = 512              # query rows per DeepGEMM mqa_logits step at long context
+_ORIG_INDEXER_SPLIT = None
+
+
+def split_indexer_prefill_chunks(seq_lens: list[int], query_lens: list[int], workspace_size: int,
+                                 max_logits_bytes: int = INDEXER_MAX_LOGITS_BYTES, request_offset: int = 0,
+                                 align: int = INDEXER_ROW_ALIGN) -> list[tuple[slice, slice]]:
+    """The fork's `_split_indexer_prefill_chunks` (requests packed while their keys fit the workspace and rows x keys
+    fit the logits budget; one request too large for the budget is cut along its query rows), except that a request
+    cut along its rows is cut into multiples of `align` rows when the budget holds at least that many.
+
+    Why: DeepGEMM's `fp8_mqa_logits` takes the same time for 1 to 512 query rows at long context and grows per 512
+    rows (L1 rows at 131,072 keys: 0.284 ms at 128 rows, 0.288 at 512, 0.573 at 1,024). The fork cut 1,024 rows at 512k
+    context (131,328 pools) into 1,022 + 2 under its 512 MiB budget: 0.58 + 0.24 ms per layer instead of 0.57 (job
+    7404). Here: one call of 1,024 rows; 8,192 rows go as 3,584 + 3,584 + 1,024."""
+    chunks: list[tuple[slice, slice]] = []
+    n, max_elems, end = len(seq_lens), max_logits_bytes // 4, 0
+    while end < n:
+        start, m, k = end, 0, 0
+        while end < n:
+            nm, nk = m + query_lens[end], k + seq_lens[end]
+            if nk <= workspace_size and nm * nk <= max_elems:
+                m, k, end = nm, nk, end + 1
+            else:
+                break
+        if end == start:
+            m, k, end = query_lens[end], seq_lens[end], end + 1
+        max_q = max(1, max_elems // k) if k > 0 else max(1, m)
+        if max_q < m and max_q >= align:
+            max_q -= max_q % align
+        req = slice(start + request_offset, end + request_offset)
+        chunks += [(req, slice(q, min(q + max_q, m))) for q in range(0, m, max_q)]
+    return chunks
+
+
+def install_indexer_split() -> None:
+    """Route the indexer metadata builder's prefill split through `split_indexer_prefill_chunks` (process-wide; the
+    builder's own `max_logits_bytes`, from VLLM_SPARSE_INDEXER_MAX_LOGITS_MB, is replaced by
+    INDEXER_MAX_LOGITS_BYTES)."""
+    global _ORIG_INDEXER_SPLIT
+    from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerMetadataBuilder as B
+
+    if _ORIG_INDEXER_SPLIT is not None:
+        return
+    _ORIG_INDEXER_SPLIT = B.__dict__["_split_indexer_prefill_chunks"]
+
+    def split(seq_lens_cpu, query_lens_cpu, workspace_size, max_logits_bytes, request_offset=0):
+        return split_indexer_prefill_chunks([int(v) for v in seq_lens_cpu.tolist()],
+                                            [int(v) for v in query_lens_cpu.tolist()], workspace_size,
+                                            INDEXER_MAX_LOGITS_BYTES, request_offset)
+
+    B._split_indexer_prefill_chunks = staticmethod(split)
 
 
 # ---------------------------------------------------------------- sparse MLA launch size
