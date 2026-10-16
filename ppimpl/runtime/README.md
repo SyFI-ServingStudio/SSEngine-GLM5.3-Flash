@@ -63,6 +63,7 @@ class StageDone(msgspec.Struct):
     start_ns: int              # GPU start of the stage's first kernel for this mb (CUDA event, host-clock aligned)
     end_ns: int                # GPU end of its last kernel, before the send
     tokens: list[tuple[str, int]] | None   # stage 3 only: (req_id, greedy token) per is_last chunk
+    host_ns: tuple[int, int, int] | None   # host clock: plan received, forward called, forward returned
 ```
 
 Clock: each worker aligns its CUDA events to `time.time_ns()` once at startup (record an event, synchronize, read the

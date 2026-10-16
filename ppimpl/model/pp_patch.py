@@ -479,6 +479,25 @@ def kpool_heads_suffix(heads, req: list[int], first: int, row0: int):
     return (rows - row0 if row0 else rows), ring, blocks, (last - row0 if row0 else last)
 
 
+_KPOOL_WINDOWS: dict = {}
+_KPOOL_WINDOWS_OLD: list = []       # outgrown tables stay allocated: queued kernels may still read them
+
+
+def kpool_windows(n: int, kpool: int, device) -> torch.Tensor:
+    """[n, kpool] int64: row r's pool window r-kpool+1 .. r, clamped at 0. A view of one per-device table (grown on
+    demand) instead of 7 small launches per DSA layer; the stage-0 host launches these before its first MoE."""
+    key = (str(device), kpool)
+    t = _KPOOL_WINDOWS.get(key)
+    if t is None or t.shape[0] < n:
+        m = max(n, 8192, 0 if t is None else 2 * t.shape[0])
+        pos = torch.arange(m, device=device)
+        if t is not None:
+            _KPOOL_WINDOWS_OLD.append(t)
+        t = (pos - (kpool - 1)).clamp_min(0)[:, None] + torch.arange(kpool, device=device)[None, :]
+        _KPOOL_WINDOWS[key] = t
+    return t[:n]
+
+
 def kpool_compress_insert(k, gate_score, ape, kv_cache, slot_mapping, kpool, head_dim, round_scale, *, ops=None):
     """`sparse_indexer._kpool_compress_insert`, with straddling pools masked out and handed to the tail seed."""
     ops = ops or _ORIG_KPOOL["ops"]
@@ -486,11 +505,11 @@ def kpool_compress_insert(k, gate_score, ape, kv_cache, slot_mapping, kpool, hea
     n = slot_mapping.shape[0]
     heads = KPOOL_HEADS.get(slot_mapping.data_ptr()) if n else None
     if n >= kpool:
-        pos = torch.arange(n, device=k.device)
-        write_mask = (slot_mapping >= 0) & (pos >= kpool - 1)
+        write_mask = slot_mapping >= 0
+        write_mask[:kpool - 1] = False          # rows whose pool starts before the slice
         if heads is not None:
             write_mask.index_fill_(0, heads.last, False)   # not `[idx] = False`: that copies the scalar H2D and syncs
-        idx = (pos - (kpool - 1)).clamp_min(0)[:, None] + torch.arange(kpool, device=k.device)[None, :]
+        idx = kpool_windows(n, kpool, k.device)
         ops.kpool_compress_and_write_cache(kv_cache, k[idx], gate_score[idx], ape, slot_mapping.to(torch.int64),
                                            pool_size=kpool, head_dim=head_dim, write_mask=write_mask,
                                            round_scale=round_scale, write_cache=True, return_compressed=False)

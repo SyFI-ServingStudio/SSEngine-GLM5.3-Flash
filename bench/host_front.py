@@ -11,6 +11,8 @@ direct - ahead is what the host costs the stage on the GPU timeline. With --idle
 thread sleeps X ms before each forward, as a worker blocks on its plan socket between microbatches) and
 `direct_spin` (it busy-waits X ms instead): what an idle, cold host thread adds. Also the host time of `forward` (perf
 counter), and with --profile one cProfile of a direct forward (top functions by own and by cumulative time).
+With --stamps, low-overhead host timings of direct forwards (ppimpl/runtime/host_stamps.py): when each graph
+segment and eager break starts after the forward's start, each chosen function's inclusive time, GC time.
 """
 
 from __future__ import annotations
@@ -25,7 +27,6 @@ import time
 from pathlib import Path
 from types import SimpleNamespace as NS
 
-
 def main():
     import torch
 
@@ -37,6 +38,7 @@ def main():
     ap.add_argument("--append", type=int, default=256)
     ap.add_argument("--reps", type=int, default=30)
     ap.add_argument("--profile", action="store_true")
+    ap.add_argument("--stamps", action="store_true")
     ap.add_argument("--idle-ms", type=float, default=0.0)
     ap.add_argument("--out", default="")
     a = ap.parse_args()
@@ -104,8 +106,51 @@ def main():
             rows = sorted(st.items(), key=lambda kv: -kv[1][col])[:40]
             lines = [f"{v[col] * 1e6:9.0f} us {v[1]:5d}x  {k[2]} ({Path(k[0]).name}:{k[1]})" for k, v in rows]
             print(f"[host_front] profile by {key} time (us, calls):\n" + "\n".join(lines), flush=True)
+    if a.stamps:
+        res["stamps"] = stamps(model, plan, hidden, dev, a.reps)
     if a.out:
         Path(a.out).write_text(json.dumps(res, indent=1) + "\n")
+
+
+def stamps(model, plan, hidden, dev, reps: int) -> dict:
+    """--stamps: segment start times and function times (ppimpl.runtime.host_stamps) over `reps` direct forwards,
+    medians per forward."""
+    import torch
+
+    from ppimpl.runtime.host_stamps import HostStamps
+
+    st = HostStamps(model)
+    if st.missing:
+        print(f"[host_front] stamps: not found: {st.missing}", flush=True)
+    recs = []
+    for r in range(reps + 3):
+        torch.cuda.synchronize(dev)
+        st.begin()
+        with torch.inference_mode():
+            model.forward(plan, hidden)
+        rec = st.end()
+        torch.cuda.synchronize(dev)
+        if r >= 3:
+            recs.append(rec)
+    med = statistics.median
+    segs: dict = {}
+    for rec in recs:
+        for i, k, t in rec["seg"]:
+            segs.setdefault((i, k), []).append(t)
+    fns: dict = {}
+    for rec in recs:
+        for q, (ms, n) in rec["fn"].items():
+            fns.setdefault(q, []).append((ms, n))
+    out = {"host_ms": round(med(r["host_ms"] for r in recs), 3), "gc_ms": round(med(r["gc_ms"] for r in recs), 3),
+           "segments": [[i, k, round(med(v), 3)] for (i, k), v in sorted(segs.items())],
+           "functions": {q: [round(med(m for m, _ in v), 3), v[0][1]]
+                         for q, v in sorted(fns.items(), key=lambda kv: -med(m for m, _ in kv[1]))}}
+    print(f"[host_front] stamps: forward host {out['host_ms']:.3f} ms (monitored), gc {out['gc_ms']:.3f} ms; "
+          "segment starts (ms):", flush=True)
+    print("  " + "  ".join(f"{i}{k}@{t:.3f}" for i, k, t in out["segments"]), flush=True)
+    for q, (ms, n) in out["functions"].items():
+        print(f"  {ms:7.3f} ms  {n:3d}x  {q}", flush=True)
+    return out
 
 
 if __name__ == "__main__":
