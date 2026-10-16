@@ -94,8 +94,9 @@ def test_topk_canonical_matches_reference(rows, width, two_requests):
             assert torch.equal(start, ref)
 
 
+@pytest.mark.parametrize("path", ["prefill", "deep_select", "kernel"])
 @pytest.mark.parametrize("rows,width", [(1, 32768), (3, 131072), (64, 8192), (128, 4096)])
-def test_decode_topk_canonical(rows, width):
+def test_decode_topk_canonical(rows, width, path):
     """(g) the indexer's decode top-k (next_n = 1, seq_lens [B, 1]; cooperative up to 64 rows, persistent above)
     through `pp_patch.canonical_decode_topk`: ties at the k-th value (logits rounded to 0.1), row ends from half to
     the full width, a row of fewer keys than k; equal to the torch reference whatever order the kernel left
@@ -107,7 +108,12 @@ def test_decode_topk_canonical(rows, width):
     from vllm.model_executor.layers import indexer_topk
     from vllm.v1.worker.workspace import init_workspace_manager
 
+    import vllm._custom_ops  # noqa: F401  registers torch.ops._C
+    import vllm._deepselect_C  # noqa: F401  registers torch.ops.deep_select
+
     pp_patch._ORIG_DECODE_TOPK = pp_patch._ORIG_DECODE_TOPK or indexer_topk.get_indexer_topk
+    pp_patch._ORIG_TOPK = pp_patch._ORIG_TOPK or torch.ops._C.top_k_per_row_prefill
+    pp_patch.DECODE_TOPK_PATH = path
     dev, k = torch.device("cuda", 0), 512
     torch.cuda.set_device(dev)
     init_workspace_manager(dev)

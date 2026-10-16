@@ -8,8 +8,8 @@ keys [0, seq_lens[r])), k = 512. Per backend (cooperative: up to 64 rows, persis
 - `valid`: every call returns a valid top-k: min(k, L) distinct keys in [0, L), -1 after them, and no key left out
   is above the smallest key taken (ties at the k-th value may be any of them);
 - `set_stable` / `order_stable`: the 5 calls return the same set / the same set in the same order;
-- `canon_ok`: after `pp_patch.canonical_decode_topk` (kernel + `topk_canon.canonicalize_split`), every call equals
-  `canonical_topk_torch`.
+- `canon_ok`: through `pp_patch.canonical_decode_topk` (each DECODE_TOPK_PATH: the backend's kernel, vLLM's prefill
+  top-k, DeepSelect; then `topk_canon.canonicalize_split`), every call equals `canonical_topk_torch`.
 """
 
 from __future__ import annotations
@@ -61,6 +61,10 @@ def main() -> None:
     torch.cuda.set_device(dev)
     init_workspace_manager(dev)
     pp_patch._ORIG_DECODE_TOPK = pp_patch._ORIG_DECODE_TOPK or indexer_topk.get_indexer_topk
+    import vllm._custom_ops  # noqa: F401  registers torch.ops._C
+    import vllm._deepselect_C  # noqa: F401  registers torch.ops.deep_select
+    pp_patch._ORIG_TOPK = pp_patch._ORIG_TOPK or torch.ops._C.top_k_per_row_prefill
+    paths = ("kernel", "prefill", "deep_select")
     out = []
     for backend in ("cooperative", "persistent"):
         disp = indexer_topk.get_indexer_topk(backend)
@@ -81,15 +85,17 @@ def main() -> None:
                     ref = torch.where(cols < ends[:, None], lg, float("-inf")).topk(K, dim=1).indices.to(torch.int32)
                     ref[torch.arange(K, device=dev)[None] >= ends[:, None]] = -1
                     canonical_topk_torch(lg, torch.zeros_like(ends), ends, ref, K)   # a valid top-k -> canonical
-                    calls, canon_ok, err = [], True, None
+                    calls, canon_ok, err = [], {p: True for p in paths}, None
                     try:
                         for _ in range(a.calls):
                             d = torch.full((rows, K), -7, dtype=torch.int32, device=dev)
                             disp(lg, seq, 1, d, K, int(seq.max()))
                             calls.append(d.clone())
-                            c = torch.full((rows, K), -7, dtype=torch.int32, device=dev)
-                            canon(lg, seq, 1, c, K, int(seq.max()))
-                            canon_ok &= bool(torch.equal(c, ref))
+                            for p in paths:
+                                pp_patch.DECODE_TOPK_PATH = p
+                                c = torch.full((rows, K), -7, dtype=torch.int32, device=dev)
+                                canon(lg, seq, 1, c, K, int(seq.max()))
+                                canon_ok[p] &= bool(torch.equal(c, ref))
                     except RuntimeError as e:
                         err = str(e).splitlines()[0][:200]
                     if err:
@@ -101,7 +107,7 @@ def main() -> None:
                         line = {"backend": backend, "rows": rows, "width": width, "kind": kind,
                                 "valid": not bad, "invalid_rows": bad[:8], "n_invalid_rows": len(bad),
                                 "set_stable": len(sets) == 1, "order_stable": len(orders) == 1,
-                                "canon_ok": canon_ok}
+                                "canon_ok": all(canon_ok.values()), "canon_ok_by_path": canon_ok}
                     out.append(line)
                     print(json.dumps(line), flush=True)
     a.out.parent.mkdir(parents=True, exist_ok=True)

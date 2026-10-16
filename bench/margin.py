@@ -3,8 +3,8 @@
   python -m bench.margin <cases.json> [--repeats 3] [--out measured/margins/<name>.json]
 
 cases.json: [{"name": str, "file": <.npy int32 token ids>, "schedule": [[start, tokens, is_last], ...],
-"decode_canon": true, "decode_topk": "kernel"}, ...] (decode_canon false: without pp_patch's decode top-k
-canonicalization; decode_topk "prefill": the decode rows through vLLM's prefill top-k). Each
+"decode_canon": true, "decode_topk": "prefill"}, ...] (decode_canon false: without pp_patch's decode top-k
+canonicalization; decode_topk: pp_patch.DECODE_TOPK_PATH, "prefill", "deep_select" or "kernel"). Each
 case runs `--repeats` times on the same KV and state blocks (one request, a fresh start each time), each schedule
 entry as one microbatch, as the server runs a request alone. At every is_last entry: the last position's logits,
 bf16 as the server's argmax takes them (`StageModel.output_head`) and FP32, their top-5 and the top-1 minus top-2
@@ -168,7 +168,7 @@ def _worker(rank: int, cases: list[dict], repeats: int, port: int, out: str, tra
         for c in cases:
             t = toks[c["name"]]
             pp_patch.DECODE_TOPK_CANON = c.get("decode_canon", True)   # a case may run without it (before/after)
-            pp_patch.DECODE_TOPK_PATH = c.get("decode_topk", "kernel")
+            pp_patch.DECODE_TOPK_PATH = c.get("decode_topk", "prefill")
             for rep in range(repeats):
                 t0 = time.time()
                 for i, (s, n, last) in enumerate(c["schedule"]):

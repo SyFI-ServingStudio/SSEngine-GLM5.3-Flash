@@ -346,18 +346,29 @@ def install_topk_router() -> None:
 
 _ORIG_DECODE_TOPK = None
 DECODE_TOPK_CANON = True      # bench/margin.py cases may turn it off (the before/after of the same process)
-DECODE_TOPK_PATH = "kernel"   # or "prefill": vLLM's prefill top-k (top_k_per_row_prefill) on the decode rows
+# Which top-k selects the decode rows: "prefill" (vLLM's top_k_per_row_prefill), "deep_select", or "kernel" (vLLM's
+# decode dispatcher: cooperative/persistent). The cooperative kernel returned a wrong set, run to run, on a real
+# 131,072-pool row (issues.md, job 7558); the prefill top-k gave a valid one every time.
+DECODE_TOPK_PATH = "prefill"
 
 
 def canonical_decode_topk(backend: str):
-    """vLLM's decode top-k (`indexer_topk.get_indexer_topk`), then `topk_canon`: the same set and order for the same
-    logits, as on the prefill path. The cooperative kernel (up to 64 rows) returns the right set in an order that
-    varies run to run (measured/issues.md, job 7522), and the sparse attention sums in that order. Rows end where the
-    kernels end them; few long rows, so the split canonicalization."""
+    """The indexer's decode top-k (`indexer_topk.get_indexer_topk` call site), then `topk_canon`: the same set and
+    order for the same logits, as on the prefill path. vLLM's decode kernels return their set in an order that varies
+    run to run (issues.md, jobs 7522, 7551), and the sparse attention sums in that order; the cooperative kernel also
+    returned a wrong set on a real 131,072-pool row (7558), so the rows go to DECODE_TOPK_PATH. Rows end where the
+    decode kernels end them; few long rows, so the split canonicalization."""
+    from vllm.model_executor.layers import indexer_topk
+
     fn = _ORIG_DECODE_TOPK(backend)
 
     def run(logits, seq_lens, next_n, dst, k, max_seq_len):
-        if DECODE_TOPK_PATH == "prefill" and _ORIG_TOPK is not None:
+        path = DECODE_TOPK_PATH if _ORIG_TOPK is not None else "kernel"
+        if path == "deep_select" and not indexer_topk.is_deep_select_supported(logits, k):
+            path = "prefill"
+        if path == "deep_select":
+            _deep_select(logits, fn._row_ends(seq_lens, next_n, logits.shape[0]), dst, k)
+        elif path == "prefill":
             ke = fn._row_ends(seq_lens, next_n, logits.shape[0])
             _ORIG_TOPK(logits, torch.zeros_like(ke), ke, dst, logits.shape[0], logits.stride(0), logits.stride(1), k)
         else:
