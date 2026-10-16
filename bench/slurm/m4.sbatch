@@ -1,10 +1,10 @@
 #!/bin/bash
 # M4 (5_prefix_cache.md) runs on one 4-GPU server, into OUT (default measured/runs_m4). Usage, from the repo root:
 #   mkdir -p measured/runs_m4/slurm
-#   sbatch -p priority -J ppimpl --dependency=singleton --time=00:12:00 -o measured/runs_m4/slurm/%j.out bench/slurm/m4.sbatch check
-#   sbatch -p priority -J ppimpl --dependency=singleton --time=00:30:00 -o measured/runs_m4/slurm/%j.out bench/slurm/m4.sbatch bringup
-#   sbatch -p priority -J ppimpl --dependency=singleton --time=00:20:00 -o measured/runs_m4/slurm/%j.out bench/slurm/m4.sbatch preflight
-#   sbatch -p priority -J ppimpl --dependency=singleton --time=00:28:00 -o measured/runs_m4/slurm/%j.out bench/slurm/m4.sbatch prefix_n400
+#   sbatch -p priority -J ppimpl --time=00:12:00 -o measured/runs_m4/slurm/%j.out bench/slurm/m4.sbatch check
+#   sbatch -p priority -J ppimpl --time=00:30:00 -o measured/runs_m4/slurm/%j.out bench/slurm/m4.sbatch bringup
+#   sbatch -p priority -J ppimpl --time=00:20:00 -o measured/runs_m4/slurm/%j.out bench/slurm/m4.sbatch preflight
+#   sbatch -p priority -J ppimpl --time=00:28:00 -o measured/runs_m4/slurm/%j.out bench/slurm/m4.sbatch prefix_n400
 # preflight (before any long run), stopping at the first failure: kvcheck with chunk starts inside 4-token indexer
 # pools (40,000 tokens in 8,001- and 8,190-token chunks, bitwise against unsplit), prefix_check with P + 1/2/3
 # (prefix_check_unaligned), then a smoke of prefix_n400's first ~2 min (client limit 3m incl. ~45 s tokenization:
