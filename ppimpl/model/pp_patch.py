@@ -269,32 +269,52 @@ _ORIG_TOPK = None
 _DS_INPUT_ALIGN = 16
 
 
-def _deep_select(logits, row_ends, out, k):
-    torch.ops.deep_select.topk(logits, k, None, row_ends, False, False, None, out, None, -1, float("-inf"), False,
-                               False)
+# DeepSelect with sorted_index returns the canonical top-k itself (topk_canon's rule: the keys above the k-th value,
+# the lowest-index ties, ascending), so its rows skip canonicalize's extra read of the logits. Only set from the
+# GPU proof in bench/topk_determinism.py (every shape and data kind there: canonical, repeatable, batch-independent).
+DS_CANONICAL = False
+
+
+def _deep_select(logits, row_ends, out, k, sorted_index: bool = False):
+    torch.ops.deep_select.topk(logits, k, None, row_ends, False, sorted_index, None, out, None, -1, float("-inf"),
+                               False, False)
 
 
 def _routed_top_k_per_row_prefill(logits, ks, ke, dst, num_rows, stride0, stride1, k):
-    _top_k_per_row_prefill(logits, ks, ke, dst, num_rows, stride0, stride1, k)
-    if logits.shape[1] > k:      # more keys than k: fix the kernel's set and order (topk_canon.py)
+    canonical = _top_k_per_row_prefill(logits, ks, ke, dst, num_rows, stride0, stride1, k)
+    if logits.shape[1] <= k:      # at most k keys: all of them, nothing to fix
+        return
+    if not canonical:             # fix the kernel's set and order (topk_canon.py)
         topk_canon.canonicalize(logits, ks, ke, dst[:num_rows], k)
+        return
+    lo = 0
+    for a, b in canonical + [(num_rows, num_rows)]:     # the rows between DeepSelect's canonical row ranges
+        if a > lo:
+            topk_canon.canonicalize(logits[lo:a], ks[lo:a], ke[lo:a], dst[lo:a], k)
+        lo = max(lo, b)
 
 
-def _top_k_per_row_prefill(logits, ks, ke, dst, num_rows, stride0, stride1, k):
+def _top_k_per_row_prefill(logits, ks, ke, dst, num_rows, stride0, stride1, k) -> list[tuple[int, int]]:
+    """The top-k into dst; returns the row ranges whose answer is already canonical (DS_CANONICAL)."""
     segments = TOPK_SEGMENTS.get(ks.data_ptr())
     if segments is None or all(seg[3] == "vllm_cuda" for seg in segments):
         if TOPK_LOG is not None:
             TOPK_LOG.append((num_rows, logits.shape[1], "vllm_cuda"))
-        return _ORIG_TOPK(logits, ks, ke, dst, num_rows, stride0, stride1, k)
+        _ORIG_TOPK(logits, ks, ke, dst, num_rows, stride0, stride1, k)
+        return []
+    canonical = []
     for lo, hi, col, backend in segments:
         if TOPK_LOG is not None:
             TOPK_LOG.append((hi - lo, -1, backend))
         if backend == "deep_select":
             # Row r's keys are [col, ke[r]); DeepSelect takes no row start, so the view starts at the request's
             # first key and the ends are relative to it. Indices come back relative to col, as vLLM's do to ks.
-            _deep_select(logits[lo:hi, col:], ke[lo:hi] - col, dst[lo:hi], k)
+            _deep_select(logits[lo:hi, col:], ke[lo:hi] - col, dst[lo:hi], k, sorted_index=DS_CANONICAL)
+            if DS_CANONICAL:
+                canonical.append((lo, hi))
         else:
             _ORIG_TOPK(logits[lo:hi], ks[lo:hi], ke[lo:hi], dst[lo:hi], hi - lo, stride0, stride1, k)
+    return canonical
 
 
 def _topk_segments(start_idx, end_idx, query_start_loc_cpu, compressed_seq_lens_cpu, query_slice, top_k=512):
