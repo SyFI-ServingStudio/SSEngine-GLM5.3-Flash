@@ -1,5 +1,119 @@
 [
  {
+  "setting": "budget_hbm",
+  "max_sessions": 400,
+  "gpu_time_multiplier": 1.06,
+  "run": "logs/20261016_6_mult106_sched/budget/c400",
+  "rounds": 31466,
+  "rounds_per_s": 26.221666666666668,
+  "new_tokens_per_s": 91033.095,
+  "prompt_tokens_per_s": 1803409.7433333334,
+  "computed_tokens_per_s": 111166.26416666666,
+  "prefix_hit_share": 0.9882425579756285,
+  "ttft_s": {
+   "p50": 0.15776710510253905,
+   "p90": 0.47788198852539066,
+   "p99": 2.139598876953122,
+   "max": 289.25375000000014
+  },
+  "rounds_ttft_over_60s": 19
+ },
+ {
+  "setting": "budget_hbm",
+  "max_sessions": 500,
+  "gpu_time_multiplier": 1.06,
+  "run": "logs/20261016_6_mult106_sched/budget/c500",
+  "rounds": 33641,
+  "rounds_per_s": 28.034166666666668,
+  "new_tokens_per_s": 101429.4025,
+  "prompt_tokens_per_s": 1880978.0091666668,
+  "computed_tokens_per_s": 120148.85166666667,
+  "prefix_hit_share": 0.989480787938841,
+  "ttft_s": {
+   "p50": 0.18315830993652343,
+   "p90": 0.7232103271484375,
+   "p99": 6.603919433593738,
+   "max": 604.5636250000001
+  },
+  "rounds_ttft_over_60s": 161
+ },
+ {
+  "setting": "even_hbm",
+  "max_sessions": 400,
+  "gpu_time_multiplier": 1.06,
+  "run": "logs/20261016_6_mult106_sched/even/c400",
+  "rounds": 31489,
+  "rounds_per_s": 26.240833333333335,
+  "new_tokens_per_s": 91084.51166666667,
+  "prompt_tokens_per_s": 1804260.2325,
+  "computed_tokens_per_s": 111087.55583333333,
+  "prefix_hit_share": 0.9883239974023583,
+  "ttft_s": {
+   "p50": 0.1576372528076172,
+   "p90": 0.48283997192382816,
+   "p99": 1.988327377929684,
+   "max": 304.21503125
+  },
+  "rounds_ttft_over_60s": 23
+ },
+ {
+  "setting": "even_hbm",
+  "max_sessions": 500,
+  "gpu_time_multiplier": 1.06,
+  "run": "logs/20261016_6_mult106_sched/even/c500",
+  "rounds": 33631,
+  "rounds_per_s": 28.025833333333335,
+  "new_tokens_per_s": 101408.36833333333,
+  "prompt_tokens_per_s": 1881127.1658333333,
+  "computed_tokens_per_s": 120141.83166666667,
+  "prefix_hit_share": 0.9894739194980418,
+  "ttft_s": {
+   "p50": 0.18338221740722657,
+   "p90": 0.7039436645507813,
+   "p99": 6.594939208984242,
+   "max": 610.1875625
+  },
+  "rounds_ttft_over_60s": 162
+ },
+ {
+  "setting": "good_hbm",
+  "max_sessions": 400,
+  "gpu_time_multiplier": 1.06,
+  "run": "logs/20261016_6_mult106_sched/good/c400",
+  "rounds": 30186,
+  "rounds_per_s": 25.155,
+  "new_tokens_per_s": 87763.5375,
+  "prompt_tokens_per_s": 1741279.4458333333,
+  "computed_tokens_per_s": 110991.45833333333,
+  "prefix_hit_share": 0.9859524055884373,
+  "ttft_s": {
+   "p50": 0.16161458587646485,
+   "p90": 1.0588464965820314,
+   "p99": 18.729346484375753,
+   "max": 63.34931640625
+  },
+  "rounds_ttft_over_60s": 223
+ },
+ {
+  "setting": "good_hbm",
+  "max_sessions": 500,
+  "gpu_time_multiplier": 1.06,
+  "run": "logs/20261016_6_mult106_sched/good/c500",
+  "rounds": 30461,
+  "rounds_per_s": 25.384166666666665,
+  "new_tokens_per_s": 90886.71,
+  "prompt_tokens_per_s": 1688741.7091666667,
+  "computed_tokens_per_s": 124376.45083333334,
+  "prefix_hit_share": 0.9790408135589279,
+  "ttft_s": {
+   "p50": 0.37504617309570315,
+   "p90": 5.50301318359375,
+   "p99": 61.885528125,
+   "max": 66.89040625
+  },
+  "rounds_ttft_over_60s": 1024
+ },
+ {
   "setting": "plain_hbm",
   "max_sessions": 400,
   "gpu_time_multiplier": 1.06,
@@ -36,5 +150,43 @@
    "max": 26.70516796875
   },
   "rounds_ttft_over_60s": 0
+ },
+ {
+  "setting": "srpt8k_hbm",
+  "max_sessions": 400,
+  "gpu_time_multiplier": 1.06,
+  "run": "logs/20261016_6_mult106_sched/srpt8k/c400",
+  "rounds": 31887,
+  "rounds_per_s": 26.5725,
+  "new_tokens_per_s": 92268.175,
+  "prompt_tokens_per_s": 1842266.9041666666,
+  "computed_tokens_per_s": 115424.52666666667,
+  "prefix_hit_share": 0.9867677894385137,
+  "ttft_s": {
+   "p50": 0.2720166625976562,
+   "p90": 0.35935927734375006,
+   "p99": 2.02150366455077,
+   "max": 211.736625
+  },
+  "rounds_ttft_over_60s": 17
+ },
+ {
+  "setting": "srpt8k_hbm",
+  "max_sessions": 500,
+  "gpu_time_multiplier": 1.06,
+  "run": "logs/20261016_6_mult106_sched/srpt8k/c500",
+  "rounds": 34290,
+  "rounds_per_s": 28.575,
+  "new_tokens_per_s": 102611.565,
+  "prompt_tokens_per_s": 1930656.37,
+  "computed_tokens_per_s": 123025.10333333333,
+  "prefix_hit_share": 0.9888331301959892,
+  "ttft_s": {
+   "p50": 0.2755220184326172,
+   "p90": 0.38024255676269547,
+   "p99": 4.415149736328126,
+   "max": 573.6064999999999
+  },
+  "rounds_ttft_over_60s": 125
  }
 ]
