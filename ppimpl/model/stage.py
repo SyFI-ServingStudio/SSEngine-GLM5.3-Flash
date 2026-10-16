@@ -297,8 +297,9 @@ class StageModel:
         budget (indexer and both top-k paths), then two requests, one continuing a cached prefix (conv and KDA initial
         state, chunk start > 0), then every power-of-2 length from 512 below the budget, a length not divisible by
         16, one request alone continuing a cached prefix (start divisible by 16 and not; and past `LONG_WARMUP` when the
-        pool holds it), the served shapes of `_warm_served_shapes` (decode rows, many requests continuing prefixes,
-        unaligned pool starts), and the first layer's mHC pre at every split count. Uses blocks 1.. before any request holds them.
+        pool and max_model_len hold it), the served shapes of `_warm_served_shapes` (decode rows, many requests
+        continuing prefixes, unaligned pool starts), and the first layer's mHC pre at every split count. Uses blocks
+        1.. before any request holds them.
         `self.tactics` records the source."""
         from types import SimpleNamespace as NS
 
@@ -355,7 +356,8 @@ class StageModel:
             # (NUM_TOPK_TOKENS 2176, 180 ms Triton compile on the first chunk ending at 65,536, job 7505) and
             # topk_canon (the indexer is wider than k), at a row count divisible by 4 and not (its scratch rows are
             # 16-byte aligned or not: a 1,699-row chunk compiled three kernels, 1.2 s, job 7505)
-            if (self.num_blocks - 1 - 6) * B >= LONG_WARMUP + 1003 + 253:
+            if (self.num_blocks - 1 - 6) * B >= LONG_WARMUP + 1003 + 253 \
+                    and LONG_WARMUP + 1003 + 253 <= self.vc.model_config.max_model_len:
                 run(NS(mb_id=-7, chunks=[chunk("wl", LONG_WARMUP, 256, 1)]))
                 run(NS(mb_id=-8, chunks=[chunk("wv", LONG_WARMUP + 1003, 253, 1)]))
             for mb_id, specs in self._warm_served_shapes():
