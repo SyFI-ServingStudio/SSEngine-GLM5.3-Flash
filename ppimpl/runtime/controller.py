@@ -53,10 +53,11 @@ from ppimpl.serve.slab import SlabReader
 READY_TIMEOUT_S = 1800   # a real stage loads its weights and captures graphs before Ready
 WAKE_ADDR = "inproc://ppimpl-control-wake"
 ADMIT_BATCH = 64   # requests the control thread takes in before it looks at the reports again
-# With intakes, the control thread busy-polls (zmq poll without a timeout) until this long after the last message or
-# open request: a poll that blocks costs ~0.17 ms of thread wake-up on every intake and report hop (one 64 B DEALER ->
-# ROUTER hop over tcp, idle host: 525 us blocked, 360 us spinning). PPIMPL_CONTROL_SPIN_S=0: always block.
-CONTROL_SPIN_S = float(os.environ.get("PPIMPL_CONTROL_SPIN_S", "60"))
+# PPIMPL_CONTROL_SPIN_S=S (intakes only): the control thread busy-polls (zmq poll without a timeout) until S seconds
+# after the last message or open request. A blocked poll costs ~0.17 ms of wake-up per hop (64 B DEALER -> ROUTER over
+# tcp, idle host: 525 us blocked, 360 us spinning), but end to end it was noise (CPU mock, 512k arrival -> dispatch
+# 4.47 ms spinning, 4.50 blocked) and it holds a core on a contended host: off by default.
+CONTROL_SPIN_S = float(os.environ.get("PPIMPL_CONTROL_SPIN_S", "0"))
 
 
 class Remote(NamedTuple):
