@@ -176,11 +176,26 @@ def main() -> None:
     ap.add_argument("--prompt-len", type=int, default=32768)
     ap.add_argument("--chunk", type=int, default=8000)
     ap.add_argument("--chunk-b", type=int, default=8192, help="chunk size of `chunked_b` (0: skip it)")
+    ap.add_argument("--exact", action="store_true",
+                    help="exit 1 unless every variant equals `whole` bitwise (rows and logits); for chunk sizes "
+                         "at which every microbatch has one mHC split-K (148 // ceil(T / 64) == 1: T > 4,736), so "
+                         "any difference is a hand-off bug")
     a = ap.parse_args()
     import torch.multiprocessing as mp
 
     port = 21000 + (int(JOB) % 100) * 100 if JOB.isdigit() else 21000
     mp.spawn(_worker, args=(a.prompt_len, a.chunk, port, a.chunk_b or None), nprocs=4, join=True)
+    if a.exact:
+        bad = []
+        for rank in range(4):
+            rep = json.loads((OUT / f"kvcheck_{a.prompt_len}_rank{rank}_{JOB}.json").read_text())["variants"]
+            for name, v in rep.items():
+                d = v["max_abs_logit"] if rank == 3 else v["rel_l2"]
+                if d != 0 or not v["finite"]:
+                    bad.append(f"stage {rank} {name}: {d}")
+        print("[kvcheck] exact: " + ("all variants bitwise equal to whole" if not bad else "; ".join(bad)), flush=True)
+        if bad:
+            raise SystemExit(1)
 
 
 if __name__ == "__main__":

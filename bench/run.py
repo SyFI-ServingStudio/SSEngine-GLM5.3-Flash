@@ -236,10 +236,14 @@ def execute(run_dir: Path, server_cfg: dict, client_cfg: dict, *, port: int, met
         print(f"[{run_dir.name}] server ready after {meta['server_ready_s']} s", flush=True)
         t = time.time()
         with open(run_dir / "client.log", "w") as clog:
-            client = subprocess.run(step(argv, None), cwd=REQ_FRONTEND, stdout=clog, stderr=subprocess.STDOUT,
-                                    timeout=client_timeout_s)
+            client = subprocess.Popen(step(argv, None), cwd=REQ_FRONTEND, stdout=clog, stderr=subprocess.STDOUT)
+            fault = watch(run_dir, server, client, client_timeout_s)
         meta["client_s"] = round(time.time() - t, 1)
-        meta["client_returncode"] = 0 if client_limit and client.returncode == 124 else client.returncode
+        if fault:
+            meta["fail_fast"] = fault
+            print(f"[{run_dir.name}] FAIL FAST: {fault}", flush=True)
+        meta["client_returncode"] = 0 if client_limit and client.returncode == 124 and not fault \
+            else client.returncode
         meta["client_exit"] = client.returncode
         meta["uptime_after"] = subprocess.run(["uptime"], capture_output=True, text=True).stdout.strip()
         print(f"[{run_dir.name}] uptime after: {meta['uptime_after']}", flush=True)
@@ -286,6 +290,65 @@ def execute(run_dir: Path, server_cfg: dict, client_cfg: dict, *, port: int, met
     rep = subprocess.run([PYTHON, *report], cwd=ROOT, capture_output=True, text=True)
     print(rep.stdout + rep.stderr, flush=True)
     return meta
+
+
+FAULT_MARKS = ("Traceback", "controller: worker", "exited with")
+
+
+def run_fault(run_dir: Path, server: subprocess.Popen, seen: dict) -> str | None:
+    """A reason to stop the run now, or None: the server exited, a worker, intake or the controller logged a
+    traceback (the server keeps answering, with errors, after a worker fails), or the client counts a failed step.
+    `seen` keeps each log's read offset, so a call reads only what is new."""
+    if server.poll() is not None:
+        return f"server exited with {server.returncode}"
+    for f in [run_dir / "server.log", *sorted(run_dir.glob("worker*.log")), *sorted(run_dir.glob("intake*.log"))]:
+        try:
+            with open(f, "rb") as fh:
+                fh.seek(seen.get(f.name, 0))
+                new = fh.read()
+        except OSError:
+            continue
+        seen[f.name] = seen.get(f.name, 0) + len(new)
+        text = new.decode(errors="replace")
+        for mark in FAULT_MARKS:
+            if mark in text:
+                line = next(x for x in text.splitlines() if mark in x)
+                return f"{f.name}: {line.strip()[:200]}"
+    try:
+        with open(run_dir / "client.log", "rb") as fh:
+            fh.seek(0, 2)
+            fh.seek(max(0, fh.tell() - 4096))
+            tail = fh.read().decode(errors="replace")
+    except OSError:
+        return None
+    counts = re.findall(r"\bfailed=(\d+)", tail)
+    if counts and int(counts[-1]) > 0:
+        return f"client: failed={counts[-1]}"
+    return None
+
+
+def watch(run_dir: Path, server: subprocess.Popen, client: subprocess.Popen, timeout_s: float,
+          every_s: float = 2.0) -> str | None:
+    """Wait for the client; stop it at the first fault (`run_fault`) or after timeout_s. Returns the fault."""
+    seen: dict = {}
+    t = time.monotonic()
+    fault = None
+    while client.poll() is None:
+        fault = run_fault(run_dir, server, seen) or (
+            f"client still running after {timeout_s:.0f} s" if time.monotonic() - t > timeout_s else None)
+        if fault:
+            break
+        time.sleep(every_s)
+    else:
+        fault = run_fault(run_dir, server, seen)
+    if client.poll() is None:
+        client.terminate()
+        try:
+            client.wait(30)
+        except subprocess.TimeoutExpired:
+            client.kill()
+            client.wait()
+    return fault
 
 
 def compressed_bringup(src: Path, out: Path, sessions: list[int] | None, gap_s: float) -> Path:
@@ -473,6 +536,8 @@ def main():
 
 def run_failure(meta: dict, run_dir: Path) -> str | None:
     """Why a finished run counts as failed (the job's exit status), or None."""
+    if meta.get("fail_fast"):
+        return f"stopped early: {meta['fail_fast']}"
     if meta.get("client_returncode") != 0:
         return f"client exited with {meta.get('client_returncode')}"
     tc = run_dir / "token_check.json"

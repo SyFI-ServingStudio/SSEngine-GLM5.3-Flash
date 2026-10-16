@@ -1,7 +1,7 @@
 """Round-1 tokens with the prefix cache against the same prompts computed without it (5_prefix_cache.md §5 "Check the
 output"), through the real server.
 
-  python -m bench.prefix_check [--out measured/runs_m4] [--fake --cpu] [--sessions 0,5,10]
+  python -m bench.prefix_check [--out measured/runs_m4] [--fake --cpu] [--sessions 0,5,10] [--p-shift 1,2,3 --name N]
 
 The bring-up sessions (data/bringup/prefix_sessions.csv), one after another, each round sent as soon as the previous
 answer is back, on a fresh server with `keep_sessions` (prefix_check_on/) and on one without (prefix_check_off/). The
@@ -14,6 +14,10 @@ Without the cache, round 1 computes its whole prompt in the same 8k chunks that 
 [P, P + A) that the cached round computes alone: the microbatches are the same, so the tokens should be identical,
 and a mismatch points at the saved KDA state or the KV of the cached tokens. Each server's server_requests.jsonl
 holds every prompt's sha256 and token; bench/prefix.py compares them (also with the bring-up run's round 1).
+
+--p-shift 1,2,3 adds 1, 2, 3, 1, ... tokens to the sessions' P in file order (the trace's P are multiples of 4): round
+1 then resumes inside a 4-token indexer pool (pp_patch `install_kpool_unaligned`). Its results go to <name>_on/,
+<name>_off/ and <name>.json.
 """
 
 import argparse
@@ -111,11 +115,17 @@ def main():
     ap.add_argument("--port", type=int)
     ap.add_argument("--fake", action="store_true")
     ap.add_argument("--cpu", action="store_true")
+    ap.add_argument("--p-shift", help="comma-separated tokens added to P, cycled over the sessions")
+    ap.add_argument("--name", default="prefix_check")
     a = ap.parse_args()
     sess = sessions_of(a.trace)
     if a.sessions:
         keep = {int(x) for x in a.sessions.split(",")}
         sess = [s for s in sess if s["session"] in keep]
+    if a.p_shift:
+        shifts = [int(x) for x in a.p_shift.split(",")]
+        for i, s in enumerate(sess):
+            s["P"] += shifts[i % len(shifts)]
     need = max(s["ordinal"] * STRIDE + s["P"] + s["new"] for s in sess)
     t = time.time()
     pool = token_pool(need)
@@ -124,9 +134,9 @@ def main():
     port = a.port or (20000 + int(job) % 120 * 100 + 50 if job else 18550)
     res = {}
     for i, keep in enumerate((True, False)):
-        name = "prefix_check_on" if keep else "prefix_check_off"
-        res[name] = run_mode(a.out / name, keep, sess, pool, port + 10 * i, a.fake, a.cpu)
-    on, off = res["prefix_check_on"], res["prefix_check_off"]
+        res[keep] = run_mode(a.out / f"{a.name}_{'on' if keep else 'off'}", keep, sess, pool, port + 10 * i, a.fake,
+                             a.cpu)
+    on, off = res[True], res[False]
     lines = []
     for x, y in zip(on, off):
         lines.append({"session": x["session"], "P": x["P"], "A": x["A"], "hit": x["round1"]["cached"],
@@ -135,10 +145,10 @@ def main():
                       "same_prompt": x["round1"]["sha256"] == y["round1"]["sha256"],
                       "token_on": x["round1"]["token"], "token_off": y["round1"]["token"],
                       "match": x["round1"]["token"] == y["round1"]["token"]})
-    summary = {"sessions": len(lines), "hit_is_P": sum(x["hit_is_P"] for x in lines),
+    summary = {"sessions": len(lines), "p_shift": a.p_shift, "hit_is_P": sum(x["hit_is_P"] for x in lines),
                "round1_match": sum(x["match"] for x in lines), "same_prompt": sum(x["same_prompt"] for x in lines),
                "lines": lines}
-    (a.out / "prefix_check.json").write_text(json.dumps(summary, indent=1) + "\n")
+    (a.out / f"{a.name}.json").write_text(json.dumps(summary, indent=1) + "\n")
     print(f"prefix check: {summary['sessions']} sessions, hit == P {summary['hit_is_P']}, round-1 token equal "
           f"{summary['round1_match']}, same round-1 prompt {summary['same_prompt']}", flush=True)
     return 0 if summary["round1_match"] == summary["sessions"] == summary["hit_is_P"] else 1

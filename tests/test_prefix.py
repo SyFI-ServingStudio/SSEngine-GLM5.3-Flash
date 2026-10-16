@@ -143,3 +143,35 @@ def test_waiting_size_counts_what_is_cached_at_arrival():
     assert hit.fresh == 2000 and s.backlog() == 2500                     # the backlog counts new tokens
     mb = s.next_microbatch(0)
     assert [c.req.req_id for c in mb] == ["a1", "b1"] and mb[0].start == 100_000
+
+
+def test_run_watch_stops_the_client_at_the_first_fault(tmp_path):
+    """bench/run.py fails fast: a worker traceback, a failed client step or a dead server stops the client."""
+    import subprocess
+    import sys
+
+    from bench.run import run_fault, watch
+
+    def procs():
+        server = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        client = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        return server, client
+
+    (tmp_path / "server.log").write_text("cpus: {}\nserving\n")
+    (tmp_path / "client.log").write_text("sessions 1/9 | steps 3/90 completed=3 failed=0 | elapsed=1.0s\n")
+    server, client = procs()
+    try:
+        assert run_fault(tmp_path, server, {}) is None
+        (tmp_path / "worker2.log").write_text("Traceback (most recent call last):\n  boom\n")
+        assert watch(tmp_path, server, client, 30, every_s=0.1) == "worker2.log: Traceback (most recent call last):"
+        assert client.poll() is not None
+        (tmp_path / "worker2.log").unlink()
+        with open(tmp_path / "client.log", "a") as f:
+            f.write("sessions 2/9 | steps 4/90 completed=3 failed=1 | elapsed=1.5s\n")
+        assert run_fault(tmp_path, server, {}) == "client: failed=1"
+        server.kill()
+        server.wait()
+        assert run_fault(tmp_path, server, {}).startswith("server exited with")
+    finally:
+        for p in (server, client):
+            p.kill()
