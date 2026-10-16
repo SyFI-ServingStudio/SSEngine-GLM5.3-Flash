@@ -232,6 +232,9 @@ Stage time / fit by microbatch tokens 0–255 / 256–1023 / 1024–8191 / 8192 
   −3.2% (mostly the session slot, as at budget N=400). The p99 comes from the overload at the end of the run. Rounds
   over 10 s: real 576, sim 405. By arrival window, 840-1200 s holds 467 of them (sim 313); at 1080-1200 s alone it is
   199 against 67. With lower throughput, the backlog in the overload grows faster.
+  At 720-1200 s, real computes 109.7-115.4k tokens/s against the sim's 118.9-120.5k (−5% to −8%), with stage 0 busy
+  93-96% against 98-99%. Stage 0 idles 4.8% there: 3.6% at 4 in flight (the cap-4 bubble, gap p50 3.0 ms) and 1.0%
+  at 3 (host, p50 0.9 ms). The slot rule adds −2.3% of sessions at N=400. 7757 reruns it with both removed.
 - force_check_even 7738 (cap 4): 1k TTFT p50 16.29 s vs 14.77 (x1.10). Cap 4 forms on exits, so the 1k prompts
   arriving at 200/s pile into larger microbatches: 1276 microbatches, mean 12.9k tokens, against 1351 and 12.2k
   (7728, cap 5); the target has 1429.
