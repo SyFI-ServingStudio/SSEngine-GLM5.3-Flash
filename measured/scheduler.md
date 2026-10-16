@@ -138,3 +138,27 @@ Stage time / fit by microbatch tokens 0–255 / 256–1023 / 1024–8191 / 8192 
   alignment × count divisible by 16 are now compiled; a 1-token prefill slice cannot occur, since a 1-token row is a
   decode row). Warm-up now prints the compiled variant count of every Triton kernel in the fork's kpool ops and
   topk_canon (worker logs, "own Triton kernel variants after warm-up").
+- **The ~40 ms at p50 (srpt8k and budget): the extra in-flight plan queues in front of a slower later stage.** The
+  dispatch rule lets a plan queue behind stage 0's running one as the 5th in flight (27,284 of 30,370 plans in 7730
+  formed at in_flight 5). The sim and the replay cap it at 4. Stage 0 is the slowest stage in the sim; in the real
+  runs, stages 2 and 3 are slower relative to the fit (7730 4,096-token microbatches: s0 33.25, s1 32.29, s2 34.62,
+  s3 34.32 ms). On GPUs 0-3 (7727, 7730), physical GPU 2 also clocks lower: 1546-1550 MHz vs 1601-1628. So the 5th
+  plan waits before stage 2 (7730: 21.0 ms mean; sim 0.25), and every round it carries pays that wait.
+  CPU replay of budget N=500 (bench.replay, sim x1.06 cost_log run in wt-pp-hitrule logs/20261016_8_budget_c500_costlog):
+
+  | Replay (budget N=500, form lead 45 ms) | r/s | TTFT p50 / p90 / p99 (s) | queue before stage 2 (ms, mean) |
+  |---|---|---|---|
+  | stage time / fit x1.06 each, 4 in flight | 27.68 | 0.171 / 0.717 / 4.41 | 0.9 |
+  | real stage balance (1.042 / 1.049 / 1.097 / 1.077), 4 in flight | 27.56 | 0.176 / 0.715 / 5.06 | 4.2 |
+  | real stage balance, 5 in flight (as the server) | 27.52 | 0.210 / 0.836 / 5.09 | 40.7 |
+  | real stage balance, 5 in flight, pacing 2 ms | 27.53 | 0.174 / 0.714 / 5.58 | 2.5 |
+  | real 7730 | 27.54 | 0.212 / 0.716 / 7.16 (19 min window) | 21.0 |
+
+  srpt8k N=400 (stage balance 1.040 / 1.022 / 1.060 / 1.063): 5 in flight 0.313 / 0.393 / 1.87, real 0.33 / 0.41 /
+  1.94. With pacing 2 ms: 0.272 / 0.363 / 1.91, against sim x1.06 0.27 / 0.36 / 2.02. Throughput is unchanged
+  (25.59 vs 25.61).
+- Fix a152856 (off by default; run name `sched_<step>_n<N>_pace`, margin 2 ms). A plan forms only when it would reach
+  every later stage no earlier than the margin before that stage frees. The check uses per-stage EWMAs of the
+  reported stage times and assumes the next plan has the last plan's tokens. The plan forms that far ahead of the
+  predicted host time (dispatch to stage-0 start, sampled when stage 0 was idle). When stage 0 is the slowest stage,
+  pacing never binds.
