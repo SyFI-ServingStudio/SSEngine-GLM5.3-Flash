@@ -161,3 +161,29 @@ def test_load_tactics_missing_file_is_reported(tmp_path):
 
     r = load_tactics(tmp_path / "none.json")
     assert r["source"] == "missing" and "does not exist" in r["reason"]
+
+
+def test_kv_groups_place_layers_by_the_design_split(monkeypatch, caplog):
+    """vLLM's GLM-5 group function counts KDA state groups per stage from `get_pp_indices`; it must see the design's
+    split [12, 11, 11, 11], not vLLM's default [11, 11, 12, 11] (which logs "unevenly partitioned")."""
+    from vllm.v1.core import kv_cache_utils as kcu
+    from vllm.distributed import utils as dist_utils
+
+    from ppimpl.model import kv_tensors as kt
+
+    seen, design = [], kt.design_pp_indices
+
+    def spy(num_layers, rank, size):
+        seen.append(design(num_layers, rank, size))
+        return seen[-1]
+
+    monkeypatch.setattr(kt, "design_pp_indices", spy)
+    mla = [f"model.layers.{i}.self_attn" for i in range(45) if i in K.DSA_LAYERS]
+    kda = [f"model.layers.{i}.linear_attn" for i in range(45) if i not in K.DSA_LAYERS]
+    vllm_split = dist_utils.get_pp_indices
+    with kt.design_split():
+        n = kcu._pp_balanced_mamba_group_count(kt.group_config_shim(None, None), kda, mla)
+    assert seen == [(0, 12), (12, 23), (23, 34), (34, 45)]
+    assert dist_utils.get_pp_indices is vllm_split
+    assert n == 5      # stage KDA/DSA [9/3, 9/2, 8/3, 8/3]: ceil(9/2)
+    assert "unevenly" not in caplog.text

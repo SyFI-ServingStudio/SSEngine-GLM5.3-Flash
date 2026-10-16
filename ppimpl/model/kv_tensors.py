@@ -19,7 +19,7 @@ caches and KDA layers read their views from `layer.kv_cache`).
 
 from __future__ import annotations
 
-import os
+import contextlib
 from dataclasses import dataclass
 from types import SimpleNamespace
 
@@ -55,11 +55,31 @@ def all_stage_specs(local_spec: dict) -> dict:
     return out
 
 
+def design_pp_indices(num_layers: int, rank: int, size: int) -> tuple[int, int]:
+    """Stage `rank`'s layers under the design's split [12, 11, 11, 11] (`kernels.SPLIT`)."""
+    assert (num_layers, size) == (NUM_LAYERS, len(kernels.SPLIT)), (num_layers, size)
+    start = sum(kernels.SPLIT[:rank])
+    return start, start + kernels.SPLIT[rank]
+
+
+@contextlib.contextmanager
+def design_split():
+    """vLLM's GLM-5 group function places layers with `vllm.distributed.utils.get_pp_indices` (imported at call
+    time), which takes the split from VLLM_PP_LAYER_PARTITION as vllm.envs cached it, else vLLM's own default split.
+    Within this block it gets the design's split instead."""
+    from vllm.distributed import utils as dist_utils
+
+    saved = dist_utils.get_pp_indices
+    dist_utils.get_pp_indices = design_pp_indices
+    try:
+        yield
+    finally:
+        dist_utils.get_pp_indices = saved
+
+
 def group_config_shim(vc, num_blocks: int | None):
-    """What the GLM-5 group functions read of the VllmConfig, with the pipeline the design has (4 stages, split
-    [12, 11, 11, 11]: the group function places layers with vLLM's `get_pp_indices`, which reads the split from
-    VLLM_PP_LAYER_PARTITION)."""
-    os.environ["VLLM_PP_LAYER_PARTITION"] = ",".join(str(n) for n in kernels.SPLIT)
+    """What the GLM-5 group functions read of the VllmConfig, with the pipeline the design has (4 stages; the split
+    comes from `design_split`)."""
     return SimpleNamespace(
         parallel_config=SimpleNamespace(pipeline_parallel_size=len(kernels.SPLIT)),
         model_config=SimpleNamespace(get_total_num_hidden_layers=lambda: NUM_LAYERS),
@@ -73,7 +93,8 @@ def stage_kv_config(vc, local_spec: dict, num_blocks: int):
     from vllm.v1.core import kv_cache_utils as kcu
 
     shim = group_config_shim(vc, num_blocks)
-    groups = kcu._get_kv_cache_groups_glm5_next(shim, all_stage_specs(local_spec))
+    with design_split():
+        groups = kcu._get_kv_cache_groups_glm5_next(shim, all_stage_specs(local_spec))
     proj = kcu._project_kv_cache_groups_to_worker(groups, local_spec)
     per_block = kcu._get_kv_cache_bytes_per_block(proj)
     return kcu.get_kv_cache_config_from_groups(shim, proj, per_block * num_blocks), per_block
@@ -82,7 +103,8 @@ def stage_kv_config(vc, local_spec: dict, num_blocks: int):
 def bytes_per_block(vc, local_spec: dict) -> int:
     from vllm.v1.core import kv_cache_utils as kcu
 
-    groups = kcu._get_kv_cache_groups_glm5_next(group_config_shim(vc, None), all_stage_specs(local_spec))
+    with design_split():
+        groups = kcu._get_kv_cache_groups_glm5_next(group_config_shim(vc, None), all_stage_specs(local_spec))
     return kcu._get_kv_cache_bytes_per_block(kcu._project_kv_cache_groups_to_worker(groups, local_spec))
 
 
