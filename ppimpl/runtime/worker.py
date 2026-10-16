@@ -159,7 +159,7 @@ class Reporter(threading.Thread):
             if not isinstance(item, tuple):
                 sock.send(encode(item))
                 continue
-            stage, mb_id, start, end, anchor, wait, tokens, tok_ids = item
+            stage, mb_id, start, end, anchor, wait, tokens, tok_ids, host = item
             if wait is not None:
                 wait.synchronize()
             toks = None
@@ -169,7 +169,7 @@ class Reporter(threading.Thread):
                         copy_stream.wait_event(wait)
                         tokens = tokens.cpu()
                 toks = list(zip(tok_ids, tokens.tolist()))
-            sock.send(encode(StageDone(stage, mb_id, Clock.to_ns(start, anchor), Clock.to_ns(end, anchor), toks)))
+            sock.send(encode(StageDone(stage, mb_id, Clock.to_ns(start, anchor), Clock.to_ns(end, anchor), toks, host)))
         sock.close()
 
 
@@ -223,6 +223,7 @@ def run_worker(cfg: RunConfig, stage: int):   # makes inference tensors, which a
                 if os.getppid() != parent:
                     raise RuntimeError("controller is gone")
             msg = decode_to_worker(plans.recv())
+            t_recv = time.time_ns()
             if isinstance(msg, Shutdown):
                 ok = True
                 if cuda:   # allocator retries (cache flush + cudaMalloc) stall the device; logged per run
@@ -241,7 +242,9 @@ def run_worker(cfg: RunConfig, stage: int):   # makes inference tensors, which a
             start = clock.mark()
             first_use.mb = plan.mb_id
             hostprof.before(plan.mb_id)
+            t_fwd = time.time_ns()
             out = model.forward(plan, hidden_in)
+            host = (t_recv, t_fwd, time.time_ns())   # the forward's GPU work is all enqueued here
             hostprof.after(plan.mb_id)
             end = clock.mark()
             if hidden_in is not None:
@@ -251,10 +254,10 @@ def run_worker(cfg: RunConfig, stage: int):   # makes inference tensors, which a
             wait = end if cuda else None
             if not last:
                 pipe.send(out, wait)
-                reporter.q.put((stage, plan.mb_id, start, end, anchor, wait, None, None))
+                reporter.q.put((stage, plan.mb_id, start, end, anchor, wait, None, None, host))
             else:
                 tok_ids = [c.req_id for c in plan.chunks if c.is_last]
-                reporter.q.put((stage, plan.mb_id, start, end, anchor, wait, out, tok_ids))
+                reporter.q.put((stage, plan.mb_id, start, end, anchor, wait, out, tok_ids, host))
             if cuda:
                 torch.cuda.nvtx.range_pop()
             window.after(plan.mb_id)
