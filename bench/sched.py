@@ -153,6 +153,11 @@ def _latest(root: Path, pattern: str) -> Path | None:
     return best[1] if best else None
 
 
+# req-frontend frees a session's slot at its last round's token (as the simulator) since 365fba07, swapped in at
+# 2026-10-16 16:11 PDT; session runs whose client started earlier held the slot through the last tool wait
+SLOT_AT_LAST_TOKEN_FROM_NS = 1_792_192_260 * 10**9
+
+
 def session_line(run_dir: Path, step: str, n: int) -> dict:
     from bench.prefix import sessions, stage_fit
 
@@ -163,7 +168,8 @@ def session_line(run_dir: Path, step: str, n: int) -> dict:
     mult_path = MEASURED / "sessions_sim" / "mult106.json"
     mult = {(r["setting"], r["max_sessions"]): r for r in json.loads(mult_path.read_text())} \
         if mult_path.exists() else {}
-    s.update(step=step, n=n, target=targets.get((f"{step}_hbm", n)), sim_x106=mult.get((f"{step}_hbm", n)))
+    s.update(step=step, n=n, target=targets.get((f"{step}_hbm", n)), sim_x106=mult.get((f"{step}_hbm", n)),
+             old_client=json.loads((run_dir / "t0.json").read_text())["t0_unix_ns"] < SLOT_AT_LAST_TOKEN_FROM_NS)
     return s
 
 
@@ -244,7 +250,7 @@ def summarize(root: Path, out: Path) -> Path:
             m, t = s["metrics"], s["target"] or {}
             tt, wt = m["ttft_s"], t.get("ttft_s", {})
             parts.append(
-                f"| {LABEL[s['step']]} | {s['n']} | {s['run']} "
+                f"| {LABEL[s['step']]} | {s['n']} | {s['run']}{' (slot held, old client)' if s['old_client'] else ''} "
                 f"| {m['rounds_per_s']:.1f} vs {t.get('rounds_per_s', 0):.1f} (x{_r(m['rounds_per_s'], t.get('rounds_per_s'))}) "
                 f"| {m['new_tokens_per_s'] / 1e3:.1f}k vs {t.get('new_tokens_per_s', 0) / 1e3:.1f}k "
                 f"(x{_r(m['new_tokens_per_s'], t.get('new_tokens_per_s'))}) "
