@@ -31,7 +31,7 @@ from pathlib import Path
 
 import yaml
 
-from bench.common import ENWIK9, HANDOFF, REQ_FRONTEND, ROOT
+from bench.common import ENWIK9, HANDOFF, REQ_FRONTEND, ROOT, free_port_block
 from ppimpl.config import CHECKPOINT
 from ppimpl.runtime.cpus import cpu_list
 
@@ -521,7 +521,7 @@ def main():
     failed = {}
     for i, name in enumerate(args.names):   # a failed run does not stop the later ones; the exit status reports it
         try:
-            meta = run_named(name, args.fake, port + 10 * i, out, args)   # fresh ports per run
+            meta = run_named(name, args.fake, free_port_block(port + 10 * i), out, args)   # fresh free ports per run
         except Exception as e:
             traceback.print_exc()
             failed[name] = f"{type(e).__name__}: {e}"
