@@ -159,7 +159,7 @@ class Reporter(threading.Thread):
             if not isinstance(item, tuple):
                 sock.send(encode(item))
                 continue
-            stage, mb_id, start, end, anchor, wait, tokens, tok_ids = item
+            stage, mb_id, start, end, anchor, wait, tokens, tok_ids, host = item
             if wait is not None:
                 wait.synchronize()
             toks = None
@@ -169,7 +169,8 @@ class Reporter(threading.Thread):
                         copy_stream.wait_event(wait)
                         tokens = tokens.cpu()
                 toks = list(zip(tok_ids, tokens.tolist()))
-            sock.send(encode(StageDone(stage, mb_id, Clock.to_ns(start, anchor), Clock.to_ns(end, anchor), toks)))
+            sock.send(encode(StageDone(stage, mb_id, Clock.to_ns(start, anchor), Clock.to_ns(end, anchor), toks,
+                                       host)))
         sock.close()
 
 
@@ -233,17 +234,20 @@ def run_worker(cfg: RunConfig, stage: int):   # makes inference tensors, which a
                            "threads": threads()}), flush=True)
                 break
             plan: Plan = msg
+            plan_ns = time.time_ns()
             window.before(plan.mb_id)
             if cuda:
                 torch.cuda.nvtx.range_push(f"stage {stage} mb {plan.mb_id}")   # bench/nsys_trace.py attributes kernels
             clock.maybe_reanchor()
             hidden_in = pipe.recv(plan.num_tokens, model.hidden_width) if stage > 0 else None
+            fwd_ns = time.time_ns()
             start = clock.mark()
             first_use.mb = plan.mb_id
             hostprof.before(plan.mb_id)
             out = model.forward(plan, hidden_in)
             hostprof.after(plan.mb_id)
             end = clock.mark()
+            host = (plan_ns, fwd_ns, time.time_ns())
             if hidden_in is not None:
                 pipe.release()                        # CePipe: the sender may reuse the slot once this forward ran
             del hidden_in
@@ -251,10 +255,10 @@ def run_worker(cfg: RunConfig, stage: int):   # makes inference tensors, which a
             wait = end if cuda else None
             if not last:
                 pipe.send(out, wait)
-                reporter.q.put((stage, plan.mb_id, start, end, anchor, wait, None, None))
+                reporter.q.put((stage, plan.mb_id, start, end, anchor, wait, None, None, host))
             else:
                 tok_ids = [c.req_id for c in plan.chunks if c.is_last]
-                reporter.q.put((stage, plan.mb_id, start, end, anchor, wait, out, tok_ids))
+                reporter.q.put((stage, plan.mb_id, start, end, anchor, wait, out, tok_ids, host))
             if cuda:
                 torch.cuda.nvtx.range_pop()
             window.after(plan.mb_id)
