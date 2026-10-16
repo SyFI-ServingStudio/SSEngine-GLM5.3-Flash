@@ -73,6 +73,10 @@ def build_vllm_config(checkpoint: str, max_num_batched_tokens: int, max_model_le
     # sparse MLA through TRTLLM's MQA kernel for every prefill (config 25), as the targets price it: the fork's dense
     # MHA prefill for prompts within the top-k (<= 2,048 pools) is slower (M2: DSA layer x1.11 at 2k)
     vc.attention_config.sparse_mla_force_mqa = True
+    # enforce_eager turns vLLM's JIT kernel warm-up off (VllmConfig: "equivalent to --kernel_config.
+    # enable_jit_warmup=False"), and with it every kernel's registration of its compile keys; StageModel compiles
+    # them in warm-up (`_warm_jit_keys`), so keep it on (7693: 1 registration with it off)
+    vc.kernel_config.enable_jit_warmup = True
     return vc
 
 
