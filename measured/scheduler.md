@@ -7,7 +7,7 @@ Real runs (bench/run.py, each on a freshly started server) against the handoff v
 | Step | Run | Microbatches | Chunk for chunk | First difference | TTFT 128k / 32k / 8k alone / 1k alone (ms) | Worst TTFT deviation | In-run JIT |
 |---|---|---|---|---|---|---|---|
 | 0 plain | sched_check_plain_7708 | 28 / 28 | yes | – | 1142 vs 1118 / 1376 vs 1344 / 212 vs 224 / 52 vs 52 | 5.3% | 0 |
-| 1 shortest first | sched_check_srpt8k_7708 | 28 / 28 | yes | – | 1739 vs 1679 / 758 vs 729 / 210 vs 224 / 53 vs 52 | 10.3% | 0 |
+| 1 shortest first | sched_check_srpt8k_7733 | 28 / 28 | yes | – | 1697 vs 1679 / 729 vs 729 / 209 vs 224 / 53 vs 52 | 6.4% | 0 |
 | 2 load budget | sched_check_budget_7708 | 55 / 55 | yes | – | 1856 vs 1742 / 759 vs 711 / 153 vs 155 / 53 vs 52 | 22.3% | 0 |
 | 3 even split | sched_check_even_7708 | 58 / 58 | yes | – | 1852 vs 1742 / 757 vs 711 / 133 vs 132 / 51 vs 51 | 23.8% | 0 |
 | 4 force-schedule | sched_check_good_7709 | 58 / 58 | yes | – | 1839 vs 1742 / 743 vs 711 / 133 vs 132 / 51 vs 51 | 5.6% | 0 |
@@ -29,8 +29,8 @@ Real runs (bench/run.py, each on a freshly started server) against the handoff v
 | └ sim x1.06 | | | 26.6 | 92.3k | 115.4k | 98.68% | 0.27 / 0.36 / 2.02 / 211.7 (measured x1.20 / x1.14 / x0.96) | 17 | | |
 | 1 shortest first | 500 | sched_srpt8k_n500_7727 | 28.3 vs 29.2 (x0.97) | 102.0k vs 104.2k (x0.98) | 122.9k vs 127.7k (x0.96) | 98.85% vs 98.76% | 0.34 / 0.44 / 3.29 / 511.1 vs 0.26 / 0.36 / 3.39 / 564.7 (x1.31 / x1.24 / x0.97) | 101 vs 118 | 91 / 85 / 92 / 91% vs 91 / 86 / 88 / 89% | 0 |
 | └ sim x1.06 | | | 28.6 | 102.6k | 123.0k | 98.88% | 0.28 / 0.38 / 4.42 / 573.6 (measured x1.23 / x1.16 / x0.75) | 125 | | |
-| 2 load budget | 400 | sched_budget_n400_7728 | 25.4 vs 26.7 (x0.95) | 87.6k vs 92.3k (x0.95) | 115.0k vs 113.9k (x1.01) | 98.37% vs 98.77% | 0.30 / 0.96 / 2.30 / 281.5 vs 0.15 / 0.34 / 1.80 / 232.0 (x2.00 / x2.79 / x1.28) | 19 vs 19 | 88 / 82 / 87 / 88% vs 88 / 85 / 87 / 88% | 0 |
-| └ sim x1.06 | | | 26.2 | 91.0k | 111.2k | 98.82% | 0.16 / 0.48 / 2.14 / 289.3 (measured x1.88 / x2.00 / x1.07) | 19 | | |
+| 2 load budget | 400 | sched_budget_n400_7733 | 25.2 vs 26.7 (x0.94) | 86.9k vs 92.3k (x0.94) | 107.4k vs 113.9k (x0.94) | 98.75% vs 98.77% | 0.17 / 0.60 / 2.26 / 298.3 vs 0.15 / 0.34 / 1.80 / 232.0 (x1.15 / x1.75 / x1.26) | 28 vs 19 | 88 / 82 / 89 / 88% vs 88 / 85 / 87 / 88% | 0 |
+| └ sim x1.06 | | | 26.2 | 91.0k | 111.2k | 98.82% | 0.16 / 0.48 / 2.14 / 289.3 (measured x1.08 / x1.26 / x1.06) | 19 | | |
 | 2 load budget | 500 | sched_budget_n500_7730 | 27.5 vs 28.6 (x0.96) | 99.8k vs 102.9k (x0.97) | 117.8k vs 124.4k (x0.95) | 98.97% vs 98.83% | 0.22 / 0.73 / 4.70 / 621.1 vs 0.16 / 0.59 / 4.61 / 577.4 (x1.37 / x1.25 / x1.02) | 146 vs 162 | 92 / 87 / 94 / 93% vs 92 / 88 / 91 / 91% | 4 |
 | └ sim x1.06 | | | 28.0 | 101.4k | 120.1k | 98.95% | 0.18 / 0.72 / 6.60 / 604.6 (measured x1.19 / x1.01 / x0.71) | 161 | | |
 
@@ -40,7 +40,7 @@ Stage time / fit by microbatch tokens 0–255 / 256–1023 / 1024–8191 / 8192 
 |---|---|---|---|---|
 | 1 shortest first | 400 | s0: x1.255 / x1.210 / x1.063 / x1.040 / –; s1: x0.916 / x1.083 / x1.037 / x1.022 / –; s2: x0.914 / x1.088 / x1.059 / x1.060 / –; s3: x0.985 / x1.102 / x1.070 / x1.063 / – | evicted 175, full 31529, none_first_round 1426, superseded 416 | g0: 1636 / 896 / 93%; g1: 1657 / 887 / 93%; g2: 1638 / 901 / 94%; g3: 1623 / 903 / 94% |
 | 1 shortest first | 500 | s0: x1.256 / x1.212 / x1.041 / x1.031 / –; s1: x0.916 / x1.087 / x1.040 / x1.023 / –; s2: x0.920 / x1.100 / x1.071 / x1.082 / –; s3: x0.989 / x1.102 / x1.065 / x1.058 / – | evicted 283, full 34209, none_first_round 1634, superseded 430 | g0: 1638 / 918 / 96%; g1: 1634 / 917 / 96%; g2: 1571 / 936 / 96%; g3: 1601 / 936 / 96% |
-| 2 load budget | 400 | s0: x1.255 / x1.203 / x1.049 / – / x1.034; s1: x0.914 / x1.075 / x1.033 / – / x0.999; s2: x0.905 / x1.080 / x1.064 / – / x1.032; s3: x0.965 / x1.091 / x1.070 / – / x1.034 | evicted 180, full 31130, none_first_round 1415, superseded 411 | g0: 1633 / 905 / 94%; g1: 1656 / 890 / 93%; g2: 1641 / 907 / 94%; g3: 1625 / 910 / 95% |
+| 2 load budget | 400 | s0: x1.298 / x1.227 / x1.060 / – / x1.028; s1: x0.914 / x1.072 / x1.030 / – / x0.993; s2: x0.908 / x1.084 / x1.083 / – / x1.040; s3: x0.968 / x1.084 / x1.065 / – / x1.024 | evicted 146, full 31083, none_first_round 1416, superseded 375 | g0: 1690 / 909 / 94%; g1: 1654 / 915 / 95%; g2: 1595 / 925 / 95%; g3: 1619 / 926 / 95% |
 | 2 load budget | 500 | s0: x1.280 / x1.212 / x1.042 / – / x1.026; s1: x0.915 / x1.078 / x1.049 / – / x1.009; s2: x0.908 / x1.088 / x1.097 / – / x1.066; s3: x0.977 / x1.089 / x1.077 / – / x1.043 | evicted 265, full 33380, none_first_round 1618, superseded 395 | g0: 1645 / 927 / 96%; g1: 1618 / 929 / 96%; g2: 1566 / 942 / 96%; g3: 1596 / 943 / 96% |
 
 ## Notes
@@ -182,3 +182,23 @@ Stage time / fit by microbatch tokens 0–255 / 256–1023 / 1024–8191 / 8192 
   - 7730 (GPUs 0-3): SM 1628 / 1601 / 1546 / 1579 MHz at 950 / 950 / 963 / 964 W.
   Stage time / fit follows the clocks (7730: s1 x1.049, s2 x1.097). The sim applies one x1.06 to every stage, so it
   keeps stage 0 the slowest. Not a software fix; with 4 in flight the imbalance no longer turns into queueing.
+
+### Sessions: budget N=400 (sched_budget_n400_7733, cap 4 + JIT warm-up)
+- 25.16 r/s, 86.9k new, TTFT 0.17/0.60/2.26 s, 0 in-run JITs (the tail seed has 4 variants after warm-up). Sim x1.06:
+  26.22, 91.0k, 0.16/0.48/2.14.
+- **Throughput −4.0%, mostly the session slot.** Replay of budget N=400 (r/s, new tokens):
+  - slot held through the last tool wait (as req-frontend), real stage balance: 25.32, 87.4k. Real is −0.6% from it.
+  - slot freed at the last token (as the sim): 25.93 (−2.3% from held).
+  - uniform x1.06, slot freed: 26.02 (−0.8% from the sim: engine vs simulator rules).
+  - Stage balance moves it at most 0.4%.
+  The same rule costs budget −0.6% and srpt8k 0.0% at N=500, hence about −4% at N=400 against −1% at N=500. Per
+  120 s: from ~450 s the real run has 386-398 sessions active (sim-way count) against 400; by 1200 s, 1309 sessions
+  have started against 1374. From 720 s every microbatch is a full 4,096 tokens in both runs, but the stages are
+  94-97% busy against the sim's 99%.
+- **p90 (x1.25) comes from the start-up burst.** 70% of the rounds over 480 ms arrive at 120-360 s, in both runs. At
+  120-240 s, TTFT p50/p90 is 593/924 ms (sim 459/700, replay 514/772). Real microbatches are larger there (mean
+  10.8k vs 9.3k, p90 21.7k vs 17.4k), and stage 2 idles 8.9%. From 360 s, every window's p90 is within ±15% of the sim.
+- **Cap 4 bubble while saturated.** Stage-2 idle at 720-1200 s is 3.4% (7733, cap 4) against 0.7% (7730, cap 5,
+  N=500). Of it, 1.2% waits on a full plan formed on an exit report and 1.7% on plans delayed by earlier ones. The
+  closed loop (sum of the stages + host) / 4 = 34.1 ms is only 0.5 ms below stage 2's 34.6 ms, so host jitter (p90 4.7
+  ms) opens bubbles. Estimated at ~1% of the run. Cap 5 + pacing (a152856) is the alternative; the coordinator decides.
