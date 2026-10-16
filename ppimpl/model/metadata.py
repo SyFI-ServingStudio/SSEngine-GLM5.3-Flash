@@ -28,8 +28,8 @@ import numpy as np
 import torch
 
 from ppimpl.model import kv_tensors
-from ppimpl.model.pp_patch import (KPOOL_HEADS, TOPK_SEGMENTS, KdaPrefillMeta, KpoolHeads, kpool_heads,
-                                   make_kda_plan)
+from ppimpl.model.pp_patch import (KPOOL_HEADS, TOPK_SEGMENTS, KdaPrefillMeta, KpoolHeads, kpool_heads_all,
+                                   kpool_heads_suffix, make_kda_plan)
 
 DECODE_THRESHOLD = 256
 KERNEL_BLOCK = 64
@@ -205,6 +205,12 @@ class StageMetadata:
         h_graph = None if bucket is None else pk.add(graph_rows(positions, slots, tok, bucket), torch.int64)
         row_end = {i: int(qsl[r + 1]) - 1 for r, i in enumerate(order)}
         h_last = pk.add([row_end[i] for i, c in enumerate(chunks) if c.is_last], torch.int64)
+        # kpool pools a chunk starts inside (pp_patch "kpool indexer": prefix hits, odd chunk ends), for every
+        # request, staged with the rest; the indexer's prefill requests are cut out once its metadata is built
+        hk, hk_req = (kpool_heads_all(starts, q_lens, qsl[:-1], tail_table[:, 0], self.kpool) if self.kpool > 1
+                      else (None, []))
+        h_hk = None if hk is None else [pk.add(a, dt) for a, dt in
+                                        zip(hk, (torch.int64, torch.bool, torch.int64, torch.int64))]
         pk.copy(self.device)
         pos_dev = pk.dev(h_pos)
 
@@ -232,13 +238,13 @@ class StageMetadata:
                 if kind == "g0":
                     slot_map[name] = cm_g0.slot_mapping
             if kind == "g0" and self.kpool > 1 and type(md).__name__ == "DeepseekV32IndexerMetadata":
-                # chunks that start inside a kpool pool (pp_patch "kpool indexer"): prefix hits, odd chunk ends
+                # device views of the staged heads (a pageable .to(device) here waited for the GPU to drain at
+                # every unaligned start, and the host lost its lead: issues.md, "unaligned resume cost")
                 nd = int(md.num_decodes)
                 if nd not in heads:
-                    h = kpool_heads(starts, q_lens, qsl[:-1], tail_table[:, 0], nd, int(md.num_decode_tokens),
-                                    self.kpool)
-                    heads[nd] = None if h is None else KpoolHeads(*(torch.from_numpy(a).to(self.device)
-                                                                   for a in h))
+                    h = kpool_heads_suffix(None if h_hk is None else [pk.dev(x) for x in h_hk], hk_req, nd,
+                                           int(md.num_decode_tokens))
+                    heads[nd] = None if h is None else KpoolHeads(*h)
                 if heads[nd] is not None:
                     KPOOL_HEADS[md.slot_mapping[int(md.num_decode_tokens):].data_ptr()] = heads[nd]
 
