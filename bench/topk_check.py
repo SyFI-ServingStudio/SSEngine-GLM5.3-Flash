@@ -77,8 +77,10 @@ def main() -> None:
                     lo = max(1, width // 2)
                     seq = torch.linspace(lo, width, rows, device=dev).to(torch.int32).reshape(rows, 1)
                     ends = seq.reshape(-1)
-                    ref = torch.full((rows, K), -1, dtype=torch.int32, device=dev)
-                    canonical_topk_torch(lg, torch.zeros_like(ends), ends, ref, K)
+                    cols = torch.arange(width, device=dev)[None]
+                    ref = torch.where(cols < ends[:, None], lg, float("-inf")).topk(K, dim=1).indices.to(torch.int32)
+                    ref[torch.arange(K, device=dev)[None] >= ends[:, None]] = -1
+                    canonical_topk_torch(lg, torch.zeros_like(ends), ends, ref, K)   # a valid top-k -> canonical
                     calls, canon_ok, err = [], True, None
                     try:
                         for _ in range(a.calls):

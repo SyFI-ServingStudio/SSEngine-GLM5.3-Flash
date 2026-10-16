@@ -117,8 +117,10 @@ def test_decode_topk_canonical(rows, width):
     if rows > 1:
         seq[0] = k // 2                               # a row of fewer keys than k
     ends = seq.reshape(-1)
-    ref = torch.full((rows, k), -1, dtype=torch.int32, device=dev)
-    canonical_topk_torch(lg, torch.zeros_like(ends), ends, ref, k)
+    cols = torch.arange(width, device=dev)[None]
+    ref = torch.where(cols < ends[:, None], lg, float("-inf")).topk(k, dim=1).indices.to(torch.int32)
+    ref[torch.arange(k, device=dev)[None] >= ends[:, None]] = -1
+    canonical_topk_torch(lg, torch.zeros_like(ends), ends, ref, k)   # rewrites a valid top-k into the canonical one
     run = pp_patch.canonical_decode_topk("auto")
     for _ in range(3):
         dst = torch.full((rows, k), -7, dtype=torch.int32, device=dev)
