@@ -94,34 +94,33 @@ def test_topk_canonical_matches_reference(rows, width, two_requests):
             assert torch.equal(start, ref)
 
 
-@pytest.mark.parametrize("rows,next_n,width", [(1, 1, 32768), (3, 3, 131072), (64, 1, 8192), (128, 2, 4096)])
-def test_decode_topk_canonical(rows, next_n, width):
-    """(g) the indexer's decode top-k (cooperative up to 64 rows, persistent above) through
-    `pp_patch.canonical_decode_topk`: ties at the k-th value (logits rounded to 0.1), causal row ends from (B, 1)
-    seq_lens, rows of fewer keys than k; equal to the torch reference whatever order the kernel left."""
+@pytest.mark.parametrize("rows,width", [(1, 32768), (3, 131072), (64, 8192), (128, 4096)])
+def test_decode_topk_canonical(rows, width):
+    """(g) the indexer's decode top-k (next_n = 1, seq_lens [B, 1]; cooperative up to 64 rows, persistent above)
+    through `pp_patch.canonical_decode_topk`: ties at the k-th value (logits rounded to 0.1), row ends from half to
+    the full width, a row of fewer keys than k; equal to the torch reference whatever order the kernel left
+    (bench/topk_check.py: per backend and shape, whether the kernel's set itself is valid)."""
     import torch
 
     from ppimpl.model import pp_patch
     from ppimpl.model.topk_canon import canonical_topk_torch
     from vllm.model_executor.layers import indexer_topk
+    from vllm.v1.worker.workspace import init_workspace_manager
 
     pp_patch._ORIG_DECODE_TOPK = pp_patch._ORIG_DECODE_TOPK or indexer_topk.get_indexer_topk
     dev, k = torch.device("cuda", 0), 512
     torch.cuda.set_device(dev)
+    init_workspace_manager(dev)
     g = torch.Generator(device=dev).manual_seed(rows)
     lg = torch.randn(rows, width, device=dev, generator=g).round(decimals=1)
-    b = rows // next_n
-    seq = torch.linspace(width // 2, width, b, device=dev).to(torch.int32).reshape(b, 1)
-    if b > 1:
+    seq = torch.linspace(width // 2, width, rows, device=dev).to(torch.int32).reshape(rows, 1)
+    if rows > 1:
         seq[0] = k // 2                               # a row of fewer keys than k
-    ke = indexer_topk.SparseIndexerTopk._row_ends(seq, next_n, rows)
+    ends = seq.reshape(-1)
     ref = torch.full((rows, k), -1, dtype=torch.int32, device=dev)
-    canonical_topk_torch(lg, torch.zeros_like(ke), ke, ref, k)
-    from vllm.v1.worker.workspace import init_workspace_manager
-
-    init_workspace_manager(dev)
+    canonical_topk_torch(lg, torch.zeros_like(ends), ends, ref, k)
     run = pp_patch.canonical_decode_topk("auto")
     for _ in range(3):
         dst = torch.full((rows, k), -7, dtype=torch.int32, device=dev)
-        run(lg, seq, next_n, dst, k, int(seq.max()))
+        run(lg, seq, 1, dst, k, int(seq.max()))
         assert torch.equal(dst, ref)
