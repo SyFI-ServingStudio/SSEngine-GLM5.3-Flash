@@ -53,6 +53,10 @@ from ppimpl.serve.slab import SlabReader
 READY_TIMEOUT_S = 1800   # a real stage loads its weights and captures graphs before Ready
 WAKE_ADDR = "inproc://ppimpl-control-wake"
 ADMIT_BATCH = 64   # requests the control thread takes in before it looks at the reports again
+# With intakes, the control thread busy-polls (zmq poll without a timeout) until this long after the last message or
+# open request: a poll that blocks costs ~0.17 ms of thread wake-up on every intake and report hop (one 64 B DEALER ->
+# ROUTER hop over tcp, idle host: 525 us blocked, 360 us spinning). PPIMPL_CONTROL_SPIN_S=0: always block.
+CONTROL_SPIN_S = float(os.environ.get("PPIMPL_CONTROL_SPIN_S", "60"))
 
 
 class Remote(NamedTuple):
@@ -302,13 +306,18 @@ class Controller:
             poller.register(self.intake, zmq.POLLIN)
         next_check = time.monotonic() + 1.0
         next_cache = time.monotonic() + 10.0
+        spin = self.intake is not None and CONTROL_SPIN_S > 0
+        busy_at = time.monotonic()     # the last message or open request
         try:
             more = False   # requests left in the inbox after this round's batch
             while True:
-                timeout_ms = 0 if more else 1000
+                if spin and self.reqs:
+                    busy_at = time.monotonic()
+                timeout_ms = 0 if more or (spin and time.monotonic() - busy_at < CONTROL_SPIN_S) else 1000
                 if self.timer_at is not None:
                     timeout_ms = min(timeout_ms, max(0, math.ceil((self.timer_at - time.time_ns()) / 1e6)))
-                poller.poll(timeout_ms)
+                if poller.poll(timeout_ms) and spin:
+                    busy_at = time.monotonic()
                 while self.reports.poll(0):          # reports first: they free in-flight slots and time stage 0
                     msg = decode_to_controller(self.reports.recv())
                     if isinstance(msg, WorkerError):
