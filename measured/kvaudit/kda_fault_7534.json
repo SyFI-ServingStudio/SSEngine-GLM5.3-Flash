@@ -1,0 +1,154 @@
+[
+ {
+  "ok": true,
+  "seconds": 1.78,
+  "finite": true,
+  "tail_zero_rows": 0,
+  "state_finite": true,
+  "kernel": "flashinfer",
+  "T": 4096,
+  "elements": 33554432
+ },
+ {
+  "ok": true,
+  "seconds": 2.73,
+  "finite": true,
+  "tail_zero_rows": 0,
+  "state_finite": true,
+  "kernel": "flashkda",
+  "T": 4096,
+  "elements": 33554432
+ },
+ {
+  "ok": true,
+  "seconds": 3.45,
+  "finite": true,
+  "tail_zero_rows": 0,
+  "state_finite": true,
+  "kernel": "triton_l2norm",
+  "T": 4096,
+  "elements": 33554432
+ },
+ {
+  "ok": true,
+  "seconds": 89.72,
+  "finite": true,
+  "tail_zero_rows": 0,
+  "state_finite": true,
+  "kernel": "triton_chunk",
+  "T": 4096,
+  "elements": 33554432
+ },
+ {
+  "ok": true,
+  "seconds": 1.94,
+  "finite": true,
+  "tail_zero_rows": 0,
+  "state_finite": true,
+  "kernel": "flashinfer",
+  "T": 262080,
+  "elements": 2146959360
+ },
+ {
+  "ok": true,
+  "seconds": 3.24,
+  "finite": true,
+  "tail_zero_rows": 0,
+  "state_finite": true,
+  "kernel": "flashkda",
+  "T": 262080,
+  "elements": 2146959360
+ },
+ {
+  "ok": true,
+  "seconds": 3.2,
+  "finite": true,
+  "tail_zero_rows": 0,
+  "state_finite": true,
+  "kernel": "triton_l2norm",
+  "T": 262080,
+  "elements": 2146959360
+ },
+ {
+  "ok": true,
+  "seconds": 7.25,
+  "finite": true,
+  "tail_zero_rows": 0,
+  "state_finite": true,
+  "kernel": "triton_chunk",
+  "T": 262080,
+  "elements": 2146959360
+ },
+ {
+  "ok": true,
+  "seconds": 0.96,
+  "finite": true,
+  "tail_zero_rows": 0,
+  "state_finite": true,
+  "kernel": "flashinfer",
+  "T": 262208,
+  "elements": 2148007936
+ },
+ {
+  "ok": true,
+  "seconds": 1.51,
+  "finite": true,
+  "tail_zero_rows": 0,
+  "state_finite": true,
+  "kernel": "flashkda",
+  "T": 262208,
+  "elements": 2148007936
+ },
+ {
+  "ok": false,
+  "rc": 1,
+  "error": "RuntimeError: Triton Error [CUDA]: an illegal memory access was encountered",
+  "kernel": "triton_l2norm",
+  "T": 262208,
+  "elements": 2148007936
+ },
+ {
+  "ok": false,
+  "rc": 1,
+  "error": "RuntimeError: Triton Error [CUDA]: an illegal memory access was encountered",
+  "kernel": "triton_chunk",
+  "T": 262208,
+  "elements": 2148007936
+ },
+ {
+  "ok": true,
+  "seconds": 0.97,
+  "finite": true,
+  "tail_zero_rows": 0,
+  "state_finite": true,
+  "kernel": "flashinfer",
+  "T": 524288,
+  "elements": 4294967296
+ },
+ {
+  "ok": true,
+  "seconds": 1.52,
+  "finite": true,
+  "tail_zero_rows": 0,
+  "state_finite": true,
+  "kernel": "flashkda",
+  "T": 524288,
+  "elements": 4294967296
+ },
+ {
+  "ok": false,
+  "rc": 1,
+  "error": "RuntimeError: Triton Error [CUDA]: an illegal memory access was encountered",
+  "kernel": "triton_l2norm",
+  "T": 524288,
+  "elements": 4294967296
+ },
+ {
+  "ok": false,
+  "rc": 1,
+  "error": "RuntimeError: Triton Error [CUDA]: an illegal memory access was encountered",
+  "kernel": "triton_chunk",
+  "T": 524288,
+  "elements": 4294967296
+ }
+]

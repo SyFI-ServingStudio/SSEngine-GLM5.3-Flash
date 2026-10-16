@@ -15,3 +15,5 @@ measured/graphs/
 measured/host/
 measured/kernels_runs/
 measured/nodecheck_runs/
+tmp/
+measured/kvaudit/
