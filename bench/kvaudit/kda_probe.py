@@ -197,7 +197,8 @@ def main() -> None:
 
     dev = torch.device("cuda", 0)
     L, B = a.length, 8576
-    m = StageModel(bench_config(L), 0, dev, layers=range(0, 4), first=True, last=False,
+    # all of stage 0 (layers 0-11): a shorter range leaves a KDA cache group empty (StageMetadata indexes it)
+    m = StageModel(bench_config(L), 0, dev, first=True, last=False,
                    num_blocks=1 + -(-L // B) + 6, max_model_len=L + B, warmup=False, cuda_graphs=False)
     heads: dict[int, list[int]] = {}
     for p in a.fp64_heads.split(","):
