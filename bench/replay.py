@@ -13,7 +13,8 @@ trace with stage times from a model, to check the engine's decisions on CPU:
 - Traces: `text-generation-independent` (id, input_len, output_len, arrival_time in ms) and
   `text-generation-session-execution-v2` (sessions_2ps.csv and the bring-ups), replayed as req-frontend does: a
   session starts at its arrival or when one of the N slots frees (first come first served, file order), holds its slot
-  through every round and tool wait, and sends round k+1 `tool_wait_after_ms` after round k's token.
+  through every round and the tool waits between them (freed at the last round's token), and sends round k+1
+  `tool_wait_after_ms` after round k's token.
 
 Output (run dir): `microbatches.jsonl` and `reads.jsonl` (1_contract.md §3), `requests.jsonl` in req-frontend's shape
 for `data/metrics.py`, and `summary.json`.
@@ -142,14 +143,13 @@ class Microbatch:
 class Replay:
     def __init__(self, sched: Scheduler, stages: StageModel, requests: list[Round] = (), sessions: list[Session] = (),
                  max_sessions: int | None = None, horizon_ms: float | None = None, form_lead_ms: float | None = None,
-                 slot_after_last_wait: bool = True, pace_margin_ms: float | None = None, host_ms: float = 0.0):
+                 pace_margin_ms: float | None = None, host_ms: float = 0.0):
         self.sched, self.stages = sched, stages
         self.host_ms = host_ms        # a formed plan reaches stage 0 this much later (the server's host time)
         # pacing (None: off): form a microbatch only once it would reach every later stage no more than the margin
         # before that stage frees, judged by the last microbatch's stage times
         self.pace_margin_ns = None if pace_margin_ms is None else int(pace_margin_ms * MS)
         self.pace_event_ns = -1
-        self.slot_after_last_wait = slot_after_last_wait
         self.max_sessions = max_sessions
         self.horizon_ns = None if horizon_ms is None else int(horizon_ms * MS)
         self.form_lead_ns = None if form_lead_ms is None else int(form_lead_ms * MS)
@@ -204,8 +204,8 @@ class Replay:
         wait = int(r.tool_wait_ms * MS)
         if k < len(self.sessions[i].rounds):
             self._push(now + wait, ARRIVE, self.sessions[i].rounds[k])
-        else:   # req-frontend holds the slot through the last tool wait; the simulator frees it at the last token
-            self._push(now + (wait if self.slot_after_last_wait else 0), SESSION, -1 - i)
+        else:   # the session frees its slot at its last round's token (the simulator; req-frontend since 365fba07)
+            self._push(now, SESSION, -1 - i)
 
     # --- pipeline ---------------------------------------------------------------------------------------------
 
@@ -444,7 +444,7 @@ def run_sessions(step: str, n: int | None, out: Path, minutes: float = 20.0, mem
                  tiers: bool = False, accounting: str = "blocks", partial_hits: bool = False,
                  trace: Path | None = None, pool_tokens: int | None = None, tier_cfg: TierConfig | None = None,
                  dispatch_ahead: int = 0, form_lead_ms: float | None = None, handoff: Path = HANDOFF,
-                 slot_after_last_wait: bool = True, max_in_flight: int = NUM_STAGES,
+                 max_in_flight: int = NUM_STAGES,
                  stage_mult: list[float] | None = None, pace_margin_ms: float | None = None,
                  host_ms: float = 0.0) -> dict:
     pool, dram = MEMORY[memory]
@@ -455,7 +455,7 @@ def run_sessions(step: str, n: int | None, out: Path, minutes: float = 20.0, mem
     _, sessions = load_trace(trace or handoff / "data/sessions_2ps.csv")
     window = minutes * 60e3
     rp = Replay(sched, StageModel(handoff, stage_mult), sessions=sessions, max_sessions=n, horizon_ms=window,
-                form_lead_ms=form_lead_ms, slot_after_last_wait=slot_after_last_wait,
+                form_lead_ms=form_lead_ms,
                 pace_margin_ms=pace_margin_ms, host_ms=host_ms).run()
     summary = rp.write(out, window)
     m = subprocess.run([sys.executable, str(handoff / "data/metrics.py"), str(out / "requests.jsonl"),
@@ -520,8 +520,6 @@ def main():
     p.add_argument("--no-ssd", action="store_true")
     p.add_argument("--accounting", choices=["blocks", "tokens"], default="blocks")
     p.add_argument("--partial-hits", action="store_true", help="the simulator's hit rule (not realizable)")
-    p.add_argument("--slot-at-last-token", action="store_true",
-                   help="the simulator's session slot: freed at the last round's token, not after its tool wait")
     p.add_argument("--trace", type=Path)
     p.add_argument("--pool-tokens", type=int)
     p.add_argument("--dispatch-ahead", type=int, default=0)
@@ -549,7 +547,7 @@ def main():
         tc = TierConfig(dram_gb=mem[1], ssd_gb=None if a.no_ssd else 256.0, ssd_writes=a.ssd_writes)
         s = run_sessions(a.step, a.n, a.out, a.minutes, a.memory, a.tiers, a.accounting, a.partial_hits, a.trace,
                          a.pool_tokens, tc, a.dispatch_ahead, a.form_lead_ms,
-                         slot_after_last_wait=not a.slot_at_last_token, max_in_flight=a.max_in_flight,
+                         max_in_flight=a.max_in_flight,
                          stage_mult=[float(x) for x in a.stage_mult.split(",")] if a.stage_mult else None,
                          pace_margin_ms=a.pace_margin_ms, host_ms=a.host_ms)
         print(json.dumps(s, indent=1))
