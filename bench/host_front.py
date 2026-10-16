@@ -7,7 +7,9 @@ Two timings of the same forward (CUDA graphs on, as the server runs):
   event. The GPU waits for the host wherever the host is slower than the kernels it launches.
 - `ahead`: the same forward enqueued behind a GPU sleep, so the host is ahead of the GPU, as stages 1-3 run it
   (they enqueue before the upstream hidden state arrives): compute = the GPU time alone.
-direct - ahead is what the host costs the stage on the GPU timeline. Also the host time of `forward` (perf
+direct - ahead is what the host costs the stage on the GPU timeline. With --idle-ms X also `direct_sleep` (the
+thread sleeps X ms before each forward, as a worker blocks on its plan socket between microbatches) and
+`direct_spin` (it busy-waits X ms instead): what an idle, cold host thread adds. Also the host time of `forward` (perf
 counter), and with --profile one cProfile of a direct forward (top functions by own and by cumulative time).
 """
 
@@ -35,6 +37,7 @@ def main():
     ap.add_argument("--append", type=int, default=256)
     ap.add_argument("--reps", type=int, default=30)
     ap.add_argument("--profile", action="store_true")
+    ap.add_argument("--idle-ms", type=float, default=0.0)
     ap.add_argument("--out", default="")
     a = ap.parse_args()
     dev = torch.device("cuda", 0)
@@ -49,8 +52,14 @@ def main():
     hidden = None if model.first else torch.zeros(a.append, model.hidden_width, dtype=torch.bfloat16, device=dev)
     res = {"stage": a.stage, "prefix": a.prefix, "append": a.append, "block_tokens": B}
 
-    def one(ahead: bool):
+    def one(ahead: bool, idle: str = ""):
         torch.cuda.synchronize(dev)
+        if idle == "sleep":
+            time.sleep(a.idle_ms / 1e3)
+        elif idle == "spin":
+            until = time.perf_counter() + a.idle_ms / 1e3
+            while time.perf_counter() < until:
+                pass
         if ahead:
             torch.cuda._sleep(200_000_000)          # ~100 ms of GPU spin: the host enqueues the forward meanwhile
         e0, e1 = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
@@ -65,13 +74,16 @@ def main():
 
     for _ in range(5):
         one(False)
-    for mode in ("direct", "ahead"):
-        h, g = zip(*(one(mode == "ahead") for _ in range(a.reps)))
+    modes = ("direct", "ahead") + (("direct_sleep", "direct_spin") if a.idle_ms else ())
+    for mode in modes:
+        h, g = zip(*(one(mode == "ahead", mode.partition("_")[2]) for _ in range(a.reps)))
         res[mode] = {"host_ms": round(statistics.median(h), 3), "gpu_ms": round(statistics.median(g), 3)}
         print(f"[host_front] stage {a.stage} P {a.prefix} A {a.append} {mode}: forward host "
               f"{res[mode]['host_ms']:.3f} ms, compute {res[mode]['gpu_ms']:.3f} ms", flush=True)
     res["host_cost_on_gpu_ms"] = round(res["direct"]["gpu_ms"] - res["ahead"]["gpu_ms"], 3)
     print(f"[host_front] direct - ahead = {res['host_cost_on_gpu_ms']:.3f} ms", flush=True)
+    for mode in modes[2:]:
+        print(f"[host_front] {mode} - ahead = {res[mode]['gpu_ms'] - res['ahead']['gpu_ms']:.3f} ms", flush=True)
     if a.profile:
         torch.cuda.synchronize(dev)
         prof = cProfile.Profile()

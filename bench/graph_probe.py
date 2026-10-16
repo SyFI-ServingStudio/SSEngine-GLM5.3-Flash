@@ -49,8 +49,14 @@ def main():
         torch.cuda.synchronize(dev)
         print(f"[graph_probe] stage {a.stage}: eager {T} ok", flush=True)
     buckets = [int(x) for x in a.buckets.split(",") if x]
-    if a.loop:
-        return capture_loop(model, sorted(buckets, reverse=True), a)
+    if a.loop:   # on a side stream, as StageModel.capture_graphs (the default stream cannot capture)
+        caller, side = torch.cuda.current_stream(dev), torch.cuda.Stream(dev)
+        side.wait_stream(caller)
+        with torch.cuda.stream(side):
+            capture_loop(model, sorted(buckets, reverse=True), a)
+        caller.wait_stream(side)
+        torch.cuda.synchronize(dev)
+        return
     for b in [tuple(buckets)] if a.together else [(b,) for b in buckets]:
         model.capture_graphs(buckets=b)
         torch.cuda.synchronize(dev)
