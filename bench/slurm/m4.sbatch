@@ -11,10 +11,12 @@
 # 2x the baseline per stage, KL within 4x, top-1 equal), prefix_check with P + 1/2/3
 # (prefix_check_unaligned), then a smoke of prefix_n400's first ~2 min (client limit 3m incl. ~45 s tokenization:
 # prefix_smoke_n400) that must end with failed=0. bench/run.py stops any run at the first fault (server or worker
-# traceback, server exit, client failed > 0). margin: bench/margin.py on CASES (top-2 margins, repeats; MARGIN_ARGS=--trace-topk). SKIP_KVCHECK=1 and CHECK_MODES=off resume a preflight whose kvcheck and
+# traceback, server exit, client failed > 0). margin: bench/margin.py on CASES (top-2 margins, repeats; MARGIN_ARGS=--trace-topk), after the GPU tests GTEST (-k) if set. SKIP_KVCHECK=1 and CHECK_MODES=off resume a preflight whose kvcheck and
 # cache-on half passed (the cache-on rounds are read from prefix_check_unaligned_on/); SKIP_CHECK=1 skips the prefix
 # check too. Token differences between the cache-on and cache-off servers go to the margin rule (bench/margin.py
 # --judge: each side's token in the top 2, margin < 3 nats).
+# resume_nsys: bench/margin.py --nvtx on CASES (default cases_resume_cost.json: P 100,000 / 100,003 / 100,004 resumed
+# with A 256 / 1,024, and 3- and 256-token chunks at 512k) under Nsight Systems; bench/mb_kernels.py per stage, kernel.
 # check: bench/prefix_check.py (round-1 tokens, cache on vs off, ~6 min). bringup: prefix_bringup (20 min) under
 # Nsight Systems, traced from microbatch NSYS_MBS (default 564:631: the last round-0 chunk and round 1 of session
 # 34, P 512k A 1k, and all of session 35, P 512k A 8k; microbatch 0 is req-frontend's preflight). prefix_n<N>: the
@@ -28,7 +30,7 @@ R=$ROOT/${OUT:-measured/runs_m4}
 mkdir -p "$R/slurm"
 G=${CUDA_VISIBLE_DEVICES:-0,1,2,3}
 P=$((20000 + ${SLURM_JOB_ID:-0} % 120 * 100))
-WHAT=${1:?check, preflight, margin, bringup or prefix_n<N>}
+WHAT=${1:?check, preflight, margin, resume_nsys, bringup or prefix_n<N>}
 echo "== $(date -Is) gpus $G port $P: $WHAT"
 nvidia-smi --query-gpu=index,pci.bus_id,memory.used --format=csv,noheader
 case $WHAT in
@@ -47,7 +49,17 @@ case $WHAT in
     (( rc == 0 )) && { $PY -m bench.run prefix_n400 --inline --gpus "$G" --port "$P" --out-root "$R" --client-limit 3m \
                          --run-name prefix_smoke_n400; rc=$?; }
     ;;
-  margin) $PY -m bench.margin "${CASES:-measured/margins/cases_unaligned.json}" --repeats "${REPEATS:-3}" ${MARGIN_ARGS:-}; rc=$? ;;
+  margin) rc=0; [ -n "${GTEST:-}" ] && { $PY -m pytest tests -m gpu -k "$GTEST" -v; rc=$?; }   # GPU tests first
+    (( rc == 0 )) && $PY -m bench.margin "${CASES:-measured/margins/cases_unaligned.json}" --repeats "${REPEATS:-3}" ${MARGIN_ARGS:-}; rc=$? ;;
+  resume_nsys) D=$R/resume_nsys_${SLURM_JOB_ID:-local}; mkdir -p "$D"   # per-kernel cost of the last chunks of CASES
+    /usr/local/cuda/bin/nsys profile -o "$D/trace" --force-overwrite true -t cuda,nvtx --cuda-graph-trace=node \
+      --sample=none --cpuctxsw=none $PY -m bench.margin "${CASES:-measured/margins/cases_resume_cost.json}" \
+      --repeats "${REPEATS:-4}" --nvtx --out "$D/res.json"; rc=$?
+    (( rc == 0 )) && { /usr/local/cuda/bin/nsys export --type sqlite --force-overwrite true -o "$D/trace.sqlite" \
+                         "$D/trace.nsys-rep" > "$D/export.log" 2>&1; rc=$?; }
+    (( rc == 0 )) && { $PY -m bench.mb_kernels "$D/trace.sqlite" "$D/res.mbs.json" --base "${BASE:-p100000_a1024}" \
+                         --out "$D/kernels.json" > "$D/kernels.txt"; rc=$?; tail -n 80 "$D/kernels.txt"; }
+    ;;
   bringup) $PY -m bench.run prefix_bringup --inline --nsys --nsys-mbs "${NSYS_MBS:-564:631}" --gpus "$G" --port "$P" \
              --out-root "$R" ${BRINGUP_ARGS:-}; rc=$? ;;
   prefix_n*) $PY -m bench.run "$WHAT" --inline --gpus "$G" --port "$P" --out-root "$R"; rc=$? ;;

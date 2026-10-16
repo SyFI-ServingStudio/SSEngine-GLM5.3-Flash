@@ -2,7 +2,8 @@
 
   python -m bench.margin <cases.json> [--repeats 3] [--out measured/margins/<name>.json]
 
-cases.json: [{"name": str, "file": <.npy int32 token ids>, "schedule": [[start, tokens, is_last], ...]}, ...]. Each
+cases.json: [{"name": str, "file": <.npy int32 token ids>, "schedule": [[start, tokens, is_last], ...],
+"decode_canon": true}, ...] (decode_canon false: without pp_patch's decode top-k canonicalization). Each
 case runs `--repeats` times on the same KV and state blocks (one request, a fresh start each time), each schedule
 entry as one microbatch, as the server runs a request alone. At every is_last entry: the last position's logits,
 bf16 as the server's argmax takes them (`StageModel.output_head`) and FP32, their top-5 and the top-1 minus top-2
@@ -67,6 +68,15 @@ def _install_topk_trace() -> None:
         return r
 
     si.sparse_attn_indexer_kpool = eager_break_during_capture(hooked)
+
+
+def _install_decode_trace() -> None:
+    """After the stage model's patches (so it sees the top-k the model uses): the decode path's pool logits and
+    top-k. The indexer looks `get_indexer_topk` up at call time, also on CUDA-graph replays (an eager break)."""
+    import hashlib
+
+    import vllm.models.glm5next.nvidia.sparse_indexer as si
+
     orig_get = si.get_indexer_topk
 
     def get_topk(backend):
@@ -76,8 +86,9 @@ def _install_topk_trace() -> None:
             fn(logits, seq_lens, next_n, dst, k, *rest)
             if TRACE["on"]:
                 # decode path: pool logits, pool-granular seq_lens, select k pools per row
-                TRACE["backend"] = fn.resolve_backend(logits, k, logits.shape[0])
-                lens = fn._row_ends(seq_lens, next_n, logits.shape[0]).tolist()   # the kernels' causal row ends
+                d0 = _dispatcher(backend)    # vLLM's dispatcher, also under a wrapper (pp_patch decode canon)
+                TRACE["backend"] = d0.resolve_backend(logits, k, logits.shape[0])
+                lens = d0._row_ends(seq_lens, next_n, logits.shape[0]).tolist()   # the kernels' causal row ends
                 lg, d = logits.float().cpu(), dst.cpu()
                 rows = []
                 for r, L in enumerate(lens):
@@ -96,12 +107,20 @@ def _install_topk_trace() -> None:
     si.get_indexer_topk = get_topk
 
 
-def _worker(rank: int, cases: list[dict], repeats: int, port: int, out: str, trace_topk: bool = False) -> None:
+def _dispatcher(backend):
+    from vllm.model_executor.layers.indexer_topk import get_indexer_topk
+
+    return get_indexer_topk(backend)
+
+
+def _worker(rank: int, cases: list[dict], repeats: int, port: int, out: str, trace_topk: bool = False,
+            nvtx: bool = False) -> None:
     import hashlib
 
     import numpy as np
     import torch
     from ppimpl.config import HIDDEN_WIDTH, RunConfig, SchedulerConfig
+    from ppimpl.model import pp_patch
     from ppimpl.model.stage import StageModel, bench_config
     from ppimpl.runtime.transport import open_pipe
     from vllm.forward_context import set_forward_context
@@ -118,17 +137,24 @@ def _worker(rank: int, cases: list[dict], repeats: int, port: int, out: str, tra
     pipe = open_pipe(rc, rank, dev, HIDDEN_WIDTH)
     m = StageModel(bench_config(MB, cuda_graphs=True), rank, dev, num_blocks=nkv + 8, max_model_len=L + 8576,
                    cuda_graphs=rank < 3)
+    if trace_topk:
+        _install_decode_trace()
     kv, st = list(range(1, nkv + 1)), list(range(nkv + 1, nkv + 7))
-    res = []
+    res, mbs = [], []
     with torch.inference_mode():
         for c in cases:
             t = toks[c["name"]]
+            pp_patch.DECODE_TOPK_CANON = c.get("decode_canon", True)   # a case may run without it (before/after)
             for rep in range(repeats):
                 t0 = time.time()
                 for i, (s, n, last) in enumerate(c["schedule"]):
                     plan = NS(mb_id=i, chunks=[NS(req_id="p", start=s, num_tokens=n, kv_blocks=kv,
                                                   state_blocks=st, is_last=last, token_ids=t[s:s + n])])
                     hidden = pipe.recv(n, HIDDEN_WIDTH) if rank > 0 else None
+                    if nvtx:     # bench/nsys_trace.py attributes kernels by this range, as in the server's workers
+                        torch.cuda.nvtx.range_push(f"stage {rank} mb {len(mbs)}")
+                        mbs.append({"mb": len(mbs), "case": c["name"], "repeat": rep, "chunk": i, "start": s,
+                                    "tokens": n, "is_last": last})
                     TRACE.update(on=trace_topk and last, rows=n, calls=[], decode=[])
                     if rank < 3:
                         o = m.forward(plan, hidden)
@@ -137,6 +163,8 @@ def _worker(rank: int, cases: list[dict], repeats: int, port: int, out: str, tra
                         if hidden is not None:
                             pipe.release()
                         pipe.send(o, done)
+                        if nvtx:
+                            torch.cuda.nvtx.range_pop()
                         if TRACE["on"]:
                             traces.append({"case": c["name"], "repeat": rep, "position": s + n - 1,
                                            "topk": TRACE["calls"], "decode": TRACE["decode"],
@@ -150,6 +178,8 @@ def _worker(rank: int, cases: list[dict], repeats: int, port: int, out: str, tra
                             lb = m.head_logits(b, x, r, po, co, fp32=False)[0]
                             lf = m.head_logits(b, x, r, po, co, fp32=True)[0]
                     pipe.release()
+                    if nvtx:
+                        torch.cuda.nvtx.range_pop()
                     if last:
                         res.append({"case": c["name"], "repeat": rep, "position": s + n - 1,
                                     "token": int(lb.argmax()), "bf16": _top(lb), "fp32": _top(lf),
@@ -166,6 +196,8 @@ def _worker(rank: int, cases: list[dict], repeats: int, port: int, out: str, tra
     Path(out).parent.mkdir(parents=True, exist_ok=True)
     if rank == 3:
         Path(out).write_text(json.dumps(res, indent=1) + "\n")
+    if nvtx and rank == 0:
+        Path(out).with_suffix(".mbs.json").write_text(json.dumps(mbs) + "\n")
     if trace_topk:
         Path(out).with_suffix(f".topk{rank}.json").write_text(json.dumps(traces) + "\n")
     pipe.close()
@@ -183,6 +215,9 @@ def main() -> None:
     ap.add_argument("--trace-topk", action="store_true",
                     help="also hash every indexer layer's top-k rows (as returned and sorted) and the FP32 logits "
                          "of each is_last microbatch; prints how many distinct values each case gives over repeats")
+    ap.add_argument("--nvtx", action="store_true",
+                    help="NVTX range `stage <s> mb <n>` per microbatch (n counts all microbatches; <out>.mbs.json "
+                         "maps n to case, repeat and chunk), for `nsys profile` + bench/nsys_trace.load")
     a = ap.parse_args()
     import torch.multiprocessing as mp
 
@@ -191,7 +226,7 @@ def main() -> None:
     port = 21500 + (int(JOB) % 100) * 100 if JOB.isdigit() else 21500
     from bench.common import free_port_block
     port = free_port_block(port)
-    mp.spawn(_worker, args=(cases, a.repeats, port, str(out), a.trace_topk), nprocs=4, join=True)
+    mp.spawn(_worker, args=(cases, a.repeats, port, str(out), a.trace_topk, a.nvtx), nprocs=4, join=True)
     if a.trace_topk:
         print(json.dumps(variation(Path(out)), indent=1), flush=True)
     if a.judge:
