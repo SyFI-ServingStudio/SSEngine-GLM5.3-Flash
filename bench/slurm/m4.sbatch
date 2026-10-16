@@ -16,7 +16,8 @@
 # check too. Token differences between the cache-on and cache-off servers go to the margin rule (bench/margin.py
 # --judge: each side's token in the top 2, margin < 3 nats).
 # SAMPLE=1: nvidia-smi samples (SM clock, power, temperature, throttle reasons) every 200 ms into
-# OUT/slurm/gpu_samples_<job>.csv. preflight also runs GTEST (-k) first, as margin does.
+# OUT/slurm/gpu_samples_<job>.csv. preflight also runs GTEST (-k) first, as margin does, and with GRAPHS=1
+# bench/graphs.py on the four stages at once (OUT/graphs_<job>/).
 # resume_nsys: bench/margin.py --nvtx on CASES (absolute paths, space-separated; default cases_resume_cost.json: P
 # 100,000 / 100,003 / 100,004 resumed with A 256 / 1,024) at each commit of REVS (default "worktree") under Nsight
 # Systems; bench/mb_kernels.py per stage and kernel (compare runs: python -m bench.mb_kernels --compare); GTEST as in margin.
@@ -45,6 +46,15 @@ case $WHAT in
   check) $PY -m bench.prefix_check --out "$R" --port "$P"; rc=$? ;;
   preflight)
     rc=0; [ -n "${GTEST:-}" ] && { $PY -m pytest tests -m gpu -k "$GTEST" -v; rc=$?; }   # GPU tests first
+    if (( rc == 0 )) && [ -n "${GRAPHS:-}" ]; then   # bench/graphs.py, the four stages at once, one GPU each
+      mkdir -p "$R/graphs_$JOB"; IFS=, read -ra GG <<< "$G"; pids=()
+      for s in 0 1 2 3; do
+        CUDA_VISIBLE_DEVICES=${GG[$s]} $PY -m bench.graphs --stage $s --out "$R/graphs_$JOB/s$s.json" \
+          > "$R/graphs_$JOB/s$s.log" 2>&1 & pids+=($!)
+      done
+      for s in 0 1 2 3; do wait ${pids[$s]} || rc=1; grep -h "\[graphs\] pass" "$R/graphs_$JOB/s$s.log"; done
+      echo "== graphs rc=$rc"
+    fi
     if (( rc == 0 )) && [ -z "${SKIP_KVCHECK:-}" ]; then
       $PY -m bench.kvcheck --prompt-len 32768 --chunk 8000 --chunk-b 8192 --exact chunked_b,whole_filler; rc=$?
       (( rc == 0 )) && { $PY -m bench.kvcheck --prompt-len 40000 --chunk 8001 --chunk-b 8190 --noise-len 32768; rc=$?; }
