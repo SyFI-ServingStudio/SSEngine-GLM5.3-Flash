@@ -190,7 +190,7 @@ Kind: setup difference, open. `1_contract.md` §1 gives the node 1 TB of local S
 the SSD tier runs (`tiers`, `ssd_heavy`) cannot hold the contract's 1 TB. Before M6, free or reserve the space, or
 record the smaller SSD tier each run actually had.
 
-## Implementation gap: NCCL p2p sends slower than the targets' send (M3) — deferred, with trigger
+## Implementation gap: sends slower than the targets' send (M3) — copy-engine transport; ~0.11 ms per hop left
 
 - Measured (job 7128, `bench/p2p.py`, 2 B200s, NCCL 2.29.7, 32 KiB per token, p50):
 
@@ -206,6 +206,20 @@ record the smaller SSD tier each run actually had.
 - Effect on one-request runs: 3 sends × ~0.07 ms excess, < 0.5% of TTFT at 1k and 0.1% at 8k.
 - Deferred: a copy-engine transport (CUDA IPC buffers and events, a host-side handshake per microbatch). Revisit if
   the saturated runs show sends, or receives posted early, costing stage time.
+- Done (efdd20b, `transport: ce`, default since then): the sender's cudaMemcpyAsync writes into a K-slot ring on the
+  receiver (CUDA IPC), ordered by cuStreamWaitValue32 / cuStreamWriteValue32 flags, with no kernels and no host
+  handshake. GPU test: bitwise the same bytes as NCCL over 10 microbatches of 1–4096 rows, through ring wrap-around,
+  with a slow consumer (`tests/test_transport_gpu.py`). One-request sends (7279, same job, ms per hop):
+
+  | prompt | ce | nccl (8 channels) | target |
+  | ---: | ---: | ---: | ---: |
+  | 1k | 0.28 / 0.17 / 0.17 | 0.42 / 0.34 / 0.34 | 0.068 |
+  | 8k | 0.58 / 0.47 / 0.65 | 1.24 / 1.14 / 1.27 | 0.482 |
+
+  A hop takes ~0.11 ms more than the copy alone (7128 peer copy: 0.061 / 0.361 ms); not traced yet. At 1k, hop
+  0→1 also waits for stage 0's host (stage 0 is host-bound there; CUDA graphs are the fix).
+- Left for now (orchestrator): sends 1k 0.17–0.28 ms vs 0.068, 8k 0.47–0.65 ms vs 0.482; cause not traced; at 1k the
+  excess is ~0.4 ms of one_1k's 60 ms TTFT. Revisit only if one_1k still misses after CUDA graphs.
 
 ## Setup difference: one-request runs of 64k and 128k cap the KV pool (M3)
 
@@ -272,7 +286,7 @@ Data: `measured/batchflip/{7170,7172}_s*.json`, `7174_s0.json`, `vllm_7173.json`
   runs that is 3 × 0.7 ms at 8k (0.3% of TTFT) and 3 × 11 ms at 128k (1%). The copy-engine transport (entry above)
   would remove both the SM sharing and the send gap.
 
-## Implementation gap: first-request TTFT in saturated runs (M3) — open, intake next
+## Implementation gap: first-request TTFT in saturated runs (M3) — 8k fixed by intake processes; 1k–4k is the client
 
 - TTFT first is 0.30 / 0.29 / 0.33 / 0.62 s at 1k / 2k / 4k / 8k against 0.21–0.22 s (7185). From arrival to the
   token at the controller the pipeline takes 174 / 203 / 211 / 275 ms; the rest is response delivery.
@@ -282,8 +296,20 @@ Data: `measured/batchflip/{7170,7172}_s*.json`, `7174_s0.json`, `vllm_7173.json`
 - Precheck (do-nothing server, 8k burst): last response at 755 / 503 / 347 ms with 1 / 2 / 4 SO_REUSEPORT
   processes; the first response still comes at ~0.21–0.25 s, after the client's posting ends. Multi-process intake
   can shorten the 8k case; the 1k–4k floor is the client.
+- Intake processes (2866002, `intake_procs`), saturated_8k with ce (7279; each run beside another on the other
+  GPU half). Throughput is unchanged:
 
-## Saturated 64k and 128k: stage 0 slower than in one-request runs (M3) — open
+  | intake_procs | TTFT first (s) | last arrival at the server (ms) | tok/s | TTFT p50 (s) |
+  | ---: | ---: | ---: | ---: | ---: |
+  | 0 (HTTP in the controller) | 0.379 | 1154 | 139.6k | 60.00 |
+  | 1 | 0.581 | 949 | 139.4k | 60.14 |
+  | 2 | 0.301 | 554 | 140.2k | 59.97 |
+  | 4 | 0.233 (x1.04) | 356 | 139.3k | 60.09 |
+
+  One intake process takes the burst faster than the controller's loop but answers later: it parses on its event
+  loop, so the first answer waits behind the parsing of later requests. Four bring the 8k first TTFT to target.
+
+## Saturated 64k and 128k: stage 0 slower than in one-request runs (M3) — gone with CE, pinning and a quiet host
 
 - 7258: saturated_64k 128.6k tok/s (×0.91), saturated_128k 111.2k (×0.80); stage 0 busy 100%, stages 1–3 78–90%.
   Stage-0 compute median is normal (59.0 / 68.8 ms) but has spikes to 115–214 ms; stages 1–3 have none.
@@ -291,6 +317,41 @@ Data: `measured/batchflip/{7170,7172}_s*.json`, `7174_s0.json`, `vllm_7173.json`
   inside forwards (482 ms of gaps > 2 ms in 2.85 s), and single launch calls take up to 9–14 ms. Host load average
   was 155–223 on 224 cores (7258 and 7259 ran side by side). Suspected host CPU contention on the stage that has no
   slack; to confirm with a rerun on a quiet host before any code change.
+- 7279 (half A alone, other half idle, load average 9–19; transport ce, workers pinned to 2 cores on their GPU's
+  NUMA node): saturated_64k 136.2k tok/s (x0.96), saturated_128k 134.8k (x0.97); TTFT p50 / p90 / p99 x1.04 / 1.04 /
+  1.04 and x1.03 / 1.03 / 1.03; stage-0 median 58.7 / 60.0 ms with no spikes (busy 97.5 / 98.4%). The three changes
+  came together, so this does not say which one removed the spikes.
+
+## Copy-engine transport: kernels keep all 148 SMs; tokens differ with the SM count (M3) — unconfirmed
+
+- With `transport: ce` nothing sends with SM kernels, so DeepGEMM and FlashInfer persistent KDA keep their default
+  148 SMs, as in vLLM (`compute_sms` / `nccl_channels` apply to `nccl` only).
+- 7279, the A/B pairs ran at the same time on the two GPU halves, with the halves swapped between 8k and 1k:
+
+  | run | tok/s | TTFT first / p50 / p90 / p99 (s) | period (run / microbatches) |
+  | --- | ---: | --- | ---: |
+  | saturated_8k ce | 139.6k (x0.97) | 0.379 / 60.00 / 108.05 / 118.87 (x1.69 / 1.02 / 1.03 / 1.03) | 58.7 ms |
+  | saturated_8k nccl | 136.1k (x0.95) | 0.490 / 61.48 / 110.95 / 122.00 (x2.19 / 1.05 / 1.05 / 1.05) | 60.2 ms |
+  | target | 143.4k | 0.224 / 58.65 / 105.39 / 115.91 | 57.2 ms |
+  | saturated_1k ce | 150.0k (x1.00) | 0.378 / 56.62 / 101.11 / 110.75 (x1.76 / 1.00 / 1.00 / 0.99) | 55.0 ms |
+  | saturated_1k nccl | 144.2k (x0.97) | 0.466 / 58.08 / 104.06 / 113.73 (x2.17 / 1.03 / 1.03 / 1.02) | 57.0 ms |
+  | target | 149.3k | 0.215 / 56.34 / 101.28 / 111.37 | 54.9 ms |
+
+- Tokens: every judged request passes in both. Between the two saturated_8k runs 131 of 2048 tokens differ (1 of
+  16384 at 1k). At 8k every microbatch is one whole prompt in both runs, so the difference is the kernels' SM count
+  (DeepGEMM and KDA grids, splits), not the transport (bitwise in the GPU test) or batching. ce runs vLLM's SM count.
+  Unconfirmed: a ce run with compute_sms 132 would match nccl's tokens if this is the cause. Every judged request
+  passes either way.
+- The indexer top-k was also not deterministic then (section "Indexer top-k was not deterministic", fixed after
+  7279), which alone can flip tokens run to run at 8k; the final M3 run (deterministic top-k) separates the two.
+
+## Implementation gap: one-request 1k and 2k, stage 0 is host-bound (M3) — CUDA graphs (model lane)
+
+- 7279 one_1k (ce): stage 0 20.5 ms (mean of 5; first 23.6) vs 12.3 target (x1.66); stages 1–3 x0.90–0.92; GPU span
+  x1.10 (first x1.17). 7187 one_2k: stage 0 x1.12. From 4k on stage 0 is GPU-bound (x0.90–0.95).
+- 7135 nsys one_1k: stage 0's host takes 23.4 ms to launch its forward and the GPU idles 12.6 ms of it between
+  kernels; stages 1–3 have the plans early (their host leads), so only stage 0 shows it. Hop 0→1 waits for that host.
+- Fix in progress: piecewise CUDA graphs per token bucket (model lane); the final M3 run measures it.
 
 ## Indexer top-k was not deterministic — fixed (M3, found by the CUDA-graph check)
 

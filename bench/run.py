@@ -28,6 +28,8 @@ from pathlib import Path
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from ppimpl.runtime.cpus import cpu_list  # noqa: E402
 WS = Path("/raid/kanzhu/ServingStudio")
 HANDOFF = Path(os.environ.get("PPIMPL_HANDOFF", WS / "wt-pp-main/doc/handoff/glm53_flash_pp4_b200_v1"))
 REQ_FRONTEND = Path(os.environ.get("PPIMPL_REQ_FRONTEND", WS / "wt-pp-main/alignment/load_generator/req-frontend"))
@@ -171,9 +173,12 @@ def nsys_window(kind: str, length: int, requests: int, spec: str | None) -> list
     return [round(0.1 * n), round(0.9 * n)]
 
 
+DIRECT = False   # --gpus: this process picked the GPUs (CUDA_VISIBLE_DEVICES) and its CPUs; no srun steps
+
+
 def step(argv: list[str], gpus: int | None) -> list[str]:
     """Inside a Slurm job: one concurrent step (`srun --overlap`); else the command itself."""
-    if not os.environ.get("SLURM_JOB_ID"):
+    if not os.environ.get("SLURM_JOB_ID") or DIRECT:
         return argv
     return ["srun", "--overlap", "-n1", f"--gres={'gpu:%d' % gpus if gpus else 'none'}", *argv]
 
@@ -185,7 +190,7 @@ def execute(run_dir: Path, server_cfg: dict, client_cfg: dict, *, port: int, met
     run_dir.mkdir(parents=True, exist_ok=True)
     for f in ("run.json", "report.json", "pool.json", "metrics.json", "summary.json",   # a failed run leaves none
               "microbatches.jsonl", "server_requests.jsonl", "requests.jsonl", "trace.nsys-rep", "trace.sqlite",
-              "trace.json", "token_check.json", *(f"stage{s}.json" for s in range(8))):
+              "trace.json", "token_check.json", "cpus.json", *(f"stage{s}.json" for s in range(8))):
         (run_dir / f).unlink(missing_ok=True)
     server_cfg = {**server_cfg, "port": port, "run_dir": str(run_dir)}
     (run_dir / "server.yaml").write_text(yaml.safe_dump(server_cfg, sort_keys=False))
@@ -193,6 +198,8 @@ def execute(run_dir: Path, server_cfg: dict, client_cfg: dict, *, port: int, met
     argv = client_argv(run_dir / "client.yaml")
     (run_dir / "client_command.txt").write_text(shlex.join(argv) + "\n")
     meta = {**meta, "port": port, "job_id": os.environ.get("SLURM_JOB_ID"), "host": os.uname().nodename,
+            "gpus": os.environ.get("CUDA_VISIBLE_DEVICES"), "half": os.environ.get("PPIMPL_HALF"),
+            "run_cpus": cpu_list(os.sched_getaffinity(0)),
             "ppimpl_commit": git_rev(ROOT), "req_frontend_commit": git_rev(REQ_FRONTEND)}
     uptime = subprocess.run(["uptime"], capture_output=True, text=True).stdout.strip()
     (run_dir / "uptime.txt").write_text(uptime + "\n")
@@ -214,6 +221,8 @@ def execute(run_dir: Path, server_cfg: dict, client_cfg: dict, *, port: int, met
                                     timeout=client_timeout_s)
         meta["client_s"] = round(time.time() - t, 1)
         meta["client_returncode"] = client.returncode
+        meta["uptime_after"] = subprocess.run(["uptime"], capture_output=True, text=True).stdout.strip()
+        print(f"[{run_dir.name}] uptime after: {meta['uptime_after']}", flush=True)
     finally:
         stop(server, port, timeout_s=1800 if nsys else 90)
         # uvicorn re-raises the SIGTERM it handled once it has shut down: -15 (143 through nsys) is a clean stop
@@ -228,6 +237,8 @@ def execute(run_dir: Path, server_cfg: dict, client_cfg: dict, *, port: int, met
                             text=True)
         (run_dir / "trace.log").write_text(tr.stdout + tr.stderr)
         meta["nsys"]["export_and_parse_s"] = round(time.time() - t, 1)
+    if (run_dir / "cpus.json").exists():
+        meta["cpus"] = json.loads((run_dir / "cpus.json").read_text())
     pool = run_dir / "pool.json"
     if pool.exists():
         meta["pool"] = json.loads(pool.read_text())
@@ -261,6 +272,10 @@ def run_named(name: str, fake: bool, port: int, out_root: Path, args) -> dict:
             extra["profile_mbs"] = window
     if fake and args.us_per_token is not None:
         extra["fake"] = {"us_per_token": args.us_per_token}
+    if args.transport:
+        extra["transport"] = args.transport
+    if args.intake_procs is not None:
+        extra["intake_procs"] = args.intake_procs
     if args.cpu:    # harness check without GPUs: gloo, small activations
         extra["fake"] = {**extra.get("fake", {}), "hidden_width": 64}
     return execute(run_dir, server_config(kind, length, fake, run_dir, device="cpu" if args.cpu else "cuda", **extra),
@@ -280,6 +295,10 @@ def submit(args) -> None:
         inner += ["--us-per-token", str(args.us_per_token)]
     if args.nsys:
         inner.append("--nsys")
+    if args.transport:
+        inner += ["--transport", args.transport]
+    if args.intake_procs is not None:
+        inner += ["--intake-procs", str(args.intake_procs)]
     if args.nsys_mbs:
         inner += ["--nsys-mbs", args.nsys_mbs]
     if args.out_root:
@@ -311,6 +330,10 @@ def main():
     ap.add_argument("--dependency", help="Slurm dependency, e.g. afterany:7034")
     ap.add_argument("--port", type=int)
     ap.add_argument("--us-per-token", type=float, help="FakeStageModel stage time per token")
+    ap.add_argument("--transport", choices=["nccl", "ce"], help="RunConfig.transport (default: the config's)")
+    ap.add_argument("--intake-procs", type=int, help="RunConfig.intake_procs (0: HTTP in the controller process)")
+    ap.add_argument("--gpus", help="with --inline: CUDA_VISIBLE_DEVICES for the server, run without srun steps (two "
+                                   "servers side by side in one 8-GPU job; start this under taskset for its CPUs)")
     ap.add_argument("--client-timeout", type=float, default=1200)
     ap.add_argument("--nsys", action="store_true", help="run the server under Nsight Systems (bench/nsys_trace.py parses it)")
     ap.add_argument("--nsys-mbs", help="microbatches to trace, a:b or all (default: one-request all, saturated the "
@@ -325,6 +348,10 @@ def main():
         if not args.time:
             raise SystemExit("--time is required to submit (run slurm-windows first)")
         return submit(args)
+    if args.gpus:
+        global DIRECT
+        DIRECT = True
+        os.environ["CUDA_VISIBLE_DEVICES"] = args.gpus
     job = os.environ.get("SLURM_JOB_ID")
     # 100 ports per job (runs use port + 10 i), all below the ephemeral range (32768+): 7134 lost a bind to one there
     port = args.port or (20000 + int(job) % 120 * 100 if job else 18500)

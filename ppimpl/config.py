@@ -76,11 +76,15 @@ class RunConfig(msgspec.Struct, forbid_unknown_fields=True):
     pool_tokens: int | None = None    # cap on the KV pool, in tokens (1_contract.md §2.3)
     cuda_graphs: bool = True          # glm53: microbatches up to 8192 tokens replay a CUDA graph per power-of-2 bucket
                                       # (padded to it); larger ones run eagerly (ppimpl/model/stage.py)
-    # Persistent kernels with spin handoffs between CTAs (DeepGEMM mega_mhc, FlashInfer persistent KDA) run on this
-    # many SMs, and NCCL p2p on at most nccl_channels CTAs per kernel (a send and a receive: 2 x 8 of the 148), so an
-    # NCCL kernel beside them never keeps one of their CTAs from running (M3 saturated: 2.7x slower stages).
+    transport: str = "ce"             # activations: "ce" copy engine into the receiver's ring (CePipe), or "nccl" p2p
+    # transport "nccl" only: persistent kernels with spin handoffs between CTAs (DeepGEMM mega_mhc, FlashInfer
+    # persistent KDA) run on this many SMs, and NCCL p2p on at most nccl_channels CTAs per kernel (a send and a receive:
+    # 2 x 8 of the 148), so an NCCL kernel beside them never keeps one of their CTAs from running (M3 saturated: 2.7x
+    # slower stages). "ce" uses no SMs for transport, and the kernels keep all 148.
     compute_sms: int | None = 132
     nccl_channels: int | None = 8
+    intake_procs: int = 4             # N intake processes on the port; 0: HTTP in the controller process
+                                      # (SO_REUSEPORT) that parse requests and pass them on over zmq (ppimpl/intake.py)
     profile_mbs: list[int] | None = None  # [a, b): cudaProfilerStart at mb a, Stop after mb b-1 (bench/run.py --nsys)
     keep_sessions: bool = False       # phase B: exact prefix cache (kept sessions, LRU eviction of whole sessions)
     scheduler: SchedulerConfig = msgspec.field(default_factory=SchedulerConfig)  # mb_tokens: one-request runs set it >= the prompt
@@ -95,7 +99,8 @@ class RunConfig(msgspec.Struct, forbid_unknown_fields=True):
     def base_port(self) -> int:
         return self.control_port if self.control_port is not None else self.port + 1
 
-    # Port layout: base = controller PULL (reports), base+1+s = worker s PULL (plans), base+1+N = torch.distributed.
+    # Port layout: base = controller PULL (reports), base+1+s = worker s PULL (plans), base+1+N = torch.distributed,
+    # base+2+N = controller ROUTER for intake processes.
     def report_addr(self) -> str:
         return f"tcp://127.0.0.1:{self.base_port}"
 
@@ -104,6 +109,9 @@ class RunConfig(msgspec.Struct, forbid_unknown_fields=True):
 
     def dist_init_method(self) -> str:
         return f"tcp://127.0.0.1:{self.base_port + 1 + self.num_stages}"
+
+    def intake_addr(self) -> str:   # controller ROUTER <- intake DEALERs (intake_procs > 0)
+        return f"tcp://127.0.0.1:{self.base_port + 2 + self.num_stages}"
 
 
 def load_config(path: str | Path, **overrides) -> RunConfig:

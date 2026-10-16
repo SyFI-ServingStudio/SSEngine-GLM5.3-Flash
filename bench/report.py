@@ -1,6 +1,7 @@
 """Numbers of 4_iteration.md §6/§8 from run dirs written by bench/run.py.
 
   python bench/report.py measured/runs/one_8k [more run dirs...]
+  python bench/report.py --summarize measured/runs_m3 --out measured     the summary of a runs root, written to --out
 
 Per run dir: report.json. Then, over every run dir beside it (the runs root), the summary: `iteration.jsonl`
 (one-request runs, one line per request), `saturated.jsonl` (one line per length) and `iteration.md` (both tables
@@ -362,6 +363,83 @@ def iteration_md(one: list[dict], sat: list[dict], title: str) -> str:
     return "\n".join(out)
 
 
+# --- misses against the pass rule of 4_iteration.md §6, each pointing at its issues.md entry ---------------------------
+
+ISSUES = Path(__file__).resolve().parents[1] / "measured/issues.md"
+# (what missed, the issues.md heading that explains it, by its start). A miss with no rule here is listed as having
+# no entry: write one before quoting the numbers.
+MISS_ISSUES = [
+    (lambda m: m["what"] in ("stage 0", "GPU span", "send 0→1") and m["prompt_tokens"] <= 2048,
+     "Implementation gap: one-request 1k and 2k, stage 0 is host-bound"),
+    (lambda m: m["what"].startswith("send"), "Implementation gap: sends slower than the targets' send"),
+    (lambda m: m["what"] == "output", "Saturated 1k: one wrong token is batch numerics"),
+]
+
+
+def misses(one: list[dict], sat: list[dict], runs: list[dict]) -> list[dict]:
+    """Every value outside the pass rule: one request, per request (stage and GPU span +10%, send +10% or 0.05 ms,
+    whichever is larger; faster is not a miss); saturated, tokens/s -10% and TTFT p50/p90/p99 +10%; and every run
+    with a wrong or missing token among the judged requests."""
+    it_t, sat_t = _targets()
+    out = []
+    for L in sorted({r["prompt_tokens"] for r in one}):
+        rs = [r for r in one if r["prompt_tokens"] == L and not r.get("failed")]
+        t = it_t.get(L)
+        if not rs or not t:
+            continue
+        checks = [(f"stage {s}", lambda r, s=s: r["stages"][s]["compute_ms"], ts["compute_ms"],
+                   1.1 * ts["compute_ms"]) for s, ts in enumerate(t["stages"])]
+        checks += [(f"send {s}→{s + 1}", lambda r, s=s: r["sends"][s]["ms"], ts["ms"],
+                    ts["ms"] + max(0.1 * ts["ms"], 0.05)) for s, ts in enumerate(t["sends"])]
+        checks.append(("GPU span", lambda r: r["gpu_span_ms"], t["ttft_ms"], 1.1 * t["ttft_ms"]))
+        for what, get, target, limit in checks:
+            vals = [get(r) for r in rs]
+            bad = [v for v in vals if v > limit]
+            if bad:
+                out.append({"run": f"one_{L // 1024}k", "prompt_tokens": L, "what": what, "measured": max(bad),
+                            "target": target, "limit": limit, "count": f"{len(bad)} of {len(vals)} requests"})
+    for r in sat:
+        t = sat_t.get(r["prompt_tokens"])
+        if not t:
+            continue
+        L = r["prompt_tokens"]
+        if r["tokens_per_s"] < 0.9 * t["tokens_per_s"]:
+            out.append({"run": f"saturated_{L // 1024}k", "prompt_tokens": L, "what": "tokens/s",
+                        "measured": r["tokens_per_s"], "target": t["tokens_per_s"], "limit": 0.9 * t["tokens_per_s"],
+                        "count": ""})
+        for q in ("p50", "p90", "p99"):
+            m = (r["ttft_s"] or {}).get(q)
+            if m is not None and m > 1.1 * t["ttft_s"][q]:
+                out.append({"run": f"saturated_{L // 1024}k", "prompt_tokens": L, "what": f"TTFT {q}",
+                            "measured": m, "target": t["ttft_s"][q], "limit": 1.1 * t["ttft_s"][q], "count": ""})
+    for run in runs:
+        tk = run.get("tokens") or {}
+        if tk.get("fail") or tk.get("no_token"):
+            L = int(m.group(1)) * 1024 if (m := re.search(r"_(\d+)k$", run["name"])) else 0
+            out.append({"run": run["name"], "prompt_tokens": L, "what": "output", "measured": None, "target": None,
+                        "limit": None, "count": f"{tk.get('fail', 0)} wrong, {tk.get('no_token', 0)} without a token"})
+    headings = [line[3:].strip() for line in ISSUES.read_text().splitlines() if line.startswith("## ")] \
+        if ISSUES.exists() else []
+    for m in out:
+        start = next((h for rule, h in MISS_ISSUES if rule(m)), None)
+        m["issue"] = next((h for h in headings if start and h.startswith(start)), None)
+    return out
+
+
+def misses_md(ms: list[dict]) -> str:
+    out = ["## Misses (4_iteration.md §6 pass rule)", ""]
+    if not ms:
+        return "\n".join(out + ["None.", ""])
+    out += ["| Run | What | Worst measured | Target | Limit | Ratio | Requests | issues.md |",
+            "|---|---|---|---|---|---|---|---|"]
+    for m in ms:
+        nd = 1 if m["what"] == "tokens/s" else 3
+        out.append(f"| {m['run']} | {m['what']} | {_f(m['measured'], nd)} | {_f(m['target'], nd)} | "
+                   f"{_f(m['limit'], nd)} | {_ratio(m['measured'], m['target'])} | {m['count']} | "
+                   + (m["issue"] or "**no entry yet**") + " |")
+    return "\n".join(out + [""])
+
+
 def report_run(run_dir: Path) -> dict:
     meta = json.loads((run_dir / "run.json").read_text())
     rep = {"name": meta["name"], "kind": meta["kind"]}
@@ -445,7 +523,7 @@ def kernels_md(name: str, kernels: list[dict], top: int = 12) -> str:
     return "\n".join(out + [""])
 
 
-def summarize(runs_root: Path) -> Path:
+def summarize(runs_root: Path, out: Path | None = None) -> Path:
     one, sat, kern, runs = [], [], [], []
     for d in sorted(runs_root.iterdir()):
         f = d / "report.json"
@@ -458,13 +536,15 @@ def summarize(runs_root: Path) -> Path:
             sat.append(rep["saturated"])
         if rep.get("kernels"):
             kern.append(kernels_md(rep["name"], rep["kernels"]))
-    out = runs_root.parent if runs_root.name == "runs" else runs_root
+    out = out or (runs_root.parent if runs_root.name == "runs" else runs_root)
+    out.mkdir(parents=True, exist_ok=True)
     one.sort(key=lambda r: (r["prompt_tokens"], r["run"]))
     sat.sort(key=lambda r: r["prompt_tokens"])
     (out / "iteration.jsonl").write_text("".join(json.dumps(r) + "\n" for r in one))
     (out / "saturated.jsonl").write_text("".join(json.dumps(r) + "\n" for r in sat))
     title = "M3 iteration: measured vs targets" + (f" ({runs_root.name} runs)" if out == runs_root else "")
     md = iteration_md(one, sat, title)
+    md += misses_md(misses(one, sat, runs)) + "\n"
     md += runs_md(runs)
     if kern:
         md += "\n## Kernels (nsys)\n\n" + "\n".join(kern)
@@ -473,6 +553,15 @@ def summarize(runs_root: Path) -> Path:
 
 
 def main():
+    if sys.argv[1:2] == ["--summarize"]:
+        args = sys.argv[2:]
+        root = Path(args[0]).resolve()
+        out = Path(args[args.index("--out") + 1]).resolve() if "--out" in args else None
+        for d in sorted(root.iterdir()):
+            if (d / "run.json").exists():
+                report_run(d)
+        print(summarize(root, out))
+        return
     dirs = [Path(a).resolve() for a in sys.argv[1:]]
     if not dirs:
         raise SystemExit(__doc__)

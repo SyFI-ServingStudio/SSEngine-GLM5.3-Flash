@@ -23,19 +23,23 @@ import json
 import math
 import os
 import queue
+import signal
 import subprocess
 import sys
 import threading
 import time
 import traceback
 from pathlib import Path
+from typing import NamedTuple
 
+import msgspec
 import numpy as np
 import zmq
 
 from ppimpl.config import BLOCK_TOKENS, RunConfig, dump_config
 from ppimpl.engine.kv import KvManager, kv_blocks_for, pool_size
 from ppimpl.engine.scheduler import ChunkSpec, PlainScheduler, Request
+from ppimpl.runtime.cpus import CONTROLLER_CORES, cpu_list, pin_process, split_cores, threads
 from ppimpl.runtime.dispatch import NOW, WAIT, DispatchRule
 from ppimpl.runtime.transport import (Chunk, Plan, Ready, Shutdown, StageDone, WorkerError, decode_to_controller,
                                       encode, for_stage)
@@ -43,6 +47,12 @@ from ppimpl.runtime.transport import (Chunk, Plan, Ready, Shutdown, StageDone, W
 READY_TIMEOUT_S = 1800   # a real stage loads its weights and captures graphs before Ready
 WAKE_ADDR = "inproc://ppimpl-control-wake"
 ADMIT_BATCH = 64   # requests the control thread takes in before it looks at the reports again
+
+
+class Remote(NamedTuple):
+    """A request that came from an intake process (ppimpl/intake.py): where its answer goes."""
+    ident: bytes
+    key: int
 
 
 def prompt_sha256(token_ids: list[int]) -> str:
@@ -77,6 +87,13 @@ class Controller:
         self.next_mb = 0
         self.next_seq = 0                    # order in which requests entered the scheduler
         self.timer_at: int | None = None     # host ns at which the dispatch rule wants to be asked again
+        # intake processes (cfg.intake_procs): all their messages go through the control thread
+        self.intake = None
+        self.intake_procs: list[subprocess.Popen] = []
+        self.intake_cpus: set[int] | None = None
+        self.intakes_ready: set[bytes] = set()
+        self.answered: dict[str, dict] = {}  # answered, response not yet sent: id -> log record
+        self.pack, self.unpack = msgspec.msgpack.Encoder(), msgspec.msgpack.Decoder()
 
     # --- lifecycle ------------------------------------------------------------------------------------------------
 
@@ -93,11 +110,16 @@ class Controller:
         self.wake_tx = self.ctx.socket(zmq.PUSH)     # used by the event loop only
         self.wake_tx.setsockopt(zmq.SNDHWM, 0)
         self.wake_tx.connect(WAKE_ADDR)
+        if cfg.intake_procs:
+            self.intake = self.ctx.socket(zmq.ROUTER)
+            self.intake.setsockopt(zmq.SNDHWM, 0)
+            self.intake.setsockopt(zmq.RCVHWM, 0)
+            self.intake.bind(cfg.intake_addr())
         self.plans = []
         pkg_root = str(Path(__file__).resolve().parents[2])
         env = {**os.environ, "PYTHONUNBUFFERED": "1",
                "PYTHONPATH": os.pathsep.join(filter(None, [pkg_root, os.environ.get("PYTHONPATH")]))}
-        if cfg.nccl_channels:   # see RunConfig.compute_sms
+        if cfg.transport == "nccl" and cfg.nccl_channels:   # see RunConfig.compute_sms
             env |= {"NCCL_MAX_NCHANNELS": str(cfg.nccl_channels), "NCCL_MAX_P2P_NCHANNELS": str(cfg.nccl_channels)}
         for s in range(self.n):
             log = open(self.run_dir / f"worker{s}.log", "w")
@@ -114,6 +136,7 @@ class Controller:
             for p in self.procs:
                 p.kill()
             raise
+        self._pin()
         num_blocks = pool_size([r.num_blocks for r in ready], cfg.pool_tokens)
         self.rule = DispatchRule(cfg.max_in_flight, cfg.dispatch_ahead >= 1, cfg.form_lead_ms)
         # the scheduler's own cap is not the binding one: the rule admits the extra queued plan
@@ -131,6 +154,29 @@ class Controller:
         self.thread = threading.Thread(target=self._control, name="control", daemon=True)
         self.thread.start()
         self.ready = True
+        for i in range(cfg.intake_procs):     # their /health answers 200 once all of them are connected
+            log = open(self.run_dir / f"intake{i}.log", "w")
+            p = subprocess.Popen([sys.executable, "-m", "ppimpl", "intake", "--config", str(cfg_path), "--index", str(i)],
+                                 stdout=log, stderr=subprocess.STDOUT, env=env)
+            if self.intake_cpus:
+                os.sched_setaffinity(p.pid, self.intake_cpus)
+            self.intake_procs.append(p)
+
+    def _pin(self):
+        """The controller takes the job's CPUs that the workers did not pin themselves to; cpus.json records both."""
+        allowed = os.sched_getaffinity(0)
+        workers = [os.sched_getaffinity(p.pid) for p in self.procs]
+        rest = allowed - set().union(*workers)
+        mine = rest
+        if rest and rest != allowed:
+            if self.cfg.intake_procs:
+                mine, self.intake_cpus = split_cores(rest, CONTROLLER_CORES)
+            pin_process(mine)
+        info = {"job_cpus": cpu_list(allowed), "workers": [cpu_list(w) for w in workers], "controller": cpu_list(mine),
+                "intakes": cpu_list(self.intake_cpus or mine),
+                "threads": {"controller": threads(), "workers": [threads(p.pid) for p in self.procs]}}
+        (self.run_dir / "cpus.json").write_text(json.dumps(info) + "\n")
+        print("cpus: " + json.dumps(info), flush=True)
 
     def _wait_ready(self) -> list[Ready]:
         ready: dict[int, Ready] = {}
@@ -151,8 +197,19 @@ class Controller:
         for s, p in enumerate(self.procs):
             if p.poll() is not None:
                 raise RuntimeError(f"worker {s} exited with {p.returncode}; see {self.run_dir}/worker{s}.log")
+        for i, p in enumerate(self.intake_procs):
+            if p.poll() is not None:
+                raise RuntimeError(f"intake {i} exited with {p.returncode}; see {self.run_dir}/intake{i}.log")
 
     async def stop(self):
+        procs, self.intake_procs = self.intake_procs, []   # stopping them is not a failure (_check_procs)
+        for p in procs:
+            p.terminate()
+        for p in procs:
+            try:
+                await asyncio.to_thread(p.wait, 10)
+            except subprocess.TimeoutExpired:
+                p.kill()
         if self.thread is not None and self.thread.is_alive():
             self.inbox.put(None)
             self.wake_tx.send(b"")
@@ -164,7 +221,7 @@ class Controller:
                 await asyncio.to_thread(p.wait, 60)
             except subprocess.TimeoutExpired:
                 p.kill()
-        for sock in (*self.plans, self.reports, self.wake_rx, self.wake_tx):
+        for sock in (*self.plans, self.reports, self.wake_rx, self.wake_tx, *([self.intake] if self.intake else [])):
             sock.close(linger=0)
         for f in ("mb_log", "req_log", "plan_log"):
             if hasattr(self, f):
@@ -203,9 +260,9 @@ class Controller:
             if not fut.done():
                 fut.set_result((tok, info))
 
-    def log_response(self, info: dict):
+    def log_response(self, info: dict, sent_ns: int | None = None):
         """After the response went out."""
-        info["response_ms"] = self._ms(time.time_ns())
+        info["response_ms"] = self._ms(sent_ns or time.time_ns())
         info["prompt_sha256"] = prompt_sha256(info.pop("_prompt"))   # here, not on intake: bursts are the hot path
         self.req_log.write(json.dumps(info) + "\n")
 
@@ -215,6 +272,8 @@ class Controller:
         poller = zmq.Poller()
         poller.register(self.reports, zmq.POLLIN)
         poller.register(self.wake_rx, zmq.POLLIN)
+        if self.intake is not None:
+            poller.register(self.intake, zmq.POLLIN)
         next_check = time.monotonic() + 1.0
         try:
             more = False   # requests left in the inbox after this round's batch
@@ -243,6 +302,15 @@ class Controller:
                     self._admit(*item)
                 else:
                     more = True
+                if self.intake is not None:
+                    for _ in range(ADMIT_BATCH):
+                        try:
+                            frames = self.intake.recv_multipart(zmq.NOBLOCK)
+                        except zmq.Again:
+                            break
+                        self._from_intake(frames)
+                    else:
+                        more = True
                 if self.timer_at is not None and time.time_ns() >= self.timer_at:
                     self.timer_at = None
                 self._pump()
@@ -259,6 +327,10 @@ class Controller:
         self.failed = why
         print(f"controller: {why}", file=sys.stderr, flush=True)
         futs = [fut for _, fut, _ in self.reqs.values()]
+        for fut in futs:
+            if isinstance(fut, Remote):
+                self.intake.send_multipart([fut.ident, b"E", self.pack.encode((fut.key, why))])
+        futs = [f for f in futs if not isinstance(f, Remote)]
         while True:
             try:
                 item = self.inbox.get_nowait()
@@ -268,6 +340,35 @@ class Controller:
                 futs.append(item[3])
         self.loop.call_soon_threadsafe(_fail_all, futs, why)
         os.kill(os.getpid(), 15)
+
+    def _from_intake(self, frames: list[bytes]):
+        ident, kind = frames[0], frames[1]
+        if kind == b"Q":
+            key, req_id, arrival_ns = self.unpack.decode(frames[2])
+            ids = np.frombuffer(frames[3], np.int32)
+            why = self.failed or (None if self.sched.kv.fits_ever(len(ids))
+                                  else f"prompt of {len(ids)} tokens does not fit the KV pool")
+            if why:
+                self.intake.send_multipart([ident, b"E", self.pack.encode((key, why))])
+                return
+            if self.t0_ns is None:
+                self.t0_ns = arrival_ns
+                (self.run_dir / "t0.json").write_text(json.dumps({"t0_unix_ns": arrival_ns}) + "\n")
+            base, k = req_id, 1
+            while req_id in self.live:
+                req_id, k = f"{base}#{k}", k + 1
+            self.live.add(req_id)
+            self._admit(req_id, ids, arrival_ns, Remote(ident, key))
+        elif kind == b"D":
+            req_id, sent_ns = self.unpack.decode(frames[2])
+            self.log_response(self.answered.pop(req_id), sent_ns)
+        elif kind == b"R":
+            self.intakes_ready.add(ident)
+            if len(self.intakes_ready) == self.cfg.intake_procs:
+                for i in self.intakes_ready:
+                    self.intake.send_multipart([i, b"G"])
+        elif kind == b"S":   # /shutdown at an intake: the serve process stops on SIGTERM (ppimpl/server.py)
+            os.kill(os.getpid(), signal.SIGTERM)
 
     def _admit(self, req_id: str, token_ids: list[int], arrival_ns: int, fut: asyncio.Future):
         req = Request(req_id, len(token_ids), arrival_ns, token_ids)
@@ -304,8 +405,9 @@ class Controller:
         for c in specs:
             r = c.req
             end = c.start + c.num_tokens
+            ids = r.token_ids[c.start:end]
             chunks.append(Chunk(r.req_id, c.start, c.num_tokens, r.alloc.kv_blocks[:kv_blocks_for(end)],
-                                r.alloc.state_blocks, c.is_last, r.token_ids[c.start:end]))
+                                r.alloc.state_blocks, c.is_last, ids if isinstance(ids, list) else ids.tolist()))
             info = self.reqs[r.req_id][2]
             info.setdefault("first_dispatch_ms", self._ms(now))
             info["chunks"] = info.get("chunks", 0) + 1
@@ -335,8 +437,14 @@ class Controller:
                 self.sched.finish(req)
                 info["token_ms"] = self._ms(now)
                 info["token"] = tok
-                done.append((fut, tok, info))
-            self.loop.call_soon_threadsafe(self._answered, done)
+                if isinstance(fut, Remote):
+                    self.live.discard(req_id)
+                    self.answered[req_id] = info
+                    self.intake.send_multipart([fut.ident, b"A", self.pack.encode((fut.key, req_id, tok))])
+                else:
+                    done.append((fut, tok, info))
+            if done:
+                self.loop.call_soon_threadsafe(self._answered, done)
 
 
 def _fail_all(futs: list[asyncio.Future], why: str):
