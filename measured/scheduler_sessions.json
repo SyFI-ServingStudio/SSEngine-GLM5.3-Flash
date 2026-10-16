@@ -1,0 +1,309 @@
+[
+ {
+  "metrics": {
+   "rounds": 30611,
+   "rounds_per_s": 25.509166666666665,
+   "new_tokens_per_s": 88182.4125,
+   "prompt_tokens_per_s": 1774426.0133333334,
+   "computed_tokens_per_s": 114054.64416666667,
+   "prefix_hit_share": 0.984656883706553,
+   "ttft_s": {
+    "p50": 0.32718994140625,
+    "p90": 0.40931005859375,
+    "p99": 1.9440110351562576,
+    "max": 167.70422998046874
+   },
+   "rounds_ttft_over_60s": 22
+  },
+  "stage_busy": [
+   0.8656506666666667,
+   0.8019039111666667,
+   0.8545547311666667,
+   0.8640376937500001
+  ],
+  "shift_ms": 213.360595703125,
+  "server_ttft_s": {
+   "p50": 0.3268255,
+   "p90": 0.4112295,
+   "p99": 2.399689350000011
+  },
+  "pool_tokens": 61258368,
+  "evicted_sessions": 1230,
+  "evicted_tokens": 88410405,
+  "preemptions": 0,
+  "hits": 31529,
+  "hit_tokens": 2239935092,
+  "peak_hard_blocks": 388,
+  "dropped_stale": 423,
+  "kept_sessions_at_end": 376,
+  "prefix_shortfall_tokens": 0,
+  "rounds_sent": 33476,
+  "rounds_failed": 0,
+  "server_answered": 33546,
+  "microbatches": 23324,
+  "microbatch_check": {
+   "0": {
+    "microbatches": 22772,
+    "p10": 1.0057415877232245,
+    "p50": 1.0425267126605051,
+    "p90": 1.117815158800159
+   },
+   "1": {
+    "microbatches": 22771,
+    "p10": 0.9842944677074363,
+    "p50": 1.0276350416438615,
+    "p90": 1.0710559670537578
+   },
+   "2": {
+    "microbatches": 22770,
+    "p10": 1.014378683928089,
+    "p50": 1.0660150040845646,
+    "p90": 1.0998059785003147
+   },
+   "3": {
+    "microbatches": 22769,
+    "p10": 1.021730947841325,
+    "p50": 1.0693434978487073,
+    "p90": 1.104782591016382
+   }
+  },
+  "cache_kinds": {
+   "rounds": 33546,
+   "by_kind": {
+    "none_first_round": 1426,
+    "full": 31529,
+    "superseded": 416,
+    "evicted": 175
+   },
+   "superseded_recomputed_tokens": 28391364,
+   "evicted_recomputed_tokens": 14381692,
+   "evicted_sessions_at_admit": 1224,
+   "admit_waits": 0,
+   "admit_wait_ms_max": 0.0
+  },
+  "in_run_jit": {
+   "compiles": 0,
+   "by_stage": {},
+   "kernels": []
+  },
+  "run": "sched_srpt8k_n400_7709",
+  "gpu": {
+   "0": {
+    "sm_mhz": 1636,
+    "power_w": 896,
+    "power_cap_share": 0.93,
+    "samples": 6492
+   },
+   "1": {
+    "sm_mhz": 1657,
+    "power_w": 887,
+    "power_cap_share": 0.931,
+    "samples": 6526
+   },
+   "2": {
+    "sm_mhz": 1638,
+    "power_w": 901,
+    "power_cap_share": 0.937,
+    "samples": 6521
+   },
+   "3": {
+    "sm_mhz": 1623,
+    "power_w": 903,
+    "power_cap_share": 0.941,
+    "samples": 6504
+   }
+  },
+  "stage_fit_bins": {
+   "bins": [
+    "[0, 256)",
+    "[256, 1024)",
+    "[1024, 8192)",
+    "8192",
+    "[8193, 32769)"
+   ],
+   "stages": [
+    [
+     {
+      "n": 551,
+      "measured_s": 5.0966701,
+      "fit_s": 4.060806231039858,
+      "ratio": 1.2550882287961045
+     },
+     {
+      "n": 1628,
+      "measured_s": 19.6966249,
+      "fit_s": 16.27959115135931,
+      "ratio": 1.2098967791556225
+     },
+     {
+      "n": 3127,
+      "measured_s": 94.7358771,
+      "fit_s": 89.10952170284112,
+      "ratio": 1.0631397777660778
+     },
+     {
+      "n": 18017,
+      "measured_s": 1088.3554815,
+      "fit_s": 1046.6612832721348,
+      "ratio": 1.0398354261251723
+     },
+     {
+      "n": 0,
+      "measured_s": 0.0,
+      "fit_s": 0.0,
+      "ratio": null
+     }
+    ],
+    [
+     {
+      "n": 551,
+      "measured_s": 4.186478,
+      "fit_s": 4.570893313596921,
+      "ratio": 0.9158993029976416
+     },
+     {
+      "n": 1628,
+      "measured_s": 18.8692775,
+      "fit_s": 17.417263747534665,
+      "ratio": 1.083366352689633
+     },
+     {
+      "n": 3127,
+      "measured_s": 89.5462517,
+      "fit_s": 86.32200435657484,
+      "ratio": 1.0373513957125762
+     },
+     {
+      "n": 18016,
+      "measured_s": 1005.9958277999999,
+      "fit_s": 984.4197226612848,
+      "ratio": 1.0219175872262962
+     },
+     {
+      "n": 0,
+      "measured_s": 0.0,
+      "fit_s": 0.0,
+      "ratio": null
+     }
+    ],
+    [
+     {
+      "n": 551,
+      "measured_s": 4.225136099999999,
+      "fit_s": 4.624506606166668,
+      "ratio": 0.9136404074687411
+     },
+     {
+      "n": 1628,
+      "measured_s": 19.2783697,
+      "fit_s": 17.71103550270664,
+      "ratio": 1.088494780390104
+     },
+     {
+      "n": 3127,
+      "measured_s": 93.94113180000001,
+      "fit_s": 88.69238699036721,
+      "ratio": 1.0591792033988536
+     },
+     {
+      "n": 18015,
+      "measured_s": 1076.3447975000001,
+      "fit_s": 1015.0188362794423,
+      "ratio": 1.0604185449851833
+     },
+     {
+      "n": 0,
+      "measured_s": 0.0,
+      "fit_s": 0.0,
+      "ratio": null
+     }
+    ],
+    [
+     {
+      "n": 551,
+      "measured_s": 4.6685269,
+      "fit_s": 4.740189259051546,
+      "ratio": 0.9848819624839441
+     },
+     {
+      "n": 1628,
+      "measured_s": 19.9129601,
+      "fit_s": 18.066782368723967,
+      "ratio": 1.1021863048769558
+     },
+     {
+      "n": 3127,
+      "measured_s": 95.83375229999999,
+      "fit_s": 89.5643116583037,
+      "ratio": 1.0699993169781152
+     },
+     {
+      "n": 18014,
+      "measured_s": 1085.8388594,
+      "fit_s": 1021.7221040670203,
+      "ratio": 1.0627536147821013
+     },
+     {
+      "n": 0,
+      "measured_s": 0.0,
+      "fit_s": 0.0,
+      "ratio": null
+     }
+    ]
+   ],
+   "s0_idle_while_waiting_s": 27.061662199996842,
+   "s0_idle_while_waiting_gaps": 20346,
+   "s0_idle_arrival_to_start_s": 26.562756357001092,
+   "s0_idle_arrivals": 2419
+  },
+  "step": "srpt8k",
+  "n": 400,
+  "target": {
+   "setting": "srpt8k_hbm",
+   "max_sessions": 400,
+   "rounds": 32159,
+   "rounds_per_s": 26.799166666666668,
+   "new_tokens_per_s": 92988.57666666666,
+   "prompt_tokens_per_s": 1871955.0858333334,
+   "computed_tokens_per_s": 118311.11333333333,
+   "prefix_hit_share": 0.9857655911248556,
+   "ttft_s": {
+    "p50": 0.25546266174316407,
+    "p90": 0.33860800781250006,
+    "p99": 1.7967679980468627,
+    "max": 132.961109375
+   },
+   "rounds_ttft_over_60s": 12,
+   "stage_busy": [
+    0.8553642011719793,
+    0.8088948028338596,
+    0.833584557560459,
+    0.8396048306555252
+   ],
+   "prefix_read_share": {
+    "hbm": 0.9764427347257453,
+    "dram": 0.0,
+    "ssd": 0.0
+   }
+  },
+  "sim_x106": {
+   "setting": "srpt8k_hbm",
+   "max_sessions": 400,
+   "gpu_time_multiplier": 1.06,
+   "run": "logs/20261016_6_mult106_sched/srpt8k/c400",
+   "rounds": 31887,
+   "rounds_per_s": 26.5725,
+   "new_tokens_per_s": 92268.175,
+   "prompt_tokens_per_s": 1842266.9041666666,
+   "computed_tokens_per_s": 115424.52666666667,
+   "prefix_hit_share": 0.9867677894385137,
+   "ttft_s": {
+    "p50": 0.2720166625976562,
+    "p90": 0.35935927734375006,
+    "p99": 2.02150366455077,
+    "max": 211.736625
+   },
+   "rounds_ttft_over_60s": 17
+  }
+ }
+]

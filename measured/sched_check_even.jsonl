@@ -1,0 +1,59 @@
+{"index": 0, "start_ms": 0.0, "tokens": 4096, "chunks": [["sched_10", 0, 1024], ["sched_11", 0, 1024], ["sched_12", 0, 1024], ["sched_13", 0, 1024]]}
+{"index": 1, "start_ms": 45.349, "tokens": 4096, "chunks": [["sched_14", 0, 1024], ["sched_15", 0, 1024], ["sched_16", 0, 1024], ["sched_17", 0, 1024]]}
+{"index": 2, "start_ms": 72.137, "tokens": 4096, "chunks": [["sched_18", 0, 1024], ["sched_19", 0, 1024], ["sched_20", 0, 1024], ["sched_21", 0, 1024]]}
+{"index": 3, "start_ms": 100.99, "tokens": 4096, "chunks": [["sched_22", 0, 1024], ["sched_23", 0, 1024], ["sched_24", 0, 1024], ["sched_25", 0, 1024]]}
+{"index": 4, "start_ms": 131.638, "tokens": 4096, "chunks": [["sched_2", 0, 4096]]}
+{"index": 5, "start_ms": 164.139, "tokens": 4096, "chunks": [["sched_3", 0, 4096]]}
+{"index": 6, "start_ms": 195.001, "tokens": 4096, "chunks": [["sched_4", 0, 4096]]}
+{"index": 7, "start_ms": 225.793, "tokens": 4096, "chunks": [["sched_5", 0, 4096]]}
+{"index": 8, "start_ms": 256.71, "tokens": 4096, "chunks": [["sched_6", 0, 4096]]}
+{"index": 9, "start_ms": 287.278, "tokens": 4096, "chunks": [["sched_7", 0, 4096]]}
+{"index": 10, "start_ms": 318.032, "tokens": 4096, "chunks": [["sched_8", 0, 4096]]}
+{"index": 11, "start_ms": 349.282, "tokens": 4096, "chunks": [["sched_9", 0, 4096]]}
+{"index": 12, "start_ms": 380.841, "tokens": 4096, "chunks": [["sched_1", 0, 4096]]}
+{"index": 13, "start_ms": 411.883, "tokens": 4096, "chunks": [["sched_1", 4096, 4096]]}
+{"index": 14, "start_ms": 444.103, "tokens": 4096, "chunks": [["sched_1", 8192, 4096]]}
+{"index": 15, "start_ms": 476.611, "tokens": 4096, "chunks": [["sched_1", 12288, 4096]]}
+{"index": 16, "start_ms": 509.83, "tokens": 4096, "chunks": [["sched_1", 16384, 4096]]}
+{"index": 17, "start_ms": 543.419, "tokens": 4096, "chunks": [["sched_1", 20480, 4096]]}
+{"index": 18, "start_ms": 575.961, "tokens": 4096, "chunks": [["sched_1", 24576, 4096]]}
+{"index": 19, "start_ms": 608.794, "tokens": 4096, "chunks": [["sched_1", 28672, 4096]]}
+{"index": 20, "start_ms": 642.126, "tokens": 4096, "chunks": [["sched_0", 0, 4096]]}
+{"index": 21, "start_ms": 673.412, "tokens": 4096, "chunks": [["sched_0", 4096, 4096]]}
+{"index": 22, "start_ms": 705.559, "tokens": 4096, "chunks": [["sched_0", 8192, 4096]]}
+{"index": 23, "start_ms": 739.033, "tokens": 4096, "chunks": [["sched_0", 12288, 4096]]}
+{"index": 24, "start_ms": 773.077, "tokens": 4096, "chunks": [["sched_0", 16384, 4096]]}
+{"index": 25, "start_ms": 806.089, "tokens": 4096, "chunks": [["sched_0", 20480, 4096]]}
+{"index": 26, "start_ms": 839.949, "tokens": 4096, "chunks": [["sched_0", 24576, 4096]]}
+{"index": 27, "start_ms": 873.685, "tokens": 4096, "chunks": [["sched_0", 28672, 4096]]}
+{"index": 28, "start_ms": 907.004, "tokens": 4096, "chunks": [["sched_0", 32768, 4096]]}
+{"index": 29, "start_ms": 940.007, "tokens": 4096, "chunks": [["sched_0", 36864, 4096]]}
+{"index": 30, "start_ms": 972.895, "tokens": 4096, "chunks": [["sched_0", 40960, 4096]]}
+{"index": 31, "start_ms": 1005.522, "tokens": 4096, "chunks": [["sched_0", 45056, 4096]]}
+{"index": 32, "start_ms": 1038.734, "tokens": 4096, "chunks": [["sched_0", 49152, 4096]]}
+{"index": 33, "start_ms": 1072.278, "tokens": 4096, "chunks": [["sched_0", 53248, 4096]]}
+{"index": 34, "start_ms": 1105.686, "tokens": 4096, "chunks": [["sched_0", 57344, 4096]]}
+{"index": 35, "start_ms": 1139.002, "tokens": 4096, "chunks": [["sched_0", 61440, 4096]]}
+{"index": 36, "start_ms": 1172.217, "tokens": 4096, "chunks": [["sched_0", 65536, 4096]]}
+{"index": 37, "start_ms": 1205.266, "tokens": 4096, "chunks": [["sched_0", 69632, 4096]]}
+{"index": 38, "start_ms": 1238.705, "tokens": 4096, "chunks": [["sched_0", 73728, 4096]]}
+{"index": 39, "start_ms": 1272.725, "tokens": 4096, "chunks": [["sched_0", 77824, 4096]]}
+{"index": 40, "start_ms": 1307.184, "tokens": 4096, "chunks": [["sched_0", 81920, 4096]]}
+{"index": 41, "start_ms": 1342.23, "tokens": 4096, "chunks": [["sched_0", 86016, 4096]]}
+{"index": 42, "start_ms": 1376.512, "tokens": 4096, "chunks": [["sched_0", 90112, 4096]]}
+{"index": 43, "start_ms": 1410.398, "tokens": 4096, "chunks": [["sched_0", 94208, 4096]]}
+{"index": 44, "start_ms": 1445.846, "tokens": 4096, "chunks": [["sched_0", 98304, 4096]]}
+{"index": 45, "start_ms": 1480.689, "tokens": 4096, "chunks": [["sched_0", 102400, 4096]]}
+{"index": 46, "start_ms": 1513.965, "tokens": 4096, "chunks": [["sched_0", 106496, 4096]]}
+{"index": 47, "start_ms": 1547.685, "tokens": 4096, "chunks": [["sched_0", 110592, 4096]]}
+{"index": 48, "start_ms": 1582.168, "tokens": 4096, "chunks": [["sched_0", 114688, 4096]]}
+{"index": 49, "start_ms": 1617.094, "tokens": 4096, "chunks": [["sched_0", 118784, 4096]]}
+{"index": 50, "start_ms": 1651.705, "tokens": 4096, "chunks": [["sched_0", 122880, 4096]]}
+{"index": 51, "start_ms": 1686.313, "tokens": 4096, "chunks": [["sched_0", 126976, 4096]]}
+{"index": 52, "start_ms": 4993.002, "tokens": 2048, "chunks": [["sched_26", 0, 2048]]}
+{"index": 53, "start_ms": 5010.883, "tokens": 2048, "chunks": [["sched_26", 2048, 2048]]}
+{"index": 54, "start_ms": 5028.662, "tokens": 2048, "chunks": [["sched_26", 4096, 2048]]}
+{"index": 55, "start_ms": 5046.586, "tokens": 2048, "chunks": [["sched_26", 6144, 2048]]}
+{"index": 56, "start_ms": 6992.01, "tokens": 512, "chunks": [["sched_27", 0, 512]]}
+{"index": 57, "start_ms": 7002.606, "tokens": 512, "chunks": [["sched_27", 512, 512]]}
+{"ttft_ms": {"sched_10": 147.97, "sched_11": 148.13, "sched_13": 148.04, "sched_12": 148.11, "sched_17": 175.18, "sched_14": 175.33, "sched_16": 175.35, "sched_15": 175.37, "sched_20": 204.8, "sched_21": 204.86, "sched_18": 204.93, "sched_19": 204.95, "sched_22": 234.24, "sched_24": 234.28, "sched_23": 234.31, "sched_25": 234.35, "sched_2": 268.87, "sched_3": 300.81, "sched_4": 332.17, "sched_5": 363.61, "sched_6": 395.71, "sched_7": 427.62, "sched_8": 458.65, "sched_9": 490.57, "sched_1": 757.0, "sched_0": 1851.94, "sched_26": 132.62, "sched_27": 50.84}}

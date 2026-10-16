@@ -1,0 +1,29 @@
+{"index": 0, "start_ms": 0.0, "tokens": 8192, "chunks": [["sched_10", 0, 1024], ["sched_11", 0, 1024], ["sched_12", 0, 1024], ["sched_13", 0, 1024], ["sched_14", 0, 1024], ["sched_15", 0, 1024], ["sched_16", 0, 1024], ["sched_17", 0, 1024]]}
+{"index": 1, "start_ms": 73.723, "tokens": 8192, "chunks": [["sched_18", 0, 1024], ["sched_19", 0, 1024], ["sched_20", 0, 1024], ["sched_21", 0, 1024], ["sched_22", 0, 1024], ["sched_23", 0, 1024], ["sched_24", 0, 1024], ["sched_25", 0, 1024]]}
+{"index": 2, "start_ms": 122.759, "tokens": 8192, "chunks": [["sched_2", 0, 4096], ["sched_3", 0, 4096]]}
+{"index": 3, "start_ms": 177.55, "tokens": 8192, "chunks": [["sched_4", 0, 4096], ["sched_5", 0, 4096]]}
+{"index": 4, "start_ms": 232.317, "tokens": 8192, "chunks": [["sched_6", 0, 4096], ["sched_7", 0, 4096]]}
+{"index": 5, "start_ms": 286.828, "tokens": 8192, "chunks": [["sched_8", 0, 4096], ["sched_9", 0, 4096]]}
+{"index": 6, "start_ms": 341.15, "tokens": 8192, "chunks": [["sched_1", 0, 8192]]}
+{"index": 7, "start_ms": 397.098, "tokens": 8192, "chunks": [["sched_1", 8192, 8192]]}
+{"index": 8, "start_ms": 455.44, "tokens": 8192, "chunks": [["sched_1", 16384, 8192]]}
+{"index": 9, "start_ms": 514.625, "tokens": 8192, "chunks": [["sched_1", 24576, 8192]]}
+{"index": 10, "start_ms": 574.482, "tokens": 8192, "chunks": [["sched_0", 0, 8192]]}
+{"index": 11, "start_ms": 630.856, "tokens": 8192, "chunks": [["sched_0", 8192, 8192]]}
+{"index": 12, "start_ms": 689.541, "tokens": 8192, "chunks": [["sched_0", 16384, 8192]]}
+{"index": 13, "start_ms": 748.93, "tokens": 8192, "chunks": [["sched_0", 24576, 8192]]}
+{"index": 14, "start_ms": 808.646, "tokens": 8192, "chunks": [["sched_0", 32768, 8192]]}
+{"index": 15, "start_ms": 869.252, "tokens": 8192, "chunks": [["sched_0", 40960, 8192]]}
+{"index": 16, "start_ms": 930.496, "tokens": 8192, "chunks": [["sched_0", 49152, 8192]]}
+{"index": 17, "start_ms": 990.958, "tokens": 8192, "chunks": [["sched_0", 57344, 8192]]}
+{"index": 18, "start_ms": 1052.076, "tokens": 8192, "chunks": [["sched_0", 65536, 8192]]}
+{"index": 19, "start_ms": 1113.023, "tokens": 8192, "chunks": [["sched_0", 73728, 8192]]}
+{"index": 20, "start_ms": 1174.622, "tokens": 8192, "chunks": [["sched_0", 81920, 8192]]}
+{"index": 21, "start_ms": 1236.695, "tokens": 8192, "chunks": [["sched_0", 90112, 8192]]}
+{"index": 22, "start_ms": 1298.412, "tokens": 8192, "chunks": [["sched_0", 98304, 8192]]}
+{"index": 23, "start_ms": 1360.733, "tokens": 8192, "chunks": [["sched_0", 106496, 8192]]}
+{"index": 24, "start_ms": 1422.763, "tokens": 8192, "chunks": [["sched_0", 114688, 8192]]}
+{"index": 25, "start_ms": 1484.447, "tokens": 8192, "chunks": [["sched_0", 122880, 8192]]}
+{"index": 26, "start_ms": 4992.67, "tokens": 8192, "chunks": [["sched_26", 0, 8192]]}
+{"index": 27, "start_ms": 6991.866, "tokens": 1024, "chunks": [["sched_27", 0, 1024]]}
+{"ttft_ms": {"sched_12": 237.08, "sched_11": 237.23, "sched_17": 237.1, "sched_10": 237.26, "sched_14": 237.27, "sched_16": 237.32, "sched_15": 237.33, "sched_13": 237.41, "sched_18": 287.71, "sched_21": 287.79, "sched_25": 287.81, "sched_22": 287.85, "sched_24": 287.84, "sched_20": 287.91, "sched_19": 287.93, "sched_23": 287.93, "sched_2": 349.38, "sched_3": 349.06, "sched_5": 403.61, "sched_4": 403.76, "sched_6": 460.04, "sched_7": 460.04, "sched_8": 513.74, "sched_9": 513.73, "sched_1": 758.36, "sched_0": 1739.31, "sched_26": 209.82, "sched_27": 53.07}}
