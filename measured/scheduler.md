@@ -27,6 +27,43 @@ Real runs (bench/run.py, each on a freshly started server) against the handoff v
 |---|---|---|---|---|---|---|---|---|---|---|
 | 1 shortest first | 400 | sched_srpt8k_n400_7709 | 25.5 vs 26.8 (x0.95) | 88.2k vs 93.0k (x0.95) | 114.1k vs 118.3k (x0.96) | 98.47% vs 98.58% | 0.33 / 0.41 / 1.94 / 167.7 vs 0.26 / 0.34 / 1.80 / 133.0 (x1.28 / x1.21 / x1.08) | 22 vs 12 | 87 / 80 / 85 / 86% vs 86 / 81 / 83 / 84% | 0 |
 | └ sim x1.06 | | | 26.6 | 92.3k | 115.4k | 98.68% | 0.27 / 0.36 / 2.02 / 211.7 (measured x1.20 / x1.14 / x0.96) | 17 | | |
+| 1 shortest first | 500 | sched_srpt8k_n500_7727 | 28.3 vs 29.2 (x0.97) | 102.0k vs 104.2k (x0.98) | 122.9k vs 127.7k (x0.96) | 98.85% vs 98.76% | 0.34 / 0.44 / 3.29 / 511.1 vs 0.26 / 0.36 / 3.39 / 564.7 (x1.31 / x1.24 / x0.97) | 101 vs 118 | 91 / 85 / 92 / 91% vs 91 / 86 / 88 / 89% | 0 |
+| └ sim x1.06 | | | 28.6 | 102.6k | 123.0k | 98.88% | 0.28 / 0.38 / 4.42 / 573.6 (measured x1.23 / x1.16 / x0.75) | 125 | | |
+
+Stage time / fit by microbatch tokens 0–255 / 256–1023 / 1024–8191 / 8192 / 8193–32768; hit kinds; GPU busy SM MHz / W / power-capped share:
+
+| Step | N | Stage time / fit | Rounds by hit kind | GPU |
+|---|---|---|---|---|
+| 1 shortest first | 400 | s0: x1.255 / x1.210 / x1.063 / x1.040 / –; s1: x0.916 / x1.083 / x1.037 / x1.022 / –; s2: x0.914 / x1.088 / x1.059 / x1.060 / –; s3: x0.985 / x1.102 / x1.070 / x1.063 / – | evicted 175, full 31529, none_first_round 1426, superseded 416 | g0: 1636 / 896 / 93%; g1: 1657 / 887 / 93%; g2: 1638 / 901 / 94%; g3: 1623 / 903 / 94% |
+| 1 shortest first | 500 | s0: x1.256 / x1.212 / x1.041 / x1.031 / –; s1: x0.916 / x1.087 / x1.040 / x1.023 / –; s2: x0.920 / x1.100 / x1.071 / x1.082 / –; s3: x0.989 / x1.102 / x1.065 / x1.058 / – | evicted 283, full 34209, none_first_round 1634, superseded 430 | g0: 1638 / 918 / 96%; g1: 1634 / 917 / 96%; g2: 1571 / 936 / 96%; g3: 1601 / 936 / 96% |
+
+## Notes" on is kept.
+
+## Scheduling check (§3)
+
+| Step | Run | Microbatches | Chunk for chunk | First difference | TTFT 128k / 32k / 8k alone / 1k alone (ms) | Worst TTFT deviation | In-run JIT |
+|---|---|---|---|---|---|---|---|
+| 0 plain | sched_check_plain_7708 | 28 / 28 | yes | – | 1142 vs 1118 / 1376 vs 1344 / 212 vs 224 / 52 vs 52 | 5.3% | 0 |
+| 1 shortest first | sched_check_srpt8k_7708 | 28 / 28 | yes | – | 1739 vs 1679 / 758 vs 729 / 210 vs 224 / 53 vs 52 | 10.3% | 0 |
+| 2 load budget | sched_check_budget_7708 | 55 / 55 | yes | – | 1856 vs 1742 / 759 vs 711 / 153 vs 155 / 53 vs 52 | 22.3% | 0 |
+| 3 even split | sched_check_even_7708 | 58 / 58 | yes | – | 1852 vs 1742 / 757 vs 711 / 133 vs 132 / 51 vs 51 | 23.8% | 0 |
+| 4 force-schedule | sched_check_good_7709 | 58 / 58 | yes | – | 1839 vs 1742 / 743 vs 711 / 133 vs 132 / 51 vs 51 | 5.6% | 0 |
+
+## Force check (§4)
+
+| Step | Run | 32k TTFT (s) | 1k TTFT p50 / p90 / p99 / max (s) | Last token (s) | Microbatches | 1k submit rate | Pass | Stage time / fit by microbatch tokens 0–255 / 256–1023 / 1024–8191 / 8192–8192 / 8193–32768 | In-run JIT |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 shortest first | force_check_srpt8k_7708 | 108.714 vs 110.075 (x0.99) | 14.196 / 25.677 / 28.27 / 28.576 vs 15.079 / 26.948 / 29.618 / 29.933 (x0.94 / x0.95 / x0.95) | 108.715 vs 110.075 | 2005 / 2004 | 200.0/s | yes | s0: – / – / x1.236 / x0.959 / –; s1: – / – / x1.026 / x0.981 / –; s2: – / – / x1.050 / x0.975 / –; s3: – / – / x1.043 / x0.985 / – | 0 |
+| 2 load budget | force_check_budget_7708 | 106.06 vs 107.506 (x0.99) | 15.152 / 21.803 / 25.36 / 25.846 vs 14.77 / 23.9 / 26.891 / 27.303 (x1.03 / x0.91 / x0.94) | 106.061 vs 107.506 | 1349 / 1429 | 200.0/s | yes | s0: – / x1.137 / x0.981 / – / x0.960; s1: – / x1.145 / x1.000 / – / x0.953; s2: – / x1.147 / x0.998 / – / x0.945; s3: – / x1.146 / x1.002 / – / x0.956 | 0 |
+| 3 even split | force_check_even_7708 | 105.828 vs 107.506 (x0.98) | 15.005 / 21.596 / 25.128 / 25.601 vs 14.77 / 23.9 / 26.891 / 27.303 (x1.02 / x0.90 / x0.93) | 105.829 vs 107.506 | 1353 / 1429 | 200.0/s | yes | s0: x1.329 / x1.083 / x0.978 / – / x0.957; s1: x1.267 / x0.890 / x0.999 / – / x0.956; s2: x1.043 / x0.829 / x0.997 / – / x0.950; s3: x1.326 / x0.847 / x0.999 / – / x0.956 | 0 |
+| 4 force-schedule | force_check_good_7708 | 60.903 vs 61.033 (x1.00) | 15.234 / 22.064 / 25.675 / 26.148 vs 14.77 / 24.093 / 27.122 / 27.519 (x1.03 / x0.92 / x0.95) | 106.135 vs 107.504 | 1342 / 1429 | 200.0/s | yes | s0: – / x1.084 / x0.977 / – / x0.961; s1: – / x0.890 / x0.997 / – / x0.953; s2: – / x0.829 / x0.996 / – / x0.946; s3: – / x0.847 / x1.000 / – / x0.949 | 0 |
+
+## Sessions (§5)
+
+| Step | N | Run | Rounds/s | New tokens/s | Computed tokens/s | Prefix hit share | TTFT p50 / p90 / p99 / max (s) | Over 60 s | Stage busy 0 / 1 / 2 / 3 | In-run JIT |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 1 shortest first | 400 | sched_srpt8k_n400_7709 | 25.5 vs 26.8 (x0.95) | 88.2k vs 93.0k (x0.95) | 114.1k vs 118.3k (x0.96) | 98.47% vs 98.58% | 0.33 / 0.41 / 1.94 / 167.7 vs 0.26 / 0.34 / 1.80 / 133.0 (x1.28 / x1.21 / x1.08) | 22 vs 12 | 87 / 80 / 85 / 86% vs 86 / 81 / 83 / 84% | 0 |
+| └ sim x1.06 | | | 26.6 | 92.3k | 115.4k | 98.68% | 0.27 / 0.36 / 2.02 / 211.7 (measured x1.20 / x1.14 / x0.96) | 17 | | |
 
 Stage time / fit by microbatch tokens 0–255 / 256–1023 / 1024–8191 / 8192 / 8193–32768; hit kinds; GPU busy SM MHz / W / power-capped share:
 
@@ -87,3 +124,32 @@ Stage time / fit by microbatch tokens 0–255 / 256–1023 / 1024–8191 / 8192 
      contexts), instead of a fixed 45 ms. Measure it with one srpt8k N=400 run.
   2. The stage-3 queueing comes from stage balance (stages 2 and 3 at x1.06 of fit vs stage 0 at x1.04). Profile what
      makes stages 2 and 3 slower than the fit. The layer split is fixed by the contract.
+
+### Sessions: budget N=400 (sched_budget_n400_7728, before c0a58f3)
+- 25.38 r/s, 87.6k new, TTFT 0.30/0.96/2.30 s, against sim x1.06 26.22, 91.0k, 0.16/0.48/2.14. From 720 s the
+  microbatches grow from 4096 tokens to 15-29k; the sim stays at 4096.
+- **Cause: the backlog B counted waiting rounds by their whole prompt.** The server has no declared prefix, so
+  `Request.fresh` was the whole prompt. The simulator counts a waiting round by its new tokens (`fresh_prompt_tokens`,
+  pipelined_chunked_prefill_admission.rs `prefill_budget`), even when an eviction means the prefix must be
+  recomputed. Waiting rounds in both runs at the same times:
+
+  | t (s) | 780 | 840 | 900 | 960 | 1020 | 1080 |
+  |---|---|---|---|---|---|---|
+  | real: waiting rounds, B share (M tokens) | 6, 0.72 | 9, 1.04 | 9, 1.48 | 8, 1.57 | 17, 2.33 | 13, 2.12 |
+  | sim: waiting rounds, B share / to compute (M) | 5, 0.04 / 0.26 | 6, 0.00 / 0.63 | 11, 0.05 / 0.84 | 3, 0.03 / 0.30 | 10, 0.08 / 0.80 | 6, 0.04 / 0.57 |
+
+  The waiting rounds are mostly evicted or superseded contexts. The sim's B stays below 1M, so its budget stays at
+  4096. Ours passed 1M and grew the microbatches. Bigger microbatches meant longer TTFT, longer waits, more
+  evictions and more recompute (computed − new 27.4k/s vs target 21.6k/s).
+- Fix c0a58f3: `KvManager.shared_prefix` estimates the declared prefix from what the server knows: the HBM hit, the
+  common prefix with a kept context the prompt does not extend, or the length of the evicted context. The backlog
+  counts a waiting round's tokens beyond it. Replay is unchanged (it has the declared prefix). budget N=400 reruns.
+- Per-microbatch cost is not the gap. Real stage 0 runs at x1.04-1.06 of the fit for its own microbatches; the sim's
+  x1.06 runs at x1.043-1.051 of the fit for its own (per 120 s windows). By stage, at exactly 4096 tokens:
+  s0/s1/s2/s3 = x1.046 / x1.030 / x1.062 / x1.067 of fit, all GPU time (host 5.7-10.9 ms, below the compute). The
+  33.5 vs 31.6 ms comparison is between microbatches with different contents: ours carry more attention per token
+  in that bin.
+- Stages 2 and 3 being relatively slow (x1.06-1.07 vs stage 0's x1.046) makes stage 3 the pipeline's bottleneck.
+  With 4 microbatches in flight, stage 0 then idles while work waits: 2.4% of the time at 240-720 s and 6.7% at
+  720-840 s, every time with the next plan at in_flight ≥ 4. The sim has stage 0 the slowest, so it never sees
+  this. srpt8k shows the same balance as queueing before stage 3.
