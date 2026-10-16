@@ -435,3 +435,25 @@ every prefix-hit variant has vLLM's top-1. Preflight rule (`bench/kvcheck.py --e
 where the chunks keep whole's microbatch shapes (8,192-aligned); other chunkings within 2x the split-K baseline
 measured in the same job per stage, KL within 4x, top-1 equal. The indexer fix itself is checked bitwise on its own
 ops (`tests/test_kpool_gpu.py`).
+
+## Unaligned prefix check: 3 token differences, all near ties; one run-to-run nondeterminism (M4, jobs 7476, 7498, 7503) — open
+
+`bench/prefix_check.py --p-shift 1,2,3` (bring-up sessions with P + 1/2/3; cache-on half 7476, cache-off half 7498 on
+free ports after 7476's port clash): hit = P 40/40; round-1 token equal 38/40, same round-1 prompt 38/40. The
+differences, with top-2 margins from `bench/margin.py` (7503: the same prompts and the server's chunks, 3 repeats in
+one process; bf16 logits as the server's argmax takes them):
+
+| Session | P | Round | Cache on | Cache off | 7503 top 2 (margin, nats) |
+|---|---|---|---|---|---|
+| 27 | 131,073 | 0 (no cache on either side) | 448 | 11 | 11, 448 (1.375 / 1.75 / 1.875 over the 3 repeats) |
+| 35 | 524,291 | 0 (no cache on either side) | 25 | 5053 | 5053, 25 (0.5, all repeats) |
+| 32 | 524,291 | 1 (same prompt) | 24306 | 1096 | cached chunks: 1096, 24306 (0.875); uncached: 1096, 1913 (0.375) |
+
+All are near ties under bench/check_tokens.py's rule (margin < 3 nats, each side's token in its schedule's top 2),
+so the check counts them and passes (`bench/margin.py --judge`; preflight runs it on any difference). Two are round 0,
+where neither server uses the cache: the same prompt in the same chunks gave another token in another server process
+(35: 25 vs 5053 at margin 0.5), and session 27's margin moves between repeats in one process (1.375 → 1.875). Both
+end with a 1–3-token chunk (P = 8,192 k + 1..3), which goes to the indexer's decode path; the bring-up's aligned P
+(7403) never made such a chunk and gave 40/40. Suspect (unverified): the decode-path top-k (`get_indexer_topk`) is
+not canonicalized like the prefill top-k (`topk_canon`, "Indexer top-k was not deterministic"), so equal pool scores
+can come back in another order and sparse MLA sums in index order. Not chased here: it moves tokens only at near ties.
