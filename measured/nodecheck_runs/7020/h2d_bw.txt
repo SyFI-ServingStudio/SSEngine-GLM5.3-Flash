@@ -1,5 +1,0 @@
-h2d single gpu0: 55.7 GB/s
-h2d single gpu1: 55.7 GB/s
-h2d single gpu2: 55.7 GB/s
-h2d single gpu3: 55.7 GB/s
-h2d concurrent: gpu0 55.7, gpu1 48.5, gpu2 52.2, gpu3 55.7; sum 212.1 GB/s

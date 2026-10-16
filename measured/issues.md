@@ -5,6 +5,8 @@ Two kinds (`1_contract.md` §6): **setup difference** (names the targets it affe
 
 The one-off probes cited below (`bench/batchflip.py`, `batchflip_prompts.py`, `cold.py`, `host.py`, `p2p.py`,
 `vllm_batch.py`) were removed once their findings were recorded here; they are in git history at `7598487`.
+Raw outputs (per-job json under `batchflip/`, `graphs/`, `host/`, run directories and logs) are not tracked; those
+cited here are in git history at `7598487`. Tracked: the md tables and the handoff-format jsonl.
 
 ## Design difference: mHC boundary at the stage edge (M2/M3)
 

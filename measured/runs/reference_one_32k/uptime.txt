@@ -1,1 +1,0 @@
-uptime before one_32k:  04:16:00 up 11 days, 14:57, 43 users,  load average: 22.84, 25.15, 20.08
