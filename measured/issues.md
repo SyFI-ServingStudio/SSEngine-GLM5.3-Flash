@@ -3,6 +3,9 @@
 Two kinds (`1_contract.md` §6): **setup difference** (names the targets it affects) and **implementation gap**
 (measured, target, suspected cause).
 
+The one-off probes cited below (`bench/batchflip.py`, `batchflip_prompts.py`, `cold.py`, `host.py`, `p2p.py`,
+`vllm_batch.py`) were removed once their findings were recorded here; they are in git history at `7598487`.
+
 ## Design difference: mHC boundary at the stage edge (M2/M3)
 
 - The targets price the first layer of stages 1–3 with the fused `attn_mhc_post_pre` (DeepGEMM mega), while the send

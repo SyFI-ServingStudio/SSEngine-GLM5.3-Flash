@@ -1,6 +1,6 @@
 """CUDA graphs of one stage: replay vs eager, per bucket (1 GPU).
 
-    python bench/graphs.py --stage S [--out JSON]
+    python -m bench.graphs --stage S [--out JSON]
 
 Builds the stage with CUDA graphs (`StageModel.capture_graphs`) and, for every bucket, two plans: exactly the bucket
 (no padding) and a padded one (two requests, a token count not divisible by 16). For each:
@@ -12,7 +12,7 @@ Builds the stage with CUDA graphs (`StageModel.capture_graphs`) and, for every b
   tokens too).
 A replay of every bucket runs in between, so each check also covers replay after other buckets.
 
-    python bench/graphs.py --stage S --memory [--mb-tokens 32768]
+    python -m bench.graphs --stage S --memory [--mb-tokens 32768]
 
 The memory check instead: the stage as the worker builds it (KV pool sized by the reserve, warm-up at the microbatch
 budget, then the graphs), then an eager forward at the budget and a replay of the largest bucket. Reports Ready's
@@ -24,12 +24,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import sys
 from pathlib import Path
 from types import SimpleNamespace as NS
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import layers as lb  # noqa: E402
+from bench import common as lb
 
 
 def plans_for(Tb: int, tokens: list[int]):

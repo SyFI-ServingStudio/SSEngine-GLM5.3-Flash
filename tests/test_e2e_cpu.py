@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-import run as bench_run
+from bench import run as bench_run
 from conftest import free_port_block
 from e2e import Server, blocks_per_request, check_microbatches, check_responses, send_all
 

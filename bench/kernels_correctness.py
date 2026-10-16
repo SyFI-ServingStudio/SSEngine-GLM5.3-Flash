@@ -5,7 +5,7 @@ from `third_party/sim_7bb224a6`), references from the runners and the vLLM fork'
 writes the comparisons. Where the fork calls a different callable than the profiler row (configs 4, 5, 7, 33;
 see `measured/kernels_identity.md`) both are checked when both are importable.
 
-    python bench/kernels_correctness.py --out measured/kernels_correctness.jsonl [--configs 1,2,...]
+    python -m bench.kernels_correctness --out measured/kernels_correctness.jsonl [--configs 1,2,...]
 
 One JSON line per (config, row, callable): max abs error, error relative to the reference's max, RMS error ratio,
 violations of `|a - r| <= atol + rtol * |r|`, the tolerance and where it comes from, pass.
@@ -17,22 +17,17 @@ import argparse
 import collections
 import json
 import math
-import os
 import sys
 import time
 import traceback
 from pathlib import Path
 
-LANE = Path(__file__).resolve().parents[1]
-PPIMPL = LANE.parents[1] if LANE.parent.name == "lanes" else LANE
-SIM = PPIMPL / "third_party" / "sim_7bb224a6"
-SPECS = Path(
-    os.environ.get(
-        "PPIMPL_KERNEL_SPECS",
-        "/raid/kanzhu/ServingStudio/wt-pp-main/doc/handoff/glm53_flash_pp4_b200_v1/data/kernel_specs.jsonl",
-    )
-)
-VLLM_TESTS = PPIMPL / "third_party" / "vllm"
+from bench.common import HANDOFF, MAIN
+
+SIM = MAIN / "third_party" / "sim_7bb224a6"
+SPECS = HANDOFF / "data" / "kernel_specs.jsonl"
+VLLM_TESTS = MAIN / "third_party" / "vllm"
+# neither tree is an installed package: the profiler's `profiling` and the fork's `tests` import from their roots
 for path in (str(SIM), str(VLLM_TESTS)):
     if path not in sys.path:
         sys.path.append(path)

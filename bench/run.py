@@ -1,7 +1,7 @@
 """Run handoff workloads against `python -m ppimpl serve` with req-frontend: one entry per run name.
 
-  python bench/run.py one_8k saturated_8k [--fake] --time 00:20:00 [--partition main]   submit one Slurm job
-  python bench/run.py one_8k --fake --inline                                                 run here (no Slurm)
+  python -m bench.run one_8k saturated_8k [--fake] --time 00:20:00 [--partition main]   submit one Slurm job
+  python -m bench.run one_8k --fake --inline                                                 run here (no Slurm)
   ... --nsys [--nsys-mbs a:b|all]     the server under Nsight Systems -> trace.nsys-rep, trace.sqlite, trace.json
 
 Names: one_<L>, saturated_<L> (4_iteration.md), L in 1k..128k. Each run gets a fresh server; the server and the
@@ -27,15 +27,13 @@ from pathlib import Path
 
 import yaml
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
-from ppimpl.runtime.cpus import cpu_list  # noqa: E402
+from bench.common import ENWIK9, HANDOFF, ROOT
+from ppimpl.runtime.cpus import cpu_list
+
 WS = Path("/raid/kanzhu/ServingStudio")
-HANDOFF = Path(os.environ.get("PPIMPL_HANDOFF", WS / "wt-pp-main/doc/handoff/glm53_flash_pp4_b200_v1"))
 REQ_FRONTEND = Path(os.environ.get("PPIMPL_REQ_FRONTEND", WS / "wt-pp-main/alignment/load_generator/req-frontend"))
 CLIENT_BIN = Path(os.environ.get("PPIMPL_REQ_FRONTEND_BIN", ROOT / "build/req-frontend/release/session_runner"))
 CHECKPOINT = Path("/raid/hf/hub/models--nvidia--GLM-5.3-Flash-NVFP4/snapshots/da920bb0b9f4a06727223a349e55468e38352348")
-ENWIK9 = WS / "data/corpus/enwik9"
 PYTHON = sys.executable
 NSYS = shutil.which("nsys") or "/usr/local/cuda/bin/nsys"
 
@@ -233,7 +231,7 @@ def execute(run_dir: Path, server_cfg: dict, client_cfg: dict, *, port: int, met
         subprocess.run([NSYS, "export", "--type", "sqlite", "--force-overwrite", "true", "-o",
                         str(run_dir / "trace.sqlite"), str(run_dir / "trace.nsys-rep")],
                        stdout=subprocess.DEVNULL, stderr=open(run_dir / "nsys_export.log", "w"), check=False)
-        tr = subprocess.run([PYTHON, str(ROOT / "bench/nsys_trace.py"), str(run_dir)], cwd=ROOT, capture_output=True,
+        tr = subprocess.run([PYTHON, "-m", "bench.nsys_trace", str(run_dir)], cwd=ROOT, capture_output=True,
                             text=True)
         (run_dir / "trace.log").write_text(tr.stdout + tr.stderr)
         meta["nsys"]["export_and_parse_s"] = round(time.time() - t, 1)
@@ -246,7 +244,7 @@ def execute(run_dir: Path, server_cfg: dict, client_cfg: dict, *, port: int, met
     if stages:
         meta["tactics"] = [json.loads(f.read_text())["tactics"] for f in stages]
     if server_cfg.get("model") != "fake" and (run_dir / "server_requests.jsonl").exists():
-        tc = subprocess.run([PYTHON, str(ROOT / "bench/check_tokens.py"), str(run_dir)], cwd=ROOT, capture_output=True,
+        tc = subprocess.run([PYTHON, "-m", "bench.check_tokens", str(run_dir)], cwd=ROOT, capture_output=True,
                             text=True)
         print(tc.stdout + tc.stderr, flush=True)
     reqs = run_dir / "requests.jsonl"
@@ -254,7 +252,7 @@ def execute(run_dir: Path, server_cfg: dict, client_cfg: dict, *, port: int, met
         m = subprocess.run([PYTHON, str(HANDOFF / "data/metrics.py"), str(reqs)], capture_output=True, text=True)
         (run_dir / "metrics.json").write_text(m.stdout if m.returncode == 0 else m.stderr)
     (run_dir / "run.json").write_text(json.dumps(meta, indent=1) + "\n")
-    rep = subprocess.run([PYTHON, str(ROOT / "bench/report.py"), str(run_dir)], cwd=ROOT, capture_output=True,
+    rep = subprocess.run([PYTHON, "-m", "bench.report", str(run_dir)], cwd=ROOT, capture_output=True,
                          text=True)
     print(rep.stdout + rep.stderr, flush=True)
     return meta
@@ -288,7 +286,7 @@ def submit(args) -> None:
     out = ROOT / "measured/runs" / ("fake" if args.fake else "")
     logs = out / "slurm"
     logs.mkdir(parents=True, exist_ok=True)
-    inner = [PYTHON, str(Path(__file__).resolve()), *args.names, "--inline"]
+    inner = [PYTHON, "-m", "bench.run", *args.names, "--inline"]
     if args.fake:
         inner.append("--fake")
     if args.us_per_token is not None:

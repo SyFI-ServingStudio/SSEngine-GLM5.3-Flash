@@ -1,6 +1,6 @@
 """Collect the pp-impl re-measure into measured/kernels.jsonl and measured/kernels.md (2_kernels.md §8).
 
-usage: python collect_kernels.py <queue_dir> <measured_dir>
+usage: python -m bench.kernels.collect_kernels <queue_dir> <measured_dir>
 Reads done/<stem>.rows.jsonl (handoff rows), out/<stem>.json (CLI --fresh results, same order),
 knames/<stem>/*.jsonl (worker hook: per-spec CUPTI kernel names and provenance notes).
 """
@@ -11,8 +11,7 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from make_queue import CONFIGS  # noqa: E402
+from bench.kernels.make_queue import CONFIGS
 
 TOL = 0.10
 

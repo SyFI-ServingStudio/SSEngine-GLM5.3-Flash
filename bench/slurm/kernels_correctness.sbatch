@@ -14,10 +14,10 @@ uptime
 nvidia-smi --query-gpu=index,name,driver_version,memory.used,utilization.gpu --format=csv
 if [ "${3:-}" = "kda-flashinfer" ]; then
   PY=/raid/kanzhu/ServingStudio/profile_envs/flashinfer_kda/bin/python
-  $PY bench/kernels_correctness.py --out "$OUT" --rows "$ROWS" --configs 5 --kda-flashinfer
+  $PY -m bench.kernels_correctness --out "$OUT" --rows "$ROWS" --configs 5 --kda-flashinfer
 else
   PY=/raid/kanzhu/ServingStudio/pp-impl/.venv/bin/python
   export PYTHONPATH=/raid/kanzhu/ServingStudio/pp-impl/third_party/causal_conv1d_try/pkg${PYTHONPATH:+:$PYTHONPATH}
-  $PY bench/kernels_correctness.py --out "$OUT" --rows "$ROWS" --configs "$CONFIGS"
+  $PY -m bench.kernels_correctness --out "$OUT" --rows "$ROWS" --configs "$CONFIGS"
 fi
 uptime

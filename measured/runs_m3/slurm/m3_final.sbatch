@@ -41,7 +41,7 @@ half() {   # half <A|B> <run names...>: one bench/run.py per name (fresh ports p
   for n in "$@"; do
     echo "== $(date -Is) half $h start $n"
     if [ -n "${DRY:-}" ]; then echo "   PPIMPL_HALF=$h taskset -c <$h cpus> bench/run.py $n --gpus $g --port $p --out-root $R"; continue; fi
-    PPIMPL_HALF=$h taskset -c "$c" $PY bench/run.py "$n" --inline --client-timeout 900 --gpus "$g" --port "$p" \
+    PPIMPL_HALF=$h taskset -c "$c" $PY -m bench.run "$n" --inline --client-timeout 900 --gpus "$g" --port "$p" \
       --out-root "$R" >> "$R/slurm/${JOB}_half_$h.log" 2>&1 || r=1
     echo "== $(date -Is) half $h done $n rc=$r"
     # first run of the half failed: the defaults are broken (server start, graphs); stop instead of holding 8 GPUs
@@ -55,7 +55,7 @@ half B one_1k one_2k one_4k one_8k one_16k one_32k one_64k one_128k & b=$!
 wait $a || rc=1; wait $b || rc=1; uptime
 half A saturated_64k saturated_128k || rc=1     # B idle: the quiet-host check
 uptime
-[ -n "${DRY:-}" ] || $PY bench/report.py --summarize "$R" --out "$M"
+[ -n "${DRY:-}" ] || $PY -m bench.report --summarize "$R" --out "$M"
 grep -h "FAILED\| -> " "$R/slurm/${JOB}_half_"*.log 2>/dev/null
 echo "== done $(date -Is) rc=$rc"
 rm -rf "$TMPDIR"

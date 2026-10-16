@@ -13,6 +13,6 @@ echo "job $SLURM_JOB_ID host $(hostname) gpus ${CUDA_VISIBLE_DEVICES:-?}"
 uptime
 for s in ${STAGES:-0 1 2 3}; do
   echo "=== stage $s $(date -Is)"
-  $PY bench/graphs.py --stage $s --memory --mb-tokens ${MB:-32768} || echo "=== stage $s FAILED rc=$?"
+  $PY -m bench.graphs --stage $s --memory --mb-tokens ${MB:-32768} || echo "=== stage $s FAILED rc=$?"
 done
 rm -rf "$TMPDIR"

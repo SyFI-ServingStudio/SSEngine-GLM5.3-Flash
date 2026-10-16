@@ -11,7 +11,7 @@ export PYTHONPATH=/raid/kanzhu/ServingStudio/pp-impl/third_party/causal_conv1d_t
 PY=/raid/kanzhu/ServingStudio/pp-impl/.venv/bin/python
 echo "job $SLURM_JOB_ID host $(hostname) gpus ${CUDA_VISIBLE_DEVICES:-?} $(git log --oneline -1)"
 uptime
-$PY bench/kvcheck.py --prompt-len ${1:-32768} --chunk ${2:-8000}
+$PY -m bench.kvcheck --prompt-len ${1:-32768} --chunk ${2:-8000}
 rc=$?
 uptime
 rm -rf "$TMPDIR"

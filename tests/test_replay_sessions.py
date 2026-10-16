@@ -3,7 +3,7 @@
 import json
 
 import pytest
-from replay import HANDOFF, MEMORY, Replay, StageModel, load_trace, make_scheduler
+from bench.replay import HANDOFF, MEMORY, Replay, StageModel, load_trace, make_scheduler
 
 from ppimpl.config import TierConfig
 

@@ -1,7 +1,7 @@
 """Numbers of 4_iteration.md §6/§8 from run dirs written by bench/run.py.
 
-  python bench/report.py measured/runs/one_8k [more run dirs...]
-  python bench/report.py --summarize measured/runs_m3 --out measured     the summary of a runs root, written to --out
+  python -m bench.report measured/runs/one_8k [more run dirs...]
+  python -m bench.report --summarize measured/runs_m3 --out measured     the summary of a runs root, written to --out
 
 Per run dir: report.json. Then, over every run dir beside it (the runs root), the summary: `iteration.jsonl`
 (one-request runs, one line per request), `saturated.jsonl` (one line per length) and `iteration.md` (both tables
@@ -18,8 +18,7 @@ from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from run import HANDOFF  # noqa: E402
+from bench.common import HANDOFF
 
 SEND_BYTES_PER_TOKEN = 4 * 4096 * 2
 

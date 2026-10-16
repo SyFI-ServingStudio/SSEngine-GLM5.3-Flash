@@ -16,7 +16,7 @@ uptime
 nvidia-smi --query-gpu=index,name,memory.used,utilization.gpu --format=csv
 for mode in $1; do
   echo "=== $mode $(date -Is)"
-  $PY bench/chain.py $mode --prompt-len $L || echo "=== $mode FAILED rc=$?"
+  $PY -m bench.chain $mode --prompt-len $L || echo "=== $mode FAILED rc=$?"
 done
 uptime
 rm -rf "$TMPDIR"

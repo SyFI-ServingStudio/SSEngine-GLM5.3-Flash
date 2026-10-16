@@ -1,6 +1,6 @@
 """KV cache and KDA state correctness on GPU: one prompt computed whole, in chunks, and in chunks on scrambled blocks.
 
-    python bench/kvcheck.py [--prompt-len 32768] [--chunk 8000]     # 4 GPUs
+    python -m bench.kvcheck [--prompt-len 32768] [--chunk 8000]     # 4 GPUs
 
 Four processes, one `StageModel` each, joined by the serving transport (`open_pipe`: RunConfig's default, the CE
 ring), as in the runtime. Stages 0-2 run `StageModel.forward` with CUDA graphs on (chunks up to 8,192 tokens replay
@@ -24,16 +24,12 @@ import argparse
 import json
 import os
 import random
-import sys
 import time
-from pathlib import Path
 from types import SimpleNamespace as NS
 
-LANE = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(LANE))
-sys.path.insert(0, str(LANE / "bench"))
+from bench.common import MEASURED, enwik9_tokens
 
-OUT = LANE / "measured" / "kvcheck"
+OUT = MEASURED / "kvcheck"
 JOB = os.environ.get("SLURM_JOB_ID", "local")
 FILLER = 1000
 NUM_BLOCKS = 96          # blocks 1.. ; a 32k prompt needs 4 KV + 6 state, a filler 1 + 6
@@ -82,7 +78,6 @@ def _worker(rank: int, L: int, chunk: int, port: int) -> None:
     from ppimpl.config import HIDDEN_WIDTH, RunConfig, SchedulerConfig
     from ppimpl.model.stage import CHECKPOINT, StageModel, bench_config
     from ppimpl.runtime.transport import open_pipe
-    from layers import enwik9_tokens
     from vllm.forward_context import set_forward_context
 
     dev = torch.device("cuda", rank)

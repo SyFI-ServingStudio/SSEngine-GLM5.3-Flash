@@ -19,9 +19,9 @@ Output (run dir): `microbatches.jsonl` and `reads.jsonl` (1_contract.md §3), `r
 for `data/metrics.py`, and `summary.json`.
 
 usage:
-  python bench/replay.py check-sched [--steps plain,srpt8k,...]      scheduling check vs sched_check_targets.json
-  python bench/replay.py check-force [--steps ...]                    force check vs force_check_targets.json
-  python bench/replay.py sessions --step good --n 500 [--minutes 20] [--pool-tokens T] [--tiers full|tiers|ssd_heavy]
+  python -m bench.replay check-sched [--steps plain,srpt8k,...]      scheduling check vs sched_check_targets.json
+  python -m bench.replay check-force [--steps ...]                    force check vs force_check_targets.json
+  python -m bench.replay sessions --step good --n 500 [--minutes 20] [--pool-tokens T] [--tiers full|tiers|ssd_heavy]
                                  [--accounting blocks|tokens] [--partial-hits] --out <run dir>
 """
 
@@ -29,23 +29,18 @@ import argparse
 import csv
 import heapq
 import json
-import os
 import subprocess
 import sys
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
-
+from bench.common import HANDOFF
 from ppimpl.config import BLOCK_TOKENS, SCHEDULER_STEPS, SchedulerConfig, TierConfig
 from ppimpl.engine.kv import KvManager
 from ppimpl.engine.scheduler import Request, Scheduler
 from ppimpl.engine.tiers import Tiers
 
-HANDOFF = Path(os.environ.get("PPIMPL_HANDOFF",       # the handoff package (read-only): data/ traces and targets
-                              "/raid/kanzhu/ServingStudio/wt-pp-main/doc/handoff/glm53_flash_pp4_b200_v1"))
 NUM_STAGES = 4
 POOL_TOKENS = 61_258_368
 MEMORY = {   # 1_contract.md §2.3: KV pool in tokens, DRAM per GPU

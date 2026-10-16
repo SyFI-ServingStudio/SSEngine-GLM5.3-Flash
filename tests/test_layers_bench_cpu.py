@@ -1,13 +1,8 @@
 """CPU tests of the M2 bench's trace attribution (bench/layers.py): scopes, ordinals, units, positions."""
 
 import json
-import sys
-from pathlib import Path
 
-LANE = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(LANE / "bench"))
-
-import layers  # noqa: E402
+from bench import layers
 
 
 def _ann(name, ts, dur, tid=1):

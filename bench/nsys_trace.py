@@ -1,6 +1,6 @@
 """Per-microbatch, per-stage GPU numbers from an Nsight Systems capture of `python -m ppimpl serve`.
 
-  python bench/nsys_trace.py <run dir>        reads <run dir>/trace.sqlite (`nsys export --type sqlite`), writes trace.json
+  python -m bench.nsys_trace <run dir>       reads <run dir>/trace.sqlite (`nsys export --type sqlite`), writes trace.json
 
 Attribution: each worker wraps a plan in the NVTX range `stage <s> mb <id>` (ppimpl/runtime/worker.py). A CUDA API
 call made inside that range on the worker's thread (kernel launch, graph launch, NCCL's launch) carries a correlation
@@ -25,7 +25,6 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
 RANGE = re.compile(r"^stage (\d+) mb (\d+)$")
 THREAD_SPACE = 1 << 24          # Nsight global thread ids keep the OS thread id in the low 24 bits
 
@@ -173,7 +172,6 @@ def main():
     if len(sys.argv) != 2:
         raise SystemExit(__doc__)
     run_dir = Path(sys.argv[1])
-    sys.path.insert(0, str(ROOT))
     res = analyze(run_dir / "trace.sqlite")
     (run_dir / "trace.json").write_text(json.dumps(res) + "\n")
     print(f"{run_dir.name}: {res['microbatches']} microbatches on all {res['stages']} stages "

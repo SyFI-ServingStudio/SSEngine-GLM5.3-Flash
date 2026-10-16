@@ -1,8 +1,8 @@
 """Model correctness on GPU: the stage split against the unsplit layers, and the 4-stage chain against vLLM.
 
-    python bench/chain.py split  [--prompt-len 1024]   # 1 GPU: layers 0-22 unsplit vs split at 12 (stage edge)
-    python bench/chain.py chain  [--prompt-len 1024]   # 4 GPUs: StageModel 0..3, NCCL send/recv, greedy token
-    python bench/chain.py vllm   [--prompt-len 1024]   # 4 GPUs: vLLM fork TP4 + EP on the same prompt (reference)
+    python -m bench.chain split  [--prompt-len 1024]   # 1 GPU: layers 0-22 unsplit vs split at 12 (stage edge)
+    python -m bench.chain chain  [--prompt-len 1024]   # 4 GPUs: StageModel 0..3, NCCL send/recv, greedy token
+    python -m bench.chain vllm   [--prompt-len 1024]   # 4 GPUs: vLLM fork TP4 + EP on the same prompt (reference)
 
 `split` (test b): one model holding layers 0-22 runs them (i) back to back, as one stage would, and (ii) as stage 0
 (0-11) + edge (`hc_post`, flatten, view) + stage 1 (12-22, standalone `hc_pre`); both end with layer 22's `hc_post`.
@@ -19,16 +19,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import sys
 import time
-from pathlib import Path
 from types import SimpleNamespace
 
-LANE = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(LANE))
-sys.path.insert(0, str(LANE / "bench"))
+from bench.common import MEASURED, NUM_BLOCKS, enwik9_tokens, one_request_plan
 
-OUT = LANE / "measured" / "chain"
+OUT = MEASURED / "chain"
 JOB = os.environ.get("SLURM_JOB_ID", "local")
 
 
@@ -40,7 +36,6 @@ def _write(name: str, data: dict) -> None:
 
 
 def _prompt(L: int) -> list[int]:
-    from layers import enwik9_tokens
     from ppimpl.model.stage import CHECKPOINT
 
     return enwik9_tokens(CHECKPOINT, L)
@@ -48,7 +43,6 @@ def _prompt(L: int) -> list[int]:
 
 def split(L: int) -> None:
     import torch
-    from layers import NUM_BLOCKS, one_request_plan
     from ppimpl.model import pp_patch
     from ppimpl.model.stage import CHECKPOINT, StageModel, bench_config
     from vllm.forward_context import set_forward_context
@@ -106,7 +100,6 @@ def edge(L: int) -> None:
     (B) by the fork's fused TileLang post+pre, (C) by hc_post then a standalone hc_pre (the stage edge); and the
     unsplit 0-22 run repeated (noise), and with the fork's fused op at every boundary."""
     import torch
-    from layers import NUM_BLOCKS, one_request_plan
     from ppimpl.model import pp_patch
     from ppimpl.model.stage import CHECKPOINT, StageModel, bench_config
     from vllm.forward_context import set_forward_context
@@ -177,7 +170,6 @@ def edge(L: int) -> None:
 def _chain_worker(rank: int, L: int, port: int, profile: bool) -> None:
     import torch
     import torch.distributed as dist
-    from layers import NUM_BLOCKS, one_request_plan
     from ppimpl import kernels as km
     from ppimpl.model.stage import HIDDEN_WIDTH, StageModel, bench_config
 

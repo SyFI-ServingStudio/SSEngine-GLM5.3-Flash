@@ -1,6 +1,6 @@
 """Back-to-back forwards without a sync vs the same forwards run one at a time: must be bitwise equal.
 
-    python bench/overlap.py [--stage 1] [--plans 5] [--reqs 8] [--len 1024] [--sleep-ms 2000]
+    python -m bench.overlap [--stage 1] [--plans 5] [--reqs 8] [--len 1024] [--sleep-ms 2000]
 
 The runtime builds a stage's metadata (host) up to several microbatches ahead of its GPU. Any host buffer that a
 non-blocking H2D copy reads, and that a later `prepare` rewrites before the GPU has run that copy, corrupts the
@@ -21,8 +21,7 @@ import time
 from pathlib import Path
 from types import SimpleNamespace as NS
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import layers as lb  # noqa: E402
+from bench import common as lb
 
 
 def make_plans(n_plans: int, reqs: int, L: int, tokens: list[int]):

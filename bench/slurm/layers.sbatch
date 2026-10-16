@@ -12,6 +12,6 @@ PY=/raid/kanzhu/ServingStudio/pp-impl/.venv/bin/python
 echo "job $SLURM_JOB_ID host $(hostname) gpus ${CUDA_VISIBLE_DEVICES:-?} lengths=$1 args=${*:2}"
 uptime
 nvidia-smi --query-gpu=index,name,memory.used,utilization.gpu --format=csv
-$PY bench/layers.py --lengths "$1" "${@:2}"
+$PY -m bench.layers --lengths "$1" "${@:2}"
 uptime
 rm -rf "$TMPDIR"

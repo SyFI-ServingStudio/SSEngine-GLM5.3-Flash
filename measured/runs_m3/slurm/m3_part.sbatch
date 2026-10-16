@@ -25,7 +25,7 @@ rc=0; first=1
 for n in $RUNS; do
   echo "== $(date -Is) start $n"
   if [ -n "${DRY:-}" ]; then echo "   bench/run.py $n --gpus $G --port $P --out-root $R"; continue; fi
-  $PY bench/run.py "$n" --inline --client-timeout 900 --gpus "$G" --port "$P" --out-root "$R" \
+  $PY -m bench.run "$n" --inline --client-timeout 900 --gpus "$G" --port "$P" --out-root "$R" \
     >> "$R/slurm/${JOB}_part.log" 2>&1 || rc=1
   echo "== $(date -Is) done $n rc=$rc"
   uptime

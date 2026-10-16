@@ -24,7 +24,7 @@ pytestmark = pytest.mark.gpu
 
 
 def _run(mode: str, L: int = 1024) -> None:
-    subprocess.run([sys.executable, str(LANE / "bench" / "chain.py"), mode, "--prompt-len", str(L)], check=True,
+    subprocess.run([sys.executable, "-m", "bench.chain", mode, "--prompt-len", str(L)], check=True,
                    cwd=LANE)
 
 
@@ -50,7 +50,7 @@ def test_chain_token_matches_vllm_and_manifest():
 
 
 def test_unsynced_forwards_match_synced():
-    subprocess.run([sys.executable, str(LANE / "bench" / "overlap.py"), "--stage", "1"], check=True, cwd=LANE)
+    subprocess.run([sys.executable, "-m", "bench.overlap", "--stage", "1"], check=True, cwd=LANE)
     r = json.loads((LANE / "measured" / "host" / f"overlap_s1_{JOB}.json").read_text())
     assert r["pass"], r
 
@@ -60,7 +60,7 @@ def test_graph_replay_matches_eager(stage):
     """(f) every bucket's replay bitwise equal to the same body run eagerly at the same padded T; without padding,
     equal to the eager forward (`bench/graphs.py`)."""
     out = LANE / "measured" / "graphs" / f"s{stage}_{JOB}.json"
-    subprocess.run([sys.executable, str(LANE / "bench" / "graphs.py"), "--stage", str(stage), "--out", str(out)],
+    subprocess.run([sys.executable, "-m", "bench.graphs", "--stage", str(stage), "--out", str(out)],
                    check=True, cwd=LANE)
     r = json.loads(out.read_text())
     keys = ("replay_eq_eager_padded", "eager_repeat_eq", "pad_independent")

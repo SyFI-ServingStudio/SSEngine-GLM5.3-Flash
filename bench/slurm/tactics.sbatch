@@ -11,6 +11,6 @@ export PYTHONPATH=/raid/kanzhu/ServingStudio/pp-impl/third_party/causal_conv1d_t
 PY=/raid/kanzhu/ServingStudio/pp-impl/.venv/bin/python
 echo "job $SLURM_JOB_ID host $(hostname) gpus ${CUDA_VISIBLE_DEVICES:-?}"
 uptime
-for mode in ${@:-tune verify}; do $PY bench/tune_tactics.py $mode; done
+for mode in ${@:-tune verify}; do $PY -m bench.tune_tactics $mode; done
 uptime
 rm -rf "$TMPDIR"

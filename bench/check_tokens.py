@@ -15,7 +15,7 @@ A request without a token always counts.
 Writes <run dir>/token_check.json and prints a summary. Exit status: 0 if at least one request was judged and none
 failed, 1 otherwise.
 
-usage: python check_tokens.py <run dir> [--reference measured/reference.jsonl] [--min-margin 3]
+usage: python -m bench.check_tokens <run dir> [--reference measured/reference.jsonl] [--min-margin 3]
 """
 
 import argparse

@@ -1,7 +1,7 @@
 """Tune FlashInfer's tactics once and persist them (`ppimpl.model.stage.TACTICS`), or verify a persisted file.
 
-    python bench/tune_tactics.py tune   [--out PATH]                 # 1 GPU, ~5 min
-    python bench/tune_tactics.py verify [--lengths 1024,8192,131072]  # fresh process: load, Ready time, cache misses
+    python -m bench.tune_tactics tune   [--out PATH]                 # 1 GPU, ~5 min
+    python -m bench.tune_tactics verify [--lengths 1024,8192,131072]  # fresh process: load, Ready time, cache misses
 
 `tune` builds stage 0 with the output head (every FlashInfer op the four stages use: KDA-dense and MoE layers'
 NVFP4 GEMMs, the trtllm NVFP4 MoE, the TRTLLM sparse MLA), budget 131,072 tokens (the largest microbatch any run
@@ -19,12 +19,10 @@ import argparse
 import collections
 import json
 import os
-import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import layers as lb  # noqa: E402  (also puts the lane on sys.path)
+from bench import common as lb
 
 BUDGET = 131072
 

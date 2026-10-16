@@ -403,7 +403,8 @@ def install_sparse_mla_split(max_rows: int = SPARSE_MLA_MAX_ROWS) -> None:
 # ---------------------------------------------------------------- host trims (M3: stage-0 host time, job 7091)
 #
 # Per-call Python that returns the same answer on every call of a serving process, hoisted or memoized. None of them
-# changes a launched kernel or its arguments (bench/host.py measures the host time; the chain/edge checks stay exact).
+# changes a launched kernel or its arguments (host time: measured/issues.md, "Host launch time", jobs 7091/7113; the
+# chain/edge checks stay exact).
 
 AUTOTUNE_MEMO: dict = {}
 AUTOTUNE_MEMO_STATS = {"hit": 0, "miss": 0, "bypass": 0}

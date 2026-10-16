@@ -9,7 +9,7 @@ node-check rows of that configuration (measured/kernels_nodecheck.jsonl). Then, 
   uncovered the time in kernels with no node-check row (kinds outside the 35 configurations, e.g. elementwise).
 Prints a markdown table.
 
-usage: python stage_bound.py <handoff data dir> <rows.jsonl>[,<more rows.jsonl>] [lengths, default 8192,131072]
+usage: python -m bench.nodecheck.stage_bound <handoff data dir> <rows.jsonl>[,<more rows.jsonl>] [lengths, default 8192,131072]
   rows files: kernels_nodecheck.jsonl (3 sampled rows per configuration) and/or kernels.jsonl (every row of the
   re-measured configurations); a configuration found in a later file replaces the earlier file's rows.
 """
@@ -20,8 +20,7 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent))
-from sample_specs import config_key  # noqa: E402
+from bench.nodecheck.sample_specs import config_key
 
 
 def main(data, nodecheck, lengths="8192,131072"):

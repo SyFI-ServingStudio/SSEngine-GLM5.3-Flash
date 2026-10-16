@@ -11,6 +11,6 @@ export PYTHONPATH=/raid/kanzhu/ServingStudio/pp-impl/third_party/causal_conv1d_t
 PY=/raid/kanzhu/ServingStudio/pp-impl/.venv/bin/python
 echo "job $SLURM_JOB_ID host $(hostname) gpus ${CUDA_VISIBLE_DEVICES:-?} args=$*"
 uptime
-$PY bench/overlap.py "$@"
+$PY -m bench.overlap "$@"
 uptime
 rm -rf "$TMPDIR"

@@ -7,8 +7,8 @@ import types
 
 import pytest
 
-import report
-import nsys_trace as tr
+from bench import nsys_trace as tr
+from bench import report
 from test_report import outcome, write_run
 
 MS = 1_000_000
