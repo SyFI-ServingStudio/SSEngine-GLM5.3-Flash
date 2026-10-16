@@ -4,8 +4,11 @@ The main thread only enqueues GPU work. A reporter thread waits for each microba
 with GPU times on the host clock, so the controller and all stages share one time base.
 """
 
+import cProfile
+import io
 import json
 import os
+import pstats
 import queue
 import signal
 import threading
@@ -75,6 +78,35 @@ class ProfileWindow:
     def after(self, mb_id: int):
         if self.b is not None and mb_id == self.b - 1:
             torch.cuda.profiler.stop()
+
+
+class HostProfile:
+    """cProfile of the host side of model.forward (metadata, launches) for microbatches [a, b) on the stages listed,
+    from PPIMPL_HOST_PROFILE="a:b[@stages]" (default stage 0): <run dir>/hostprof/stage<s>_mb<m>.txt, the top
+    functions by cumulative time. A diagnosis aid: the profiler slows the host down."""
+
+    def __init__(self, stage: int, run_dir: str):
+        spec = os.environ.get("PPIMPL_HOST_PROFILE", "")
+        rng, _, stages = spec.partition("@")
+        self.on = bool(rng) and stage in [int(x) for x in (stages or "0").split(",")]
+        if self.on:
+            self.a, self.b = (int(x) for x in rng.split(":"))
+            self.dir = Path(run_dir) / "hostprof"
+            self.dir.mkdir(exist_ok=True)
+        self.stage, self.prof = stage, None
+
+    def before(self, mb_id: int):
+        if self.on and self.a <= mb_id < self.b:
+            self.prof = cProfile.Profile()
+            self.prof.enable()
+
+    def after(self, mb_id: int):
+        if self.prof is not None:
+            self.prof.disable()
+            out = io.StringIO()
+            pstats.Stats(self.prof, stream=out).sort_stats("cumulative").print_stats(60)
+            (self.dir / f"stage{self.stage}_mb{mb_id}.txt").write_text(out.getvalue())
+            self.prof = None
 
 
 class Reporter(threading.Thread):
@@ -148,6 +180,7 @@ def run_worker(cfg: RunConfig, stage: int):   # makes inference tensors, which a
         (Path(cfg.run_dir) / f"stage{stage}.json").write_text(json.dumps(info) + "\n")
         clock = Clock(device)
         window = ProfileWindow(cfg.profile_mbs if cuda else None)
+        hostprof = HostProfile(stage, cfg.run_dir)
         print(f"stage {stage} cpus: {cpu_list(cpus) if cpus else 'not pinned'}, threads {threads()}", flush=True)
         reporter.q.put(Ready(stage, model.num_blocks))
         while True:
@@ -171,7 +204,9 @@ def run_worker(cfg: RunConfig, stage: int):   # makes inference tensors, which a
             clock.maybe_reanchor()
             hidden_in = pipe.recv(plan.num_tokens, model.hidden_width) if stage > 0 else None
             start = clock.mark()
+            hostprof.before(plan.mb_id)
             out = model.forward(plan, hidden_in)
+            hostprof.after(plan.mb_id)
             end = clock.mark()
             if hidden_in is not None:
                 pipe.release()                        # CePipe: the sender may reuse the slot once this forward ran
