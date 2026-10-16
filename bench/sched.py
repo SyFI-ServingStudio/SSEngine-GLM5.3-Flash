@@ -229,12 +229,11 @@ def summarize(root: Path, out: Path) -> Path:
     lines = []
     for step in STEPS:
         for n in (400, 500):
-            for pace in ("", "_pace"):
-                d = _latest(root, f"sched_{step}_n{n}{pace}")
-                if d is None and step == "plain" and not pace:
-                    d = _latest(root, f"prefix_n{n}")
-                if d is not None and (d / "requests.jsonl").exists() and (d / "metrics.json").exists():
-                    lines.append(session_line(d, step, n))
+            d = _latest(root, f"sched_{step}_n{n}")
+            if d is None and step == "plain":
+                d = _latest(root, f"prefix_n{n}")
+            if d is not None and (d / "requests.jsonl").exists() and (d / "metrics.json").exists():
+                lines.append(session_line(d, step, n))
     if lines:
         (out / "scheduler_sessions.json").write_text(json.dumps(lines, indent=1, default=str) + "\n")
         parts += ["## Sessions (§5)", "",

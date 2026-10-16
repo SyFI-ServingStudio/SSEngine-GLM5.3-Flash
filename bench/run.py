@@ -5,9 +5,8 @@
   ... --nsys [--nsys-mbs a:b|all]     the server under Nsight Systems -> trace.nsys-rep, trace.sqlite, trace.json
 
 Names: one_<L>, saturated_<L> (4_iteration.md), L in 1k..128k; prefix_bringup and prefix_n<N> (5_prefix_cache.md,
-prefix cache on: `keep_sessions`); sched_check_<step>, force_check_<step> and sched_<step>_n<N>[_pace] (6_scheduler.md, step
-one of ppimpl.config.SCHEDULER_STEPS: plain, srpt8k, budget, even, good; prefix_n<N> is sched_plain_n<N>; _pace: the server
-paces forming to the later stages, PACE_MARGIN_MS).
+prefix cache on: `keep_sessions`); sched_check_<step>, force_check_<step> and sched_<step>_n<N> (6_scheduler.md, step
+one of ppimpl.config.SCHEDULER_STEPS: plain, srpt8k, budget, even, good; prefix_n<N> is sched_plain_n<N>).
 Session runs (prefix_n<N>, sched_<step>_n<N>) run the client under `timeout 22m`: 1_contract.md §2.2
 says 20 min, but req-frontend first spends ~45 s tokenizing the corpus (measured, loaded host) and t = 0 is its first
 submit; rounds answered after 20 min are not counted (data/metrics.py), so the extra 2 min change no number.
@@ -59,7 +58,7 @@ def parse_name(name: str) -> tuple[str, int]:
         return "sessions", int(m.group(1))
     if (m := re.fullmatch(r"(sched_check|force_check)_(\w+)", name)) and m.group(2) in SCHEDULER_STEPS:
         return m.group(1), 0
-    if (m := re.fullmatch(r"sched_(\w+?)_n(\d+)(?:_pace)?", name)) and m.group(1) in SCHEDULER_STEPS:
+    if (m := re.fullmatch(r"sched_(\w+)_n(\d+)", name)) and m.group(1) in SCHEDULER_STEPS:
         return "sessions", int(m.group(2))
     m = re.fullmatch(r"(one|saturated)_(\d+)k", name)
     if not m:
@@ -71,7 +70,7 @@ def parse_name(name: str) -> tuple[str, int]:
 
 def sched_step(name: str) -> str:
     """The scheduler step of a run name (6_scheduler.md §2): plain unless the name gives one."""
-    m = re.fullmatch(r"(?:sched_check|force_check)_(\w+)|sched_(\w+?)_n\d+(?:_pace)?", name)
+    m = re.fullmatch(r"(?:sched_check|force_check)_(\w+)|sched_(\w+)_n\d+", name)
     return (m.group(1) or m.group(2)) if m else "plain"
 
 
@@ -87,9 +86,6 @@ def hold_for(trace: Path) -> int:
 # 41.5 ms (the p99 is 8,192-token microbatches with 56k-134k contexts), plus margin. Recorded in each run's
 # server_config.yaml.
 REAL_FORM_LEAD_MS = 45.0
-
-# sched_<step>_n<N>_pace: the server paces forming to the later stages (ppimpl/runtime/dispatch.py) with this margin
-PACE_MARGIN_MS = 2.0
 
 # One request of 64k or more is one microbatch, and its activations outgrow the contract's 13.6 GB reserve beside the
 # full KV pool (job 7117: one_64k needs ~37 GB, one_128k ran out of memory in warm-up). These runs need a few blocks of
@@ -436,8 +432,6 @@ def run_named(name: str, fake: bool, port: int, out_root: Path, args) -> dict:
     extra = {"keep_sessions": True, "scheduler": msgspec.to_builtins(SCHEDULER_STEPS[step])}
     if hold:
         extra["hold_requests"] = hold
-    if name.endswith("_pace"):
-        extra["pace_margin_ms"] = PACE_MARGIN_MS
     if fake and args.us_per_token is not None:
         extra["fake"] = {"us_per_token": args.us_per_token}
     if args.intake_procs is not None:
