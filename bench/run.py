@@ -42,6 +42,7 @@ NSYS = shutil.which("nsys") or "/usr/local/cuda/bin/nsys"
 
 
 PREFIX_RUNS = ("prefix_bringup",)
+CLIENT_TIMEOUT_S = 1200
 SESSION_MINUTES = 20
 SESSION_CLIENT_LIMIT = "22m"     # 20 min from the first submit + the client's corpus tokenization (~45 s) + margin
 
@@ -452,6 +453,8 @@ def submit(args) -> None:
         inner += ["--intake-procs", str(args.intake_procs)]
     if args.nsys_mbs:
         inner += ["--nsys-mbs", args.nsys_mbs]
+    if args.client_timeout != CLIENT_TIMEOUT_S:
+        inner += ["--client-timeout", str(args.client_timeout)]
     for opt in ("trace", "client_limit", "pool_tokens", "token_pool_limit", "gap_s", "sessions", "run_name"):
         if getattr(args, opt):
             inner += [f"--{opt.replace('_', '-')}", str(getattr(args, opt))]
@@ -486,7 +489,9 @@ def main():
     ap.add_argument("--intake-procs", type=int, help="RunConfig.intake_procs (0: HTTP in the controller process)")
     ap.add_argument("--gpus", help="with --inline: CUDA_VISIBLE_DEVICES for the server, run without srun steps (two "
                                    "servers side by side in one 8-GPU job; start this under taskset for its CPUs)")
-    ap.add_argument("--client-timeout", type=float, default=1200)
+    ap.add_argument("--client-timeout", type=float, default=CLIENT_TIMEOUT_S,
+                    help="stop the client after this many s (prefix/session runs: at least 25 min); a run stopped "
+                         "this way fails (fail_fast in run.json, exit 1)")
     ap.add_argument("--nsys", action="store_true", help="run the server under Nsight Systems (bench/nsys_trace.py parses it)")
     ap.add_argument("--nsys-mbs", help="microbatches to trace, a:b or all (default: one-request all, saturated the "
                     "middle 80%% of the expected microbatches)")
@@ -516,7 +521,7 @@ def main():
     port = args.port or (20000 + int(job) % 120 * 100 if job else 18500)
     if args.cpu and not (args.fake and args.inline):
         raise SystemExit("--cpu needs --fake --inline")
-    out = Path(args.out_root) if args.out_root else \
+    out = Path(args.out_root).resolve() if args.out_root else \
         ROOT / "measured/runs" / ("fake_cpu" if args.cpu else "fake" if args.fake else "")
     failed = {}
     for i, name in enumerate(args.names):   # a failed run does not stop the later ones; the exit status reports it
