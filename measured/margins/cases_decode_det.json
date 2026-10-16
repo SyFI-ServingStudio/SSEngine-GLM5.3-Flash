@@ -1,7 +1,7 @@
 [
  {
   "name": "s27_dec1_131k",
-  "file": "/raid/kanzhu/ServingStudio/pp-impl/lanes/m4/measured/margins/s27_r0.npy",
+  "file": "measured/margins/s27_r0.npy",
   "schedule": [
    [
     0,
@@ -92,7 +92,7 @@
  },
  {
   "name": "s32_dec3_131k",
-  "file": "/raid/kanzhu/ServingStudio/pp-impl/lanes/m4/measured/margins/s32_r1.npy",
+  "file": "measured/margins/s32_r1.npy",
   "schedule": [
    [
     0,
@@ -183,7 +183,7 @@
  },
  {
   "name": "s32_ctl300_131k",
-  "file": "/raid/kanzhu/ServingStudio/pp-impl/lanes/m4/measured/margins/s32_r1.npy",
+  "file": "measured/margins/s32_r1.npy",
   "schedule": [
    [
     0,
@@ -274,7 +274,7 @@
  },
  {
   "name": "s35_dec3_524k",
-  "file": "/raid/kanzhu/ServingStudio/pp-impl/lanes/m4/measured/margins/s35_r0.npy",
+  "file": "measured/margins/s35_r0.npy",
   "schedule": [
    [
     0,
@@ -605,7 +605,7 @@
  },
  {
   "name": "s32_dec3_524k",
-  "file": "/raid/kanzhu/ServingStudio/pp-impl/lanes/m4/measured/margins/s32_r1.npy",
+  "file": "measured/margins/s32_r1.npy",
   "schedule": [
    [
     0,
@@ -936,7 +936,7 @@
  },
  {
   "name": "s32_ctl300_524k",
-  "file": "/raid/kanzhu/ServingStudio/pp-impl/lanes/m4/measured/margins/s32_r1.npy",
+  "file": "measured/margins/s32_r1.npy",
   "schedule": [
    [
     0,

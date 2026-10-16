@@ -35,7 +35,7 @@
    },
    "rounds_ttft_over_60s": 0
   },
-  "target_source": "/raid/kanzhu/ServingStudio/wt-pp-hitrule/logs/20261016_1_hitrule_targets/plain/c400",
+  "target_source": "logs/20261016_1_hitrule_targets/plain/c400",
   "replay": {
    "step": "plain",
    "dispatch_ahead": 1,
@@ -217,7 +217,7 @@
    },
    "rounds_ttft_over_60s": 0
   },
-  "target_source": "/raid/kanzhu/ServingStudio/wt-pp-hitrule/logs/20261016_1_hitrule_targets/plain/c400",
+  "target_source": "logs/20261016_1_hitrule_targets/plain/c400",
   "replay": {
    "step": "plain",
    "dispatch_ahead": 1,
@@ -399,7 +399,7 @@
    },
    "rounds_ttft_over_60s": 0
   },
-  "target_source": "/raid/kanzhu/ServingStudio/wt-pp-hitrule/logs/20261016_1_hitrule_targets/plain/c400",
+  "target_source": "logs/20261016_1_hitrule_targets/plain/c400",
   "replay": {
    "step": "plain",
    "dispatch_ahead": 1,
@@ -634,7 +634,7 @@
    },
    "rounds_ttft_over_60s": 0
   },
-  "target_source": "/raid/kanzhu/ServingStudio/wt-pp-hitrule/logs/20261016_1_hitrule_targets/plain/c400",
+  "target_source": "logs/20261016_1_hitrule_targets/plain/c400",
   "replay": {
    "step": "plain",
    "dispatch_ahead": 1,
@@ -859,7 +859,7 @@
    },
    "rounds_ttft_over_60s": 0
   },
-  "target_source": "/raid/kanzhu/ServingStudio/wt-pp-hitrule/logs/20261016_1_hitrule_targets/plain/c400",
+  "target_source": "logs/20261016_1_hitrule_targets/plain/c400",
   "replay": {
    "step": "plain",
    "dispatch_ahead": 1,

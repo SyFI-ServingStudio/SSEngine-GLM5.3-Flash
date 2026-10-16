@@ -2,8 +2,8 @@
 
   python -m bench.margin <cases.json> [--repeats 3] [--out measured/margins/<name>.json]
 
-cases.json: [{"name": str, "file": <.npy int32 token ids>, "schedule": [[start, tokens, is_last], ...],
-"decode_canon": true, "decode_topk": "prefill"}, ...] (decode_canon false: without pp_patch's decode top-k
+cases.json: [{"name": str, "file": <.npy int32 token ids, relative to the repo root>,
+"schedule": [[start, tokens, is_last], ...], "decode_canon": true, "decode_topk": "prefill"}, ...] (decode_canon false: without pp_patch's decode top-k
 canonicalization; decode_topk: pp_patch.DECODE_TOPK_PATH, "prefill", "deep_select" or "kernel"). Each
 case runs `--repeats` times on the same KV and state blocks (one request, a fresh start each time), each schedule
 entry as one microbatch, as the server runs a request alone. At every is_last entry: the last position's logits,
@@ -21,10 +21,16 @@ import time
 from pathlib import Path
 from types import SimpleNamespace as NS
 
-from bench.common import MEASURED
+from bench.common import MEASURED, ROOT
 
 JOB = os.environ.get("SLURM_JOB_ID", "local")
 MB = 8192
+
+
+def case_file(case: dict) -> Path:
+    """A case's token file: relative to the repo root (absolute paths are taken as they are)."""
+    f = Path(case["file"])
+    return f if f.is_absolute() else ROOT / f
 
 
 def server_schedule(n: int, start: int = 0) -> list[list]:
@@ -153,7 +159,7 @@ def _worker(rank: int, cases: list[dict], repeats: int, port: int, out: str, tra
     if trace_topk:
         _install_topk_trace()
     traces = []
-    toks = {c["name"]: np.load(c["file"]).astype(np.int64).tolist() for c in cases}
+    toks = {c["name"]: np.load(case_file(c)).astype(np.int64).tolist() for c in cases}
     L = max(len(t) for t in toks.values())
     nkv = -(-L // 8576)
     rc = RunConfig(port=port, scheduler=SchedulerConfig(mb_tokens=MB))

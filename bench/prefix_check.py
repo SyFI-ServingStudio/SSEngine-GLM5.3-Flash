@@ -39,6 +39,13 @@ from bench.run import CHECKPOINT, PYTHON, REAL_FORM_LEAD_MS, step, stop, wait_he
 STRIDE = 9_973
 
 
+
+def rel(path: Path) -> str:
+    """A path under the repo root as written into tracked files: relative to the root (bench/margin.case_file)."""
+    path = path.resolve()
+    return str(path.relative_to(ROOT)) if path.is_relative_to(ROOT) else str(path)
+
+
 def sessions_of(trace: Path) -> list[dict]:
     """Per session (file order = req-frontend's ordinal): P (round 0 input) and A - 1 (round 1 input)."""
     out = {}
@@ -182,7 +189,7 @@ def margin_cases(sess: list[dict], on: list[dict], off: list[dict], pool: np.nda
         if x["round0"]["token"] != y["round0"]["token"]:
             out.mkdir(parents=True, exist_ok=True)
             np.save(out / f"{name}_r0.npy", r0)
-            cases.append({"name": f"{name}_r0", "file": str(out / f"{name}_r0.npy"),
+            cases.append({"name": f"{name}_r0", "file": rel(out / f"{name}_r0.npy"),
                           "schedule": server_schedule(s["P"]),
                           "expect_top2": [x["round0"]["token"], y["round0"]["token"]]})
         elif x["round1"]["token"] != y["round1"]["token"]:
@@ -190,10 +197,10 @@ def margin_cases(sess: list[dict], on: list[dict], off: list[dict], pool: np.nda
             r1 = np.concatenate([r0, [x["round0"]["token"]], pool[st + s["P"]:st + s["P"] + s["new"]]]).astype(np.int32)
             assert sha256(r1) == x["round1"]["sha256"] == y["round1"]["sha256"]
             np.save(out / f"{name}_r1.npy", r1)
-            cases.append({"name": f"{name}_r1_on", "file": str(out / f"{name}_r1.npy"),
+            cases.append({"name": f"{name}_r1_on", "file": rel(out / f"{name}_r1.npy"),
                           "schedule": server_schedule(s["P"]) + [[s["P"], len(r1) - s["P"], True]],
                           "expect_top2": [x["round1"]["token"]]})
-            cases.append({"name": f"{name}_r1_off", "file": str(out / f"{name}_r1.npy"),
+            cases.append({"name": f"{name}_r1_off", "file": rel(out / f"{name}_r1.npy"),
                           "schedule": server_schedule(len(r1)), "expect_top2": [y["round1"]["token"]]})
     if cases:
         (out / "cases.json").write_text(json.dumps(cases, indent=1) + "\n")

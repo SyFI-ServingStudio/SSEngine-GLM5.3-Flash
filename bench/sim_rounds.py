@@ -23,6 +23,12 @@ from bench.common import HANDOFF, MEASURED
 from bench.prefix import sim_arrays, window_metrics
 
 
+
+def sim_rel(run: Path) -> str:
+    """A simulator run directory as recorded: from its checkout's logs/ on (no host paths in tracked files)."""
+    parts = str(run.resolve()).split("/logs/", 1)
+    return "logs/" + parts[1] if len(parts) == 2 else str(run)
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("run", type=Path)
@@ -53,7 +59,7 @@ def main() -> None:
         assert abs(full["ttft_s"][p] - target["ttft_s"][p]) <= 1e-9, (p, full["ttft_s"][p], target["ttft_s"][p])
     out = a.out or MEASURED / "sessions_sim" / f"{a.setting}_c{n}.json.gz"
     out.parent.mkdir(parents=True, exist_ok=True)
-    doc = {"setting": a.setting, "max_sessions": n, "source": str(a.run.resolve()),
+    doc = {"setting": a.setting, "max_sessions": n, "source": sim_rel(a.run),
            "request_slo_sha256": hashlib.sha256(pqf.read_bytes()).hexdigest(),
            "full_window_equals_target": True, **{k: v.tolist() for k, v in cols.items()}}
     with gzip.open(out, "wt") as f:

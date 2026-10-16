@@ -1,7 +1,7 @@
 [
  {
   "name": "s32_dec1_524k_raw",
-  "file": "/raid/kanzhu/ServingStudio/pp-impl/lanes/m4/measured/margins/s32_r1.npy",
+  "file": "measured/margins/s32_r1.npy",
   "schedule": [
    [
     0,
@@ -334,7 +334,7 @@
  },
  {
   "name": "s32_dec1_524k_canon",
-  "file": "/raid/kanzhu/ServingStudio/pp-impl/lanes/m4/measured/margins/s32_r1.npy",
+  "file": "measured/margins/s32_r1.npy",
   "schedule": [
    [
     0,
@@ -667,7 +667,7 @@
  },
  {
   "name": "s32_dec1_524k_prefill",
-  "file": "/raid/kanzhu/ServingStudio/pp-impl/lanes/m4/measured/margins/s32_r1.npy",
+  "file": "measured/margins/s32_r1.npy",
   "schedule": [
    [
     0,
@@ -1000,7 +1000,7 @@
  },
  {
   "name": "s35_dec1_524k_canon",
-  "file": "/raid/kanzhu/ServingStudio/pp-impl/lanes/m4/measured/margins/s35_r0.npy",
+  "file": "measured/margins/s35_r0.npy",
   "schedule": [
    [
     0,
@@ -1333,7 +1333,7 @@
  },
  {
   "name": "s35_dec1_524k_prefill",
-  "file": "/raid/kanzhu/ServingStudio/pp-impl/lanes/m4/measured/margins/s35_r0.npy",
+  "file": "measured/margins/s35_r0.npy",
   "schedule": [
    [
     0,
@@ -1666,7 +1666,7 @@
  },
  {
   "name": "s27_dec1_131k_prefill",
-  "file": "/raid/kanzhu/ServingStudio/pp-impl/lanes/m4/measured/margins/s27_r0.npy",
+  "file": "measured/margins/s27_r0.npy",
   "schedule": [
    [
     0,

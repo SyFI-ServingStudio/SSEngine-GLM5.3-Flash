@@ -1,7 +1,7 @@
 [
  {
   "name": "s27_r0",
-  "file": "/raid/kanzhu/ServingStudio/pp-impl/lanes/m4/measured/margins/s27_r0.npy",
+  "file": "measured/margins/s27_r0.npy",
   "schedule": [
    [
     0,
@@ -92,7 +92,7 @@
  },
  {
   "name": "s32_r0",
-  "file": "/raid/kanzhu/ServingStudio/pp-impl/lanes/m4/measured/margins/s32_r0.npy",
+  "file": "measured/margins/s32_r0.npy",
   "schedule": [
    [
     0,
@@ -423,7 +423,7 @@
  },
  {
   "name": "s32_r1_on",
-  "file": "/raid/kanzhu/ServingStudio/pp-impl/lanes/m4/measured/margins/s32_r1.npy",
+  "file": "measured/margins/s32_r1.npy",
   "schedule": [
    [
     0,
@@ -759,7 +759,7 @@
  },
  {
   "name": "s32_r1_off",
-  "file": "/raid/kanzhu/ServingStudio/pp-impl/lanes/m4/measured/margins/s32_r1.npy",
+  "file": "measured/margins/s32_r1.npy",
   "schedule": [
    [
     0,
@@ -1090,7 +1090,7 @@
  },
  {
   "name": "s35_r0",
-  "file": "/raid/kanzhu/ServingStudio/pp-impl/lanes/m4/measured/margins/s35_r0.npy",
+  "file": "measured/margins/s35_r0.npy",
   "schedule": [
    [
     0,
