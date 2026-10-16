@@ -13,7 +13,7 @@ Construction:
 
 Forward runs the layers inside vLLM's forward context; no host sync: plan -> metadata (host) -> GPU work.
 
-CUDA graphs (`cuda_graphs`): a microbatch of up to the largest bucket (`GRAPH_BUCKETS`, powers of 2) is padded to its
+CUDA graphs (`cuda_graphs`): a microbatch of up to the largest bucket (`GRAPH_BUCKETS`) is padded to its
 bucket and replayed from the fork's breakable CUDA graph (`vllm.compilation.breakable_cudagraph`): one capture per
 bucket of the whole stage forward, cut at the ops the fork marks as eager breaks (MLA attention, the kpool indexer,
 our KDA prefill), which run eagerly on each replay with the microbatch's own metadata. The captured segments (mHC,
@@ -46,7 +46,10 @@ HIDDEN_WIDTH = 4 * 4096
 TACTICS = Path(os.environ.get("PPIMPL_FI_TACTICS",
                               Path(__file__).resolve().parents[1] / "data" / "flashinfer_tactics_b200.json"))
 RESERVE_GB = 13.6     # 1_contract.md §1: activations and workspace beside weights and KV (and the CUDA graph pool)
-GRAPH_BUCKETS = (128, 256, 512, 1024, 2048, 4096, 8192)   # token counts captured as CUDA graphs
+# token counts captured as CUDA graphs: powers of 2 to 1024, then every 1024 (and 1536). With powers of 2 only, a
+# 3,000-token prompt ran as 4,096 (round 0 TTFT 114 vs 96.7 ms target, x1.18; 4k: 121 ms, job 7462).
+GRAPH_BUCKETS = (128, 256, 512, 1024, 1536, 2048, 3072, 4096, 5120, 6144, 7168, 8192)
+LONG_WARMUP = 65536    # context at which warm-up runs its long continuation chunks (StageModel.warmup)
 
 
 def graph_bucket(num_tokens: int, buckets) -> int | None:
@@ -165,6 +168,24 @@ class GraphEntry:
         self.out: tuple = ()
 
 
+def graph_capture(pool):
+    """The fork's BreakableCUDAGraphCapture, except that each graph segment is replayed as soon as it is captured.
+    An eager break runs during capture (it is not captured), on inputs the segments before it would have computed;
+    without the replay those are whatever the shared graph pool last held there (another bucket's tensors, read as
+    other dtypes: NaN keys, so NaN logits and out-of-range top-k rows: the illegal memory access with 12 buckets in one
+    pool, 3,072 after 8,192-4,096, job 7559). With it, a capture is an ordinary forward of the dummy plan."""
+    from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
+
+    class Capture(BreakableCUDAGraphCapture):
+        def _end_segment(self) -> None:
+            g = self._current_graph if self._capturing else None
+            super()._end_segment()
+            if g is not None:
+                g.replay()
+
+    return Capture(pool=pool)
+
+
 class StageModel:
     def __init__(self, cfg, stage: int, device: torch.device, *, layers: range | None = None,
                  first: bool | None = None, last: bool | None = None, num_blocks: int | None = None,
@@ -228,6 +249,7 @@ class StageModel:
         pp_patch.install_kpool_unaligned()
         pp_patch.install_decode_topk_canon()
         pp_patch.install_sparse_mla_split()
+        pp_patch.install_indexer_split()
         # host trims (no kernel or argument changes): env cache, FlashInfer tactic memo / mm_fp4 skip_check, plain
         # parameters
         self.host_trims = self.install_host_trims() if host_trims else None
@@ -268,7 +290,8 @@ class StageModel:
         autotuned pass at the microbatch budget, as vLLM's `kernel_warmup` does. Shapes: one request at the full
         budget (indexer and both top-k paths), then two requests, one continuing a cached prefix (conv and KDA initial
         state, chunk start > 0), then every power-of-2 length from 512 below the budget, a length not divisible by
-        16, and the first layer's mHC pre at every split count. Uses blocks 1.. before any request holds them.
+        16, one request alone continuing a cached prefix (start divisible by 16 and not; and past `LONG_WARMUP` when the
+        pool holds it), and the first layer's mHC pre at every split count. Uses blocks 1.. before any request holds them.
         `self.tactics` records the source."""
         from types import SimpleNamespace as NS
 
@@ -316,6 +339,18 @@ class StageModel:
                 run(NS(mb_id=-3, chunks=[chunk("wb", 0, p, 1)]))
                 p *= 2
             run(NS(mb_id=-4, chunks=[chunk("wo", 0, 1000, 1)]))
+            # one request alone continuing its cached prefix, as every round >= 1 is: the KDA state gather of one
+            # slot loaded a torch module on the first such request (8k + 1k, 7432: 23 ms cuLibraryLoadData + 11.5
+            # ms lazy kernel load); and the same at a start and length not divisible by 16 (P = 100,003)
+            run(NS(mb_id=-5, chunks=[chunk("wc", 1024, 256, 1)]))
+            run(NS(mb_id=-6, chunks=[chunk("wu", 1003, 253, 1)]))
+            # past 64k of context (when the pool holds it): the sparse-MLA index remap at the long top-k width
+            # (NUM_TOPK_TOKENS 2176, 180 ms Triton compile on the first chunk ending at 65,536, job 7505) and
+            # topk_canon (the indexer is wider than k), at a row count divisible by 4 and not (its scratch rows are
+            # 16-byte aligned or not: a 1,699-row chunk compiled three kernels, 1.2 s, job 7505)
+            if (self.num_blocks - 1 - 6) * B >= LONG_WARMUP + 1003 + 253:
+                run(NS(mb_id=-7, chunks=[chunk("wl", LONG_WARMUP, 256, 1)]))
+                run(NS(mb_id=-8, chunks=[chunk("wv", LONG_WARMUP + 1003, 253, 1)]))
             self._warm_mhc_pre()
         torch.cuda.synchronize(self.device)
         pp_patch.clear_autotune_memo()     # tactics may have changed while tuning
@@ -383,9 +418,7 @@ class StageModel:
                 with self._graph_context(b, e):
                     self._graph_body(e)                       # eager once at this shape, PIECEWISE paths
                 torch.cuda.synchronize(self.device)
-                from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
-
-                e.capture = BreakableCUDAGraphCapture(pool=pool)
+                e.capture = graph_capture(pool)
                 with self._graph_context(b, e), e.capture:
                     e.out = self._graph_body(e)
                 torch.cuda.synchronize(self.device)

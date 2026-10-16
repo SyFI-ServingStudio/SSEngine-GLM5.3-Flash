@@ -13,6 +13,7 @@ def test_bucket_is_smallest_that_holds_the_microbatch():
     assert graph_bucket(129, GRAPH_BUCKETS) == 256
     assert graph_bucket(1000, GRAPH_BUCKETS) == 1024
     assert graph_bucket(1024, GRAPH_BUCKETS) == 1024
+    assert graph_bucket(3000, GRAPH_BUCKETS) == 3072       # not 4096: 1024 steps above 2048
     assert graph_bucket(8192, GRAPH_BUCKETS) == 8192
     assert graph_bucket(8193, GRAPH_BUCKETS) is None        # eager above the largest bucket
     assert graph_bucket(300, {1024: 0, 256: 0}) == 1024      # any container of buckets, unsorted

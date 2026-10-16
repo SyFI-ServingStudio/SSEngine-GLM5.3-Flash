@@ -1,0 +1,740 @@
+[
+ {
+  "prefix_tokens": 8192,
+  "computed_tokens": 256,
+  "sessions": 5,
+  "rounds": 4,
+  "round0": {
+   "ttft_ms": 223.599,
+   "microbatches": 1
+  },
+  "round1": {
+   "ttft_ms": 36.787,
+   "hit_tokens": 8192,
+   "computed_tokens": 256,
+   "microbatches": [
+    {
+     "tokens": 256,
+     "context": [
+      8192
+     ],
+     "compute_ms": [
+      8.376,
+      9.293,
+      9.412,
+      9.623
+     ],
+     "send_ms": [
+      0.027,
+      0.027,
+      0.027
+     ]
+    }
+   ]
+  },
+  "round2": {
+   "ttft_ms": 36.789,
+   "hit_tokens": 8448,
+   "computed_tokens": 256,
+   "microbatches": [
+    {
+     "tokens": 256,
+     "context": [
+      8448
+     ],
+     "compute_ms": [
+      8.376,
+      9.294,
+      9.412,
+      9.624
+     ],
+     "send_ms": [
+      0.027,
+      0.027,
+      0.027
+     ]
+    }
+   ]
+  },
+  "round3": {
+   "ttft_ms": 36.791,
+   "hit_tokens": 8704,
+   "computed_tokens": 256,
+   "microbatches": [
+    {
+     "tokens": 256,
+     "context": [
+      8704
+     ],
+     "compute_ms": [
+      8.377,
+      9.294,
+      9.413,
+      9.625
+     ],
+     "send_ms": [
+      0.027,
+      0.027,
+      0.027
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "prefix_tokens": 8192,
+  "computed_tokens": 1024,
+  "sessions": 5,
+  "rounds": 4,
+  "round0": {
+   "ttft_ms": 223.599,
+   "microbatches": 1
+  },
+  "round1": {
+   "ttft_ms": 53.32,
+   "hit_tokens": 8192,
+   "computed_tokens": 1024,
+   "microbatches": [
+    {
+     "tokens": 1024,
+     "context": [
+      8192
+     ],
+     "compute_ms": [
+      12.703,
+      13.273,
+      13.457,
+      13.684
+     ],
+     "send_ms": [
+      0.068,
+      0.068,
+      0.068
+     ]
+    }
+   ]
+  },
+  "round2": {
+   "ttft_ms": 53.34,
+   "hit_tokens": 9216,
+   "computed_tokens": 1024,
+   "microbatches": [
+    {
+     "tokens": 1024,
+     "context": [
+      9216
+     ],
+     "compute_ms": [
+      12.708,
+      13.276,
+      13.463,
+      13.689
+     ],
+     "send_ms": [
+      0.068,
+      0.068,
+      0.068
+     ]
+    }
+   ]
+  },
+  "round3": {
+   "ttft_ms": 53.359,
+   "hit_tokens": 10240,
+   "computed_tokens": 1024,
+   "microbatches": [
+    {
+     "tokens": 1024,
+     "context": [
+      10240
+     ],
+     "compute_ms": [
+      12.713,
+      13.28,
+      13.468,
+      13.694
+     ],
+     "send_ms": [
+      0.068,
+      0.068,
+      0.068
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "prefix_tokens": 8192,
+  "computed_tokens": 8192,
+  "sessions": 5,
+  "rounds": 4,
+  "round0": {
+   "ttft_ms": 223.599,
+   "microbatches": 1
+  },
+  "round1": {
+   "ttft_ms": 223.758,
+   "hit_tokens": 8192,
+   "computed_tokens": 8192,
+   "microbatches": [
+    {
+     "tokens": 8192,
+     "context": [
+      8192
+     ],
+     "compute_ms": [
+      57.13,
+      54.159,
+      55.325,
+      55.698
+     ],
+     "send_ms": [
+      0.482,
+      0.482,
+      0.482
+     ]
+    }
+   ]
+  },
+  "round2": {
+   "ttft_ms": 224.279,
+   "hit_tokens": 16384,
+   "computed_tokens": 8192,
+   "microbatches": [
+    {
+     "tokens": 8192,
+     "context": [
+      16384
+     ],
+     "compute_ms": [
+      57.272,
+      54.254,
+      55.468,
+      55.841
+     ],
+     "send_ms": [
+      0.482,
+      0.482,
+      0.482
+     ]
+    }
+   ]
+  },
+  "round3": {
+   "ttft_ms": 225.322,
+   "hit_tokens": 24576,
+   "computed_tokens": 8192,
+   "microbatches": [
+    {
+     "tokens": 8192,
+     "context": [
+      24576
+     ],
+     "compute_ms": [
+      57.556,
+      54.444,
+      55.752,
+      56.125
+     ],
+     "send_ms": [
+      0.482,
+      0.482,
+      0.482
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "prefix_tokens": 131072,
+  "computed_tokens": 256,
+  "sessions": 5,
+  "rounds": 4,
+  "round0": {
+   "ttft_ms": 1118.187,
+   "microbatches": 16
+  },
+  "round1": {
+   "ttft_ms": 37.732,
+   "hit_tokens": 131072,
+   "computed_tokens": 256,
+   "microbatches": [
+    {
+     "tokens": 256,
+     "context": [
+      131072
+     ],
+     "compute_ms": [
+      8.634,
+      9.465,
+      9.67,
+      9.881
+     ],
+     "send_ms": [
+      0.027,
+      0.027,
+      0.027
+     ]
+    }
+   ]
+  },
+  "round2": {
+   "ttft_ms": 37.734,
+   "hit_tokens": 131328,
+   "computed_tokens": 256,
+   "microbatches": [
+    {
+     "tokens": 256,
+     "context": [
+      131328
+     ],
+     "compute_ms": [
+      8.634,
+      9.466,
+      9.67,
+      9.882
+     ],
+     "send_ms": [
+      0.027,
+      0.027,
+      0.027
+     ]
+    }
+   ]
+  },
+  "round3": {
+   "ttft_ms": 37.736,
+   "hit_tokens": 131584,
+   "computed_tokens": 256,
+   "microbatches": [
+    {
+     "tokens": 256,
+     "context": [
+      131584
+     ],
+     "compute_ms": [
+      8.635,
+      9.466,
+      9.671,
+      9.882
+     ],
+     "send_ms": [
+      0.027,
+      0.027,
+      0.027
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "prefix_tokens": 131072,
+  "computed_tokens": 1024,
+  "sessions": 5,
+  "rounds": 4,
+  "round0": {
+   "ttft_ms": 1118.187,
+   "microbatches": 16
+  },
+  "round1": {
+   "ttft_ms": 55.407,
+   "hit_tokens": 131072,
+   "computed_tokens": 1024,
+   "microbatches": [
+    {
+     "tokens": 1024,
+     "context": [
+      131072
+     ],
+     "compute_ms": [
+      13.272,
+      13.652,
+      14.027,
+      14.253
+     ],
+     "send_ms": [
+      0.068,
+      0.068,
+      0.068
+     ]
+    }
+   ]
+  },
+  "round2": {
+   "ttft_ms": 55.425,
+   "hit_tokens": 132096,
+   "computed_tokens": 1024,
+   "microbatches": [
+    {
+     "tokens": 1024,
+     "context": [
+      132096
+     ],
+     "compute_ms": [
+      13.277,
+      13.656,
+      14.032,
+      14.258
+     ],
+     "send_ms": [
+      0.068,
+      0.068,
+      0.068
+     ]
+    }
+   ]
+  },
+  "round3": {
+   "ttft_ms": 55.444,
+   "hit_tokens": 133120,
+   "computed_tokens": 1024,
+   "microbatches": [
+    {
+     "tokens": 1024,
+     "context": [
+      133120
+     ],
+     "compute_ms": [
+      13.282,
+      13.659,
+      14.036,
+      14.263
+     ],
+     "send_ms": [
+      0.068,
+      0.068,
+      0.068
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "prefix_tokens": 131072,
+  "computed_tokens": 8192,
+  "sessions": 5,
+  "rounds": 4,
+  "round0": {
+   "ttft_ms": 1118.187,
+   "microbatches": 16
+  },
+  "round1": {
+   "ttft_ms": 238.964,
+   "hit_tokens": 131072,
+   "computed_tokens": 8192,
+   "microbatches": [
+    {
+     "tokens": 8192,
+     "context": [
+      131072
+     ],
+     "compute_ms": [
+      61.277,
+      56.924,
+      59.472,
+      59.845
+     ],
+     "send_ms": [
+      0.482,
+      0.482,
+      0.482
+     ]
+    }
+   ]
+  },
+  "round2": {
+   "ttft_ms": 240.052,
+   "hit_tokens": 139264,
+   "computed_tokens": 8192,
+   "microbatches": [
+    {
+     "tokens": 8192,
+     "context": [
+      139264
+     ],
+     "compute_ms": [
+      61.574,
+      57.122,
+      59.769,
+      60.142
+     ],
+     "send_ms": [
+      0.482,
+      0.482,
+      0.482
+     ]
+    }
+   ]
+  },
+  "round3": {
+   "ttft_ms": 241.202,
+   "hit_tokens": 147456,
+   "computed_tokens": 8192,
+   "microbatches": [
+    {
+     "tokens": 8192,
+     "context": [
+      147456
+     ],
+     "compute_ms": [
+      61.887,
+      57.331,
+      60.083,
+      60.456
+     ],
+     "send_ms": [
+      0.482,
+      0.482,
+      0.482
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "prefix_tokens": 524288,
+  "computed_tokens": 256,
+  "sessions": 5,
+  "rounds": 4,
+  "round0": {
+   "ttft_ms": 4408.086,
+   "microbatches": 64
+  },
+  "round1": {
+   "ttft_ms": 40.296,
+   "hit_tokens": 524288,
+   "computed_tokens": 256,
+   "microbatches": [
+    {
+     "tokens": 256,
+     "context": [
+      524288
+     ],
+     "compute_ms": [
+      9.333,
+      9.931,
+      10.369,
+      10.581
+     ],
+     "send_ms": [
+      0.027,
+      0.027,
+      0.027
+     ]
+    }
+   ]
+  },
+  "round2": {
+   "ttft_ms": 40.298,
+   "hit_tokens": 524544,
+   "computed_tokens": 256,
+   "microbatches": [
+    {
+     "tokens": 256,
+     "context": [
+      524544
+     ],
+     "compute_ms": [
+      9.333,
+      9.932,
+      10.369,
+      10.581
+     ],
+     "send_ms": [
+      0.027,
+      0.027,
+      0.027
+     ]
+    }
+   ]
+  },
+  "round3": {
+   "ttft_ms": 40.299,
+   "hit_tokens": 524800,
+   "computed_tokens": 256,
+   "microbatches": [
+    {
+     "tokens": 256,
+     "context": [
+      524800
+     ],
+     "compute_ms": [
+      9.334,
+      9.932,
+      10.37,
+      10.581
+     ],
+     "send_ms": [
+      0.027,
+      0.027,
+      0.027
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "prefix_tokens": 524288,
+  "computed_tokens": 1024,
+  "sessions": 5,
+  "rounds": 4,
+  "round0": {
+   "ttft_ms": 4408.086,
+   "microbatches": 64
+  },
+  "round1": {
+   "ttft_ms": 64.349,
+   "hit_tokens": 524288,
+   "computed_tokens": 1024,
+   "microbatches": [
+    {
+     "tokens": 1024,
+     "context": [
+      524288
+     ],
+     "compute_ms": [
+      15.71,
+      15.278,
+      16.465,
+      16.692
+     ],
+     "send_ms": [
+      0.068,
+      0.068,
+      0.068
+     ]
+    }
+   ]
+  },
+  "round2": {
+   "ttft_ms": 64.349,
+   "hit_tokens": 525312,
+   "computed_tokens": 1024,
+   "microbatches": [
+    {
+     "tokens": 1024,
+     "context": [
+      525312
+     ],
+     "compute_ms": [
+      15.71,
+      15.278,
+      16.465,
+      16.692
+     ],
+     "send_ms": [
+      0.068,
+      0.068,
+      0.068
+     ]
+    }
+   ]
+  },
+  "round3": {
+   "ttft_ms": 64.363,
+   "hit_tokens": 526336,
+   "computed_tokens": 1024,
+   "microbatches": [
+    {
+     "tokens": 1024,
+     "context": [
+      526336
+     ],
+     "compute_ms": [
+      15.714,
+      15.281,
+      16.469,
+      16.696
+     ],
+     "send_ms": [
+      0.068,
+      0.068,
+      0.068
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "prefix_tokens": 524288,
+  "computed_tokens": 8192,
+  "sessions": 5,
+  "rounds": 4,
+  "round0": {
+   "ttft_ms": 4408.086,
+   "microbatches": 64
+  },
+  "round1": {
+   "ttft_ms": 287.72,
+   "hit_tokens": 524288,
+   "computed_tokens": 8192,
+   "microbatches": [
+    {
+     "tokens": 8192,
+     "context": [
+      524288
+     ],
+     "compute_ms": [
+      74.574,
+      65.789,
+      72.77,
+      73.143
+     ],
+     "send_ms": [
+      0.482,
+      0.482,
+      0.482
+     ]
+    }
+   ]
+  },
+  "round2": {
+   "ttft_ms": 287.961,
+   "hit_tokens": 532480,
+   "computed_tokens": 8192,
+   "microbatches": [
+    {
+     "tokens": 8192,
+     "context": [
+      532480
+     ],
+     "compute_ms": [
+      74.64,
+      65.833,
+      72.835,
+      73.208
+     ],
+     "send_ms": [
+      0.482,
+      0.482,
+      0.482
+     ]
+    }
+   ]
+  },
+  "round3": {
+   "ttft_ms": 288.229,
+   "hit_tokens": 540672,
+   "computed_tokens": 8192,
+   "microbatches": [
+    {
+     "tokens": 8192,
+     "context": [
+      540672
+     ],
+     "compute_ms": [
+      74.713,
+      65.881,
+      72.908,
+      73.282
+     ],
+     "send_ms": [
+      0.482,
+      0.482,
+      0.482
+     ]
+    }
+   ]
+  }
+ }
+]

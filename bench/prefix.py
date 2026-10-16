@@ -2,6 +2,9 @@
 prefix_n<N>).
 
   python -m bench.prefix run <run dir>                      report.json of one run
+  python -m bench.prefix table <run dir>... --targets <targets json> [--reference reference.jsonl] [--out x.md]
+      every round of every (P, A) case of the runs (e.g. the parts of bench/targets_ext/), measured / target, and
+      the token check against the reference (bench/check_tokens.py rule) per row; --out also writes x.jsonl
   python -m bench.prefix summarize <runs root> --out measured
       measured/prefix_bringup.jsonl (one line per bring-up session, §8) and measured/prefix_cache.md (both tables
       with targets and ratios, the microbatch check, the cache counters); reads <runs root>/prefix_bringup,
@@ -136,6 +139,15 @@ def server_rows(run_dir: Path) -> dict[str, dict]:
     return {r["id"]: r for r in read_jsonl(run_dir / "server_requests.jsonl") if not r["id"].startswith(PREFLIGHT)}
 
 
+def server_ttft_ms(s: dict | None) -> float | None:
+    """Server-side TTFT: the request entered the scheduler's pending queue (`host_ms.admitted`, after the body was
+    received, parsed and handed to the controller) -> the first token's response went out. The client's TTFT adds
+    building, sending, receiving and parsing the body before that and reading the response after."""
+    if s is None or s.get("response_ms") is None or (s.get("host_ms") or {}).get("admitted") is None:
+        return None
+    return round(s["response_ms"] - (s["arrival_ms"] + s["host_ms"]["admitted"]), 3)
+
+
 def shift_ms(run_dir: Path, client: dict) -> float:
     """Workload t = 0 (first workload submit) on the server's ms axis."""
     t0 = json.loads((run_dir / "t0.json").read_text())["t0_unix_ns"] / 1e6
@@ -155,18 +167,44 @@ def stages_of(lines: list[dict], nstages: int = 4) -> tuple[list[dict], list[flo
     st = []
     for s in range(nstages):
         ms = sorted((m for m in lines if m["stage"] == s), key=lambda m: m["start_ms"])
+        if not ms:      # a stage's line missing (an nsys capture stopped with it): no numbers for that stage
+            st.append({"stage": s, "compute_ms": None, "start_ms": None, "end_ms": None, "microbatches": 0})
+            continue
         st.append({"stage": s, "compute_ms": round(sum(m["compute_ms"] for m in ms), 3),
                    "start_ms": ms[0]["start_ms"], "end_ms": ms[-1]["start_ms"] + ms[-1]["compute_ms"],
                    "microbatches": len(ms)})
     sends = [round(st[s + 1]["start_ms"] - st[s]["end_ms"], 3) for s in range(nstages - 1)] \
-        if st[0]["microbatches"] == 1 else []
+        if st[0]["microbatches"] == 1 and all(x["microbatches"] for x in st) else []
     return st, sends
 
 
 # --- bring-up ---------------------------------------------------------------------------------------------------------
 
+def round_line(c: dict, mine: list[dict], s: dict | None, tr) -> dict:
+    """One resumed round (k >= 1): client TTFT, hit, computed tokens, per-stage compute and sends (CUDA events)."""
+    out = {"ttft_ms": c["ttft_ms"], "cached_tokens": c["cached"],
+           "computed_tokens": c["prompt_tokens"] - (c["cached"] or 0), "stages": None, "sends_ms": None}
+    if mine:
+        st, sends = stages_of(mine)
+        out.update(stages=[x["compute_ms"] for x in st], sends_ms=sends, microbatches=st[0]["microbatches"])
+        if all(x["start_ms"] is not None for x in st):
+            out["host_ms"] = round(c["ttft_ms"] - (st[-1]["end_ms"] - st[0]["start_ms"]), 3)
+        t = trace_request(tr, sorted({m["index"] for m in mine}), 4) if tr else None
+        if t is not None:
+            out["nsys"] = {"stages_ms": [round(x["compute_ms"], 3) for x in t["stages"]],
+                           "sends_ms": [round(t["stages"][k + 1]["start_ms"] - t["stages"][k]["end_ms"], 3)
+                                        for k in range(3)]}
+    out["server_ttft_ms"] = server_ttft_ms(s)
+    if s is not None:
+        out["token"] = s.get("token")
+        out["prompt_sha256"] = s.get("prompt_sha256")
+        out["server_host_ms"] = s.get("host_ms")
+    return out
+
+
 def bringup(run_dir: Path, reference: Path | None = None) -> list[dict]:
-    """One line per session (§8), from the run's client log, server logs and (if any) nsys trace."""
+    """One line per session (§8), from the run's client log, server logs and (if any) nsys trace. Every resumed
+    round k >= 1 is in `rounds` (round 1 also in the round1_* keys)."""
     client = client_rows(run_dir)
     sreq = server_rows(run_dir)
     by_req = mbs_of(read_jsonl(run_dir / "microbatches.jsonl"))
@@ -180,38 +218,38 @@ def bringup(run_dir: Path, reference: Path | None = None) -> list[dict]:
     out = []
     for sid in sorted(sessions):
         rounds = sessions[sid]
-        (r0id, r0), (r1id, r1) = rounds[0], rounds.get(1, (None, None))
+        r0id, r0 = rounds[0]
         line = {"prefix_tokens": r0["input_len"], "computed_tokens": None, "session": sid,
-                "round0_ttft_ms": r0["ttft_ms"], "round1_ttft_ms": None, "round1_cached_tokens": None,
-                "round1_stages": None, "round1_sends_ms": None, "token_matches_reference": None}
-        if r1 is None or not r1["ok"]:
-            line["failed"] = "round 1: no token"
+                "round0_ttft_ms": r0["ttft_ms"], "round0_server_ttft_ms": server_ttft_ms(sreq.get(r0id)),
+                "round1_ttft_ms": None, "round1_server_ttft_ms": None, "round1_cached_tokens": None,
+                "round1_stages": None, "round1_sends_ms": None, "token_matches_reference": None,
+                "round0_microbatches": len({m["index"] for m in by_req.get(r0id, [])}), "rounds": {}}
+        for k in sorted(r for r in rounds if r >= 1):
+            rid, c = rounds[k]
+            if not c["ok"]:
+                line["failed"] = f"round {k}: no token"
+                break
+            line["rounds"][k] = round_line(c, by_req.get(rid, []), sreq.get(rid), tr)
+            line["rounds"][k]["append_tokens"] = c["input_len"] + 1   # A: the output token + the new tokens
+        if 1 not in line["rounds"]:
+            line.setdefault("failed", "round 1: no token")
             out.append(line)
             continue
-        line.update(computed_tokens=r1["prompt_tokens"] - (r1["cached"] or 0), round1_ttft_ms=r1["ttft_ms"],
-                    round1_cached_tokens=r1["cached"])
-        line["append_tokens"] = r1["input_len"] + 1                      # A: the output token + the new tokens
-        mine = by_req.get(r1id, [])
-        if mine:
-            st, sends = stages_of(mine)
-            line["round1_stages"] = [{"stage": s["stage"], "compute_ms": s["compute_ms"]} for s in st]
-            line["round1_sends_ms"] = sends
-            line["round1_microbatches"] = st[0]["microbatches"]
-            t = trace_request(tr, sorted({m["index"] for m in mine}), 4) if tr else None
-            if t is not None:
-                line["round1_nsys"] = {"stages_ms": [round(s["compute_ms"], 3) for s in t["stages"]],
-                                       "sends_ms": [round(t["stages"][s + 1]["start_ms"] - t["stages"][s]["end_ms"], 3)
-                                                    for s in range(3)]}
-        line["round0_microbatches"] = len({m["index"] for m in by_req.get(r0id, [])})
-        s1 = sreq.get(r1id)
-        if s1 is not None:
-            line["round1_token"] = s1.get("token")
-            line["round1_host_ms"] = round(r1["ttft_ms"] - (st[-1]["end_ms"] - st[0]["start_ms"]), 3) if mine else None
-            other = ref.get(s1["prompt_sha256"])
-            if other is not None:
-                line["token_matches_reference"] = other["token"] == s1["token"]
-                line["reference_token"] = other["token"]
-                line["reference_cached"] = other.get("cached")
+        r1 = line["rounds"][1]
+        line.update(computed_tokens=r1["computed_tokens"], round1_ttft_ms=r1["ttft_ms"],
+                    round1_server_ttft_ms=r1["server_ttft_ms"],
+                    round1_cached_tokens=r1["cached_tokens"], append_tokens=r1["append_tokens"],
+                    round1_stages=None if r1["stages"] is None else
+                    [{"stage": k, "compute_ms": v} for k, v in enumerate(r1["stages"])],
+                    round1_sends_ms=r1["sends_ms"], round1_microbatches=r1.get("microbatches"),
+                    round1_host_ms=r1.get("host_ms"), round1_token=r1.get("token"))
+        if "nsys" in r1:
+            line["round1_nsys"] = r1["nsys"]
+        other = ref.get(r1.get("prompt_sha256"))
+        if other is not None:
+            line["token_matches_reference"] = other["token"] == r1.get("token")
+            line["reference_token"] = other["token"]
+            line["reference_cached"] = other.get("cached")
         out.append(line)
     return out
 
@@ -268,7 +306,9 @@ def sessions(run_dir: Path) -> dict:
     cache = json.loads((run_dir / "cache.json").read_text()) if (run_dir / "cache.json").exists() else {}
     metrics = json.loads((run_dir / "metrics.json").read_text())
     sreq = server_rows(run_dir)
+    sv = np.array([v for v in (server_ttft_ms(r) for r in sreq.values()) if v is not None]) / 1e3
     return {"metrics": metrics, "stage_busy": busy, "shift_ms": shift,
+            "server_ttft_s": {f"p{q}": float(np.percentile(sv, q)) for q in (50, 90, 99)} if len(sv) else None,
             "pool_tokens": cache.get("pool_tokens"), "evicted_sessions": cache.get("evicted_sessions"),
             "evicted_tokens": cache.get("evicted_tokens"), "preemptions": cache.get("preemptions"),
             "hits": cache.get("hits"), "hit_tokens": cache.get("hit_tokens"), "peak_hard_blocks": cache.get("peak_hard"),
@@ -299,13 +339,14 @@ def _r(m, t):
 
 
 def _k(n):
-    return f"{n // 1024}k"
+    return f"{n // 1024}k" if n % 1024 == 0 else f"{n:,}"
 
 
 def bringup_md(lines: list[dict]) -> str:
     targets = {(t["prefix_tokens"], t["computed_tokens"]): t for t in json.loads((HANDOFF / "data/prefix_targets.json").read_text())}
-    out = ["| P | A | n | hit = P | Round 0 TTFT p50 (ms) | Round 1 TTFT p50 (ms) | Stage 0 | Stage 1 | Stage 2 | Stage 3 | "
-           "Each send | Token = no cache |", "|---|---|---|---|---|---|---|---|---|---|---|---|"]
+    out = ["| P | A | n | hit = P | Round 0 TTFT p50 (ms) | Round 1 TTFT p50 (ms) | Round 1 server TTFT p50 (ms) | "
+           "Stage 0 | Stage 1 | Stage 2 | Stage 3 | Each send | Token = no cache |",
+           "|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
     groups = {}
     for x in lines:
         groups.setdefault((x["prefix_tokens"], x.get("append_tokens")), []).append(x)
@@ -317,6 +358,8 @@ def bringup_md(lines: list[dict]) -> str:
         r1s = [x["round1_ttft_ms"] for x in ok]
         r0, r1 = float(np.median(r0s)), med(lambda x: x["round1_ttft_ms"])
         tail = lambda v: f"; p90 {np.percentile(v, 90):.1f}, p99 {np.percentile(v, 99):.1f}" if v else ""  # noqa: E731
+        sv = [x["round1_server_ttft_ms"] for x in ok if x.get("round1_server_ttft_ms") is not None]
+        s1 = float(np.median(sv)) if sv else None
         st = [med(lambda x, s=s: x["round1_stages"][s]["compute_ms"]) for s in range(4)]
         sends = med(lambda x: float(np.mean(x["round1_sends_ms"]))) if ok and all(x["round1_sends_ms"] for x in ok) else None
         hits = sum(x["round1_cached_tokens"] == P for x in xs)
@@ -329,16 +372,82 @@ def bringup_md(lines: list[dict]) -> str:
         out.append(f"| {_k(P)} | {_k(A) if A else '?'} | {len(xs)} | {hits}/{len(xs)} | "
                    f"{cell(r0, t['round0']['ttft_ms'] if t else None)}{tail(r0s)} | "
                    f"{cell(r1, tr['ttft_ms'] if tr else None)}{tail(r1s)} | "
+                   f"{cell(s1, tr['ttft_ms'] if tr else None)}{tail(sv)} | "
                    + " | ".join(cell(st[s], tr["microbatches"][0]["compute_ms"][s] if tr else None) for s in range(4))
                    + f" | {send} | {tok} |")
     return "\n".join(out)
+
+
+def rounds_md(lines: list[dict], targets: Path, verdicts: dict | None = None) -> str:
+    """Every round of every (P, A) case: measured / target (ratio), medians over the case's sessions. Round 0 is the
+    no-cache prefill of P; round k >= 1 hits P + (k - 1) A and computes A. `verdicts`: prompt sha256 -> the token
+    check's verdict (bench/check_tokens.py), counted per row as pass / judged (+ near ties)."""
+    tg = {(t["prefix_tokens"], t["computed_tokens"]): t for t in json.loads(targets.read_text())}
+    out = ["| P | A | Round | n | Hit = target | TTFT (ms) | Server TTFT (ms) | Stage 0 | Stage 1 | Stage 2 | Stage 3 | "
+           "Token |", "|---|---|---|---|---|---|---|---|---|---|---|---|"]
+    groups = {}
+    for x in lines:
+        if x.get("append_tokens"):
+            groups.setdefault((x["prefix_tokens"], x["append_tokens"]), []).append(x)
+    cell = lambda m, tv: f"{m:.1f} / {tv:.1f} (x{_r(m, tv)})" if m is not None and tv else "–"   # noqa: E731
+    for (P, A), xs in sorted(groups.items()):
+        t = tg.get((P, A))
+        r0 = [x["round0_ttft_ms"] for x in xs if x["round0_ttft_ms"] is not None]
+        s0 = [x["round0_server_ttft_ms"] for x in xs if x.get("round0_server_ttft_ms") is not None]
+        t0 = t["round0"]["ttft_ms"] if t else None
+        out.append(f"| {_k(P)} | {_k(A)} | 0 | {len(xs)} | – | {cell(float(np.median(r0)) if r0 else None, t0)} "
+                   f"| {cell(float(np.median(s0)) if s0 else None, t0)} | – | – | – | – | – |")
+        nrounds = max(max(x["rounds"], default=0) for x in xs)
+        for k in range(1, nrounds + 1):
+            rs = [x["rounds"][k] for x in xs if k in x["rounds"]]
+            tk = t.get(f"round{k}") if t else None
+            med = lambda f, rs=rs: (lambda v: float(np.median(v)) if v else None)(   # noqa: E731
+                [f(r) for r in rs if f(r) is not None])
+            ttft = med(lambda r: r["ttft_ms"])
+            sttft = med(lambda r: r.get("server_ttft_ms"))
+            st = [med(lambda r, i=i: r["stages"][i] if r["stages"] else None) for i in range(4)]
+            want_hit = tk["hit_tokens"] if tk else None
+            hits = sum(r["cached_tokens"] == want_hit for r in rs) if want_hit is not None else None
+            tmb = tk["microbatches"][0]["compute_ms"] if tk and len(tk["microbatches"]) == 1 else None
+            if tk and len(tk["microbatches"]) > 1:
+                tmb = [sum(m["compute_ms"][i] for m in tk["microbatches"]) for i in range(4)]
+            tok = "–"
+            if verdicts is not None:
+                v = [verdicts.get(r.get("prompt_sha256")) for r in rs]
+                tok = (f"{sum(x == 'pass' for x in v)}/{sum(x in ('pass', 'fail') for x in v)}"
+                       + (f" +{sum(x == 'near_tie' for x in v)} near tie" if 'near_tie' in v else "")
+                       + (f", {sum(x is None or x == 'no_reference' for x in v)} no ref"
+                          if any(x is None or x == 'no_reference' for x in v) else ""))
+            out.append(f"| {_k(P)} | {_k(A)} | {k} | {len(rs)} | "
+                       f"{'–' if hits is None else f'{hits}/{len(rs)}'} | {cell(ttft, tk['ttft_ms'] if tk else None)} | "
+                       f"{cell(sttft, tk['ttft_ms'] if tk else None)} | "
+                       + " | ".join(cell(st[i], tmb[i] if tmb else None) for i in range(4)) + f" | {tok} |")
+    return "\n".join(out)
+
+
+def table(run_dirs: list[Path], targets: Path, reference: Path | None = None) -> tuple[str, list[dict]]:
+    """rounds_md over the bring-up lines of several runs (e.g. the parts of an extended trace, one server each)."""
+    from bench.check_tokens import check as check_tokens
+    lines, verdicts = [], None if reference is None else {}
+    for d in run_dirs:
+        ls = bringup(d)
+        for x in ls:
+            x["run"] = d.name
+        lines += ls
+        if reference is not None:
+            res = check_tokens(d, reference)
+            sha = {r["id"]: r.get("prompt_sha256") for r in server_rows(d).values()}
+            for r in res["requests"]:
+                if sha.get(r["id"]):
+                    verdicts[sha[r["id"]]] = r["verdict"]
+    return rounds_md(lines, targets, verdicts), lines
 
 
 def sessions_md(runs: dict[int, dict]) -> str:
     targets = {t["max_sessions"]: t for t in json.loads((HANDOFF / "data/session_targets.json").read_text())
                if t["setting"] == "plain_hbm"}
     out = ["| N | Rounds/s | New tokens/s | Computed tokens/s | Prefix hit share | TTFT p50 / p90 / p99 (s) | "
-           "Stage busy 0 / 1 / 2 / 3 |", "|---|---|---|---|---|---|---|"]
+           "Server TTFT p50 / p90 / p99 (s) | Stage busy 0 / 1 / 2 / 3 |", "|---|---|---|---|---|---|---|---|"]
     for n, s in sorted(runs.items()):
         m, t = s["metrics"], targets.get(n)
         tt = m["ttft_s"]
@@ -352,7 +461,10 @@ def sessions_md(runs: dict[int, dict]) -> str:
             f"| {tt['p50']:.2f} / {tt['p90']:.2f} / {tt['p99']:.2f} vs {t['ttft_s']['p50']:.2f} / "
             f"{t['ttft_s']['p90']:.2f} / {t['ttft_s']['p99']:.2f} (x{_r(tt['p50'], t['ttft_s']['p50'])} / "
             f"x{_r(tt['p90'], t['ttft_s']['p90'])} / x{_r(tt['p99'], t['ttft_s']['p99'])}) "
-            f"| {' / '.join(f'{100 * b:.0f}' for b in s['stage_busy'])}% vs "
+            + (lambda sv: "| – " if not sv else
+               f"| {sv['p50']:.2f} / {sv['p90']:.2f} / {sv['p99']:.2f} (x{_r(sv['p50'], t['ttft_s']['p50'])} / "
+               f"x{_r(sv['p90'], t['ttft_s']['p90'])} / x{_r(sv['p99'], t['ttft_s']['p99'])}) ")(s.get("server_ttft_s"))
+            + f"| {' / '.join(f'{100 * b:.0f}' for b in s['stage_busy'])}% vs "
             f"{' / '.join(f'{100 * b:.0f}' for b in t['stage_busy'])}% |")
     out += ["", "| N | Pool (tokens) | Evicted sessions (tokens) | Preemptions | Prefix shortfall | Rounds failed | "
             "Microbatches / fit, median per stage (p10–p90) |", "|---|---|---|---|---|---|---|"]
@@ -420,10 +532,20 @@ def summarize(root: Path, out: Path) -> Path:
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("cmd", choices=["run", "summarize"])
-    ap.add_argument("path", type=Path)
+    ap.add_argument("cmd", choices=["run", "summarize", "table"])
+    ap.add_argument("path", type=Path, nargs="+")
     ap.add_argument("--out", type=Path)
+    ap.add_argument("--targets", type=Path, help="table: the targets file (e.g. bench/targets_ext/*.json)")
+    ap.add_argument("--reference", type=Path, help="table: reference.jsonl for the token check")
     a = ap.parse_args()
+    if a.cmd == "table":
+        md, lines = table(a.path, a.targets or HANDOFF / "data/prefix_targets.json", a.reference)
+        print(md)
+        if a.out:
+            a.out.write_text(md + "\n")
+            a.out.with_suffix(".jsonl").write_text("".join(json.dumps(x) + "\n" for x in lines))
+        return 0
+    a.path = a.path[0]
     if a.cmd == "run":
         rep = report_run(a.path)
         print(json.dumps(rep)[:2000])

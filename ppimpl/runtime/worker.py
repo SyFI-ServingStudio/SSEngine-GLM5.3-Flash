@@ -4,8 +4,11 @@ The main thread only enqueues GPU work. A reporter thread waits for each microba
 with GPU times on the host clock, so the controller and all stages share one time base.
 """
 
+import cProfile
+import io
 import json
 import os
+import pstats
 import queue
 import signal
 import threading
@@ -75,6 +78,67 @@ class ProfileWindow:
     def after(self, mb_id: int):
         if self.b is not None and mb_id == self.b - 1:
             torch.cuda.profiler.stop()
+
+
+class HostProfile:
+    """cProfile of the host side of model.forward (metadata, launches) for microbatches [a, b) on the stages listed,
+    from PPIMPL_HOST_PROFILE="a:b[@stages]" (default stage 0): <run dir>/hostprof/stage<s>_mb<m>.txt, the top
+    functions by cumulative time. A diagnosis aid: the profiler slows the host down."""
+
+    def __init__(self, stage: int, run_dir: str):
+        spec = os.environ.get("PPIMPL_HOST_PROFILE", "")
+        rng, _, stages = spec.partition("@")
+        self.on = bool(rng) and stage in [int(x) for x in (stages or "0").split(",")]
+        if self.on:
+            self.a, self.b = (int(x) for x in rng.split(":"))
+            self.dir = Path(run_dir) / "hostprof"
+            self.dir.mkdir(exist_ok=True)
+        self.stage, self.prof = stage, None
+
+    def before(self, mb_id: int):
+        if self.on and self.a <= mb_id < self.b:
+            self.prof = cProfile.Profile()
+            self.prof.enable()
+
+    def after(self, mb_id: int):
+        if self.prof is not None:
+            self.prof.disable()
+            out = io.StringIO()
+            pstats.Stats(self.prof, stream=out).sort_stats("cumulative").print_stats(60)
+            (self.dir / f"stage{self.stage}_mb{mb_id}.txt").write_text(out.getvalue())
+            self.prof = None
+
+
+class FirstUse:
+    """After `Ready`: vLLM's JIT monitor (Triton, CuTeDSL and TileLang compiles, Triton autotuning; verbose: the
+    specialization) plus, per Triton compile or disk-cache load, the microbatch and the host time it took: "stage S
+    mb M: first use after warm-up: triton <kernel> T ms". Warm-up is meant to have run every variant
+    (StageModel.warmup); each such line is one it missed. The hooks run only on a compile path, never on a cached
+    launch."""
+
+    def __init__(self, stage: int):
+        self.stage, self.mb, self.t0 = stage, None, {}
+
+    def install(self):
+        try:
+            from triton import knobs
+        except ImportError:
+            return
+        from vllm.utils import jit_monitor
+
+        knobs.runtime.jit_cache_hook = self._start
+        knobs.runtime.jit_post_compile_hook = self._done
+        jit_monitor.activate(mode="warn", verbose=True)    # chains to self._done
+
+    def _start(self, **kw):
+        self.t0[str(kw.get("key"))] = time.perf_counter()
+        return False                      # compile as usual
+
+    def _done(self, **kw):
+        t = self.t0.pop(str(kw.get("key")), None)
+        ms = -1.0 if t is None else 1e3 * (time.perf_counter() - t)
+        name = getattr(kw.get("fn"), "name", "?")
+        print(f"stage {self.stage} mb {self.mb}: first use after warm-up: triton {name} {ms:.1f} ms", flush=True)
 
 
 class Reporter(threading.Thread):
@@ -148,7 +212,11 @@ def run_worker(cfg: RunConfig, stage: int):   # makes inference tensors, which a
         (Path(cfg.run_dir) / f"stage{stage}.json").write_text(json.dumps(info) + "\n")
         clock = Clock(device)
         window = ProfileWindow(cfg.profile_mbs if cuda else None)
+        hostprof = HostProfile(stage, cfg.run_dir)
         print(f"stage {stage} cpus: {cpu_list(cpus) if cpus else 'not pinned'}, threads {threads()}", flush=True)
+        first_use = FirstUse(stage)
+        if cuda:
+            first_use.install()
         reporter.q.put(Ready(stage, model.num_blocks))
         while True:
             while not plans.poll(1000):
@@ -171,7 +239,10 @@ def run_worker(cfg: RunConfig, stage: int):   # makes inference tensors, which a
             clock.maybe_reanchor()
             hidden_in = pipe.recv(plan.num_tokens, model.hidden_width) if stage > 0 else None
             start = clock.mark()
+            first_use.mb = plan.mb_id
+            hostprof.before(plan.mb_id)
             out = model.forward(plan, hidden_in)
+            hostprof.after(plan.mb_id)
             end = clock.mark()
             if hidden_in is not None:
                 pipe.release()                        # CePipe: the sender may reuse the slot once this forward ran

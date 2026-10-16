@@ -30,12 +30,14 @@ from types import SimpleNamespace as NS
 from bench import common as lb
 
 
-def plans_for(Tb: int, tokens: list[int]):
+def plans_for(Tb: int, tokens: list[int], prev: int | None = None):
+    """The bucket exactly, and a padded plan of two requests between the next smaller bucket `prev` and Tb (not
+    divisible by 16)."""
     def chunk(rid, n, kv, base_tok):
         return NS(req_id=rid, start=0, num_tokens=n, kv_blocks=[kv], is_last=True,
                   state_blocks=list(range(kv + 1, kv + 7)), token_ids=tokens[base_tok:base_tok + n])
     exact = NS(mb_id=0, chunks=[chunk("a", Tb, 1, 0)])
-    T = Tb - Tb // 8 - 3 if Tb > 128 else Tb - 21
+    T = Tb - (Tb - prev) // 8 - 3 if prev else Tb - 21
     n1 = T // 3
     padded = NS(mb_id=1, chunks=[chunk("b", T - n1, 1, 100), chunk("c", n1, 8, 7000)])
     return {"exact": exact, "padded": padded}
@@ -97,7 +99,8 @@ def main() -> None:
     ok = True
     with torch.inference_mode():
         for Tb in sorted(model.graphs):
-            for kind, plan in plans_for(Tb, tokens).items():
+            prev = max((t for t in model.graphs if t < Tb), default=None)
+            for kind, plan in plans_for(Tb, tokens, prev).items():
                 T = sum(c.num_tokens for c in plan.chunks)
                 h = None if model.first else torch.randn(T, model.hidden_width, device=dev, generator=gen).to(
                     torch.bfloat16)
