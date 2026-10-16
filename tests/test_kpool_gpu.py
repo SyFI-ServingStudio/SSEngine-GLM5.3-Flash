@@ -73,7 +73,8 @@ def test_unaligned_resume_bitwise_on_gpu(hit):
 
     ref = whole([L])
     assert torch.equal(run(sched, [L]), ref)
-    assert not torch.equal(run(sched, [L], override=False), ref)
+    if hit % KPOOL:          # 8193 + 3 = 8196 is pool-aligned: the fork's insert alone is right there
+        assert not torch.equal(run(sched, [L], override=False), ref)
 
 
 def test_two_requests_and_short_chunks_bitwise_on_gpu():

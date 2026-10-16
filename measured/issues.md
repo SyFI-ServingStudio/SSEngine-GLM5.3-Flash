@@ -416,3 +416,22 @@ P = 8193+1/2/3, two requests in one microbatch equal the unsplit pools; the fork
   holds ceil(L / 8,576) KV blocks + 6 state blocks; a kept session the same (target: L tokens + 51,456).
 - **Host time is not zero** (target: none). Admission, dispatch and launch (`dispatch_ahead` 1, `intake_procs` 16).
   The long-context host cost (request parse at 512k) is lane longctx's.
+
+## Resuming off KDA's 32-token chunk grid is not bitwise (M4 preflight, jobs 7430, 7456) — numerics, decided
+
+Kind: run-to-run numerics, not a hand-off bug. kvcheck at 40,000 tokens in 8,001- and 8,190-token chunks (7430):
+every chunk after the first differs from the unsplit prefill (stage 0 rel. L2 0.116–0.128, stage 1 0.20–0.33, stage 2
+0.24–0.40; last-position logits max |diff| 4.0 / 4.6, KL 8.1e-6 / 1.5e-5, top-1 equal). With 8,000- and 8,192-token
+chunks (7413) all variants are bitwise equal. Cause, isolated on one GPU (probe 7456, random inputs, H 64): FlashInfer's
+persistent KDA cuts each sequence into 32-token chunks from its own start, so a resume at a start that is not a
+multiple of 32 sums the recurrence in other pieces: KDA output of the resumed part 0.44% rel. L2 from the unsplit
+run, final state 0.39% (bf16 level); starts at multiples of 32 are bitwise. Dao causal-conv1d resumes bitwise at any
+start. The model carries any bf16-level change to the same size: 7395's 768-token last chunk (another mHC split-K
+count, nothing resumed) gave stage 0 0.118, stage 1 0.20, stage 2 0.23, KL 2.5e-4. Prefix hits resume at the kept
+prompt's length, which is any number in the sessions trace, so their round-1 tokens can differ from a no-cache
+prefill the way any batch change can. The KV audit (lane kvaudit, `measured/kvaudit/32768/compare.json`) agrees: 8,001-token chunks against
+whole sit at vLLM's own filler noise (MLA 0.13, indexer 0.07, KDA state 0.08), 8,192-token chunks are bit-exact, and
+every prefix-hit variant has vLLM's top-1. Preflight rule (`bench/kvcheck.py --exact / --noise-len`): bitwise only
+where the chunks keep whole's microbatch shapes (8,192-aligned); other chunkings within 2x the split-K baseline
+measured in the same job per stage, KL within 4x, top-1 equal. The indexer fix itself is checked bitwise on its own
+ops (`tests/test_kpool_gpu.py`).
