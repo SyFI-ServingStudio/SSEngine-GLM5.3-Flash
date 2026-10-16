@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import time
 import warnings
 from pathlib import Path
 
@@ -46,9 +47,11 @@ HIDDEN_WIDTH = 4 * 4096
 TACTICS = Path(os.environ.get("PPIMPL_FI_TACTICS",
                               Path(__file__).resolve().parents[1] / "data" / "flashinfer_tactics_b200.json"))
 RESERVE_GB = 13.6     # 1_contract.md §1: activations and workspace beside weights and KV (and the CUDA graph pool)
-# token counts captured as CUDA graphs: powers of 2 to 1024, then every 1024 (and 1536). With powers of 2 only, a
-# 3,000-token prompt ran as 4,096 (round 0 TTFT 114 vs 96.7 ms target, x1.18; 4k: 121 ms, job 7462).
-GRAPH_BUCKETS = (128, 256, 512, 1024, 1536, 2048, 3072, 4096, 5120, 6144, 7168, 8192)
+# token counts captured as CUDA graphs: 128, then every 256 to 8192 (33). A microbatch pads to its bucket, so
+# coarse buckets cost compute: with powers of 2 a 3,000-token prompt ran as 4,096 (round 0 TTFT 114 vs 96.7 ms
+# target, x1.18; job 7462), and on the N=400 smoke's stage-0 sizes (7569) the pad was 3.8% of the tokens (every 1024:
+# 1.5%; every 256: 0.6%). The graph pool is shared and sized by the 8192 bucket, so more buckets cost little memory.
+GRAPH_BUCKETS = (128,) + tuple(range(256, 8192 + 1, 256))
 LONG_WARMUP = 65536    # context at which warm-up runs its long continuation chunks (StageModel.warmup)
 
 
@@ -275,9 +278,12 @@ class StageModel:
         self.graphs: dict[int, GraphEntry] = {}
         self.graph_info: dict = {"enabled": False}
         if warmup:
+            t0 = time.perf_counter()
             self.warmup()
+            warmup_s = round(time.perf_counter() - t0, 1)
             if st["cuda_graphs"] if cuda_graphs is None else cuda_graphs:
                 self.capture_graphs()
+            self.graph_info["warmup_s"] = warmup_s
 
     def install_host_trims(self) -> dict:
         mods = [m for m in (*self.layers, self.embed, self.norm, self.lm_head) if m is not None]
@@ -394,7 +400,6 @@ class StageModel:
 
     def _capture_graphs(self, buckets) -> dict:
         import gc
-        import time
         from types import SimpleNamespace as NS
 
         B = self.kv.block_tokens
