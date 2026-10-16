@@ -293,6 +293,7 @@ class StageModel:
             warmup_s = round(time.perf_counter() - t0, 1)
             if st["cuda_graphs"] if cuda_graphs is None else cuda_graphs:
                 self.capture_graphs()
+                self._regrow()
             self.graph_info["warmup_s"] = warmup_s
             self.graph_info["jit_warmup"] = self.jit_warmup
 
@@ -378,6 +379,29 @@ class StageModel:
         torch.cuda.synchronize(self.device)
         self._log_own_kernel_variants()
         pp_patch.clear_autotune_memo()     # tactics may have changed while tuning
+
+    def _regrow(self) -> None:
+        """Graph capture empties the allocator's cache (`_capture_graphs`), so the first served microbatches would
+        allocate their eager-path buffers from the driver: 35 more device allocations per stage and +37 ms on the
+        first 4x1k microbatch (sched_check_good 7738), +80 ms with expandable segments. Run the shapes that set the
+        allocator's peak once more: several fresh prompts, the largest microbatch, and the largest one continuing
+        long contexts."""
+        from types import SimpleNamespace as NS
+
+        T = self.max_tokens
+        shapes = [[(0, 1024)] * 4, [(0, 1024)] * 16, [(0, T)]]
+        long = [(LONG_WARMUP + 7 * i, T // 4) for i in range(4)]
+        if (sum(-(-(st + n) // self.kv.block_tokens) + 6 for st, n in long) <= self.num_blocks - 1
+                and LONG_WARMUP + T <= self.vc.model_config.max_model_len):
+            shapes.append(long)
+        with torch.inference_mode():
+            for i, specs in enumerate(shapes):
+                if sum(n for _, n in specs) > T:
+                    continue
+                hidden = None if self.first else torch.zeros(sum(n for _, n in specs), self.hidden_width,
+                                                              dtype=torch.bfloat16, device=self.device)
+                self.forward(NS(mb_id=-200 - i, chunks=self._warm_chunks(specs)), hidden)
+        torch.cuda.synchronize(self.device)
 
     def _warm_chunks(self, specs: list[tuple[int, int]]) -> list:
         """Warm-up chunks (start, tokens), each continuing a cached prefix of `start` tokens, on blocks 1.. laid out
