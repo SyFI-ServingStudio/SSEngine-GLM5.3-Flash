@@ -31,6 +31,9 @@ def main():
     ap.add_argument("--pool-per-bucket", action="store_true", help="with --loop: a fresh graph pool per bucket")
     ap.add_argument("--keep-eager-args", action="store_true",
                     help="with --loop: eager breaks hold strong references to their arguments (no weak refs)")
+    ap.add_argument("--trace-eager", action="store_true",
+                    help="with --loop: during capture, sync after each eager break and print its op and its tensor "
+                         "arguments (int: min/max, float: non-finite count), to name the one that faults")
     a = ap.parse_args()
     dev = torch.device("cuda", 0)
     torch.cuda.set_device(dev)
@@ -70,6 +73,37 @@ def capture_loop(model, buckets, a):
 
     if a.keep_eager_args:
         bc._weak_ref_capture_arg = lambda arg: arg
+    if a.trace_eager:
+        add_eager = bc.BreakableCUDAGraphCapture.add_eager
+
+        def traced(self, fn):
+            cells = {k: c.cell_contents for k, c in zip(fn.__code__.co_freevars, fn.__closure__ or ())}
+            op = getattr(cells.get("fn"), "__qualname__", "?")
+            args = list(cells.get("weak_args", ())) + list(cells.get("weak_kwargs", {}).values())
+
+            def desc(t):
+                if not isinstance(t, torch.Tensor) or t.numel() == 0:
+                    return type(t).__name__
+                if t.dtype in (torch.int32, torch.int64, torch.int16):
+                    return f"{t.dtype} {tuple(t.shape)} [{int(t.min())}, {int(t.max())}]"
+                if t.is_floating_point() and t.element_size() >= 2:
+                    return f"{t.dtype} {tuple(t.shape)} nonfinite {int((~torch.isfinite(t)).sum())}"
+                return f"{t.dtype} {tuple(t.shape)}"
+
+            self._end_segment()             # add_eager's own end is then a no-op; no sync while capturing
+            torch.cuda.synchronize()
+            print(f"[graph_probe]   eager {self.num_eager_breaks} {op} in: " + "; ".join(desc(t) for t in args),
+                  flush=True)
+
+            def run():
+                out = fn()
+                torch.cuda.synchronize()
+                return out
+            out = add_eager(self, run)
+            self.segments[-1] = fn          # replay the original
+            print(f"[graph_probe]   eager {self.num_eager_breaks - 1} {op} ok", flush=True)
+            return out
+        bc.BreakableCUDAGraphCapture.add_eager = traced
     pool = torch.cuda.graph_pool_handle()
     hidden = None if model.first else torch.zeros(buckets[0], model.hidden_width, dtype=torch.bfloat16,
                                                   device=model.device)
