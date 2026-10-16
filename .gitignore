@@ -5,8 +5,7 @@ __pycache__/
 goal.md
 progress.md
 notes.md
-measured/runs/
-third_party/vllm/
+measured/runs*/
 third_party/
 measured/logs/
 build/
