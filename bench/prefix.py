@@ -177,13 +177,14 @@ def stage_fit(run_dir: Path) -> dict:
 
 def form_to_enqueue(run_dir: Path) -> dict | None:
     """Stage 0's host time from a plan's forming (plans.jsonl dispatch_ms) to its forward returning with all its GPU
-    work enqueued (mb_host.jsonl), split at the worker's receipt of the plan and its forward call; for the plans formed
+    work enqueued (worker_host.jsonl), split at the worker's receipt of the plan and its forward call; for the plans formed
     while another ran on stage 0 (queued), how often the enqueue came after that one's stage-0 end (the GPU waited on
     the host) and by how much. What form_lead_ms has to cover."""
-    if not (run_dir / "mb_host.jsonl").exists():
+    if not (run_dir / "worker_host.jsonl").exists():
         return None
     plans = {p["index"]: p for p in read_jsonl(run_dir / "plans.jsonl")}
-    host = {h["index"]: h["host_ms"] for h in read_jsonl(run_dir / "mb_host.jsonl") if h["stage"] == 0}
+    host = {h["index"]: (h["plan_ms"], h["forward_ms"], h["return_ms"])
+            for h in read_jsonl(run_dir / "worker_host.jsonl") if h["stage"] == 0}
     s0 = {m["index"]: (m["start_ms"], m["start_ms"] + m["compute_ms"]) for m in read_jsonl(run_dir / "microbatches.jsonl")
           if m["stage"] == 0}
     idx = sorted(i for i in host if i in plans and i in s0)
