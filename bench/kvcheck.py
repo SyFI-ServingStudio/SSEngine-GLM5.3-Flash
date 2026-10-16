@@ -11,8 +11,13 @@ GPU test f). The same prompt (the first L tokens of enwik9) runs as:
   to `whole` is the batch-numerics noise (mHC split-K count, NVFP4) that the others are judged against.
 - `chunked`: chunks of `--chunk` tokens (not on block boundaries) in consecutive microbatches; each chunk reads the
   KV its earlier chunks wrote and resumes the KDA and conv state they left.
+- `chunked_b`: as `chunked` with chunks of `--chunk-b` tokens: chunked against chunked is the spread of resuming at
+  other boundaries.
 - `scrambled`: as `chunked`, on KV and state blocks drawn at random from blocks the earlier variants used (stale
   contents), each microbatch also carrying a 1,000-token request on other random blocks.
+Baseline for the resume: each chunk's output rows against the same rows of `whole` (`per_chunk`, stages 0-2). The
+first chunk starts at position 0 and resumes nothing, so its distance is what the microbatch size alone does (other
+GEMM tactics and accumulation orders at T = chunk vs T = L); the later chunks add the KV and state hand-off.
 Per variant: the last position's logits against `whole` (max |diff|, KL, top-1, top-5 overlap) and each stage's
 output rows of the prompt's last chunk against the same rows of `whole` (relative L2). A KV or state hand-off bug
 moves `chunked`/`scrambled` far past `whole_filler`. Results: `measured/kvcheck/kvcheck_<L>_<job>.json`.
@@ -40,7 +45,8 @@ def _chunk(rid, start, n, kv, state, last, toks):
               token_ids=toks[start:start + n])
 
 
-def variants(tokens: list[int], fillers: list[list[int]], chunk: int, seed: int = 0) -> dict[str, list]:
+def variants(tokens: list[int], fillers: list[list[int]], chunk: int, seed: int = 0,
+             chunk_b: int | None = None) -> dict[str, list]:
     """Each variant: its microbatches (plans). Block ids 1.. in the order the variants run, so `scrambled` draws
     from blocks the earlier variants left written."""
     L = len(tokens)
@@ -59,6 +65,11 @@ def variants(tokens: list[int], fillers: list[list[int]], chunk: int, seed: int 
     kv, st = take(nkv), take(6)
     out["chunked"] = [NS(mb_id=i, chunks=[_chunk("p", s, min(chunk, L - s), kv, st, s + chunk >= L, tokens)])
                       for i, s in enumerate(range(0, L, chunk))]
+    if chunk_b:
+        kv, st = take(nkv), take(6)
+        out["chunked_b"] = [NS(mb_id=i, chunks=[_chunk("p", s, min(chunk_b, L - s), kv, st, s + chunk_b >= L,
+                                                       tokens)])
+                            for i, s in enumerate(range(0, L, chunk_b))]
     used = list(range(1, NUM_BLOCKS))
     rng = random.Random(seed)
     rng.shuffle(used)
@@ -73,7 +84,11 @@ def variants(tokens: list[int], fillers: list[list[int]], chunk: int, seed: int 
     return out
 
 
-def _worker(rank: int, L: int, chunk: int, port: int) -> None:
+def _rel(x, a) -> float:
+    return float((x.float() - a.float()).norm() / a.float().norm())
+
+
+def _worker(rank: int, L: int, chunk: int, port: int, chunk_b: int | None = None) -> None:
     import torch
     from ppimpl.config import HIDDEN_WIDTH, RunConfig, SchedulerConfig
     from ppimpl.model.stage import CHECKPOINT, StageModel, bench_config
@@ -91,10 +106,11 @@ def _worker(rank: int, L: int, chunk: int, port: int) -> None:
           f"graphs {getattr(m, 'graph_info', None)}", flush=True)
     ids = enwik9_tokens(CHECKPOINT, L + 8 * FILLER)
     tokens, fillers = ids[:L], [ids[L + FILLER * i:L + FILLER * (i + 1)] for i in range(8)]
-    last_start = (L - 1) // chunk * chunk          # first token of the prompt's last chunk
-    res = {}
+    res, per_chunk, whole_rows = {}, {}, None
     with torch.inference_mode():
-        for name, plans in variants(tokens, fillers, chunk).items():
+        for name, plans in variants(tokens, fillers, chunk, chunk_b=chunk_b).items():
+            step = chunk_b if name == "chunked_b" else chunk
+            last_start = (L - 1) // step * step          # first token of the prompt's last chunk
             for plan in plans:
                 n = sum(c.num_tokens for c in plan.chunks)
                 hidden = pipe.recv(n, HIDDEN_WIDTH) if rank > 0 else None
@@ -107,6 +123,12 @@ def _worker(rank: int, L: int, chunk: int, port: int) -> None:
                     pipe.send(out, done)
                     p = plan.chunks[0]
                     rows = out[:p.num_tokens].float()
+                    if name == "whole":
+                        whole_rows = out[:L].clone()
+                    elif whole_rows is not None and name != "whole_filler":
+                        per_chunk.setdefault(name, []).append(
+                            {"start": p.start, "tokens": p.num_tokens,
+                             "rel_l2": _rel(rows, whole_rows[p.start:p.start + p.num_tokens])})
                 else:
                     b = m.prepare(plan)
                     with set_forward_context(b.attn, m.vc, num_tokens=b.num_tokens, slot_mapping=b.slots):
@@ -116,7 +138,7 @@ def _worker(rank: int, L: int, chunk: int, port: int) -> None:
                     pipe.release()
                     p = plan.chunks[0]
                 if rank < 3 and p.start + p.num_tokens == L:   # the prompt's last microbatch: keep its last-chunk rows
-                    keep = rows[last_start - p.start:].cpu()
+                    keep = rows[(last_start if name != "whole" else (L - 1) // chunk * chunk) - p.start:].cpu()
                     res[name] = {"rows": keep}
                 if rank == 3 and p.is_last:
                     res[name] = {"logits": logits[0].float().cpu()}
@@ -128,8 +150,11 @@ def _worker(rank: int, L: int, chunk: int, port: int) -> None:
             continue
         if rank < 3:
             a, x = base["rows"], r["rows"]
+            if name == "chunked_b":                 # its last chunk covers other rows: compare the common tail
+                n = min(len(a), len(x))
+                a, x = a[-n:], x[-n:]
             report[name] = {"rel_l2": float((x - a).norm() / a.norm()), "max_abs": float((x - a).abs().max()),
-                            "finite": bool(torch.isfinite(x).all())}
+                            "finite": bool(torch.isfinite(x).all()), "per_chunk": per_chunk.get(name)}
         else:
             a, x = base["logits"], r["logits"]
             pa, px = torch.log_softmax(a, -1), torch.log_softmax(x, -1)
@@ -140,7 +165,8 @@ def _worker(rank: int, L: int, chunk: int, port: int) -> None:
                             "finite": bool(torch.isfinite(x).all())}
     OUT.mkdir(parents=True, exist_ok=True)
     path = OUT / f"kvcheck_{L}_rank{rank}_{JOB}.json"
-    path.write_text(json.dumps({"stage": rank, "prompt_tokens": L, "chunk": chunk, "variants": report}, indent=1))
+    path.write_text(json.dumps({"stage": rank, "prompt_tokens": L, "chunk": chunk, "chunk_b": chunk_b,
+                                "variants": report}, indent=1))
     print(f"[kvcheck] rank {rank}: {json.dumps(report)}", flush=True)
     pipe.close()
 
@@ -149,11 +175,12 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--prompt-len", type=int, default=32768)
     ap.add_argument("--chunk", type=int, default=8000)
+    ap.add_argument("--chunk-b", type=int, default=8192, help="chunk size of `chunked_b` (0: skip it)")
     a = ap.parse_args()
     import torch.multiprocessing as mp
 
     port = 21000 + (int(JOB) % 100) * 100 if JOB.isdigit() else 21000
-    mp.spawn(_worker, args=(a.prompt_len, a.chunk, port), nprocs=4, join=True)
+    mp.spawn(_worker, args=(a.prompt_len, a.chunk, port, a.chunk_b or None), nprocs=4, join=True)
 
 
 if __name__ == "__main__":
