@@ -299,7 +299,7 @@ decided; `bench/overlap.py` (GPU test e) keeps the no-race check.
 - Code removed with the NCCL transport: `RunConfig.compute_sms`, `nccl_channels` and the worker's
   `limit_persistent_grids`. CE sends use no SMs, so nothing needs a cap (git history at `7598487`).
 
-## Implementation gap: first-request TTFT in saturated runs (M3) — 8k fixed by intake processes; 1k–4k is the client
+## Implementation gap: first-request TTFT in saturated runs (M3) — intake_procs 16; 1k rest is the client
 
 - TTFT first is 0.30 / 0.29 / 0.33 / 0.62 s at 1k / 2k / 4k / 8k against 0.21–0.22 s (7185). From arrival to the
   token at the controller the pipeline takes 174 / 203 / 211 / 275 ms; the rest is response delivery.
@@ -321,6 +321,18 @@ decided; `bench/overlap.py` (GPU test e) keeps the no-race check.
 
   One intake process takes the burst faster than the controller's loop but answers later: it parses on its event
   loop, so the first answer waits behind the parsing of later requests. Four bring the 8k first TTFT to target.
+- Final M3 runs (7366–7369, intake_procs 4, alone on its GPU half): 8k first 0.416 s (x1.86), 1k 1.369 s. The 8k
+  token is ready at 209 ms and written at 415 ms: the owning intake's loop is parsing other 8k bodies. Sweep 7390
+  (TTFT first, target 0.215 s at 1k, 0.224 s at 8k; tok/s within 0.7% of intake 4):
+
+  | intake_procs | 1k first (s) | 8k first (s) |
+  | ---: | ---: | ---: |
+  | 4 (7366–7369) | 1.369 (x6.4) | 0.416 (x1.86) |
+  | 8 | — | 0.253 (x1.13) |
+  | 16 | 0.318 (x1.48) | 0.248 (x1.11) |
+
+  Default now 16 (4560f22). What is left at 1k is the client posting the burst (submit spread 2.2 s; it tokenizes
+  each prompt). Host time, not in the M3 pass rule.
 
 ## Saturated 64k and 128k: stage 0 slower than in one-request runs (M3) — gone with CE, pinning and a quiet host
 
@@ -360,13 +372,15 @@ decided; `bench/overlap.py` (GPU test e) keeps the no-race check.
 - The indexer top-k was also not deterministic then (section "Indexer top-k was not deterministic", fixed after
   7279), which alone can flip tokens run to run at 8k; the final M3 run (deterministic top-k) separates the two.
 
-## Implementation gap: one-request 1k and 2k, stage 0 is host-bound (M3) — CUDA graphs (model lane)
+## Implementation gap: one-request 1k and 2k, stage 0 is host-bound (M3) — fixed by CUDA graphs
 
 - 7279 one_1k (ce): stage 0 20.5 ms (mean of 5; first 23.6) vs 12.3 target (x1.66); stages 1–3 x0.90–0.92; GPU span
   x1.10 (first x1.17). 7187 one_2k: stage 0 x1.12. From 4k on stage 0 is GPU-bound (x0.90–0.95).
 - 7135 nsys one_1k: stage 0's host takes 23.4 ms to launch its forward and the GPU idles 12.6 ms of it between
   kernels; stages 1–3 have the plans early (their host leads), so only stage 0 shows it. Hop 0→1 waits for that host.
-- Fix in progress: piecewise CUDA graphs per token bucket (model lane); the final M3 run measures it.
+- Fixed by piecewise CUDA graphs per token bucket (model lane). Final M3 run (7366): one_1k stage 0 12.98 ms mean
+  of 5 vs 12.33 target (x1.05); one request of 5 at x1.10. Send 0→1 0.28 ms (stage 0's host still finishes the
+  hand-off after the graph; ~0.2 ms over).
 
 ## Indexer top-k was not deterministic — fixed (M3, found by the CUDA-graph check)
 
