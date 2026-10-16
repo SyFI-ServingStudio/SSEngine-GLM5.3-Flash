@@ -36,5 +36,43 @@
    "rounds_ttft_over_60s": 0
   },
   "target_source": "/raid/kanzhu/ServingStudio/wt-pp-main/logs/20261013_1_pp4_sched/plain/c400"
+ },
+ {
+  "run": "prefix_smoke_n400_7569",
+  "max_sessions": 400,
+  "window_s": 149.45606838281248,
+  "measured": {
+   "window_s": 149.45606838281248,
+   "rounds": 2038,
+   "rounds_per_s": 13.636114090596344,
+   "new_tokens_per_s": 93730.39282766917,
+   "prompt_tokens_per_s": 556529.6538308067,
+   "computed_tokens_per_s": 95004.96803937672,
+   "prefix_hit_share": 0.9972459437187846,
+   "ttft_s": {
+    "p50": 0.4577249755859375,
+    "p90": 1.8325990478515624,
+    "p99": 3.3213419848632797,
+    "max": 4.1807099609375
+   },
+   "rounds_ttft_over_60s": 0
+  },
+  "target": {
+   "window_s": 149.45606838281248,
+   "rounds": 2105,
+   "rounds_per_s": 14.08440635952174,
+   "new_tokens_per_s": 94675.99511420874,
+   "prompt_tokens_per_s": 582372.8868409705,
+   "computed_tokens_per_s": 94688.1056963991,
+   "prefix_hit_share": 0.999975167809359,
+   "ttft_s": {
+    "p50": 0.37270370483398435,
+    "p90": 1.1694324218749914,
+    "p99": 1.9858391650390625,
+    "max": 3.084985595703125
+   },
+   "rounds_ttft_over_60s": 0
+  },
+  "target_source": "/raid/kanzhu/ServingStudio/wt-pp-main/logs/20261013_1_pp4_sched/plain/c400"
  }
 ]

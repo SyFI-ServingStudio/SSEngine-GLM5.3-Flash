@@ -21,7 +21,7 @@ Measured / target (ratio), medians (p50) over each case's sessions, TTFT also p9
 
 ## Cache on vs off, unaligned P
 
-P + 1,2,3 (cycled) on the bring-up sessions: 40 sessions, hit = P 40, round-1 token equal to no-cache 38, same prompt 38 (bench/prefix_check.py --p-shift).
+P + 1,2,3 (cycled) on the bring-up sessions: 40 sessions, hit = P 40, round-1 token equal to no-cache 38, same prompt 40 (bench/prefix_check.py --p-shift).
 
 ## Sessions smoke
 
@@ -30,6 +30,7 @@ Measured / target over the same window: from the first submit to the last first 
 | Run | N | Window (s) | Rounds | Rounds/s | New tokens/s | Prefix hit share | TTFT p50 / p90 / p99 (s) |
 |---|---|---|---|---|---|---|---|
 | prefix_smoke_n400_7508 | 400 | 146 | 1954 / 2082 | 13.35 / 14.22 | 91.1k / 94.8k | 99.71% / 100.00% | 0.58 / 2.64 / 7.92 vs 0.37 / 1.14 / 1.86 (x1.59 / x2.33 / x4.25) |
+| prefix_smoke_n400_7569 | 400 | 149 | 2038 / 2105 | 13.64 / 14.08 | 93.7k / 94.7k | 99.72% / 100.00% | 0.46 / 1.83 / 3.32 vs 0.37 / 1.17 / 1.99 (x1.23 / x1.57 / x1.67) |
 
 ## Notes
 
@@ -58,16 +59,23 @@ column except stage 1 at 1k (x1.07). Causes:
 first such hit). The indexer fix and its checks are in issues.md ("kpool indexer assumed pool-aligned chunk starts").
 
 **Preflight before the session runs** (all passed):
-- `tests/test_kpool_gpu.py` (7481): the fork's kpool ops write the unsplit prefill's index cache bytes for hits at
-  P = 8193 + 1/2/3 and for mixed chunkings, bitwise; CPU tests 135 passed.
-- kvcheck (7476): 8,192-token chunks bitwise equal to whole at 32,768 tokens; 8,001- and 8,190-token chunks at 40,000
-  (starts inside indexer pools and off KDA's 32-token chunk grid) within 2x the split-K noise baseline per stage
+- `tests/test_kpool_gpu.py` (7481, again 7601 after the sync fix): the fork's kpool ops write the unsplit prefill's
+  index cache bytes for hits at P = 8193 + 1/2/3 and for mixed chunkings, bitwise; CPU tests 135 passed.
+- kvcheck (7476, 7569): 8,192-token chunks bitwise equal to whole at 32,768 tokens; 8,001- and 8,190-token chunks at
+  40,000 (starts inside indexer pools and off KDA's 32-token chunk grid) within 2x the split-K noise baseline per stage
   (0.128 / 0.334 / 0.402 against limits 0.235 / 0.407 / 0.458), KL 8e-6 / 1.5e-5, top-1 equal.
-- Unaligned prefix check (7476 cache on, 7498 cache off): hit = P 40/40; 3 token differences, all near ties
+- Unaligned prefix check, first (7476 cache on, 7498 cache off): hit = P 40/40; 3 token differences, all near ties
   (margins 0.375–1.875 nats, 7503; issues.md "Unaligned prefix check").
+- Unaligned prefix check with the decode top-k fix (7569, both halves in one job, new req-frontend): hit = P 40/40,
+  same round-1 prompt 40/40, round-1 token equal 38/40; the 2 differences (s27 and s32 round 1) are near ties by
+  `bench/margin.py --judge` (top 2 the same pair on both servers, margins 0–0.375 nats). Round 0 now matches in all 40.
 - Smoke (7508): prefix_n400's first 2.4 min of client time on a fresh server: 1,954 rounds, failed 0, 1,699 hits,
   0 evictions, 0 preemptions; uptime load 35–42.
+- Smoke (7569, new req-frontend, decode top-k fix and the unaligned-P sync fix): 2,038 rounds, failed 0, 1,799 hits,
+  0 evictions, 0 preemptions; TTFT p50 / p90 / p99 0.46 / 1.83 / 3.32 s against the same-window target 0.37 / 1.17 /
+  1.99 (table above); uptime load 65 before, 10 after.
 
-**Sessions N=400 and N=500: not run yet.** On hold until lane longctx's long-context fixes (topk_canon rewrite,
-indexer split, host parse) are merged into lane-m4 and its bring-up re-measure passes; then two parallel 4-GPU jobs
+**Sessions N=400 and N=500: not run yet.** On hold until three fixes are in lane-m4: lane longctx's graph buckets
+(the 3,000-token padding) and its stage-0 host launch gap, and the unaligned-P per-DSA-layer sync (done, 9d73048).
+Then one smoke with the new req-frontend and two parallel 4-GPU jobs
 (`m4.sbatch prefix_n400`, `prefix_n500`), each failing fast on a server or worker traceback or client failed > 0.
