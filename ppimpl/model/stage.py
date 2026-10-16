@@ -297,7 +297,8 @@ class StageModel:
         budget (indexer and both top-k paths), then two requests, one continuing a cached prefix (conv and KDA initial
         state, chunk start > 0), then every power-of-2 length from 512 below the budget, a length not divisible by
         16, one request alone continuing a cached prefix (start divisible by 16 and not; and past `LONG_WARMUP` when the
-        pool holds it), and the first layer's mHC pre at every split count. Uses blocks 1.. before any request holds them.
+        pool holds it), the served shapes of `_warm_served_shapes` (decode rows, many requests continuing prefixes,
+        unaligned pool starts), and the first layer's mHC pre at every split count. Uses blocks 1.. before any request holds them.
         `self.tactics` records the source."""
         from types import SimpleNamespace as NS
 
@@ -357,9 +358,68 @@ class StageModel:
             if (self.num_blocks - 1 - 6) * B >= LONG_WARMUP + 1003 + 253:
                 run(NS(mb_id=-7, chunks=[chunk("wl", LONG_WARMUP, 256, 1)]))
                 run(NS(mb_id=-8, chunks=[chunk("wv", LONG_WARMUP + 1003, 253, 1)]))
+            for mb_id, specs in self._warm_served_shapes():
+                run(NS(mb_id=mb_id, chunks=self._warm_chunks(specs)))
             self._warm_mhc_pre()
         torch.cuda.synchronize(self.device)
         pp_patch.clear_autotune_memo()     # tactics may have changed while tuning
+
+    def _warm_chunks(self, specs: list[tuple[int, int]]) -> list:
+        """Warm-up chunks (start, tokens), each continuing a cached prefix of `start` tokens, on blocks 1.. laid out
+        one request after another (6 state blocks each)."""
+        from types import SimpleNamespace as NS
+
+        B, base, out = self.kv.block_tokens, 1, []
+        for i, (start, n) in enumerate(specs):
+            nb = -(-(start + n) // B)
+            out.append(NS(req_id=f"ws{i}", start=start, num_tokens=n, kv_blocks=list(range(base, base + nb)),
+                          is_last=True, state_blocks=list(range(base + nb, base + nb + 6)), token_ids=[1] * n))
+            base += nb + 6
+        return out
+
+    def _warm_served_shapes(self):
+        """The served microbatch shapes whose kernels the earlier warm-up shapes did not compile (smoke 7658: 11
+        Triton compiles per stage during the run, 0.3-3.3 s pipeline stalls). Triton compiles a kernel per constexpr
+        value and per specialization of its integer and pointer arguments (an integer divisible by 16 or not, a
+        pointer 16-byte aligned or not), so each kernel has to run at every class the server meets:
+        - rows past k pools (topk_canon kth / count / finish) at row counts 2 and 3 mod 4 (its scratch rows are
+          16-byte aligned or not by the row count), and 6,246 rows (7658's microbatch 2);
+        - a 1-token append after a cached prefix (the indexer's decode metadata, the kpool decode update, the split
+          canonicalization) at every g0 table width (`StageMetadata.table_width`: powers of 2 of blocks, and the cap
+          at max_model_len), which also covers the split canonicalization's piece counts;
+        - 1, 2 and 3 such rows ahead of prefill requests that start inside a pool (the kpool insert with its write
+          mask and tail seed, on slices offset by the decode rows);
+        - 2 to 9 requests continuing cached prefixes, with and without one starting fresh (the indexer's prefill
+          chunk metadata over request slices).
+        Shapes the KV pool, the microbatch budget or max_model_len cannot hold are skipped. Yields
+        (mb_id, [(start, tokens)])."""
+        B = self.kv.block_tokens
+        free = self.num_blocks - 1
+        mml = self.vc.model_config.max_model_len
+
+        def fits(specs):
+            return (sum(-(-(st + n) // B) + 6 for st, n in specs) <= free
+                    and sum(n for _, n in specs) <= self.max_tokens and all(st + n <= mml for st, n in specs))
+
+        shapes = [[(8192, 254)], [(8192, 255)], [(8192, 6246)]]
+        b = 1
+        while True:                            # one 1-token append per table width, the last one at the cap
+            P = b * B - 5
+            if P + 1 > mml - 1:
+                shapes.append([(mml - 2, 1)])
+                break
+            shapes.append([(P, 1)])
+            b *= 2
+        prefills = [(15290, 646), (36051, 1203), (20001, 300)]           # starts 2, 3, 1 mod 4
+        for d in (1, 2, 3):
+            shapes.append([(40001 + 7 * i, 1) for i in range(d)] + prefills)
+        for r in range(2, 10):
+            reqs = [(20789 + 997 * i, 128 + 61 * i) for i in range(r)]
+            shapes.append(reqs)
+            shapes.append(reqs[:-1] + [(0, 300)])
+        for i, specs in enumerate(shapes):
+            if fits(specs):
+                yield -100 - i, specs
 
     def _warm_mhc_pre(self) -> None:
         """The standalone mHC pre of the stage's first layer (layer 0 after the input head, or after the stage edge)
