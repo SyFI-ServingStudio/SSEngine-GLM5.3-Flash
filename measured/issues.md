@@ -384,3 +384,35 @@ the keys equal to it, in ascending order. It is a Triton kernel, one program per
 8k rows × 2k pools and 0.6 ms at 32k × 8k (3 calls per stage). Rows of at most 512 keys are unchanged (the kernel
 already returns all of them in order). After the fix: 0 of 150 stage-3 8k runs differ. vLLM keeps the
 nondeterministic order; this is a tie-break choice, not a parity change.
+
+## Implementation gap, fixed: kpool indexer assumed pool-aligned chunk starts (M4)
+
+Kind: crash, fixed. Sessions N=400 and N=500 (jobs 7405, 7406) stopped 2.5 s after the first request:
+`AssertionError: kpool indexer: chunk starts must be pool-aligned` (ppimpl/model/metadata.py). The fork's prefill
+K insert (`sparse_indexer._kpool_compress_insert`) pools each pool-completing row with the 3 batch rows before it, so
+a chunk that starts at `start % 4 != 0` would pool its first complete pool with rows of the previous request in the
+microbatch (or with nothing); the assert kept that from going silent. A prefix hit resumes at the kept prompt's
+length, which in `sessions_2ps.csv` is any number (the bring-up's P are multiples of 4, so 7403/7404 never met it);
+plain chunked prefill meets it when a chunk ends at a non-multiple of 4.
+
+Fix (`pp_patch.install_kpool_unaligned`; no rounding of the hit): the metadata marks each prefill request whose chunk
+starts inside a pool and completes it (`pp_patch.KPOOL_HEADS`); the insert override masks that pool out of the
+batch-wide write and, before the tail seed overwrites the request's tail ring (state_blocks[5]: the last 4 tokens'
+raw K and gate, kept with the context), writes it from ring rows + batch rows with the same compress kernel. K and
+gate are bf16 in both, so the pool is bitwise the one an unsplit prefill writes. Chunks too short to complete the
+pool need nothing (the seed stashes them). Checks: `tests/test_kpool_cpu.py` (torch reference ops: any chunking,
+P = 8193+1/2/3, two requests in one microbatch equal the unsplit pools; the fork's insert alone does not),
+`tests/test_prefix_e2e_cpu.py::test_unaligned_hits_resume_exactly`; on GPU (job 7430): see "M4 preflight" below.
+
+## Setup differences in the M4 runs (5_prefix_cache.md §2 "What the targets assume")
+
+- **Exact repeats.** req-frontend's prefix preflight sends one 8k prompt twice and refuses a server that reports no
+  hit. The server answers a prompt equal to a kept context with that context's token, computing nothing (cached =
+  prompt length). The probe's context stays kept: 8,192 tokens, 7 blocks of the pool.
+- **t0.** The server's t0 is the preflight's arrival; bench/prefix.py shifts server times to the client's t0.
+- **20 minutes.** Session runs run the client under `timeout 22m`: req-frontend spends ~45 s building its token pool
+  before its clock starts; rounds sent after 20 minutes are not counted by data/metrics.py.
+- **Blocks, not tokens.** Pool 7,143 blocks × 8,576 = 61,258,368 tokens (target 61.3M, token-granular). A request
+  holds ceil(L / 8,576) KV blocks + 6 state blocks; a kept session the same (target: L tokens + 51,456).
+- **Host time is not zero** (target: none). Admission, dispatch and launch (`dispatch_ahead` 1, `intake_procs` 16).
+  The long-context host cost (request parse at 512k) is lane longctx's.
