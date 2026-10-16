@@ -31,6 +31,8 @@ def main():
     ap.add_argument("--pool-per-bucket", action="store_true", help="with --loop: a fresh graph pool per bucket")
     ap.add_argument("--keep-eager-args", action="store_true",
                     help="with --loop: eager breaks hold strong references to their arguments (no weak refs)")
+    ap.add_argument("--no-replay", action="store_true",
+                    help="with --loop: the fork's capture as is (segments not replayed when captured)")
     ap.add_argument("--trace-ops", action="store_true",
                     help="with --trace-eager: also sync after every torch op and Triton launch inside the eager breaks "
                          "and print the last ones completed before a fault")
@@ -155,7 +157,7 @@ def capture_loop(model, buckets, a):
     pool = torch.cuda.graph_pool_handle()
     hidden = None if model.first else torch.zeros(buckets[0], model.hidden_width, dtype=torch.bfloat16,
                                                   device=model.device)
-    from ppimpl.model.stage import GraphEntry
+    from ppimpl.model.stage import GraphEntry, graph_capture
 
     with torch.inference_mode():
         for Tb in buckets:
@@ -171,7 +173,7 @@ def capture_loop(model, buckets, a):
                 model._graph_body(e)
             torch.cuda.synchronize(model.device)
             print(f"[graph_probe] {Tb}: eager ok", flush=True)
-            e.capture = bc.BreakableCUDAGraphCapture(pool=pool)
+            e.capture = bc.BreakableCUDAGraphCapture(pool=pool) if a.no_replay else graph_capture(pool)
             with model._graph_context(b, e), e.capture:
                 e.out = model._graph_body(e)
             torch.cuda.synchronize(model.device)

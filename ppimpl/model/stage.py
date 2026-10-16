@@ -166,6 +166,24 @@ class GraphEntry:
         self.out: tuple = ()
 
 
+def graph_capture(pool):
+    """The fork's BreakableCUDAGraphCapture, except that each graph segment is replayed as soon as it is captured.
+    An eager break runs during capture (it is not captured), on inputs the segments before it would have computed;
+    without the replay those are whatever the shared graph pool last held there (another bucket's tensors, read as
+    other dtypes: NaN keys, so NaN logits and out-of-range top-k rows: the illegal memory access with 12 buckets in one
+    pool, 3,072 after 8,192-4,096, job 7559). With it, a capture is an ordinary forward of the dummy plan."""
+    from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
+
+    class Capture(BreakableCUDAGraphCapture):
+        def _end_segment(self) -> None:
+            g = self._current_graph if self._capturing else None
+            super()._end_segment()
+            if g is not None:
+                g.replay()
+
+    return Capture(pool=pool)
+
+
 class StageModel:
     def __init__(self, cfg, stage: int, device: torch.device, *, layers: range | None = None,
                  first: bool | None = None, last: bool | None = None, num_blocks: int | None = None,
@@ -397,9 +415,7 @@ class StageModel:
                 with self._graph_context(b, e):
                     self._graph_body(e)                       # eager once at this shape, PIECEWISE paths
                 torch.cuda.synchronize(self.device)
-                from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
-
-                e.capture = BreakableCUDAGraphCapture(pool=pool)
+                e.capture = graph_capture(pool)
                 with self._graph_context(b, e), e.capture:
                     e.out = self._graph_body(e)
                 torch.cuda.synchronize(self.device)
