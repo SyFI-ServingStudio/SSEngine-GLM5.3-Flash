@@ -75,6 +75,38 @@ first such hit). The indexer fix and its checks are in issues.md ("kpool indexer
   0 evictions, 0 preemptions; TTFT p50 / p90 / p99 0.46 / 1.83 / 3.32 s against the same-window target 0.37 / 1.17 /
   1.99 (table above); uptime load 65 before, 10 after.
 
+**Where the smoke's TTFT gap goes (7569 against the frozen sim, `bench/ttft_attrib.py`).** All 2,108 rounds the
+server answered, matched to the sim run by request id (trace row); each round's server TTFT split along its critical
+path. Mean TTFT is +309 ms over the sim (round 0, 304 rounds: 1,034 vs 793 ms; resumed, 1,804: 846 vs 525). By part
+(real − sim, round 0 / resumed, ms):
+
+| Part | Round 0 | Resumed |
+|---|---|---|
+| Arrival → first chunk on stage 0, stage 0 busy with other microbatches (work ahead) | +197 | +267 |
+| same, stage 0 idle (admission and dispatch latency) | +12 | +11 |
+| Own chunks on stage 0 (and gaps between them) | +6 | +8 |
+| Stages 1–3: own microbatch (and own earlier chunks) | +22 | +19 |
+| Stages 1–3: behind other microbatches | 0 | +12 |
+| Last stage → response | +5 | +4 |
+
+The work ahead is a longer backlog, not slower microbatches in it: 9.3–9.5 microbatches ahead against the sim's
+5.2–6.5 (~62 ms each in both). Same chunking (3.98 / 3.99 chunks per round 0), same FIFO order and 8,192-token
+microbatches as the sim. A replay of the real stage-0 order as a work-conserving server gives the arrival → stage 0
+wait (mean, p50 / p90 / p99 ms): real 600 (173 / 1,740 / 4,125); replay at the real compute 511 (139 / 1,488 / 3,603);
+replay at the sim's per-microbatch compute (x0.941) 366 (94 / 1,094 / 2,761); sim 333 (91 / 920 / 2,876). So of the
++268 ms mean wait: ~145 ms is per-microbatch compute, amplified by queueing (stage 0 busy 73% vs 70%); ~90 ms is
+stage 0 idle while rounds wait (6.1 s of 154 s vs the sim's 2.8 s: 2.3 s at the in-flight cap of 4 behind slower
+stages 2–3, 0.5 s dispatched late, the rest the ~12 ms from arrival to start when stage 0 is idle); ~33 ms is left
+for packing and the closed loop's arrivals.
+
+Per-microbatch compute against the sim, by tokens (stage 0 / 3): full 8,192-token microbatches x1.024 / x1.061;
+partial ones x1.09–1.35 / x1.10–1.38 (4,097–6,144 tokens: 51.3 vs 38.0 ms). The partial ones are padded to the
+power-of-2 CUDA graph buckets of that tree (4,097 → 8,192); lane longctx's 1,024-step buckets (merged, 306107f)
+target exactly that. Full microbatches on stages 2–3 (+6%) make stage 3 the slowest stage (59.6 ms vs stage 0's
+58.9), where the sim's slowest is stage 0: that is the in-flight-cap idle on stage 0 and the waits behind other
+microbatches on stages 2–3. Scheduling order is not the gap (same policy, same chunk shapes); M5's scheduler work
+does not explain it.
+
 **Sessions N=400 and N=500: not run yet.** On hold until three fixes are in lane-m4: lane longctx's graph buckets
 (the 3,000-token padding) and its stage-0 host launch gap, and the unaligned-P per-DSA-layer sync (done, 9d73048).
 Then one smoke with the new req-frontend and two parallel 4-GPU jobs
