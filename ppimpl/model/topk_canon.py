@@ -7,9 +7,16 @@ rewrites the kernel's answer in place: every key above the k-th largest value pl
 lowest indices, in ascending order, -1 fills last. Rows of at most k keys come back as the kernel gives them (all
 their keys, ascending).
 
-The CUDA path is one Triton program per row: two passes over the row's logits (count the keys above the k-th value,
-then compact the kept indices with prefix sums), ~2 reads of the logits. `canonical_topk_torch` is the same rule in
-torch ops (CPU tests, and the reference the GPU test compares against).
+The CUDA path reads the logits once, spread over the whole GPU, and touches a row again only when it has a tie:
+1. `_kth_kernel`, one program per row: the k-th value (the smallest selected logit) and the number of selected keys.
+2. `_count_kernel`, one program per (row, 4,096 keys): counts the row's keys at or above the k-th value.
+3. `_finish_kernel`, one program per row: if that count equals the number selected, the kernel's set is already the
+   canonical one (every key at or above the k-th value), and only its order is fixed: the 512 indices sorted. Else
+   (keys tied at the k-th value outside the set) the row is rewritten in two passes over its logits: count the keys
+   above the k-th value, then compact the kept indices with prefix sums.
+At 512k context (131k pools) the old one-program-per-row two-pass kernel took 0.66 ms for 1,022 rows (job 7404),
+more than the logits and the top-k together. `canonical_topk_torch` is the same rule in torch ops (CPU tests, and the
+reference the GPU test compares against).
 """
 
 from __future__ import annotations
@@ -47,39 +54,74 @@ def canonical_topk_torch(logits, ks, ke, dst: torch.Tensor, k: int, block_elems:
 
 if triton is not None:
     @triton.jit
-    def _canonical_topk_kernel(logits_ptr, stride_l, ks_ptr, ke_ptr, dst_ptr, stride_d,
-                               K: tl.constexpr, KP: tl.constexpr, BLOCK: tl.constexpr):
+    def _kth_kernel(logits_ptr, stride_l, ks_ptr, dst_ptr, stride_d, kth_ptr, nvalid_ptr, cnt_ptr,
+                    K: tl.constexpr, KP: tl.constexpr):
         r = tl.program_id(0).to(tl.int64)
         lo = tl.load(ks_ptr + r).to(tl.int32)
+        offs_k = tl.arange(0, KP)
+        sel = tl.load(dst_ptr + r * stride_d + offs_k, mask=offs_k < K, other=-1)
+        valid = sel >= 0
+        v = tl.load(logits_ptr + r * stride_l + lo + sel, mask=valid, other=float("inf"))
+        tl.store(kth_ptr + r, tl.min(v, axis=0))
+        tl.store(nvalid_ptr + r, tl.sum(valid.to(tl.int32), axis=0))
+        tl.store(cnt_ptr + r, 0)
+
+    @triton.jit
+    def _count_kernel(logits_ptr, stride_l, ks_ptr, ke_ptr, kth_ptr, cnt_ptr, BLOCK: tl.constexpr):
+        r = tl.program_id(0).to(tl.int64)
+        c0 = tl.program_id(1) * BLOCK
+        lo = tl.load(ks_ptr + r).to(tl.int32)
         hi = tl.load(ke_ptr + r).to(tl.int32)
-        row = logits_ptr + r * stride_l
+        if c0 + BLOCK > lo and c0 < hi:
+            kth = tl.load(kth_ptr + r)
+            cols = c0 + tl.arange(0, BLOCK)
+            m = (cols >= lo) & (cols < hi)
+            x = tl.load(logits_ptr + r * stride_l + cols, mask=m, other=float("-inf"))
+            n = tl.sum(((x >= kth) & m).to(tl.int32), axis=0)
+            tl.atomic_add(cnt_ptr + r, n, sem="relaxed")
+
+    @triton.jit
+    def _finish_kernel(logits_ptr, stride_l, ks_ptr, ke_ptr, dst_ptr, stride_d, kth_ptr, nvalid_ptr, cnt_ptr,
+                       K: tl.constexpr, KP: tl.constexpr, BLOCK: tl.constexpr):
+        r = tl.program_id(0).to(tl.int64)
         drow = dst_ptr + r * stride_d
         offs_k = tl.arange(0, KP)
-        sel = tl.load(drow + offs_k, mask=offs_k < K, other=-1)
-        valid = sel >= 0
-        v = tl.load(row + lo + sel, mask=valid, other=float("inf"))
-        kth = tl.min(v, axis=0)
-        n_valid = tl.sum(valid.to(tl.int32), axis=0)
-        n_above = tl.zeros((), dtype=tl.int32)
-        for c0 in range(lo, hi, BLOCK):
-            cols = c0 + tl.arange(0, BLOCK)
-            m = cols < hi
-            x = tl.load(row + cols, mask=m, other=float("-inf"))
-            n_above += tl.sum(((x > kth) & m).to(tl.int32), axis=0)
-        need = n_valid - n_above
-        pos = tl.zeros((), dtype=tl.int32)
-        ties = tl.zeros((), dtype=tl.int32)
-        for c0 in range(lo, hi, BLOCK):
-            cols = c0 + tl.arange(0, BLOCK)
-            m = cols < hi
-            x = tl.load(row + cols, mask=m, other=float("-inf"))
-            tie = ((x == kth) & m).to(tl.int32)
-            take = ((x > kth) & m) | ((tie != 0) & (tl.cumsum(tie, axis=0) + ties <= need))
-            slot = tl.cumsum(take.to(tl.int32), axis=0) - 1 + pos
-            tl.store(drow + slot, cols - lo, mask=take)
-            pos += tl.sum(take.to(tl.int32), axis=0)
-            ties += tl.sum(tie, axis=0)
-        tl.store(drow + offs_k, tl.full((KP,), -1, tl.int32), mask=(offs_k >= pos) & (offs_k < K))
+        n_valid = tl.load(nvalid_ptr + r)
+        if tl.load(cnt_ptr + r) == n_valid:
+            # the set is every key at or above the k-th value: sort it, -1 last
+            big = 2147483647
+            sel = tl.load(drow + offs_k, mask=offs_k < K, other=-1)
+            s = tl.sort(tl.where(sel >= 0, sel, big), dim=0)
+            tl.store(drow + offs_k, tl.where(s == big, -1, s), mask=offs_k < K)
+        else:
+            # keys tie at the k-th value outside the set: every key above it, then the lowest tied indices
+            lo = tl.load(ks_ptr + r).to(tl.int32)
+            hi = tl.load(ke_ptr + r).to(tl.int32)
+            row = logits_ptr + r * stride_l
+            kth = tl.load(kth_ptr + r)
+            n_above = tl.zeros((), dtype=tl.int32)
+            for c0 in range(lo, hi, BLOCK):
+                cols = c0 + tl.arange(0, BLOCK)
+                m = cols < hi
+                x = tl.load(row + cols, mask=m, other=float("-inf"))
+                n_above += tl.sum(((x > kth) & m).to(tl.int32), axis=0)
+            need = n_valid - n_above
+            pos = tl.zeros((), dtype=tl.int32)
+            ties = tl.zeros((), dtype=tl.int32)
+            for c0 in range(lo, hi, BLOCK):
+                cols = c0 + tl.arange(0, BLOCK)
+                m = cols < hi
+                x = tl.load(row + cols, mask=m, other=float("-inf"))
+                tie = ((x == kth) & m).to(tl.int32)
+                take = ((x > kth) & m) | ((tie != 0) & (tl.cumsum(tie, axis=0) + ties <= need))
+                slot = tl.cumsum(take.to(tl.int32), axis=0) - 1 + pos
+                tl.store(drow + slot, cols - lo, mask=take)
+                pos += tl.sum(take.to(tl.int32), axis=0)
+                ties += tl.sum(tie, axis=0)
+            tl.store(drow + offs_k, tl.full((KP,), -1, tl.int32), mask=(offs_k >= pos) & (offs_k < K))
+
+
+COUNT_BLOCK = 4096
 
 
 def canonicalize(logits, ks, ke, dst: torch.Tensor, k: int) -> None:
@@ -91,5 +133,11 @@ def canonicalize(logits, ks, ke, dst: torch.Tensor, k: int) -> None:
         canonical_topk_torch(logits, ks, ke, dst, k)
         return
     assert dst.dtype == torch.int32 and dst.stride(1) == 1 and logits.stride(1) == 1, (dst.dtype, dst.stride())
-    _canonical_topk_kernel[(n,)](logits, logits.stride(0), ks, ke, dst, dst.stride(0),
-                                 K=k, KP=triton.next_power_of_2(k), BLOCK=1024, num_warps=4)
+    kp = triton.next_power_of_2(k)
+    scratch = torch.empty(3, n, dtype=torch.int32, device=dst.device)
+    kth, n_valid, cnt = scratch[0].view(torch.float32), scratch[1], scratch[2]
+    _kth_kernel[(n,)](logits, logits.stride(0), ks, dst, dst.stride(0), kth, n_valid, cnt, K=k, KP=kp, num_warps=4)
+    _count_kernel[(n, triton.cdiv(logits.shape[1], COUNT_BLOCK))](logits, logits.stride(0), ks, ke, kth, cnt,
+                                                                  BLOCK=COUNT_BLOCK, num_warps=8)
+    _finish_kernel[(n,)](logits, logits.stride(0), ks, ke, dst, dst.stride(0), kth, n_valid, cnt,
+                         K=k, KP=kp, BLOCK=1024, num_warps=4)
