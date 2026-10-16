@@ -87,6 +87,21 @@ def test_round1_hits_the_whole_previous_prompt(server):
     assert cache["kept_sessions"] == 1 and cache["preemptions"] == 0
 
 
+def test_unaligned_hits_resume_exactly(server):
+    """P = 8193 + 1, 2, 3 (not multiples of the indexer's 4-token pool): the hit is still exactly P and round 1's
+    first chunk starts at position P (the kpool insert handles the straddling pool, tests/test_kpool_cpu.py)."""
+    srv, c = server
+    for i, P in enumerate((8193 + 1, 8193 + 2, 8193 + 3)):
+        r0 = c.new_tokens(P)
+        tok, cached = c.send(f"u{i}_r0", r0)
+        assert cached == 0
+        assert c.send(f"u{i}_r1", r0 + [tok] + c.new_tokens(999))[1] == P
+    srv.stop()
+    ch = chunks_of(srv.run_dir)
+    for i, P in enumerate((8193 + 1, 8193 + 2, 8193 + 3)):
+        assert ch[f"u{i}_r1"][0] == (P, ch[f"u{i}_r1"][0][1]) and sum(a for _, a in ch[f"u{i}_r1"]) == 1000
+
+
 def test_lru_evicts_whole_sessions_and_an_evicted_session_recomputes(server):
     """29 blocks; a 5,000-token context holds 1 + 6 blocks. A..D fill 28; A's round 1 refreshes it; a new session
     E evicts B (least recently used), not A, and all of B; B's round 1 recomputes its whole prompt and evicts C; D

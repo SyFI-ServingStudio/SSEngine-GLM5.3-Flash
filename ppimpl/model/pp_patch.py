@@ -17,6 +17,7 @@ kernel a stage launches must be the manifest's for its position, with no fallbac
 | `route_hc_expand` | glm5next `model.hc_expand` (vLLM), process-wide | one vectorized concatenation; the fork's broadcast copy ran at ~1 TB/s (M2: input_head x3.3) | M2 `input_head` time (issues.md, "M2 results") |
 | `route_kda` | each KDA layer's `Glm5NextLinearAttention._forward` (vLLM) | Dao causal-conv1d (config 4) + FlashInfer persistent `recurrent_kda` (config 5) on our state blocks, as the design prices | manifest check (configs 4, 5); `bench/kvcheck.py` |
 | `install_topk_router` | `torch.ops._C.top_k_per_row_prefill` and `indexer.build_prefill_chunk_metadata` (vLLM), process-wide | per shape, DeepSelect or vLLM's kernel, whichever row is faster (configs 20/21); `topk_canon` makes the answer deterministic | manifest check (configs 20/21); `test_model_cpu.py::test_topk_choice_matches_the_faster_row_at_every_profiled_shape`; GPU test g |
+| `install_kpool_unaligned` | glm5next `sparse_indexer._kpool_compress_insert` and `kpool_compress.kpool_seed_tail_cache` (vLLM), process-wide | a chunk may start inside a 4-token indexer pool (prefix hits resume at the kept prompt's length); the fork's insert assumes pool-aligned starts. The straddling pool is written from the tail ring + batch rows with the same kernel | `test_kpool_cpu.py` (reference ops); `bench/kvcheck.py --chunk 8001` (bitwise vs unsplit) |
 | `install_sparse_mla_split` | `flashinfer.decode.trtllm_batch_decode_with_kv_cache_mla`, process-wide | a launch over 32,768 rows returns without doing the work on B200; split as the target does (issues.md, "M2 results") | M2 `dsa_moe` at 64k/128k |
 | `install_autotune_memo` | FlashInfer `AutoTuner.choose_one`, process-wide | host time: memoize the tactic lookup outside tuning (same answer) | `test_host_trims_cpu.py::test_autotune_memo_matches_and_returns_callers_runner` |
 | `install_mm_fp4_skip_check` | `flashinfer.mm_fp4`, process-wide | host time: `skip_check=True` after the warm-up ran the checks | GPU tests c, d (same kernels, same token) |
@@ -339,6 +340,102 @@ def install_topk_router() -> None:
         return md
 
     idx.build_prefill_chunk_metadata = build_and_route
+
+
+# ---------------------------------------------------------------- kpool indexer: chunks that start inside a pool
+# The fork's prefill K insert (`sparse_indexer._kpool_compress_insert`) pools each completing token with the 3 rows
+# before it in the batch, so it assumes every chunk starts on a pool boundary (start % 4 == 0). A prefix hit resumes
+# at the kept prompt's length and a chunk may end anywhere, so a chunk can start inside a pool: its first complete
+# pool holds `start % 4` tokens of the earlier chunk, which sit in the request's tail ring (state_blocks[5], seeded at
+# the end of every prefill chunk and kept with the context). The override masks that pool out of the batch-wide
+# insert and, before the tail seed overwrites the ring, writes it with the same compress kernel from ring + batch
+# rows (bitwise the pool an unsplit prefill writes: bf16 K and gate in both, same kernel).
+
+@dataclass
+class KpoolHeads:
+    """One microbatch's prefill requests whose chunk starts inside a pool and completes it."""
+    rows: torch.Tensor      # [U, kpool] int64: prefill-slice row of each pool token (ring tokens: any valid row)
+    ring: torch.Tensor      # [U, kpool] bool: the token is from an earlier chunk (read from the tail ring)
+    blocks: torch.Tensor    # [U] int64: the request's tail block
+    last: torch.Tensor      # [U] int64: row of the pool's last token, whose slot is the pool's
+
+
+KPOOL_HEADS: dict[int, KpoolHeads] = {}   # prefill-slice slot-mapping data_ptr -> heads (set per microbatch)
+_KPOOL_PENDING: list[tuple] = []          # insert -> seed hand-off within one indexer call
+_ORIG_KPOOL = None
+
+
+def kpool_heads(starts, q_lens, row_starts, tail_blocks, first: int, row0: int, kpool: int):
+    """Host side: the straddling pools of requests `first..` (the indexer's prefill requests). `row_starts[r]` is
+    request r's first row in the batch, `row0` the prefill slice's first row. Returns numpy (rows, ring, blocks, last)
+    or None."""
+    import numpy as np
+
+    rows, ring, blocks, last = [], [], [], []
+    for r in range(first, len(starts)):
+        m = int(starts[r]) % kpool
+        need = kpool - m
+        if m == 0 or int(q_lens[r]) < need:     # aligned, or the pool does not complete in this chunk (the ring has it)
+            continue
+        end = int(row_starts[r]) - row0 + need - 1
+        j = np.arange(kpool)
+        rows.append(np.maximum(end - (kpool - 1) + j, end - need + 1))
+        ring.append(j < m)
+        blocks.append(int(tail_blocks[r]))
+        last.append(end)
+    if not rows:
+        return None
+    return (np.stack(rows).astype(np.int64), np.stack(ring), np.asarray(blocks, dtype=np.int64),
+            np.asarray(last, dtype=np.int64))
+
+
+def kpool_compress_insert(k, gate_score, ape, kv_cache, slot_mapping, kpool, head_dim, round_scale, *, ops=None):
+    """`sparse_indexer._kpool_compress_insert`, with straddling pools masked out and handed to the tail seed."""
+    ops = ops or _ORIG_KPOOL["ops"]
+    assert not _KPOOL_PENDING, "kpool: a straddling pool was not written (no tail seed after the insert)"
+    n = slot_mapping.shape[0]
+    heads = KPOOL_HEADS.get(slot_mapping.data_ptr()) if n else None
+    if n >= kpool:
+        pos = torch.arange(n, device=k.device)
+        write_mask = (slot_mapping >= 0) & (pos >= kpool - 1)
+        if heads is not None:
+            write_mask[heads.last] = False
+        idx = (pos - (kpool - 1)).clamp_min(0)[:, None] + torch.arange(kpool, device=k.device)[None, :]
+        ops.kpool_compress_and_write_cache(kv_cache, k[idx], gate_score[idx], ape, slot_mapping.to(torch.int64),
+                                           pool_size=kpool, head_dim=head_dim, write_mask=write_mask,
+                                           round_scale=round_scale, write_cache=True, return_compressed=False)
+    if heads is not None:
+        _KPOOL_PENDING.append((heads, k, gate_score, ape, kv_cache, slot_mapping, kpool, head_dim, round_scale))
+
+
+def kpool_seed_tail_cache(tail_kv_cache, key, gate_score, tslot, kpool, head_dim=128, *, ops=None, seed=None):
+    """`kpool_ops.kpool_seed_tail_cache`, first writing the straddling pools from the ring the seed overwrites."""
+    ops = ops or _ORIG_KPOOL["ops"]
+    seed = seed or _ORIG_KPOOL["seed"]
+    if _KPOOL_PENDING:
+        heads, k, g, ape, kv_cache, sm, kp, hd, rs = _KPOOL_PENDING.pop()
+        assert k.data_ptr() == key.data_ptr() and kp == kpool, "kpool: seed is not for the pending insert"
+        ring = heads.ring[:, :, None]
+        slot_k = torch.where(ring, tail_kv_cache[heads.blocks, 0], k[heads.rows])
+        slot_s = torch.where(ring, tail_kv_cache[heads.blocks, 1], g[heads.rows])
+        ops.kpool_compress_and_write_cache(kv_cache, slot_k, slot_s, ape, sm[heads.last].to(torch.int64),
+                                           pool_size=kp, head_dim=hd, write_mask=None, round_scale=rs,
+                                           write_cache=True, return_compressed=False)
+    seed(tail_kv_cache, key, gate_score, tslot, kpool, head_dim)
+
+
+def install_kpool_unaligned() -> None:
+    """Route the fork's kpool prefill insert and tail seed through the overrides above (process-wide)."""
+    global _ORIG_KPOOL
+    import vllm.models.glm5next.nvidia.sparse_indexer as si
+    from vllm.models.glm5next.nvidia.ops import kpool_compress as kops
+
+    if _ORIG_KPOOL is not None:
+        return
+    _ORIG_KPOOL = {"ops": types.SimpleNamespace(kpool_compress_and_write_cache=kops.kpool_compress_and_write_cache),
+                   "seed": kops.kpool_seed_tail_cache}
+    si._kpool_compress_insert = kpool_compress_insert
+    kops.kpool_seed_tail_cache = kpool_seed_tail_cache
 
 
 # ---------------------------------------------------------------- sparse MLA launch size
