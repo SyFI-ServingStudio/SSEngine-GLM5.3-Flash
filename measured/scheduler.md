@@ -212,3 +212,22 @@ Stage time / fit by microbatch tokens 0–255 / 256–1023 / 1024–8191 / 8192 
   N=500). Of it, 1.2% waits on a full plan formed on an exit report and 1.7% on plans delayed by earlier ones. The
   closed loop (sum of the stages + host) / 4 = 34.1 ms is only 0.5 ms below stage 2's 34.6 ms, so host jitter (p90 4.7
   ms) opens bubbles. Estimated at ~1% of the run. Cap 5 + pacing (a152856) is the alternative; the coordinator decides.
+
+### Sessions: even N=500 (7741) and good N=400 (7742), cap 4 + expandable segments + regrow
+- **even N=400 (7738): stage 2 ran out of memory** at ~240 s, allocating 2 GiB for MLA decode output. The microbatch
+  (4649) had 32,698 tokens, 5 requests and contexts up to 69k. PyTorch had 164.4 GB allocated, 7.2 GB reserved but
+  unallocated, and 1.8 GB free. Budget runs already showed 8-11 allocator retries per stage at peak_reserved 186 GB.
+  Fixes:
+  - 848903a: expandable segments. Retries drop to 0 (force_check_even: 12-79 → 0).
+  - 25f128a: run the allocator-peak shapes again after graph capture. Without it, the first microbatches allocate
+    from the driver: sched_check_good +37 ms (+80 ms with expandable segments), force_check_plain 32k TTFT 0.64 s.
+- **even N=500 (7741)**: 27.31 r/s, TTFT 0.19/0.74/6.61 s. Against sim x1.06: TTFT x1.06/x1.05/x1.00, throughput
+  −2.6%. Bottleneck stage 2 idles 5.2% at 360-1200 s, against 2.9% in budget N=500 7730 (cap 5). From 480 to 960 s,
+  computed is −5%, with busy at 96-97% against the sim's 99%.
+- **good N=400 (7742)**: 24.42 r/s, TTFT 0.18/1.16/27.75 s. Against sim x1.06: TTFT x1.09/x1.10/x1.48, throughput
+  −3.2% (mostly the session slot, as at budget N=400). The p99 comes from the overload at the end of the run. Rounds
+  over 10 s: real 576, sim 405. By arrival window, 840-1200 s holds 467 of them (sim 313); at 1080-1200 s alone it is
+  199 against 67. With lower throughput, the backlog in the overload grows faster.
+- force_check_even 7738 (cap 4): 1k TTFT p50 16.29 s vs 14.77 (x1.10). Cap 4 forms on exits, so the 1k prompts
+  arriving at 200/s pile into larger microbatches: 1276 microbatches, mean 12.9k tokens, against 1351 and 12.2k
+  (7728, cap 5); the target has 1429.
