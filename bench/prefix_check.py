@@ -156,10 +156,48 @@ def main():
     summary = {"sessions": len(lines), "p_shift": a.p_shift, "hit_is_P": sum(x["hit_is_P"] for x in lines),
                "round1_match": sum(x["match"] for x in lines), "same_prompt": sum(x["same_prompt"] for x in lines),
                "lines": lines}
+    cases = margin_cases(sess, on, off, pool, a.out / f"{a.name}_margins")
+    summary["margin_cases"] = str(a.out / f"{a.name}_margins" / "cases.json") if cases else None
     (a.out / f"{a.name}.json").write_text(json.dumps(summary, indent=1) + "\n")
     print(f"prefix check: {summary['sessions']} sessions, hit == P {summary['hit_is_P']}, round-1 token equal "
-          f"{summary['round1_match']}, same round-1 prompt {summary['same_prompt']}", flush=True)
-    return 0 if summary["round1_match"] == summary["sessions"] == summary["hit_is_P"] else 1
+          f"{summary['round1_match']}, same round-1 prompt {summary['same_prompt']}; "
+          f"{len(cases)} margin cases", flush=True)
+    if summary["hit_is_P"] != summary["sessions"]:
+        return 1
+    return 2 if cases else 0      # 2: token differences left for the margin rule (bench/margin.py --judge)
+
+
+def margin_cases(sess: list[dict], on: list[dict], off: list[dict], pool: np.ndarray, out: Path) -> list[dict]:
+    """Every token that differs between the servers, as bench/margin.py cases with the tokens each side returned:
+    a round 0 (no cache on either side, same chunks) as one case; a round 1 with the same prompt as two, the cached
+    side's chunks (round 0's, then [P, P + A)) and the uncached side's. The margin rule passes a difference when, in
+    every case, each side's token is among the top 2 and the top-2 margin is below 3 nats (bench/check_tokens.py)."""
+    from bench.margin import server_schedule
+
+    cases = []
+    for s, x, y in zip(sess, on, off):
+        st = s["ordinal"] * STRIDE
+        r0 = pool[st:st + s["P"]].astype(np.int32)
+        name = f"s{s['session']}"
+        if x["round0"]["token"] != y["round0"]["token"]:
+            out.mkdir(parents=True, exist_ok=True)
+            np.save(out / f"{name}_r0.npy", r0)
+            cases.append({"name": f"{name}_r0", "file": str(out / f"{name}_r0.npy"),
+                          "schedule": server_schedule(s["P"]),
+                          "expect_top2": [x["round0"]["token"], y["round0"]["token"]]})
+        elif x["round1"]["token"] != y["round1"]["token"]:
+            out.mkdir(parents=True, exist_ok=True)
+            r1 = np.concatenate([r0, [x["round0"]["token"]], pool[st + s["P"]:st + s["P"] + s["new"]]]).astype(np.int32)
+            assert sha256(r1) == x["round1"]["sha256"] == y["round1"]["sha256"]
+            np.save(out / f"{name}_r1.npy", r1)
+            cases.append({"name": f"{name}_r1_on", "file": str(out / f"{name}_r1.npy"),
+                          "schedule": server_schedule(s["P"]) + [[s["P"], len(r1) - s["P"], True]],
+                          "expect_top2": [x["round1"]["token"]]})
+            cases.append({"name": f"{name}_r1_off", "file": str(out / f"{name}_r1.npy"),
+                          "schedule": server_schedule(len(r1)), "expect_top2": [y["round1"]["token"]]})
+    if cases:
+        (out / "cases.json").write_text(json.dumps(cases, indent=1) + "\n")
+    return cases
 
 
 if __name__ == "__main__":

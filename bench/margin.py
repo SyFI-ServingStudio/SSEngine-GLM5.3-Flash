@@ -106,6 +106,10 @@ def main() -> None:
     ap.add_argument("cases", type=Path)
     ap.add_argument("--repeats", type=int, default=3)
     ap.add_argument("--out", type=Path)
+    ap.add_argument("--judge", action="store_true",
+                    help="exit 1 unless, for every case with `expect_top2` and in every repeat, the last position's "
+                         "top 2 hold those tokens and its top-2 margin is below --min-margin (a near tie)")
+    ap.add_argument("--min-margin", type=float, default=3.0)
     a = ap.parse_args()
     import torch.multiprocessing as mp
 
@@ -115,6 +119,25 @@ def main() -> None:
     from bench.common import free_port_block
     port = free_port_block(port)
     mp.spawn(_worker, args=(cases, a.repeats, port, str(out)), nprocs=4, join=True)
+    if a.judge:
+        raise SystemExit(judge(cases, json.loads(Path(out).read_text()), a.min_margin))
+
+
+def judge(cases: list[dict], res: list[dict], min_margin: float) -> int:
+    bad = []
+    for c in cases:
+        if not c.get("expect_top2"):
+            continue
+        last = max(r["position"] for r in res if r["case"] == c["name"])
+        for r in (r for r in res if r["case"] == c["name"] and r["position"] == last):
+            top2 = [t[0] for t in r["bf16"]["top"][:2]]
+            ok = set(c["expect_top2"]) <= set(top2) and r["bf16"]["margin"] < min_margin
+            print(f"[margin] judge {c['name']} repeat {r['repeat']}: top 2 {top2}, margin {r['bf16']['margin']}, "
+                  f"server tokens {c['expect_top2']}: {'near tie' if ok else 'NOT a near tie'}", flush=True)
+            if not ok:
+                bad.append(c["name"])
+    print(f"[margin] judge: {'pass' if not bad else 'fail: ' + ', '.join(sorted(set(bad)))}", flush=True)
+    return 1 if bad else 0
 
 
 if __name__ == "__main__":
