@@ -7,6 +7,7 @@ Classes come from kernel short names (CLASSES, first match wins). Per stage and 
 over the selected microbatches), and the change from the first capture. Also each stage's compute / busy / gaps.
 `--copies` reads <run dir>/trace.sqlite: for each stage and kernel name, the mean duration of the instances that
 overlap a copy touching that GPU (CePipe's peer memcpy, either end) and of those that do not.
+Without trace.sqlite: `nsys export --type sqlite -o <run dir>/trace.sqlite <run dir>/trace.nsys-rep`.
 """
 
 import json
