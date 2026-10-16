@@ -23,7 +23,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 
 from ppimpl.config import TierConfig
-from ppimpl.engine.kv import Allocation, prefix_digest, resumable_tokens
+from ppimpl.engine.kv import Allocation, prefix_content, resumable_tokens
 
 NS = 1_000_000_000
 
@@ -48,7 +48,7 @@ class TierOp:
 @dataclass
 class TierEntry:
     tokens: int
-    digest: bytes | None
+    content: object | None             # the context's token ids (kv.prefix_content), None in replay
 
 
 class TierStore:
@@ -81,13 +81,13 @@ class TierStore:
         if key in self.entries:
             self.entries.move_to_end(key)
 
-    def store(self, key, tokens: int, digest, keeps: int) -> tuple[bool, list[tuple[object, TierEntry]]]:
+    def store(self, key, tokens: int, content, keeps: int) -> tuple[bool, list[tuple[object, TierEntry]]]:
         """Store the session's context; `keeps` tokens of the old entry are still valid (written already).
         Returns (stored, what left the tier: LRU victims, or the context itself when it exceeds the tier)."""
         self.remove(key)
         c = self.charge(tokens)
         if c > self.capacity:
-            return False, [(key, TierEntry(tokens, digest))]
+            return False, [(key, TierEntry(tokens, content))]
         left = []
         while self.used + c > self.capacity:
             victim, e = self.entries.popitem(last=False)
@@ -95,7 +95,7 @@ class TierStore:
             self.stats["evicted"] += 1
             self.stats["evicted_tokens"] += e.tokens
             left.append((victim, e))
-        self.entries[key] = TierEntry(tokens, digest)
+        self.entries[key] = TierEntry(tokens, content)
         self.used += c
         self.stats["stored"] += 1
         self.stats["written_bytes"] += (tokens - keeps) * self.bpt + self.state_bytes
@@ -142,7 +142,7 @@ class Tiers:
         for i, t in enumerate(self.tiers):
             e = t.entries.get(req.session)
             if e is not None:
-                n = resumable_tokens(e.tokens, e.digest, req, self.partial_hits)
+                n = resumable_tokens(e.tokens, e.content, req, self.partial_hits)
                 if n > 0 and (best is None or n > best[1]):
                     best = (i, n)
         return best
@@ -173,9 +173,9 @@ class Tiers:
         op = self._emit("read", t.name, req.session, token_start=hbm_tokens, token_end=tokens,
                         kv_blocks=list(alloc.kv_blocks), state_blocks=list(alloc.state_blocks), req_id=req.req_id,
                         land_ns=land)
-        digest = t.entries[req.session].digest
+        content = t.entries[req.session].content
         for faster in range(tier):
-            self._store_in(faster, req.session, tokens, digest, "promote", alloc)
+            self._store_in(faster, req.session, tokens, content, "promote", alloc)
         return op
 
     # --- writes -------------------------------------------------------------------------------------------------
@@ -184,16 +184,16 @@ class Tiers:
         """A round ended: write its context to the fastest tier and every write-through tier; a victim tier's older
         entry stays valid only if the new context starts with it."""
         tokens = req.num_tokens
-        digest = prefix_digest(req.token_ids, tokens) if req.token_ids is not None else None
+        content = prefix_content(req.token_ids, tokens) if req.token_ids is not None else None
         for t in self.tiers[1:]:
             e = t.entries.get(req.session)
-            if t.victim and e is not None and resumable_tokens(e.tokens, e.digest, req, self.partial_hits) != e.tokens:
+            if t.victim and e is not None and resumable_tokens(e.tokens, e.content, req, self.partial_hits) != e.tokens:
                 t.remove(req.session)
                 t.stats["dropped"] += 1
                 self._emit("drop", t.name, req.session)
         for i, t in enumerate(self.tiers):
             if i == 0 or not t.victim:
-                self._store_in(i, req.session, tokens, digest, "write", alloc, req)
+                self._store_in(i, req.session, tokens, content, "write", alloc, req)
 
     def _keeps(self, old: TierEntry | None, tokens: int, req) -> int:
         """Tokens of the tier's old entry for the session that the new context still starts with (not rewritten).
@@ -202,17 +202,17 @@ class Tiers:
         if old is None:
             return 0
         if req is not None:
-            return old.tokens if resumable_tokens(old.tokens, old.digest, req, self.partial_hits) == old.tokens else 0
+            return old.tokens if resumable_tokens(old.tokens, old.content, req, self.partial_hits) == old.tokens else 0
         return old.tokens if old.tokens <= tokens else 0
 
-    def _store_in(self, i: int, key, tokens: int, digest, op: str, alloc: Allocation | None = None, req=None):
+    def _store_in(self, i: int, key, tokens: int, content, op: str, alloc: Allocation | None = None, req=None):
         """Store into tier i (op "write" from HBM, "promote" SSD -> DRAM, "demote" DRAM -> SSD). What the tier
         evicts for it goes down to the next tier if that one is a victim tier, then is dropped here (the worker
         copies before it frees)."""
         t = self.tiers[i]
         old = t.entries.get(key)
         keeps = self._keeps(old, tokens, req)
-        stored, left = t.store(key, tokens, digest, keeps)
+        stored, left = t.store(key, tokens, content, keeps)
         blocks = dict(kv_blocks=list(alloc.kv_blocks), state_blocks=list(alloc.state_blocks)) if alloc else {}
         if stored:
             self._emit(op, t.name, key, token_start=keeps, token_end=tokens, **blocks)
@@ -222,14 +222,14 @@ class Tiers:
         for victim, e in left:
             if victim == key:                       # larger than this whole tier: straight to the victim tier
                 if nxt is not None and op == "write":
-                    self._store_in(nxt, key, tokens, digest, "write", alloc, req)
+                    self._store_in(nxt, key, tokens, content, "write", alloc, req)
                 continue
             if nxt is not None:
                 held = self.tiers[nxt].entries.get(victim)
                 if held is not None and held.tokens >= e.tokens:
                     self.tiers[nxt].touch(victim)
                 else:
-                    self._store_in(nxt, victim, e.tokens, e.digest, "demote")
+                    self._store_in(nxt, victim, e.tokens, e.content, "demote")
             self._emit("drop", t.name, victim)
 
     # --- reporting ----------------------------------------------------------------------------------------------

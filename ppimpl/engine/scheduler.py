@@ -56,6 +56,7 @@ class Request:
     read_start_ns: int | None = None
     read_land_ns: int | None = None
     admit_ns: int | None = None
+    hit_memo: tuple | None = None      # (kept context, hit): KvManager's comparison of the prompt with it
 
     @property
     def remaining(self) -> int:

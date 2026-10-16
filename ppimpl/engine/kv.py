@@ -11,19 +11,27 @@ not start with the whole kept context gets no hit (`resumable_tokens`). Kept ses
 requests and yield to them: when a request needs room, kept sessions are evicted least recently used first, a whole
 session at a time.
 
+Matching (server, `content_keys`): a kept context is found by content, not by a session id. Its key is its first
+`SESSION_KEY_TOKENS` token ids (all of them if it is shorter); a new prompt looks up the key of its own first tokens
+(`find_session`), and the hit then needs the prompt to start with the whole kept context, compared token by token
+(`resumable_tokens`). req-frontend starts every session at its own corpus offset, so sessions share no first tokens
+(5_prefix_cache.md §2). Two prompts that share their first tokens but not the whole kept context get no hit, and the
+newer context replaces the older one.
+
 Accounting. `blocks` (the real pool): a request costs blocks_for(prompt), a kept session the same. `tokens` (replay
 only, to reproduce the targets): the simulator's token ledger, a running request costs prompt + 1 + 51,456 tokens and
 a kept session prompt + 51,456, against the pool's token count; block ids then come from an unbounded virtual pool.
 """
 
-import hashlib
-from array import array
-from collections import OrderedDict, deque
+from collections import Counter, OrderedDict, deque
 from dataclasses import dataclass
+
+import numpy as np
 
 from ppimpl.config import BLOCK_TOKENS, NULL_BLOCK, STATE_BLOCKS
 
 STATE_TOKENS = STATE_BLOCKS * BLOCK_TOKENS     # 51,456: what the 6 state blocks cost in tokens
+SESSION_KEY_TOKENS = 64                        # content key of a kept context: its first 64 token ids
 
 
 def kv_blocks_for(tokens: int) -> int:
@@ -45,12 +53,19 @@ def pool_size(ready_blocks: list[int], pool_tokens: int | None = None) -> int:
     return n
 
 
-def prefix_digest(token_ids, n: int) -> bytes:
-    """Content key of a prompt's first n tokens: a kept context matches a new prompt when the digests agree."""
-    return hashlib.blake2b(array("i", token_ids[:n]).tobytes(), digest_size=16).digest()
+def prefix_content(token_ids, n: int) -> np.ndarray:
+    """A prompt's first n token ids (int32, a view when token_ids is already an int32 array): what a kept context is
+    compared with."""
+    return np.asarray(token_ids[:n], dtype=np.int32)
 
 
-def resumable_tokens(tokens: int, digest: bytes | None, req, partial: bool = False) -> int:
+def session_key(token_ids, n: int | None = None) -> bytes:
+    """Content key of a context: its first SESSION_KEY_TOKENS token ids (of its first n tokens)."""
+    n = len(token_ids) if n is None else n
+    return prefix_content(token_ids, min(n, SESSION_KEY_TOKENS)).tobytes()
+
+
+def resumable_tokens(tokens: int, content: np.ndarray | None, req, partial: bool = False) -> int:
     """How much of a kept context of `tokens` tokens a request can resume from: all of it if the prompt starts with
     it and goes beyond it, else 0 (its KDA state is at its end only).
 
@@ -61,8 +76,8 @@ def resumable_tokens(tokens: int, digest: bytes | None, req, partial: bool = Fal
     """
     if tokens <= 0:
         return 0
-    if req.token_ids is not None and digest is not None:
-        ok = tokens < req.num_tokens and prefix_digest(req.token_ids, tokens) == digest
+    if req.token_ids is not None and content is not None:
+        ok = tokens < req.num_tokens and np.array_equal(prefix_content(req.token_ids, tokens), content)
         return tokens if ok else 0
     shared = req.prefix_tokens
     if partial:
@@ -112,17 +127,19 @@ class Kept:
     session: object
     tokens: int
     alloc: Allocation
-    digest: bytes | None
+    content: np.ndarray | None          # its token ids (server); None in replay
 
 
 class KvManager:
     """Per-request allocation over the pool, plus the kept sessions. Pure state; the scheduler drives it."""
 
     def __init__(self, num_blocks: int, keep_sessions: bool = False, accounting: str = "blocks",
-                 partial_hits: bool = False):
+                 partial_hits: bool = False, content_keys: bool = False):
         assert accounting in ("blocks", "tokens")
         self.accounting = accounting
         self.keep_sessions = keep_sessions
+        self.content_keys = content_keys               # server: kept contexts keyed by session_key, not req.session
+        self._short = Counter()                        # content keys: lengths of kept contexts under the key size
         self.partial_hits = partial_hits
         self.pool = BlockPool(num_blocks, virtual=accounting == "tokens")
         self.capacity = num_blocks if accounting == "blocks" else num_blocks * BLOCK_TOKENS
@@ -132,7 +149,7 @@ class KvManager:
         self.held: dict[str, Allocation] = {}          # running and held requests
         self._charge: dict[str, int] = {}
         self.stats = dict(admitted=0, hits=0, hit_tokens=0, evicted_sessions=0, evicted_tokens=0, dropped_stale=0,
-                          peak_hard=0)
+                          peak_hard=0, preemptions=0)    # no preemption: the count stays 0
 
     @property
     def num_blocks(self) -> int:
@@ -164,12 +181,38 @@ class KvManager:
 
     # --- lookups ------------------------------------------------------------------------------------------------
 
+    def find_session(self, token_ids) -> bytes:
+        """Content keys: the key of the kept context this prompt may continue (its own key if none is kept)."""
+        n = len(token_ids)
+        key = session_key(token_ids)
+        if key not in self.kept:
+            for m in sorted(m for m, c in self._short.items() if c and m < n):
+                short = session_key(token_ids, m)
+                if short in self.kept:
+                    return short
+        return key
+
+    def _hit(self, k: Kept, req) -> int:
+        """resumable_tokens, remembered per (request, kept context): the scheduler asks again at every microbatch
+        while the request waits, and comparing a long prompt costs ~0.1 ms per call."""
+        memo = req.hit_memo
+        if memo is not None and memo[0] is k:
+            return memo[1]
+        hit = resumable_tokens(k.tokens, k.content, req, self.partial_hits)
+        req.hit_memo = (k, hit)
+        return hit
+
     def peek_hit(self, req) -> int:
         """The HBM hit the request would get if it were admitted now."""
         if req.session is None or not self.keep_sessions:
             return 0
         k = self.kept.get(req.session)
-        return 0 if k is None else resumable_tokens(k.tokens, k.digest, req, self.partial_hits)
+        return 0 if k is None else self._hit(k, req)
+
+    def _unkeep(self, k: Kept):
+        self.kept_charge -= self.kept_cost(k.tokens)
+        if self.content_keys and k.tokens < SESSION_KEY_TOKENS:
+            self._short[k.tokens] -= 1
 
     # --- allocation ---------------------------------------------------------------------------------------------
 
@@ -180,8 +223,8 @@ class KvManager:
         k = self.kept.pop(req.session, None) if req.session is not None else None
         hit = 0
         if k is not None:
-            self.kept_charge -= self.kept_cost(k.tokens)
-            hit = resumable_tokens(k.tokens, k.digest, req, self.partial_hits)
+            self._unkeep(k)
+            hit = self._hit(k, req)
             if hit == 0:
                 self.pool.give(k.alloc.kv_blocks + k.alloc.state_blocks)     # superseded: the prompt left it
                 self.stats["dropped_stale"] += 1
@@ -221,7 +264,7 @@ class KvManager:
         while self.kept and (self.hard + self.kept_charge > self.capacity
                              or (not self.pool.virtual and self.pool.num_free < blocks_needed)):
             _, k = self.kept.popitem(last=False)
-            self.kept_charge -= self.kept_cost(k.tokens)
+            self._unkeep(k)
             self.pool.give(k.alloc.kv_blocks + k.alloc.state_blocks)
             self.stats["evicted_sessions"] += 1
             self.stats["evicted_tokens"] += k.tokens
@@ -235,13 +278,16 @@ class KvManager:
         if not (self.keep_sessions and req.session is not None):
             self.pool.give(alloc.kv_blocks + alloc.state_blocks)
             return
-        old = self.kept.pop(req.session, None)       # the session's entry went to this request; a stray one goes
+        key = session_key(req.token_ids) if self.content_keys else req.session
+        old = self.kept.pop(key, None)               # the session's entry went to this request; a stray one goes
         if old is not None:
-            self.kept_charge -= self.kept_cost(old.tokens)
+            self._unkeep(old)
             self.pool.give(old.alloc.kv_blocks + old.alloc.state_blocks)
-        digest = prefix_digest(req.token_ids, req.num_tokens) if req.token_ids is not None else None
-        self.kept[req.session] = Kept(req.session, req.num_tokens, alloc, digest)
+        content = prefix_content(req.token_ids, req.num_tokens) if req.token_ids is not None else None
+        self.kept[key] = Kept(key, req.num_tokens, alloc, content)
         self.kept_charge += self.kept_cost(req.num_tokens)
+        if self.content_keys and req.num_tokens < SESSION_KEY_TOKENS:
+            self._short[req.num_tokens] += 1
         self._make_room(0)
 
     def drop(self, req):

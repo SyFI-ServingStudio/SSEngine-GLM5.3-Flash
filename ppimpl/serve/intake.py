@@ -7,7 +7,7 @@ DEALER (identity = index) <-> controller ROUTER (RunConfig.intake_addr), frames:
   intake -> controller: [b"R"] ready | [b"Q", msgpack (key, req_id, arrival_ns), int32 ids] request
                         | [b"D", msgpack (req_id, response_ns)] response sent | [b"S"] /shutdown
   controller -> intake: [b"G"] all intakes ready (/health 200 from now on)
-                        | [b"A", msgpack (key, req_id, token)] | [b"E", msgpack (key, why)]
+                        | [b"A", msgpack (key, req_id, token, cached tokens)] | [b"E", msgpack (key, why)]
 """
 
 import asyncio
@@ -103,10 +103,10 @@ class Intake:
             frames = await self.sock.recv_multipart()
             kind = frames[0]
             if kind == b"A":
-                key, req_id, tok = self.unpack.decode(frames[1])
+                key, req_id, tok, cached = self.unpack.decode(frames[1])
                 fut = self.pending.pop(key, None)
                 if fut is not None and not fut.done():
-                    fut.set_result((req_id, tok))
+                    fut.set_result((req_id, tok, cached))
             elif kind == b"E":
                 key, why = self.unpack.decode(frames[1])
                 fut = self.pending.pop(key, None)
@@ -140,13 +140,13 @@ class Intake:
         self.pending[key] = fut
         await self.sock.send_multipart([b"Q", self.pack.encode((key, req_id, arrival_ns)), ids.data], copy=False)
         try:
-            final_id, tok = await fut
+            final_id, tok, cached = await fut
         except RuntimeError as e:
             return await error(send, str(e))
         if body.stream:
-            await reply(send, 200, sse_body(req_id, tok, len(ids)), b"text/event-stream")
+            await reply(send, 200, sse_body(req_id, tok, len(ids), cached), b"text/event-stream")
         else:
-            await reply(send, 200, json_body(req_id, tok, len(ids)))
+            await reply(send, 200, json_body(req_id, tok, len(ids), cached))
         await self.sock.send_multipart([b"D", self.pack.encode((final_id, time.time_ns()))])
 
 

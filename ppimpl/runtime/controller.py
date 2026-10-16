@@ -12,7 +12,12 @@ the tokens. Logs, in `run_dir` (times in ms from t0, the first request's arrival
 - `server_requests.jsonl`: one line per request: scheduler order (seq), arrival, first dispatch, token (when the
   control thread handled the last stage's report), response, prompt sha256;
 - `plans.jsonl`: one line per microbatch at dispatch: tokens, dispatch time, whether it was queued behind a running
-  stage-0 plan, and that plan's predicted stage-0 end.
+  stage-0 plan, and that plan's predicted stage-0 end;
+- `cache.json` (rewritten every 10 s and at stop): the pool in blocks and tokens, the prefix cache's counters (hits,
+  hit tokens, evicted sessions and tokens, preemptions: always 0), the kept sessions and the pool in use.
+Prefix cache (`keep_sessions`, 5_prefix_cache.md §2): a finished request's blocks stay as its context; the next prompt
+that starts with that whole context takes them over and computes only the rest (`engine/kv.py`, matched by content).
+Its cached tokens go back in `usage.prompt_tokens_details.cached_tokens` and into `server_requests.jsonl`.
 When a microbatch forms is `DispatchRule`'s decision (ppimpl/runtime/dispatch.py); what it holds is the scheduler's.
 """
 
@@ -138,13 +143,15 @@ class Controller:
         num_blocks = pool_size([r.num_blocks for r in ready], cfg.pool_tokens)
         self.rule = DispatchRule(cfg.max_in_flight, cfg.dispatch_ahead >= 1, cfg.form_lead_ms)
         # the scheduler's own cap is not the binding one: the rule admits the extra queued plan
-        self.sched = PlainScheduler(KvManager(num_blocks), cfg.scheduler.mb_tokens, self.rule.cap, 1)
+        self.sched = PlainScheduler(KvManager(num_blocks, keep_sessions=cfg.keep_sessions, content_keys=True),
+                                    cfg.scheduler.mb_tokens, self.rule.cap, 1)
         self.mb_log = open(self.run_dir / "microbatches.jsonl", "w")
         self.plan_log = open(self.run_dir / "plans.jsonl", "w")
         self.req_log = open(self.run_dir / "server_requests.jsonl", "w")
         (self.run_dir / "pool.json").write_text(json.dumps(
             {"ready_blocks": [r.num_blocks for r in ready], "num_blocks": num_blocks,
-             "pool_tokens": num_blocks * BLOCK_TOKENS}))
+             "pool_tokens": num_blocks * BLOCK_TOKENS, "keep_sessions": cfg.keep_sessions}))
+        self._write_cache()
         # Leave start-up objects (torch, FastAPI, ...) out of later collections: a full one took ~50 ms with the GIL
         # held, stalling the control thread during a burst.
         gc.collect()
@@ -224,6 +231,19 @@ class Controller:
         for f in ("mb_log", "req_log", "plan_log"):
             if hasattr(self, f):
                 getattr(self, f).close()
+        if self.sched is not None:
+            self._write_cache()
+
+    def _write_cache(self):
+        """cache.json: the pool and the prefix cache's counters (5_prefix_cache.md §8)."""
+        kv = self.sched.kv
+        info = {"keep_sessions": kv.keep_sessions, "num_blocks": kv.num_blocks,
+                "pool_tokens": kv.num_blocks * BLOCK_TOKENS, **kv.stats, "kept_sessions": len(kv.kept),
+                "kept_tokens": sum(k.tokens for k in kv.kept.values()), "used_tokens": kv.used_tokens,
+                "free_blocks": kv.pool.num_free, "time_ms": self._ms(time.time_ns()) if self.t0_ns else None}
+        tmp = self.run_dir / "cache.json.tmp"
+        tmp.write_text(json.dumps(info) + "\n")
+        tmp.replace(self.run_dir / "cache.json")
 
     def _ms(self, ns: int) -> float:
         return (ns - self.t0_ns) / 1e6
@@ -273,6 +293,7 @@ class Controller:
         if self.intake is not None:
             poller.register(self.intake, zmq.POLLIN)
         next_check = time.monotonic() + 1.0
+        next_cache = time.monotonic() + 10.0
         try:
             more = False   # requests left in the inbox after this round's batch
             while True:
@@ -317,6 +338,9 @@ class Controller:
                     self._check_procs()
                     for f in (self.mb_log, self.plan_log, self.req_log):
                         f.flush()
+                    if next_check >= next_cache:
+                        next_cache = next_check + 10.0
+                        self._write_cache()
         except Exception as e:
             self._fail(str(e) if isinstance(e, RuntimeError) else traceback.format_exc())
 
@@ -368,8 +392,12 @@ class Controller:
         elif kind == b"S":   # /shutdown at an intake: the serve process stops on SIGTERM (ppimpl/serve/server.py)
             os.kill(os.getpid(), signal.SIGTERM)
 
-    def _admit(self, req_id: str, token_ids: list[int], arrival_ns: int, fut: asyncio.Future):
+    def _admit(self, req_id: str, token_ids, arrival_ns: int, fut: asyncio.Future):
+        if not isinstance(token_ids, np.ndarray):
+            token_ids = np.asarray(token_ids, np.int32)
         req = Request(req_id, len(token_ids), arrival_ns, token_ids)
+        if self.sched.kv.keep_sessions:
+            req.session = self.sched.kv.find_session(token_ids)
         self.reqs[req_id] = (req, fut, {"id": req_id, "seq": self.next_seq, "prompt_tokens": len(token_ids),
                                         "arrival_ms": self._ms(arrival_ns), "_prompt": token_ids})
         self.next_seq += 1
@@ -407,7 +435,9 @@ class Controller:
             chunks.append(Chunk(r.req_id, c.start, c.num_tokens, r.alloc.kv_blocks[:kv_blocks_for(end)],
                                 r.alloc.state_blocks, c.is_last, ids if isinstance(ids, list) else ids.tolist()))
             info = self.reqs[r.req_id][2]
-            info.setdefault("first_dispatch_ms", self._ms(now))
+            if "first_dispatch_ms" not in info:
+                info["first_dispatch_ms"] = self._ms(now)
+                info["cached"] = r.cached
             info["chunks"] = info.get("chunks", 0) + 1
         plan = Plan(mb_id, chunks)
         for s in range(self.n):
@@ -435,10 +465,12 @@ class Controller:
                 self.sched.finish(req)
                 info["token_ms"] = self._ms(now)
                 info["token"] = tok
+                info["cached"] = req.cached
                 if isinstance(fut, Remote):
                     self.live.discard(req_id)
                     self.answered[req_id] = info
-                    self.intake.send_multipart([fut.ident, b"A", self.pack.encode((fut.key, req_id, tok))])
+                    self.intake.send_multipart([fut.ident, b"A",
+                                                self.pack.encode((fut.key, req_id, tok, req.cached))])
                 else:
                     done.append((fut, tok, info))
             if done:

@@ -2,7 +2,8 @@
 
 POST /inference/v1/generate  {"token_ids": [...], "sampling_params": {"max_tokens": 1, ...}, "stream": true}
   stream: SSE, one event with the token id (`choices[0].token_ids`), one usage event, `[DONE]`;
-  otherwise one JSON body with both. `usage.prompt_tokens_details.cached_tokens` is 0 in phase A.
+  otherwise one JSON body with both. `usage.prompt_tokens_details.cached_tokens`: the prompt tokens taken from the
+  prefix cache (0 without `keep_sessions`).
   The request id is the `x-request-id` header (req-frontend sends the trace id), else the body's `rid`.
 GET /health  200 once all stages are ready.
 POST /shutdown  graceful stop (bench/run.py).
@@ -93,10 +94,10 @@ class App:
             await send({"type": "http.response.start", "status": 200,
                         "headers": [(b"content-type", b"text/event-stream")]})
             tok, info = await fut
-            await send({"type": "http.response.body", "body": sse_body(req_id, tok, n)})
+            await send({"type": "http.response.body", "body": sse_body(req_id, tok, n, info.get("cached", 0))})
         else:
             tok, info = await fut
-            await reply(send, 200, json_body(req_id, tok, n))
+            await reply(send, 200, json_body(req_id, tok, n, info.get("cached", 0)))
         self.ctl.log_response(info)
 
 
