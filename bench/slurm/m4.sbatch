@@ -17,7 +17,7 @@
 # --judge: each side's token in the top 2, margin < 3 nats).
 # resume_nsys: bench/margin.py --nvtx on CASES (absolute paths, space-separated; default cases_resume_cost.json: P
 # 100,000 / 100,003 / 100,004 resumed with A 256 / 1,024) at each commit of REVS (default "worktree") under Nsight
-# Systems; bench/mb_kernels.py per stage and kernel (compare runs: python -m bench.mb_kernels --compare).
+# Systems; bench/mb_kernels.py per stage and kernel (compare runs: python -m bench.mb_kernels --compare); GTEST as in margin.
 # check: bench/prefix_check.py (round-1 tokens, cache on vs off, ~6 min). bringup: prefix_bringup (20 min) under
 # Nsight Systems, traced from microbatch NSYS_MBS (default 564:631: the last round-0 chunk and round 1 of session
 # 34, P 512k A 1k, and all of session 35, P 512k A 8k; microbatch 0 is req-frontend's preflight). prefix_n<N>: the
@@ -54,8 +54,8 @@ case $WHAT in
     (( rc == 0 )) && $PY -m bench.margin "${CASES:-measured/margins/cases_unaligned.json}" --repeats "${REPEATS:-3}" ${MARGIN_ARGS:-}; rc=$? ;;
   resume_nsys)   # per-kernel cost of the last chunks of CASES, at each of REVS (a commit: its ppimpl/ and bench/ from
                  # git archive; "worktree": this tree), under Nsight Systems; bench/mb_kernels.py per stage and kernel
-    rc=0
-    for rev in ${REVS:-worktree}; do
+    rc=0; [ -n "${GTEST:-}" ] && { $PY -m pytest tests -m gpu -k "$GTEST" -v; rc=$?; }   # GPU tests first
+    (( rc == 0 )) && for rev in ${REVS:-worktree}; do
       D=$R/resume_nsys_${SLURM_JOB_ID:-local}/$rev; mkdir -p "$D"; src=$ROOT
       if [ "$rev" != worktree ]; then
         src=$TMPDIR/rev_$rev; mkdir -p "$src"; git -C "$ROOT" archive "$rev" ppimpl bench | tar -x -C "$src" || { rc=1; break; }
