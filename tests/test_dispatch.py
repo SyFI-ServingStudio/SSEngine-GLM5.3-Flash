@@ -59,11 +59,14 @@ def test_without_queue_one_stage0_must_be_free():
     assert r.decide(1, 0) == (NO, None)
 
 
-def simulate(rule: DispatchRule | None, n_mb=60, stage_ms=10.0, report_ms=0.3, form_ms=0.8):
-    """A 4-stage pipeline of equal stages, integer ns. The host learns of a stage end `report_ms` later; a plan reaches
-    stage 0 `form_ms` after it is formed. rule=None: the old rule (<= 4 in flight, one queued, form on a report).
-    Returns the stage-0 gaps (ms), the peak in flight and the peak number of plans waiting at stage 0."""
-    st, rep, form = int(stage_ms * MS), int(report_ms * MS), int(form_ms * MS)
+def simulate(rule: DispatchRule | None, n_mb=60, stage_ms=10.0, report_ms=0.3, form_ms=0.8, out: dict | None = None):
+    """A 4-stage pipeline (equal stages, or `stage_ms` per stage), integer ns. The host learns of a stage end
+    `report_ms` later; a plan reaches stage 0 `form_ms` after it is formed. rule=None: the old rule (<= 4 in flight,
+    one queued, form on a report). Returns the stage-0 gaps (ms), the peak in flight and the peak number of plans
+    waiting at stage 0; `out` gets per microbatch its form time and stage starts and ends (ns)."""
+    sts = [int(x * MS) for x in (stage_ms if isinstance(stage_ms, list) else [stage_ms] * 4)]
+    st, rep, form = sts[0], int(report_ms * MS), int(form_ms * MS)
+    formed, starts, ends = {}, {}, {}
     events, seq = [], [0]
     free = [0] * 4
     s0_start, s0_end, arrived = {}, {}, {}
@@ -90,6 +93,7 @@ def simulate(rule: DispatchRule | None, n_mb=60, stage_ms=10.0, report_ms=0.3, f
                     return
                 rule.dispatched(state["next_mb"], now, 8192)
             mb = state["next_mb"]
+            formed[mb] = now
             state["next_mb"] += 1
             state["in_flight"] += 1
             state["peak"] = max(state["peak"], state["in_flight"])
@@ -112,19 +116,33 @@ def simulate(rule: DispatchRule | None, n_mb=60, stage_ms=10.0, report_ms=0.3, f
             state["queued"] = max(state["queued"], sum(1 for m in arrived if m != data and s0_start[m] > t))
             free[0] = start + st
             s0_start[data], s0_end[data] = start, start + st
+            starts[data], ends[data] = [start], [start + st]
             push(free[0] + rep, "done0", data)
             end = free[0]
             for s in range(1, 4):
-                free[s] = end = max(end, free[s]) + st
+                begin = max(end, free[s])
+                free[s] = end = begin + sts[s]
+                starts[data].append(begin)
+                ends[data].append(end)
+                if s < 3:
+                    push(end + rep, "done", (s, data))
             push(end + rep, "done3", data)
         elif kind == "done0":
             on0.remove(data)
             if rule is not None:
                 rule.stage0_done(data, s0_start[data], s0_end[data])
+                rule.stage_done(0, data, s0_start[data], s0_end[data])
             try_form(t)
+        elif kind == "done":
+            if rule is not None:
+                rule.stage_done(data[0], data[1], starts[data[1]][data[0]], ends[data[1]][data[0]])
         elif kind == "done3":
             state["in_flight"] -= 1
+            if rule is not None:
+                rule.stage_done(3, data, starts[data][3], ends[data][3])
             try_form(t)
+    if out is not None:
+        out.update(formed=formed, starts=starts, ends=ends)
     gaps = [(s0_start[k + 1] - s0_end[k]) / MS for k in range(n_mb - 1)]
     return gaps, state["peak"], state["queued"]
 
@@ -141,3 +159,34 @@ def test_rule_closes_the_stage0_host_gap():
 def test_lead_shorter_than_host_time_leaves_the_difference():
     gaps, _, _ = simulate(DispatchRule(4, True, 0.5), form_ms=0.8)
     assert max(gaps[5:]) == pytest.approx(0.3, abs=1e-3)
+
+
+def test_pacing_moves_the_queue_before_a_slow_stage_to_forming_time():
+    """Stage 2 slower than stage 0: without pacing the extra in-flight plan queues in front of stage 2 and its rounds
+    wait there; with pacing the plan forms later (its rounds can still join), stage 2 stays as busy, and the time from
+    forming to the stage-3 end drops to the stages' compute plus host time."""
+    stage_ms = [10.0, 10.0, 12.0, 10.0]
+
+    def run(margin):
+        out = {}
+        simulate(DispatchRule(4, True, 3.0, margin), n_mb=80, stage_ms=stage_ms, out=out)
+        ids = range(20, 75)
+        queue2 = max((out["starts"][k][2] - out["ends"][k][1]) / MS for k in ids)
+        idle2 = max((out["starts"][k + 1][2] - out["ends"][k][2]) / MS for k in ids)
+        span = sum((out["ends"][k][3] - out["formed"][k]) / MS for k in ids) / len(ids)
+        return queue2, idle2, span
+
+    q, idle, span = run(None)
+    assert q > 10.0 and idle == pytest.approx(0.0, abs=1e-6)
+    q, idle, paced_span = run(1.0)
+    assert q <= 1.5 and idle == pytest.approx(0.0, abs=1e-6)      # stage 2 still back to back
+    assert paced_span < span - 10.0
+    assert paced_span == pytest.approx(sum(stage_ms) + 0.8 + 1.0, abs=1.5)
+
+
+def test_pacing_does_not_bind_when_stage0_is_slowest():
+    a, b = {}, {}
+    simulate(DispatchRule(4, True, 3.0), n_mb=60, stage_ms=[12.0, 10.0, 10.0, 10.0], out=a)
+    gaps, _, _ = simulate(DispatchRule(4, True, 3.0, 1.0), n_mb=60, stage_ms=[12.0, 10.0, 10.0, 10.0], out=b)
+    assert max(gaps[5:]) == pytest.approx(0.0, abs=1e-6)
+    assert a["starts"][59] == b["starts"][59]

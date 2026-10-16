@@ -169,7 +169,8 @@ class Controller:
             raise
         self._pin()
         num_blocks = pool_size([r.num_blocks for r in ready], cfg.pool_tokens)
-        self.rule = DispatchRule(cfg.max_in_flight, cfg.dispatch_ahead >= 1, cfg.form_lead_ms)
+        self.rule = DispatchRule(cfg.max_in_flight, cfg.dispatch_ahead >= 1, cfg.form_lead_ms, cfg.pace_margin_ms,
+                                 self.n)
         # the scheduler's own cap is not the binding one: the rule admits the extra queued plan
         self.sched = Scheduler(KvManager(num_blocks, keep_sessions=cfg.keep_sessions, content_keys=True),
                                cfg.scheduler, None, self.rule.cap, 1)
@@ -540,6 +541,7 @@ class Controller:
         self.sched.stage_done(d.stage, self.n - 1)
         if d.stage == 0:
             self.rule.stage0_done(d.mb_id, d.start_ns, d.end_ns)
+        self.rule.stage_done(d.stage, d.mb_id, d.start_ns, d.end_ns)
         if d.tokens:
             now = time.time_ns()
             done = []
