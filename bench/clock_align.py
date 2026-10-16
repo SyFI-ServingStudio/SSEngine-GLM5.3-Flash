@@ -29,7 +29,13 @@ def load_samples(path: Path):
     with open(path) as f:
         rows = csv.reader(f)
         head = [h.strip() for h in next(rows)]
-        col = {h.split(" ")[0]: i for i, h in enumerate(head)}
+        names = [h.split(" ")[0] for h in head]
+
+        def find(*keys):   # nvidia-smi renames: clocks.sm -> clocks.current.sm, throttle -> event reasons
+            return next(i for i, n in enumerate(names) if n in keys)
+        col = {"timestamp": find("timestamp"), "index": find("index"), "clocks.sm": find("clocks.sm", "clocks.current.sm"),
+               "power.draw": find("power.draw"), "temperature.gpu": find("temperature.gpu"),
+               "clocks_throttle_reasons.active": find("clocks_throttle_reasons.active", "clocks_event_reasons.active")}
         for r in rows:
             if len(r) < len(head):
                 continue
