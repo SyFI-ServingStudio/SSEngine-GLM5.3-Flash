@@ -27,8 +27,9 @@ class Client:
     def new_tokens(self, n: int) -> list[int]:
         return [self.rng.randrange(1, 150_000) for _ in range(n)]
 
-    def send(self, rid: str, ids: list[int]) -> tuple[int, int]:
-        """One round; returns (token, cached tokens), streamed and not, alternately."""
+    def send(self, rid: str, ids: list[int], token_of: str | None = None) -> tuple[int, int]:
+        """One round; returns (token, cached tokens), streamed and not, alternately. The fake model's token is
+        fake_token(request id, prompt length): `token_of` names the request whose token a repeat gets."""
         stream = self.n % 2 == 0
         self.n += 1
         r = self.c.post("/inference/v1/generate", headers={"x-request-id": rid},
@@ -40,7 +41,7 @@ class Client:
         else:
             j = r.json()
             tok, usage = j["choices"][0]["token_ids"], j["usage"]
-        assert tok == [fake_token(rid, len(ids))] and usage["prompt_tokens"] == len(ids)
+        assert tok == [fake_token(token_of or rid, len(ids))] and usage["prompt_tokens"] == len(ids)
         return tok[0], usage["prompt_tokens_details"]["cached_tokens"]
 
 
@@ -133,15 +134,21 @@ def test_no_hit_unless_the_prompt_starts_with_the_whole_kept_context(server):
 
 
 def test_short_contexts_and_exact_repeat(server):
-    """A context shorter than the content key still hits; a prompt equal to the kept context has nothing new to
-    compute from its KDA state, so it gets no hit."""
+    """A context shorter than the content key still hits. A prompt equal to a kept context (req-frontend's
+    preflight sends one prompt twice) has nothing new to compute: it gets that prompt's token, all of it cached,
+    and runs no microbatch."""
     srv, c = server
     r0 = c.new_tokens(10)
     tok, _ = c.send("y_r0", r0)
     r1 = r0 + [tok] + c.new_tokens(5)
     assert c.send("y_r1", r1)[1] == 10
-    assert c.send("y_r2", list(r1))[1] == 0
+    assert c.send("y_r2", list(r1), token_of="y_r1")[1] == len(r1)
+    assert c.send("y_r3", list(r0) + [tok])[1] == 0              # a prefix of the kept context: computed again
     srv.stop()
+    ch = chunks_of(srv.run_dir)
+    assert "y_r2" not in ch and ch["y_r3"] == [(0, 11)]
+    cache = json.loads((srv.run_dir / "cache.json").read_text())
+    assert cache["repeats"] == 1 and cache["hits"] == 1
 
 
 def test_off_by_default(tmp_path):

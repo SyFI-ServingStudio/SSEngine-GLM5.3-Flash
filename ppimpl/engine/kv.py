@@ -128,6 +128,7 @@ class Kept:
     tokens: int
     alloc: Allocation
     content: np.ndarray | None          # its token ids (server); None in replay
+    token: int | None = None            # the output token its prompt got (server)
 
 
 class KvManager:
@@ -149,7 +150,7 @@ class KvManager:
         self.held: dict[str, Allocation] = {}          # running and held requests
         self._charge: dict[str, int] = {}
         self.stats = dict(admitted=0, hits=0, hit_tokens=0, evicted_sessions=0, evicted_tokens=0, dropped_stale=0,
-                          peak_hard=0, preemptions=0)    # no preemption: the count stays 0
+                          peak_hard=0, preemptions=0, repeats=0)    # no preemption: the count stays 0
 
     @property
     def num_blocks(self) -> int:
@@ -208,6 +209,20 @@ class KvManager:
             return 0
         k = self.kept.get(req.session)
         return 0 if k is None else self._hit(k, req)
+
+    def repeat_token(self, req) -> int | None:
+        """A prompt identical to a kept context: nothing new to compute from its KDA state, and the answer is the
+        token that prompt already got (greedy). Returns it and refreshes the context, or None. req-frontend's prefix
+        preflight sends one prompt twice and requires the second to report cached tokens."""
+        if req.session is None or not self.keep_sessions or req.token_ids is None:
+            return None
+        k = self.kept.get(req.session)
+        if k is None or k.token is None or k.tokens != req.num_tokens \
+                or not np.array_equal(prefix_content(req.token_ids, k.tokens), k.content):
+            return None
+        self.kept.move_to_end(req.session)
+        self.stats["repeats"] += 1
+        return k.token
 
     def _unkeep(self, k: Kept):
         self.kept_charge -= self.kept_cost(k.tokens)
@@ -284,7 +299,7 @@ class KvManager:
             self._unkeep(old)
             self.pool.give(old.alloc.kv_blocks + old.alloc.state_blocks)
         content = prefix_content(req.token_ids, req.num_tokens) if req.token_ids is not None else None
-        self.kept[key] = Kept(key, req.num_tokens, alloc, content)
+        self.kept[key] = Kept(key, req.num_tokens, alloc, content, req.output_token)
         self.kept_charge += self.kept_cost(req.num_tokens)
         if self.content_keys and req.num_tokens < SESSION_KEY_TOKENS:
             self._short[req.num_tokens] += 1

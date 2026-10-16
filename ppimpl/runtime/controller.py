@@ -396,11 +396,19 @@ class Controller:
         if not isinstance(token_ids, np.ndarray):
             token_ids = np.asarray(token_ids, np.int32)
         req = Request(req_id, len(token_ids), arrival_ns, token_ids)
-        if self.sched.kv.keep_sessions:
-            req.session = self.sched.kv.find_session(token_ids)
         self.reqs[req_id] = (req, fut, {"id": req_id, "seq": self.next_seq, "prompt_tokens": len(token_ids),
                                         "arrival_ms": self._ms(arrival_ns), "_prompt": token_ids})
         self.next_seq += 1
+        if self.sched.kv.keep_sessions:
+            req.session = self.sched.kv.find_session(token_ids)
+            tok = self.sched.kv.repeat_token(req)
+            if tok is not None:      # the same prompt as a kept context: its token, nothing computed
+                req.cached = req.num_tokens
+                self.reqs[req_id][2]["repeat"] = True
+                done = self._reply(req, tok, time.time_ns())
+                if done:
+                    self.loop.call_soon_threadsafe(self._answered, done)
+                return
         self.sched.add(req)
 
     def _pump(self):
@@ -461,20 +469,25 @@ class Controller:
             now = time.time_ns()
             done = []
             for req_id, tok in d.tokens:
-                req, fut, info = self.reqs.pop(req_id)
+                req = self.reqs[req_id][0]
+                req.output_token = tok
                 self.sched.finish(req)
-                info["token_ms"] = self._ms(now)
-                info["token"] = tok
-                info["cached"] = req.cached
-                if isinstance(fut, Remote):
-                    self.live.discard(req_id)
-                    self.answered[req_id] = info
-                    self.intake.send_multipart([fut.ident, b"A",
-                                                self.pack.encode((fut.key, req_id, tok, req.cached))])
-                else:
-                    done.append((fut, tok, info))
+                done += self._reply(req, tok, now)
             if done:
                 self.loop.call_soon_threadsafe(self._answered, done)
+
+    def _reply(self, req: Request, tok: int, now: int) -> list:
+        """Send the request's answer (intake) or return it for the event loop (in-process HTTP)."""
+        _, fut, info = self.reqs.pop(req.req_id)
+        info["token_ms"] = self._ms(now)
+        info["token"] = tok
+        info["cached"] = req.cached
+        if isinstance(fut, Remote):
+            self.live.discard(req.req_id)
+            self.answered[req.req_id] = info
+            self.intake.send_multipart([fut.ident, b"A", self.pack.encode((fut.key, req.req_id, tok, req.cached))])
+            return []
+        return [(fut, tok, info)]
 
 
 def _fail_all(futs: list[asyncio.Future], why: str):

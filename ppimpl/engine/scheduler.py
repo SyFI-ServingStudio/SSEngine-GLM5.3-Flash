@@ -57,6 +57,7 @@ class Request:
     read_land_ns: int | None = None
     admit_ns: int | None = None
     hit_memo: tuple | None = None      # (kept context, hit): KvManager's comparison of the prompt with it
+    output_token: int | None = None    # the token the prompt got (server; kept with the context)
 
     @property
     def remaining(self) -> int:

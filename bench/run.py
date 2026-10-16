@@ -4,7 +4,11 @@
   python -m bench.run one_8k --fake --inline                                                 run here (no Slurm)
   ... --nsys [--nsys-mbs a:b|all]     the server under Nsight Systems -> trace.nsys-rep, trace.sqlite, trace.json
 
-Names: one_<L>, saturated_<L> (4_iteration.md), L in 1k..128k. Each run gets a fresh server; the server and the
+Names: one_<L>, saturated_<L> (4_iteration.md), L in 1k..128k; prefix_bringup and prefix_n<N> (5_prefix_cache.md,
+prefix cache on: `keep_sessions`). Session runs (prefix_n<N>) run the client under `timeout 22m`: 1_contract.md §2.2
+says 20 min, but req-frontend first spends ~45 s tokenizing the corpus (measured, loaded host) and t = 0 is its first
+submit; rounds answered after 20 min are not counted (data/metrics.py), so the extra 2 min change no number.
+The cache on/off token check is bench/prefix_check.py. Each run gets a fresh server; the server and the
 client run as concurrent steps of one job (port 20000 + job id % 120 * 100). Everything goes to
 measured/runs/<name>/ (with --fake: measured/runs/fake/<name>/): run.json, uptime.txt, server and client configs,
 server logs (microbatches.jsonl, server_requests.jsonl, worker*.log), requests.jsonl, metrics.json
@@ -37,10 +41,21 @@ PYTHON = sys.executable
 NSYS = shutil.which("nsys") or "/usr/local/cuda/bin/nsys"
 
 
+PREFIX_RUNS = ("prefix_bringup",)
+SESSION_MINUTES = 20
+SESSION_CLIENT_LIMIT = "22m"     # 20 min from the first submit + the client's corpus tokenization (~45 s) + margin
+
+
 def parse_name(name: str) -> tuple[str, int]:
+    """(kind, size): size is the prompt length (one, saturated), N (sessions) or 0."""
+    if name in PREFIX_RUNS:
+        return name.removeprefix("prefix_"), 0
+    if m := re.fullmatch(r"prefix_n(\d+)", name):
+        return "sessions", int(m.group(1))
     m = re.fullmatch(r"(one|saturated)_(\d+)k", name)
     if not m:
-        raise SystemExit(f"unknown run name {name!r}: one_<L> or saturated_<L>, L in 1k..128k")
+        raise SystemExit(f"unknown run name {name!r}: one_<L> or saturated_<L>, L in 1k..128k; "
+                         f"{', '.join(PREFIX_RUNS)}; prefix_n<N>")
     return m.group(1), int(m.group(2)) * 1024
 
 
@@ -73,9 +88,10 @@ def server_config(kind: str, length: int, use_fake: bool, run_dir: Path, device:
 
 
 def client_config(trace: Path, port: int, run_dir: Path, *, text_file: Path = ENWIK9,
-                  tokenizer: Path = CHECKPOINT / "tokenizer.json", token_pool_limit: int | None = None) -> dict:
+                  tokenizer: Path = CHECKPOINT / "tokenizer.json", token_pool_limit: int | None = None,
+                  fmt: str = "text-generation-independent", max_concurrency: int | None = None) -> dict:
     cfg = {
-        "input": {"trace": str(trace), "format": "text-generation-independent"},
+        "input": {"trace": str(trace), "format": fmt},
         "corpus": {"text_file": str(text_file), "tokenizer": str(tokenizer)},
         "server": {"backend": "vllm-tokens", "base_url": f"http://127.0.0.1:{port}", "model": "glm53-flash-pp4",
                    "temperature": 0},
@@ -85,6 +101,8 @@ def client_config(trace: Path, port: int, run_dir: Path, *, text_file: Path = EN
     }
     if token_pool_limit:
         cfg["corpus"]["token_pool_limit"] = token_pool_limit
+    if max_concurrency:
+        cfg["replay"]["max_concurrency"] = max_concurrency
     return cfg
 
 
@@ -182,17 +200,21 @@ def step(argv: list[str], gpus: int | None) -> list[str]:
 
 def execute(run_dir: Path, server_cfg: dict, client_cfg: dict, *, port: int, meta: dict,
             client_timeout_s: float = 1200, health_timeout_s: float = 1800, gpus: int | None = 4,
-            nsys: bool = False) -> dict:
+            nsys: bool = False, client_limit: str | None = None) -> dict:
+    """client_limit: run the client under `timeout <client_limit>` (session runs: 20m); its exit 124 is a normal end."""
     """One run: fresh server, req-frontend, metrics and report. Returns run.json's content."""
     run_dir.mkdir(parents=True, exist_ok=True)
     for f in ("run.json", "report.json", "pool.json", "metrics.json", "summary.json",   # a failed run leaves none
-              "microbatches.jsonl", "server_requests.jsonl", "requests.jsonl", "trace.nsys-rep", "trace.sqlite",
+              "cache.json", "microbatch_check.txt", "microbatches.jsonl", "server_requests.jsonl", "requests.jsonl",
+              "trace.nsys-rep", "trace.sqlite",
               "trace.json", "token_check.json", "cpus.json", *(f"stage{s}.json" for s in range(8))):
         (run_dir / f).unlink(missing_ok=True)
     server_cfg = {**server_cfg, "port": port, "run_dir": str(run_dir)}
     (run_dir / "server.yaml").write_text(yaml.safe_dump(server_cfg, sort_keys=False))
     (run_dir / "client.yaml").write_text(yaml.safe_dump(client_cfg, sort_keys=False))
     argv = client_argv(run_dir / "client.yaml")
+    if client_limit:
+        argv = ["timeout", client_limit, *argv]
     (run_dir / "client_command.txt").write_text(shlex.join(argv) + "\n")
     meta = {**meta, "port": port, "job_id": os.environ.get("SLURM_JOB_ID"), "host": os.uname().nodename,
             "gpus": os.environ.get("CUDA_VISIBLE_DEVICES"),
@@ -217,7 +239,8 @@ def execute(run_dir: Path, server_cfg: dict, client_cfg: dict, *, port: int, met
             client = subprocess.run(step(argv, None), cwd=REQ_FRONTEND, stdout=clog, stderr=subprocess.STDOUT,
                                     timeout=client_timeout_s)
         meta["client_s"] = round(time.time() - t, 1)
-        meta["client_returncode"] = client.returncode
+        meta["client_returncode"] = 0 if client_limit and client.returncode == 124 else client.returncode
+        meta["client_exit"] = client.returncode
         meta["uptime_after"] = subprocess.run(["uptime"], capture_output=True, text=True).stdout.strip()
         print(f"[{run_dir.name}] uptime after: {meta['uptime_after']}", flush=True)
     finally:
@@ -236,13 +259,15 @@ def execute(run_dir: Path, server_cfg: dict, client_cfg: dict, *, port: int, met
         meta["nsys"]["export_and_parse_s"] = round(time.time() - t, 1)
     if (run_dir / "cpus.json").exists():
         meta["cpus"] = json.loads((run_dir / "cpus.json").read_text())
-    pool = run_dir / "pool.json"
-    if pool.exists():
-        meta["pool"] = json.loads(pool.read_text())
+    for name in ("pool", "cache"):
+        f = run_dir / f"{name}.json"
+        if f.exists():
+            meta[name] = json.loads(f.read_text())
     stages = sorted(run_dir.glob("stage[0-9].json"))
     if stages:
         meta["tactics"] = [json.loads(f.read_text())["tactics"] for f in stages]
-    if server_cfg.get("model") != "fake" and (run_dir / "server_requests.jsonl").exists():
+    if server_cfg.get("model") != "fake" and meta.get("kind") in ("one", "saturated") \
+            and (run_dir / "server_requests.jsonl").exists():
         tc = subprocess.run([PYTHON, "-m", "bench.check_tokens", str(run_dir)], cwd=ROOT, capture_output=True,
                             text=True)
         print(tc.stdout + tc.stderr, flush=True)
@@ -250,9 +275,15 @@ def execute(run_dir: Path, server_cfg: dict, client_cfg: dict, *, port: int, met
     if reqs.exists() and reqs.stat().st_size:
         m = subprocess.run([PYTHON, str(HANDOFF / "data/metrics.py"), str(reqs)], capture_output=True, text=True)
         (run_dir / "metrics.json").write_text(m.stdout if m.returncode == 0 else m.stderr)
+    mbs = run_dir / "microbatches.jsonl"
+    if meta.get("kind") == "sessions" and mbs.exists() and mbs.stat().st_size:
+        m = subprocess.run([PYTHON, str(HANDOFF / "data/microbatch_fit.py"), "check", str(mbs)], capture_output=True,
+                           text=True)
+        (run_dir / "microbatch_check.txt").write_text(m.stdout + m.stderr)
     (run_dir / "run.json").write_text(json.dumps(meta, indent=1) + "\n")
-    rep = subprocess.run([PYTHON, "-m", "bench.report", str(run_dir)], cwd=ROOT, capture_output=True,
-                         text=True)
+    report = ["-m", "bench.prefix", "run", str(run_dir)] if meta.get("kind") not in ("one", "saturated") \
+        else ["-m", "bench.report", str(run_dir)]
+    rep = subprocess.run([PYTHON, *report], cwd=ROOT, capture_output=True, text=True)
     print(rep.stdout + rep.stderr, flush=True)
     return meta
 
@@ -260,6 +291,43 @@ def execute(run_dir: Path, server_cfg: dict, client_cfg: dict, *, port: int, met
 def run_named(name: str, fake: bool, port: int, out_root: Path, args) -> dict:
     kind, length = parse_name(name)
     run_dir = out_root / name
+    if kind in ("one", "saturated"):
+        return run_iteration(name, kind, length, fake, port, run_dir, args)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    fmt = "text-generation-session-execution-v2"
+    if kind == "sessions":
+        trace, ccfg = HANDOFF / "data/sessions_2ps.csv", {"max_concurrency": length}
+    else:
+        trace, ccfg = HANDOFF / "data/bringup/prefix_sessions.csv", {}   # no max_concurrency (5_prefix_cache.md §5)
+    if args.trace:
+        trace = Path(args.trace).resolve()
+    extra = {"keep_sessions": True, "scheduler": {"mb_tokens": 8192}}
+    if fake and args.us_per_token is not None:
+        extra["fake"] = {"us_per_token": args.us_per_token}
+    if args.intake_procs is not None:
+        extra["intake_procs"] = args.intake_procs
+    if args.cpu:
+        extra["fake"] = {**extra.get("fake", {}), "hidden_width": 64}
+    if args.nsys and args.nsys_mbs and args.nsys_mbs != "all":
+        extra["profile_mbs"] = [int(x) for x in args.nsys_mbs.split(":")]
+    if args.pool_tokens:
+        extra["pool_tokens"] = args.pool_tokens
+    scfg = {"model": "fake" if fake else "glm53", "device": "cpu" if args.cpu else "cuda", "run_dir": str(run_dir),
+            **extra}
+    if not fake:
+        scfg["checkpoint"] = str(CHECKPOINT)
+        scfg["form_lead_ms"] = REAL_FORM_LEAD_MS
+    limit = SESSION_CLIENT_LIMIT if kind == "sessions" else None
+    return execute(run_dir, scfg, client_config(trace, port, run_dir, fmt=fmt, **ccfg,
+                                                token_pool_limit=args.token_pool_limit),
+                   port=port, gpus=None if args.cpu else 4,
+                   meta={"name": name, "kind": kind, "max_concurrency": ccfg.get("max_concurrency"), "fake": fake,
+                         "trace": str(trace)},
+                   client_timeout_s=max(args.client_timeout, (SESSION_MINUTES + 5) * 60), nsys=args.nsys,
+                   client_limit=args.client_limit or limit)
+
+
+def run_iteration(name: str, kind: str, length: int, fake: bool, port: int, run_dir: Path, args) -> dict:
     trace = trace_for(kind, length)
     extra = {}
     if args.nsys:
@@ -294,6 +362,9 @@ def submit(args) -> None:
         inner += ["--intake-procs", str(args.intake_procs)]
     if args.nsys_mbs:
         inner += ["--nsys-mbs", args.nsys_mbs]
+    for opt in ("trace", "client_limit", "pool_tokens", "token_pool_limit"):
+        if getattr(args, opt):
+            inner += [f"--{opt.replace('_', '-')}", str(getattr(args, opt))]
     if args.out_root:
         inner += ["--out-root", str(Path(args.out_root).resolve())]
     script = f"""#!/bin/bash
@@ -331,6 +402,10 @@ def main():
                     "middle 80%% of the expected microbatches)")
     ap.add_argument("--out-root", help="runs root (default measured/runs, or measured/runs/fake[_cpu])")
     ap.add_argument("--cpu", action="store_true", help="with --fake --inline: stages on CPU (gloo), to check the harness")
+    ap.add_argument("--trace", help="prefix/session runs: another trace (harness checks)")
+    ap.add_argument("--client-limit", help="prefix/session runs: `timeout` for the client (default 22m for prefix_n<N>)")
+    ap.add_argument("--pool-tokens", type=int, help="prefix/session runs: cap the KV pool (harness checks)")
+    ap.add_argument("--token-pool-limit", type=int, help="req-frontend corpus.token_pool_limit (harness checks)")
     args = ap.parse_args()
     for n in args.names:
         parse_name(n)
