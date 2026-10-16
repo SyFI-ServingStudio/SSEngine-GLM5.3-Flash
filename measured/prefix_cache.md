@@ -33,8 +33,10 @@ Measured / target over the same window: from the first submit to the last first 
 | └ replay (our engine, fit times; plain, dispatch_ahead 1, form lead 35 ms) | | | 2145 | 14.20 | 96.0k | 99.74% | 0.41 / 1.40 / 3.61 (x1.02 / x1.03 / x1.01 of target) |
 | prefix_smoke_n400_7683 | 400 | 149 | 2048 / 2090 | 13.74 / 14.02 | 94.1k / 94.7k | 99.73% / 99.74% | 0.45 / 1.73 / 2.82 vs 0.39 / 1.28 / 2.14 (x1.15 / x1.35 / x1.32) |
 | └ replay (our engine, fit times; plain, dispatch_ahead 1, form lead 45 ms) | | | 2100 | 14.09 | 94.9k | 99.74% | 0.40 / 1.22 / 2.22 (x1.03 / x0.95 / x1.03 of target) |
+| prefix_smoke_n400_7693 | 400 | 151 | 2065 / 2129 | 13.70 / 14.12 | 94.5k / 95.8k | 99.73% / 99.74% | 0.45 / 1.72 / 3.42 vs 0.40 / 1.34 / 3.57 (x1.12 / x1.28 / x0.96) |
+| └ replay (our engine, fit times; plain, dispatch_ahead 1, form lead 45 ms) | | | 2138 | 14.18 | 96.1k | 99.74% | 0.41 / 1.33 / 3.43 (x1.03 / x0.99 / x0.96 of target) |
 
-Kernels compiled after warm-up (worker jit_stage<S>.jsonl; any fails the run): prefix_smoke_n400_7508 not monitored; prefix_smoke_n400_7569 not monitored; prefix_smoke_n400_7658 44 (by stage {0: 11, 1: 11, 2: 11, 3: 11}); prefix_smoke_n400_7683 4 (by stage {0: 1, 1: 1, 2: 1, 3: 1}).
+Kernels compiled after warm-up (worker jit_stage<S>.jsonl; any fails the run): prefix_smoke_n400_7508 not monitored; prefix_smoke_n400_7569 not monitored; prefix_smoke_n400_7658 44 (by stage {0: 11, 1: 11, 2: 11, 3: 11}); prefix_smoke_n400_7683 4 (by stage {0: 1, 1: 1, 2: 1, 3: 1}); prefix_smoke_n400_7693 0.
 
 Prefix cache per round (server_requests.jsonl hit_kind): rounds by kind, tokens recomputed because the kept context was superseded or evicted, waits for pool room:
 
@@ -42,6 +44,7 @@ Prefix cache per round (server_requests.jsonl hit_kind): rounds by kind, tokens 
 |---|---|---|---|---|
 | prefix_smoke_n400_7658 | full 1792, none_first_round 307, superseded 5 | 188,750 | 0 | 0 (max 0 ms) |
 | prefix_smoke_n400_7683 | full 1813, none_first_round 302, superseded 5 | 188,750 | 0 | 0 (max 0 ms) |
+| prefix_smoke_n400_7693 | full 1824, none_first_round 306, superseded 5 | 188,750 | 0 | 0 (max 0 ms) |
 
 Stage 0, plan formed -> its forward returned with all GPU work enqueued (ms, p50 / p90 / p99); of the plans formed while another ran, how many were enqueued after that one's stage-0 end (late, by how much):
 
@@ -49,6 +52,7 @@ Stage 0, plan formed -> its forward returned with all GPU work enqueued (ms, p50
 |---|---|---|---|---|---|
 | prefix_smoke_n400_7658 | 7.2 / 10.1 / 41.5 | 0.8 / 1.0 / 2.4 | 6.5 / 9.1 / 39.0 | 135 / 1830 | 5.3 / 15.8 / 475.2 |
 | prefix_smoke_n400_7683 | 7.4 / 10.1 / 38.6 | 0.7 / 0.9 / 3.5 | 6.7 / 9.1 / 37.8 | 229 / 1795 | 4.9 / 9.9 / 24.1 |
+| prefix_smoke_n400_7693 | 7.3 / 10.2 / 37.4 | 0.7 / 0.9 / 4.2 | 6.6 / 9.1 / 36.5 | 270 / 1833 | 5.2 / 10.7 / 26.7 |
 
 Stage time / fit (microbatch_fit.json) by microbatch size in tokens, summed over the run's microbatches (n); stage 0 idle while a round was already waiting (gaps), and from a round's arrival on an idle stage 0 to its start (arrivals):
 
@@ -70,6 +74,10 @@ Stage time / fit (microbatch_fit.json) by microbatch size in tokens, summed over
 | prefix_smoke_n400_7683 | 1 | x0.921 (73; -0.0 s) | x1.088 (198; +0.2 s) | x1.038 (448; +0.5 s) | x1.018 (1586; +1.6 s) |  |  |
 | prefix_smoke_n400_7683 | 2 | x0.918 (73; -0.1 s) | x1.101 (198; +0.2 s) | x1.069 (448; +0.9 s) | x1.062 (1586; +5.4 s) |  |  |
 | prefix_smoke_n400_7683 | 3 | x0.993 (73; -0.0 s) | x1.103 (198; +0.2 s) | x1.059 (448; +0.8 s) | x1.037 (1586; +3.3 s) |  |  |
+| prefix_smoke_n400_7693 | 0 | x1.327 (76; +0.2 s) | x1.236 (201; +0.5 s) | x1.028 (470; +0.4 s) | x1.010 (1594; +0.9 s) | 3.51 s (1744 gaps) | 3.81 s (453 arrivals) |
+| prefix_smoke_n400_7693 | 1 | x0.929 (76; -0.0 s) | x1.087 (201; +0.2 s) | x1.035 (470; +0.5 s) | x1.016 (1594; +1.4 s) |  |  |
+| prefix_smoke_n400_7693 | 2 | x0.931 (76; -0.0 s) | x1.101 (201; +0.2 s) | x1.065 (470; +0.9 s) | x1.065 (1594; +5.8 s) |  |  |
+| prefix_smoke_n400_7693 | 3 | x1.004 (76; +0.0 s) | x1.100 (201; +0.2 s) | x1.056 (470; +0.8 s) | x1.038 (1594; +3.4 s) |  |  |
 
 ## Notes
 
