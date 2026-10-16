@@ -8,7 +8,11 @@ vLLM's own builder classes build the MLA, indexer and kpool-tail metadata (as `G
   reordering, the hidden rows travel between stages in that order, and only stage 0 (token ids) and stage 3 (the
   rows that produce tokens) translate. `Batch.order` is the chunk order used.
 - g0 (MLA + indexer K): block table in 64-token kernel blocks, logical block b -> b * 134 + j; slot mapping
-  b * 8576 + pos % 8576 with b = kv_blocks[pos // 8576].
+  b * 8576 + pos % 8576 with b = kv_blocks[pos // 8576]. The table's width is the microbatch's longest request in
+  blocks rounded up to a power of 2, capped at vLLM's full width for max_model_len (`table_width`): the indexer's
+  decode metadata kernel takes the width as a Triton constexpr, so each distinct width compiled a kernel in the
+  middle of a run (smoke 7658: 670 and 1,072 columns, ~75 ms each, every stage); vLLM's own tables are always
+  full width. Rounding bounds the widths to 8, all run by `StageModel.warmup`.
 - g1 (kpool tail): one block per request, its state_blocks[5]; the builder computes its own slots.
 - kpool pools a chunk starts inside (start % 4 != 0: prefix hits, odd chunk ends): `pp_patch.KPOOL_HEADS`, keyed by
   the indexer metadata's prefill slot mapping, read by the kpool insert override.
@@ -130,12 +134,26 @@ class StageMetadata:
                 ag = AttentionGroup(backend, names, layer_spec, gid)
                 ag.create_metadata_builders(vc, device, kernel_bs)
                 self.groups.append((kind, ag))
+        # vLLM's full table width for max_model_len, in kernel blocks (its indexer builder's buffer), or None
+        caps = [b.expanded_block_table_buffer.shape[1] for _, ag in self.groups
+                if (b := ag.get_metadata_builder()) is not None and hasattr(b, "expanded_block_table_buffer")]
+        self.table_cap = min(caps) if caps else None
         self.kda_index = kv.kda_state_index()
         text = getattr(getattr(vc, "model_config", None), "hf_text_config", None)
         self.kpool = int(getattr(text, "index_kpool", 1) or 1)
         self.num_kda_heads = num_kda_heads
         self._plans: collections.OrderedDict = collections.OrderedDict()
         self._side = torch.cuda.Stream(device)
+
+    def table_width(self, blocks: int) -> int:
+        """The g0 table width (kernel blocks) for a microbatch whose longest request spans `blocks` blocks: the next
+        power of 2 of `blocks`, capped at vLLM's full width."""
+        need = blocks * self.kernel_per_block
+        w = (1 << max(blocks - 1, 0).bit_length()) * self.kernel_per_block
+        if self.table_cap is not None:
+            assert need <= self.table_cap, (need, self.table_cap)
+            w = min(w, self.table_cap)
+        return w
 
     # -- KDA work plan (FlashInfer persistent KDA): built once per distinct sequence offsets, on a side stream so
     #    its small synchronous H2D copies never wait for queued compute.
@@ -172,7 +190,7 @@ class StageMetadata:
 
         # g0: kernel-block table and slot mapping
         B = self.block_tokens
-        width = int(max(-(-int(s) // B) for s in seq_lens)) * self.kernel_per_block
+        width = self.table_width(int(max(-(-int(s) // B) for s in seq_lens)))
         table = np.zeros((R, width), dtype=np.int64)
         slots = np.empty(T, dtype=np.int64)
         j = np.arange(self.kernel_per_block)
