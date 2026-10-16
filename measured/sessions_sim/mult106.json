@@ -1,0 +1,40 @@
+[
+ {
+  "setting": "plain_hbm",
+  "max_sessions": 400,
+  "gpu_time_multiplier": 1.06,
+  "run": "logs/20261016_4_mult106/plain/c400",
+  "rounds": 29509,
+  "rounds_per_s": 24.590833333333332,
+  "new_tokens_per_s": 86266.19416666667,
+  "prompt_tokens_per_s": 1679117.8891666667,
+  "computed_tokens_per_s": 112497.84,
+  "prefix_hit_share": 0.9835316458426888,
+  "ttft_s": {
+   "p50": 0.7513002319335937,
+   "p90": 4.2458142578125,
+   "p99": 8.21688640624999,
+   "max": 12.2769052734375
+  },
+  "rounds_ttft_over_60s": 0
+ },
+ {
+  "setting": "plain_hbm",
+  "max_sessions": 500,
+  "gpu_time_multiplier": 1.06,
+  "run": "logs/20261016_4_mult106/plain/c500",
+  "rounds": 26381,
+  "rounds_per_s": 21.984166666666667,
+  "new_tokens_per_s": 84535.52833333334,
+  "prompt_tokens_per_s": 1358949.0266666666,
+  "computed_tokens_per_s": 121903.31,
+  "prefix_hit_share": 0.9706784479954615,
+  "ttft_s": {
+   "p50": 3.8464052734375,
+   "p90": 14.365056640625,
+   "p99": 24.2464328125,
+   "max": 26.70516796875
+  },
+  "rounds_ttft_over_60s": 0
+ }
+]

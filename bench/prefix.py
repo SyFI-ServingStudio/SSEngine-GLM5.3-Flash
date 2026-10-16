@@ -472,7 +472,27 @@ def sessions(run_dir: Path) -> dict:
             "rounds_sent": len(client), "rounds_failed": sum(not c["ok"] for c in client.values()),
             "server_answered": len(sreq), "microbatches": len({m["index"] for m in mbs}),
             "microbatch_check": microbatch_check(mbs), "cache_kinds": cache_kinds(run_dir),
-            "in_run_jit": in_run_jit(run_dir)}
+            "in_run_jit": in_run_jit(run_dir), "run": run_dir.name, "gpu": gpu_samples(run_dir / "gpu_samples.csv")}
+
+
+def gpu_samples(path: Path) -> dict | None:
+    """Per GPU over its busy samples (utilization > 0) of the run's nvidia-smi log (m4.sbatch SAMPLE=1): mean SM
+    clock (MHz), mean power (W) and the share of samples throttled by the power cap (sw_power_cap, bit 0x4)."""
+    import csv
+
+    if not path.exists():
+        return None
+    by: dict[str, list] = {}
+    for r in list(csv.reader(open(path)))[1:]:
+        r = [c.strip() for c in r]
+        try:
+            if float(r[7]) > 0:
+                by.setdefault(r[1], []).append((float(r[2]), float(r[4]), int(r[8], 16) & 0x4 != 0))
+        except (ValueError, IndexError):
+            continue
+    return {g: {"sm_mhz": round(float(np.mean([x[0] for x in v]))), "power_w": round(float(np.mean([x[1] for x in v]))),
+                "power_cap_share": round(float(np.mean([x[2] for x in v])), 3), "samples": len(v)}
+            for g, v in sorted(by.items())}
 
 
 def in_run_jit(run_dir: Path) -> dict:
@@ -631,11 +651,14 @@ def sessions_md(runs: dict[int, dict]) -> str:
                if t["setting"] == "plain_hbm"}
     out = ["| N | Rounds/s | New tokens/s | Computed tokens/s | Prefix hit share | TTFT p50 / p90 / p99 (s) | "
            "Server TTFT p50 / p90 / p99 (s) | Stage busy 0 / 1 / 2 / 3 |", "|---|---|---|---|---|---|---|---|"]
+    mult_path = MEASURED / "sessions_sim" / "mult106.json"
+    mult = {r["max_sessions"]: r for r in json.loads(mult_path.read_text()) if r["setting"] == "plain_hbm"} \
+        if mult_path.exists() else {}
     for n, s in sorted(runs.items()):
         m, t = s["metrics"], targets.get(n)
         tt = m["ttft_s"]
         out.append(
-            f"| {n} | {m['rounds_per_s']:.1f} / {t['rounds_per_s']:.1f} (x{_r(m['rounds_per_s'], t['rounds_per_s'])}) "
+            f"| {n} ({s.get('run', '')}) | {m['rounds_per_s']:.1f} / {t['rounds_per_s']:.1f} (x{_r(m['rounds_per_s'], t['rounds_per_s'])}) "
             f"| {m['new_tokens_per_s'] / 1e3:.1f}k / {t['new_tokens_per_s'] / 1e3:.1f}k "
             f"(x{_r(m['new_tokens_per_s'], t['new_tokens_per_s'])}) "
             f"| {m['computed_tokens_per_s'] / 1e3:.1f}k / {t['computed_tokens_per_s'] / 1e3:.1f}k "
@@ -649,14 +672,30 @@ def sessions_md(runs: dict[int, dict]) -> str:
                f"x{_r(sv['p90'], t['ttft_s']['p90'])} / x{_r(sv['p99'], t['ttft_s']['p99'])}) ")(s.get("server_ttft_s"))
             + f"| {' / '.join(f'{100 * b:.0f}' for b in s['stage_busy'])}% vs "
             f"{' / '.join(f'{100 * b:.0f}' for b in t['stage_busy'])}% |")
+        if (x := mult.get(n)) is not None:     # the frozen simulator at gpu_time_multiplier 1.06 (power cap)
+            xt = x["ttft_s"]
+            out.append(
+                f"| └ sim x{x['gpu_time_multiplier']:g} | {x['rounds_per_s']:.1f} (x{_r(m['rounds_per_s'], x['rounds_per_s'])}) "
+                f"| {x['new_tokens_per_s'] / 1e3:.1f}k (x{_r(m['new_tokens_per_s'], x['new_tokens_per_s'])}) "
+                f"| {x['computed_tokens_per_s'] / 1e3:.1f}k (x{_r(m['computed_tokens_per_s'], x['computed_tokens_per_s'])}) "
+                f"| {100 * x['prefix_hit_share']:.2f}% | {xt['p50']:.2f} / {xt['p90']:.2f} / {xt['p99']:.2f} "
+                f"(measured x{_r(tt['p50'], xt['p50'])} / x{_r(tt['p90'], xt['p90'])} / x{_r(tt['p99'], xt['p99'])}) "
+                f"| | |")
     out += ["", "| N | Pool (tokens) | Evicted sessions (tokens) | Preemptions | Prefix shortfall | Rounds failed | "
-            "Microbatches / fit, median per stage (p10–p90) |", "|---|---|---|---|---|---|---|"]
+            "Microbatches / fit, median per stage (p10–p90) | In-run JIT | GPU busy: SM MHz / W / power-capped |",
+            "|---|---|---|---|---|---|---|---|---|"]
     for n, s in sorted(runs.items()):
         mc = s["microbatch_check"]
         fit = "; ".join(f"s{st}: x{v['p50']:.3f} ({v['p10']:.2f}–{v['p90']:.2f}, n={v['microbatches']})"
                         for st, v in mc.items())
+        jit = s.get("in_run_jit") or {}
+        jit = "not monitored" if jit.get("compiles") is None else str(jit["compiles"]) + (
+            f" ({'; '.join(jit['kernels'])})" if jit["compiles"] else "")
+        gpu = "; ".join(f"g{g}: {v['sm_mhz']} / {v['power_w']} / {100 * v['power_cap_share']:.0f}%"
+                        for g, v in (s.get("gpu") or {}).items()) or "–"
         out.append(f"| {n} | {s['pool_tokens']:,} | {s['evicted_sessions']:,} ({s['evicted_tokens']:,}) | "
-                   f"{s['preemptions']} | {s['prefix_shortfall_tokens']} | {s['rounds_failed']} | {fit} |")
+                   f"{s['preemptions']} | {s['prefix_shortfall_tokens']} | {s['rounds_failed']} | {fit} | {jit} | "
+                   f"{gpu} |")
     kinds = {n: s["cache_kinds"] for n, s in runs.items() if s.get("cache_kinds")}
     if kinds:
         out += ["", "| N | Rounds by hit kind | Superseded: recomputed tokens | Evicted: recomputed tokens | Admit waits |",
@@ -694,8 +733,8 @@ def summarize(root: Path, out: Path) -> Path:
                   f"{c['sessions']} sessions, hit = P {c['hit_is_P']}, round-1 token equal to no-cache "
                   f"{c['round1_match']}, same prompt {c['same_prompt']} (bench/prefix_check.py --p-shift).", ""]
     runs = {}
-    for d in sorted(root.glob("prefix_n*")):
-        m = re.fullmatch(r"prefix_n(\d+)", d.name)
+    for d in sorted(root.glob("prefix_n*"), key=lambda d: [int(x) for x in re.findall(r"\d+", d.name)]):
+        m = re.fullmatch(r"prefix_n(\d+)(?:_\d+)?", d.name)        # prefix_n<N> or prefix_n<N>_<job>: the latest job
         if m and (d / "requests.jsonl").exists() and (d / "metrics.json").exists():
             runs[int(m.group(1))] = sessions(d)
     if runs:
