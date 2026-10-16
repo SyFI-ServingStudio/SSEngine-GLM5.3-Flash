@@ -28,14 +28,18 @@ stage; each stage backs them with its own tensors.
 - A request holds `ceil(prompt_tokens / 8576)` **KV blocks** (DSA, its token positions in order) and 6 **state
   blocks** (KDA): state block g backs KDA cache group g on every stage; a stage with fewer KDA groups ignores the
   extra ones. The last state block is scratch.
-- Blocks are freed when the request finishes (phase A keeps nothing).
+- Blocks are freed when the request finishes. With `keep_sessions` (phase B, `5_prefix_cache.md`) they stay as the
+  request's kept context instead: the KV of its prompt and the KDA state after its last token. The next prompt that
+  starts with that whole context takes over its blocks (same ids, so the state continues in place) and its first chunk
+  has `start` = the cached tokens. Kept contexts are matched by content (`engine/kv.py`) and evicted least recently
+  used first, a whole context at a time, when a running request needs room.
 
 ## Messages
 
 ```python
 class Chunk(msgspec.Struct):
     req_id: str
-    start: int                 # tokens of this request already in KV (computed by earlier chunks); 0 in phase A
+    start: int                 # tokens of this request already in KV: cached (a prefix hit) + computed by earlier chunks
     num_tokens: int            # tokens computed in this chunk
     kv_blocks: list[int]       # DSA blocks covering [0, start + num_tokens)
     state_blocks: list[int]    # 6 KDA state blocks
@@ -59,6 +63,7 @@ class StageDone(msgspec.Struct):
     start_ns: int              # GPU start of the stage's first kernel for this mb (CUDA event, host-clock aligned)
     end_ns: int                # GPU end of its last kernel, before the send
     tokens: list[tuple[str, int]] | None   # stage 3 only: (req_id, greedy token) per is_last chunk
+    host_ns: tuple[int, int, int] | None   # host clock: plan received, forward called, forward returned
 ```
 
 Clock: each worker aligns its CUDA events to `time.time_ns()` once at startup (record an event, synchronize, read the
@@ -122,7 +127,8 @@ launches should not also be the one that services messages or sends, or it stall
 ## Server API
 
 What req-frontend's backend sends (`alignment/load_generator/req-frontend`): token ids in, one output token id out,
-`usage.prompt_tokens`, `usage.cached_tokens` (0 in phase A). Plus `GET /health`.
+`usage.prompt_tokens`, `usage.prompt_tokens_details.cached_tokens` (the prefix-cache hit; 0 without
+`keep_sessions`). Plus `GET /health`.
 
 ## Server logs (`1_contract.md` §3)
 

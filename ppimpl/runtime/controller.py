@@ -9,10 +9,22 @@ the report socket was read again (~1 s for 2,048 requests, job 7056).
 Microbatches go to all workers at once, in mb_id order; workers report `StageDone`; the last stage's report carries
 the tokens. Logs, in `run_dir` (times in ms from t0, the first request's arrival at the server):
 - `microbatches.jsonl`: one line per (microbatch, stage), 1_contract.md §3;
+- `worker_host.jsonl`: per (microbatch, stage), when the worker received the plan, called the stage forward and it
+  returned (host clock): with microbatches.jsonl's GPU start and end, whether the stage waited for its host;
 - `server_requests.jsonl`: one line per request: scheduler order (seq), arrival, first dispatch, token (when the
-  control thread handled the last stage's report), response, prompt sha256;
+  control thread handled the last stage's report), response, prompt sha256; with the prefix cache, how it was served:
+  `hit_kind` (none_first_round: no kept context for its key; full; superseded: the kept context is not a prefix of
+  the prompt, dropped; evicted: its session's context was evicted earlier; repeat), `kept_tokens` (the kept context
+  at admission, 0 if none), `common_prefix_tokens` (prompt and kept context, compared only on a miss),
+  `evicted_context_tokens` (evicted), `evicted_sessions_at_admit` and `admit_wait_ms` (at the head, waiting for pool
+  room);
 - `plans.jsonl`: one line per microbatch at dispatch: tokens, dispatch time, whether it was queued behind a running
-  stage-0 plan, and that plan's predicted stage-0 end.
+  stage-0 plan, and that plan's predicted stage-0 end;
+- `cache.json` (rewritten every 10 s and at stop): the pool in blocks and tokens, the prefix cache's counters (hits,
+  hit tokens, evicted sessions and tokens, preemptions: always 0), the kept sessions and the pool in use.
+Prefix cache (`keep_sessions`, 5_prefix_cache.md §2): a finished request's blocks stay as its context; the next prompt
+that starts with that whole context takes them over and computes only the rest (`engine/kv.py`, matched by content).
+Its cached tokens go back in `usage.prompt_tokens_details.cached_tokens` and into `server_requests.jsonl`.
 When a microbatch forms is `DispatchRule`'s decision (ppimpl/runtime/dispatch.py); what it holds is the scheduler's.
 """
 
@@ -43,10 +55,16 @@ from ppimpl.runtime.cpus import CONTROLLER_CORES, cpu_list, pin_process, split_c
 from ppimpl.runtime.dispatch import NOW, WAIT, DispatchRule
 from ppimpl.runtime.transport import (Chunk, Plan, Ready, Shutdown, StageDone, WorkerError, decode_to_controller,
                                       encode, for_stage)
+from ppimpl.serve.slab import SlabReader
 
 READY_TIMEOUT_S = 1800   # a real stage loads its weights and captures graphs before Ready
 WAKE_ADDR = "inproc://ppimpl-control-wake"
 ADMIT_BATCH = 64   # requests the control thread takes in before it looks at the reports again
+# PPIMPL_CONTROL_SPIN_S=S (intakes only): the control thread busy-polls (zmq poll without a timeout) until S seconds
+# after the last message or open request. A blocked poll costs ~0.17 ms of wake-up per hop (64 B DEALER -> ROUTER over
+# tcp, idle host: 525 us blocked, 360 us spinning), but end to end it was noise (CPU mock, 512k arrival -> dispatch
+# 4.47 ms spinning, 4.50 blocked) and it holds a core on a contended host: off by default.
+CONTROL_SPIN_S = float(os.environ.get("PPIMPL_CONTROL_SPIN_S", "0"))
 
 
 class Remote(NamedTuple):
@@ -89,9 +107,15 @@ class Controller:
         self.timer_at: int | None = None     # host ns at which the dispatch rule wants to be asked again
         # intake processes (cfg.intake_procs): all their messages go through the control thread
         self.intake = None
+        # sockets made by start(); None/empty until then, so stop() after a failed start() closes what exists and
+        # the start error is the one raised
+        self.ctx = self.reports = self.wake_rx = self.wake_tx = None
+        self.plans: list = []
         self.intake_procs: list[subprocess.Popen] = []
         self.intake_cpus: set[int] | None = None
         self.intakes_ready: set[bytes] = set()
+        self.slabs = SlabReader()            # the intakes' shared-memory prompt slabs (ppimpl/serve/slab.py)
+        self.slab_views: set[str] = set()    # requests admitted on a view of a slab, not yet copied out (_own)
         self.answered: dict[str, dict] = {}  # answered, response not yet sent: id -> log record
         self.pack, self.unpack = msgspec.msgpack.Encoder(), msgspec.msgpack.Decoder()
 
@@ -138,13 +162,16 @@ class Controller:
         num_blocks = pool_size([r.num_blocks for r in ready], cfg.pool_tokens)
         self.rule = DispatchRule(cfg.max_in_flight, cfg.dispatch_ahead >= 1, cfg.form_lead_ms)
         # the scheduler's own cap is not the binding one: the rule admits the extra queued plan
-        self.sched = PlainScheduler(KvManager(num_blocks), cfg.scheduler.mb_tokens, self.rule.cap, 1)
+        self.sched = PlainScheduler(KvManager(num_blocks, keep_sessions=cfg.keep_sessions, content_keys=True),
+                                    cfg.scheduler.mb_tokens, self.rule.cap, 1)
         self.mb_log = open(self.run_dir / "microbatches.jsonl", "w")
+        self.host_log = open(self.run_dir / "worker_host.jsonl", "w")
         self.plan_log = open(self.run_dir / "plans.jsonl", "w")
         self.req_log = open(self.run_dir / "server_requests.jsonl", "w")
         (self.run_dir / "pool.json").write_text(json.dumps(
             {"ready_blocks": [r.num_blocks for r in ready], "num_blocks": num_blocks,
-             "pool_tokens": num_blocks * BLOCK_TOKENS}))
+             "pool_tokens": num_blocks * BLOCK_TOKENS, "keep_sessions": cfg.keep_sessions}))
+        self._write_cache()
         # Leave start-up objects (torch, FastAPI, ...) out of later collections: a full one took ~50 ms with the GIL
         # held, stalling the control thread during a burst.
         gc.collect()
@@ -219,11 +246,25 @@ class Controller:
                 await asyncio.to_thread(p.wait, 60)
             except subprocess.TimeoutExpired:
                 p.kill()
-        for sock in (*self.plans, self.reports, self.wake_rx, self.wake_tx, *([self.intake] if self.intake else [])):
-            sock.close(linger=0)
-        for f in ("mb_log", "req_log", "plan_log"):
+        for sock in (*self.plans, self.reports, self.wake_rx, self.wake_tx, self.intake):
+            if sock is not None:
+                sock.close(linger=0)
+        for f in ("mb_log", "host_log", "req_log", "plan_log"):
             if hasattr(self, f):
                 getattr(self, f).close()
+        if self.sched is not None:
+            self._write_cache()
+
+    def _write_cache(self):
+        """cache.json: the pool and the prefix cache's counters (5_prefix_cache.md §8)."""
+        kv = self.sched.kv
+        info = {"keep_sessions": kv.keep_sessions, "num_blocks": kv.num_blocks,
+                "pool_tokens": kv.num_blocks * BLOCK_TOKENS, **kv.stats, "kept_sessions": len(kv.kept),
+                "kept_tokens": sum(k.tokens for k in kv.kept.values()), "used_tokens": kv.used_tokens,
+                "free_blocks": kv.pool.num_free, "time_ms": self._ms(time.time_ns()) if self.t0_ns else None}
+        tmp = self.run_dir / "cache.json.tmp"
+        tmp.write_text(json.dumps(info) + "\n")
+        tmp.replace(self.run_dir / "cache.json")
 
     def _ms(self, ns: int) -> float:
         return (ns - self.t0_ns) / 1e6
@@ -273,13 +314,19 @@ class Controller:
         if self.intake is not None:
             poller.register(self.intake, zmq.POLLIN)
         next_check = time.monotonic() + 1.0
+        next_cache = time.monotonic() + 10.0
+        spin = self.intake is not None and CONTROL_SPIN_S > 0
+        busy_at = time.monotonic()     # the last message or open request
         try:
             more = False   # requests left in the inbox after this round's batch
             while True:
-                timeout_ms = 0 if more else 1000
+                if spin and self.reqs:
+                    busy_at = time.monotonic()
+                timeout_ms = 0 if more or (spin and time.monotonic() - busy_at < CONTROL_SPIN_S) else 1000
                 if self.timer_at is not None:
                     timeout_ms = min(timeout_ms, max(0, math.ceil((self.timer_at - time.time_ns()) / 1e6)))
-                poller.poll(timeout_ms)
+                if poller.poll(timeout_ms) and spin:
+                    busy_at = time.monotonic()
                 while self.reports.poll(0):          # reports first: they free in-flight slots and time stage 0
                     msg = decode_to_controller(self.reports.recv())
                     if isinstance(msg, WorkerError):
@@ -312,11 +359,16 @@ class Controller:
                 if self.timer_at is not None and time.time_ns() >= self.timer_at:
                     self.timer_at = None
                 self._pump()
+                for req_id in list(self.slab_views):
+                    self._own(req_id)
                 if time.monotonic() >= next_check:
                     next_check = time.monotonic() + 1.0
                     self._check_procs()
-                    for f in (self.mb_log, self.plan_log, self.req_log):
+                    for f in (self.mb_log, self.host_log, self.plan_log, self.req_log):
                         f.flush()
+                    if next_check >= next_cache:
+                        next_cache = next_check + 10.0
+                        self._write_cache()
         except Exception as e:
             self._fail(str(e) if isinstance(e, RuntimeError) else traceback.format_exc())
 
@@ -341,9 +393,11 @@ class Controller:
 
     def _from_intake(self, frames: list[bytes]):
         ident, kind = frames[0], frames[1]
-        if kind == b"Q":
-            key, req_id, arrival_ns = self.unpack.decode(frames[2])
-            ids = np.frombuffer(frames[3], np.int32)
+        if kind == b"Q" or kind == b"M":
+            key, req_id, arrival_ns, *stamps = self.unpack.decode(frames[2])
+            ids = np.frombuffer(frames[3], np.int32) if kind == b"Q" else \
+                self.slabs.view(*self.unpack.decode(frames[3]))
+            recv_ns = time.time_ns()     # the ids are here
             why = self.failed or (None if self.sched.kv.fits_ever(len(ids))
                                   else f"prompt of {len(ids)} tokens does not fit the KV pool")
             if why:
@@ -356,11 +410,15 @@ class Controller:
             while req_id in self.live:
                 req_id, k = f"{base}#{k}", k + 1
             self.live.add(req_id)
-            self._admit(req_id, ids, arrival_ns, Remote(ident, key))
+            if kind == b"M":
+                self.slab_views.add(req_id)   # _own copies them after this round's dispatch
+            self._admit(req_id, ids, arrival_ns, Remote(ident, key), (*stamps, recv_ns))
         elif kind == b"D":
             req_id, sent_ns = self.unpack.decode(frames[2])
             self.log_response(self.answered.pop(req_id), sent_ns)
         elif kind == b"R":
+            if len(frames) > 2:
+                self.slabs.attach(frames[2].decode())
             self.intakes_ready.add(ident)
             if len(self.intakes_ready) == self.cfg.intake_procs:
                 for i in self.intakes_ready:
@@ -368,11 +426,37 @@ class Controller:
         elif kind == b"S":   # /shutdown at an intake: the serve process stops on SIGTERM (ppimpl/serve/server.py)
             os.kill(os.getpid(), signal.SIGTERM)
 
-    def _admit(self, req_id: str, token_ids: list[int], arrival_ns: int, fut: asyncio.Future):
+    def _admit(self, req_id: str, token_ids, arrival_ns: int, fut: asyncio.Future, stamps: tuple = ()):
+        """`stamps` (intake requests): host ns of body read, ids parsed, received here; logged as `host_ms`."""
+        if not isinstance(token_ids, np.ndarray):
+            token_ids = np.asarray(token_ids, np.int32)
         req = Request(req_id, len(token_ids), arrival_ns, token_ids)
-        self.reqs[req_id] = (req, fut, {"id": req_id, "seq": self.next_seq, "prompt_tokens": len(token_ids),
-                                        "arrival_ms": self._ms(arrival_ns), "_prompt": token_ids})
+        info = {"id": req_id, "seq": self.next_seq, "prompt_tokens": len(token_ids),
+                "arrival_ms": self._ms(arrival_ns), "_prompt": token_ids}
+        self.reqs[req_id] = (req, fut, info)
         self.next_seq += 1
+        try:
+            self._admit_inner(req, info)
+        finally:
+            if len(stamps) == 3:     # phases of arrival -> admitted, ms from the arrival
+                info["host_ms"] = {k: round((t - arrival_ns) / 1e6, 3) for k, t in
+                                   zip(("body", "parsed", "received", "admitted"), (*stamps, time.time_ns()))}
+
+    def _admit_inner(self, req: Request, info: dict):
+        req_id = req.req_id
+        token_ids = req.token_ids
+        if self.sched.kv.keep_sessions:
+            req.session = self.sched.kv.find_session(token_ids)
+            tok = self.sched.kv.repeat_token(req)
+            if tok is not None:      # the same prompt as a kept context: its token, nothing computed
+                req.cached = req.num_tokens
+                info["repeat"] = True
+                info.update(hit_kind="repeat", kept_tokens=req.num_tokens, common_prefix_tokens=req.num_tokens,
+                            evicted_sessions_at_admit=0, admit_wait_ms=0.0)
+                done = self._reply(req, tok, time.time_ns())
+                if done:
+                    self.loop.call_soon_threadsafe(self._answered, done)
+                return
         self.sched.add(req)
 
     def _pump(self):
@@ -407,7 +491,13 @@ class Controller:
             chunks.append(Chunk(r.req_id, c.start, c.num_tokens, r.alloc.kv_blocks[:kv_blocks_for(end)],
                                 r.alloc.state_blocks, c.is_last, ids if isinstance(ids, list) else ids.tolist()))
             info = self.reqs[r.req_id][2]
-            info.setdefault("first_dispatch_ms", self._ms(now))
+            if "first_dispatch_ms" not in info:
+                info["first_dispatch_ms"] = self._ms(now)
+                info["cached"] = r.cached
+                if r.admit_info is not None:
+                    info.update(r.admit_info)
+                info["admit_wait_ms"] = (round((r.admit_ns - r.room_wait_ns) / 1e6, 3)
+                                         if r.room_wait_ns is not None and r.admit_ns is not None else 0.0)
             info["chunks"] = info.get("chunks", 0) + 1
         plan = Plan(mb_id, chunks)
         for s in range(self.n):
@@ -420,6 +510,10 @@ class Controller:
         self.mb_log.write(json.dumps({"stage": d.stage, "index": d.mb_id, "start_ms": round(self._ms(d.start_ns), 4),
                                       "compute_ms": round((d.end_ns - d.start_ns) / 1e6, 4),
                                       "requests": reqs}) + "\n")
+        if d.host_ns is not None:
+            plan, call, ret = (round(self._ms(t), 4) for t in d.host_ns)
+            self.host_log.write(json.dumps({"stage": d.stage, "index": d.mb_id, "plan_ms": plan, "forward_ms": call,
+                                            "return_ms": ret}) + "\n")
         if left == 1:
             del self.inflight_plans[d.mb_id]
         else:
@@ -431,18 +525,40 @@ class Controller:
             now = time.time_ns()
             done = []
             for req_id, tok in d.tokens:
-                req, fut, info = self.reqs.pop(req_id)
+                if req_id in self.slab_views:   # before its context is kept
+                    self._own(req_id)
+                req = self.reqs[req_id][0]
+                req.output_token = tok
                 self.sched.finish(req)
-                info["token_ms"] = self._ms(now)
-                info["token"] = tok
-                if isinstance(fut, Remote):
-                    self.live.discard(req_id)
-                    self.answered[req_id] = info
-                    self.intake.send_multipart([fut.ident, b"A", self.pack.encode((fut.key, req_id, tok))])
-                else:
-                    done.append((fut, tok, info))
+                done += self._reply(req, tok, now)
             if done:
                 self.loop.call_soon_threadsafe(self._answered, done)
+
+    def _own(self, req_id: str):
+        """A request admitted on a view of an intake's slab: copy its ids out (the intake reuses the range once the
+        request is answered; the scheduler's kept contexts and the response log keep them longer)."""
+        self.slab_views.discard(req_id)
+        entry = self.reqs.get(req_id)
+        if entry is None:
+            return
+        req, _, info = entry
+        req.token_ids = req.token_ids.copy()
+        info["_prompt"] = req.token_ids
+
+    def _reply(self, req: Request, tok: int, now: int) -> list:
+        """Send the request's answer (intake) or return it for the event loop (in-process HTTP)."""
+        if req.req_id in self.slab_views:
+            self._own(req.req_id)
+        _, fut, info = self.reqs.pop(req.req_id)
+        info["token_ms"] = self._ms(now)
+        info["token"] = tok
+        info["cached"] = req.cached
+        if isinstance(fut, Remote):
+            self.live.discard(req.req_id)
+            self.answered[req.req_id] = info
+            self.intake.send_multipart([fut.ident, b"A", self.pack.encode((fut.key, req.req_id, tok, req.cached))])
+            return []
+        return [(fut, tok, info)]
 
 
 def _fail_all(futs: list[asyncio.Future], why: str):

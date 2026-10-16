@@ -8,8 +8,14 @@ vLLM's own builder classes build the MLA, indexer and kpool-tail metadata (as `G
   reordering, the hidden rows travel between stages in that order, and only stage 0 (token ids) and stage 3 (the
   rows that produce tokens) translate. `Batch.order` is the chunk order used.
 - g0 (MLA + indexer K): block table in 64-token kernel blocks, logical block b -> b * 134 + j; slot mapping
-  b * 8576 + pos % 8576 with b = kv_blocks[pos // 8576].
+  b * 8576 + pos % 8576 with b = kv_blocks[pos // 8576]. The table's width is the microbatch's longest request in
+  blocks rounded up to a power of 2, capped at vLLM's full width for max_model_len (`table_width`): the indexer's
+  decode metadata kernel takes the width as a Triton constexpr, so each distinct width compiled a kernel in the
+  middle of a run (smoke 7658: 670 and 1,072 columns, ~75 ms each, every stage); vLLM's own tables are always
+  full width. Rounding bounds the widths to 8, all run by `StageModel.warmup`.
 - g1 (kpool tail): one block per request, its state_blocks[5]; the builder computes its own slots.
+- kpool pools a chunk starts inside (start % 4 != 0: prefix hits, odd chunk ends): `pp_patch.KPOOL_HEADS`, keyed by
+  the indexer metadata's prefill slot mapping, read by the kpool insert override.
 - KDA (g2..g6): `pp_patch.KdaPrefillMeta`, read by our KDA prefill forward (the fork's GDN metadata is not built:
   the `_forward` that reads it is replaced).
 
@@ -26,7 +32,8 @@ import numpy as np
 import torch
 
 from ppimpl.model import kv_tensors
-from ppimpl.model.pp_patch import TOPK_SEGMENTS, KdaPrefillMeta, make_kda_plan
+from ppimpl.model.pp_patch import (KPOOL_HEADS, TOPK_SEGMENTS, KdaPrefillMeta, KpoolHeads, kpool_heads_all,
+                                   kpool_heads_suffix, make_kda_plan)
 
 DECODE_THRESHOLD = 256
 KERNEL_BLOCK = 64
@@ -127,10 +134,26 @@ class StageMetadata:
                 ag = AttentionGroup(backend, names, layer_spec, gid)
                 ag.create_metadata_builders(vc, device, kernel_bs)
                 self.groups.append((kind, ag))
+        # vLLM's full table width for max_model_len, in kernel blocks (its indexer builder's buffer), or None
+        caps = [b.expanded_block_table_buffer.shape[1] for _, ag in self.groups
+                if (b := ag.get_metadata_builder()) is not None and hasattr(b, "expanded_block_table_buffer")]
+        self.table_cap = min(caps) if caps else None
         self.kda_index = kv.kda_state_index()
+        text = getattr(getattr(vc, "model_config", None), "hf_text_config", None)
+        self.kpool = int(getattr(text, "index_kpool", 1) or 1)
         self.num_kda_heads = num_kda_heads
         self._plans: collections.OrderedDict = collections.OrderedDict()
         self._side = torch.cuda.Stream(device)
+
+    def table_width(self, blocks: int) -> int:
+        """The g0 table width (kernel blocks) for a microbatch whose longest request spans `blocks` blocks: the next
+        power of 2 of `blocks`, capped at vLLM's full width."""
+        need = blocks * self.kernel_per_block
+        w = (1 << max(blocks - 1, 0).bit_length()) * self.kernel_per_block
+        if self.table_cap is not None:
+            assert need <= self.table_cap, (need, self.table_cap)
+            w = min(w, self.table_cap)
+        return w
 
     # -- KDA work plan (FlashInfer persistent KDA): built once per distinct sequence offsets, on a side stream so
     #    its small synchronous H2D copies never wait for queued compute.
@@ -159,7 +182,6 @@ class StageMetadata:
         R = len(order)
         q_lens = np.array([chunks[i].num_tokens for i in order], dtype=np.int64)
         starts = np.array([chunks[i].start for i in order], dtype=np.int64)
-        assert all(s % 4 == 0 for s in starts), "kpool indexer: chunk starts must be pool-aligned"
         seq_lens = starts + q_lens
         qsl = np.zeros(R + 1, dtype=np.int64)
         np.cumsum(q_lens, out=qsl[1:])
@@ -168,7 +190,7 @@ class StageMetadata:
 
         # g0: kernel-block table and slot mapping
         B = self.block_tokens
-        width = int(max(-(-int(s) // B) for s in seq_lens)) * self.kernel_per_block
+        width = self.table_width(int(max(-(-int(s) // B) for s in seq_lens)))
         table = np.zeros((R, width), dtype=np.int64)
         slots = np.empty(T, dtype=np.int64)
         j = np.arange(self.kernel_per_block)
@@ -201,6 +223,12 @@ class StageMetadata:
         h_graph = None if bucket is None else pk.add(graph_rows(positions, slots, tok, bucket), torch.int64)
         row_end = {i: int(qsl[r + 1]) - 1 for r, i in enumerate(order)}
         h_last = pk.add([row_end[i] for i, c in enumerate(chunks) if c.is_last], torch.int64)
+        # kpool pools a chunk starts inside (pp_patch "kpool indexer": prefix hits, odd chunk ends), for every
+        # request, staged with the rest; the indexer's prefill requests are cut out once its metadata is built
+        hk, hk_req = (kpool_heads_all(starts, q_lens, qsl[:-1], tail_table[:, 0], self.kpool) if self.kpool > 1
+                      else (None, []))
+        h_hk = None if hk is None else [pk.add(a, dt) for a, dt in
+                                        zip(hk, (torch.int64, torch.bool, torch.int64, torch.int64))]
         pk.copy(self.device)
         pos_dev = pk.dev(h_pos)
 
@@ -214,10 +242,12 @@ class StageMetadata:
                 positions=pos_dev, is_prefilling=pk.dev(h["prefill"]), seq_lens_cpu_upper_bound=seq_cpu)
 
         TOPK_SEGMENTS.clear()
+        KPOOL_HEADS.clear()
         attn: dict = {}
         slot_map: dict = {}
         cm_g0 = common(h_g0)
         cm_tail = common(h_tail)
+        heads: dict = {}
         for kind, ag in self.groups:
             cm = cm_g0 if kind == "g0" else cm_tail
             md = ag.get_metadata_builder().build(common_prefix_len=0, common_attn_metadata=cm)
@@ -225,6 +255,16 @@ class StageMetadata:
                 attn[name] = md
                 if kind == "g0":
                     slot_map[name] = cm_g0.slot_mapping
+            if kind == "g0" and self.kpool > 1 and type(md).__name__ == "DeepseekV32IndexerMetadata":
+                # device views of the staged heads (a pageable .to(device) here waited for the GPU to drain at
+                # every unaligned start, and the host lost its lead: issues.md, "unaligned resume cost")
+                nd = int(md.num_decodes)
+                if nd not in heads:
+                    h = kpool_heads_suffix(None if h_hk is None else [pk.dev(x) for x in h_hk], hk_req, nd,
+                                           int(md.num_decode_tokens))
+                    heads[nd] = None if h is None else KpoolHeads(*h)
+                if heads[nd] is not None:
+                    KPOOL_HEADS[md.slot_mapping[int(md.num_decode_tokens):].data_ptr()] = heads[nd]
 
         # KDA: one meta per state group (the sequences and plan are shared, the state blocks differ)
         offsets = tuple(int(v) for v in qsl)

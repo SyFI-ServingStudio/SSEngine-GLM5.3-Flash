@@ -247,7 +247,7 @@ def vllm_reference(L: int) -> None:
     ids = _prompt(L)
     llm = LLM(model=CHECKPOINT, tensor_parallel_size=4, enable_expert_parallel=True, kv_cache_dtype="fp8_e4m3",
               language_model_only=True, max_model_len=max(L, 8192) + 64, enable_prefix_caching=False,
-              enforce_eager=True)
+              enforce_eager=True, kda_prefill_backend="triton")   # accuracy reference: not FlashKDA (issues.md)
     out = llm.generate([{"prompt_token_ids": ids}], SamplingParams(max_tokens=1, temperature=0.0, logprobs=5))
     o = out[0].outputs[0]
     lp = o.logprobs[0]

@@ -4,8 +4,11 @@ The main thread only enqueues GPU work. A reporter thread waits for each microba
 with GPU times on the host clock, so the controller and all stages share one time base.
 """
 
+import cProfile
+import io
 import json
 import os
+import pstats
 import queue
 import signal
 import threading
@@ -18,6 +21,7 @@ import zmq
 
 from ppimpl.config import HIDDEN_WIDTH, RunConfig
 from ppimpl.runtime.cpus import cpu_list, pin_process, threads, worker_cpus
+from ppimpl.runtime.host_stamps import WorkerStamps
 from ppimpl.runtime.transport import (open_pipe, Plan, Ready, Shutdown, StageDone, WorkerError, decode_to_worker,
                                       encode, report_socket, worker_sockets)
 
@@ -77,6 +81,72 @@ class ProfileWindow:
             torch.cuda.profiler.stop()
 
 
+class HostProfile:
+    """cProfile of the host side of model.forward (metadata, launches) for microbatches [a, b) on the stages listed,
+    from PPIMPL_HOST_PROFILE="a:b[@stages]" (default stage 0): <run dir>/hostprof/stage<s>_mb<m>.txt, the top
+    functions by cumulative time. A diagnosis aid: the profiler slows the host down."""
+
+    def __init__(self, stage: int, run_dir: str):
+        spec = os.environ.get("PPIMPL_HOST_PROFILE", "")
+        rng, _, stages = spec.partition("@")
+        self.on = bool(rng) and stage in [int(x) for x in (stages or "0").split(",")]
+        if self.on:
+            self.a, self.b = (int(x) for x in rng.split(":"))
+            self.dir = Path(run_dir) / "hostprof"
+            self.dir.mkdir(exist_ok=True)
+        self.stage, self.prof = stage, None
+
+    def before(self, mb_id: int):
+        if self.on and self.a <= mb_id < self.b:
+            self.prof = cProfile.Profile()
+            self.prof.enable()
+
+    def after(self, mb_id: int):
+        if self.prof is not None:
+            self.prof.disable()
+            out = io.StringIO()
+            pstats.Stats(self.prof, stream=out).sort_stats("cumulative").print_stats(60)
+            (self.dir / f"stage{self.stage}_mb{mb_id}.txt").write_text(out.getvalue())
+            self.prof = None
+
+
+class FirstUse:
+    """After `Ready`: vLLM's JIT monitor (Triton, CuTeDSL and TileLang compiles, Triton autotuning; verbose: the
+    specialization) plus, per Triton compile or disk-cache load, the microbatch and the host time it took: "stage S
+    mb M: first use after warm-up: triton <kernel> T ms", also appended to `jit_stage<S>.jsonl` in the run dir.
+    Warm-up is meant to have run every variant (StageModel.warmup); each such line is one it missed, and fails the
+    run (bench/run.py). The hooks run only on a compile path, never on a cached
+    launch."""
+
+    def __init__(self, stage: int, run_dir: str | None = None):
+        self.stage, self.mb, self.t0 = stage, None, {}
+        self.log = None if run_dir is None else Path(run_dir) / f"jit_stage{stage}.jsonl"
+
+    def install(self):
+        try:
+            from triton import knobs
+        except ImportError:
+            return
+        from vllm.utils import jit_monitor
+
+        knobs.runtime.jit_cache_hook = self._start
+        knobs.runtime.jit_post_compile_hook = self._done
+        jit_monitor.activate(mode="warn", verbose=True)    # chains to self._done
+
+    def _start(self, **kw):
+        self.t0[str(kw.get("key"))] = time.perf_counter()
+        return False                      # compile as usual
+
+    def _done(self, **kw):
+        t = self.t0.pop(str(kw.get("key")), None)
+        ms = -1.0 if t is None else 1e3 * (time.perf_counter() - t)
+        name = getattr(kw.get("fn"), "name", "?")
+        print(f"stage {self.stage} mb {self.mb}: first use after warm-up: triton {name} {ms:.1f} ms", flush=True)
+        if self.log is not None:          # read by bench/run.py: any line fails the run (run_failure)
+            with open(self.log, "a") as f:
+                f.write(json.dumps({"stage": self.stage, "mb": self.mb, "kernel": name, "ms": round(ms, 1)}) + "\n")
+
+
 class Reporter(threading.Thread):
     """Owns the worker's report socket. Items: a message to send as is, or a finished-microbatch record."""
 
@@ -95,7 +165,7 @@ class Reporter(threading.Thread):
             if not isinstance(item, tuple):
                 sock.send(encode(item))
                 continue
-            stage, mb_id, start, end, anchor, wait, tokens, tok_ids = item
+            stage, mb_id, start, end, anchor, wait, tokens, tok_ids, host = item
             if wait is not None:
                 wait.synchronize()
             toks = None
@@ -105,7 +175,8 @@ class Reporter(threading.Thread):
                         copy_stream.wait_event(wait)
                         tokens = tokens.cpu()
                 toks = list(zip(tok_ids, tokens.tolist()))
-            sock.send(encode(StageDone(stage, mb_id, Clock.to_ns(start, anchor), Clock.to_ns(end, anchor), toks)))
+            sock.send(encode(StageDone(stage, mb_id, Clock.to_ns(start, anchor), Clock.to_ns(end, anchor), toks,
+                                       host)))
         sock.close()
 
 
@@ -148,7 +219,12 @@ def run_worker(cfg: RunConfig, stage: int):   # makes inference tensors, which a
         (Path(cfg.run_dir) / f"stage{stage}.json").write_text(json.dumps(info) + "\n")
         clock = Clock(device)
         window = ProfileWindow(cfg.profile_mbs if cuda else None)
+        hostprof = HostProfile(stage, cfg.run_dir)
+        stamps = WorkerStamps(stage, cfg.run_dir, model)
         print(f"stage {stage} cpus: {cpu_list(cpus) if cpus else 'not pinned'}, threads {threads()}", flush=True)
+        first_use = FirstUse(stage, cfg.run_dir)
+        if cuda:
+            first_use.install()
         reporter.q.put(Ready(stage, model.num_blocks))
         while True:
             while not plans.poll(1000):
@@ -165,14 +241,22 @@ def run_worker(cfg: RunConfig, stage: int):   # makes inference tensors, which a
                            "threads": threads()}), flush=True)
                 break
             plan: Plan = msg
+            plan_ns = time.time_ns()
             window.before(plan.mb_id)
             if cuda:
                 torch.cuda.nvtx.range_push(f"stage {stage} mb {plan.mb_id}")   # bench/nsys_trace.py attributes kernels
             clock.maybe_reanchor()
             hidden_in = pipe.recv(plan.num_tokens, model.hidden_width) if stage > 0 else None
+            fwd_ns = time.time_ns()
             start = clock.mark()
+            first_use.mb = plan.mb_id
+            hostprof.before(plan.mb_id)
+            stamps.before(plan)
             out = model.forward(plan, hidden_in)
+            stamps.after()
+            hostprof.after(plan.mb_id)
             end = clock.mark()
+            host = (plan_ns, fwd_ns, time.time_ns())
             if hidden_in is not None:
                 pipe.release()                        # CePipe: the sender may reuse the slot once this forward ran
             del hidden_in
@@ -180,10 +264,10 @@ def run_worker(cfg: RunConfig, stage: int):   # makes inference tensors, which a
             wait = end if cuda else None
             if not last:
                 pipe.send(out, wait)
-                reporter.q.put((stage, plan.mb_id, start, end, anchor, wait, None, None))
+                reporter.q.put((stage, plan.mb_id, start, end, anchor, wait, None, None, host))
             else:
                 tok_ids = [c.req_id for c in plan.chunks if c.is_last]
-                reporter.q.put((stage, plan.mb_id, start, end, anchor, wait, out, tok_ids))
+                reporter.q.put((stage, plan.mb_id, start, end, anchor, wait, out, tok_ids, host))
             if cuda:
                 torch.cuda.nvtx.range_pop()
             window.after(plan.mb_id)

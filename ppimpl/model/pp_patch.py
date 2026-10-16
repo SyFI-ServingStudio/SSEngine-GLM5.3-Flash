@@ -17,6 +17,9 @@ kernel a stage launches must be the manifest's for its position, with no fallbac
 | `route_hc_expand` | glm5next `model.hc_expand` (vLLM), process-wide | one vectorized concatenation; the fork's broadcast copy ran at ~1 TB/s (M2: input_head x3.3) | M2 `input_head` time (issues.md, "M2 results") |
 | `route_kda` | each KDA layer's `Glm5NextLinearAttention._forward` (vLLM) | Dao causal-conv1d (config 4) + FlashInfer persistent `recurrent_kda` (config 5) on our state blocks, as the design prices | manifest check (configs 4, 5); `bench/kvcheck.py` |
 | `install_topk_router` | `torch.ops._C.top_k_per_row_prefill` and `indexer.build_prefill_chunk_metadata` (vLLM), process-wide | per shape, DeepSelect or vLLM's kernel, whichever row is faster (configs 20/21); `topk_canon` makes the answer deterministic | manifest check (configs 20/21); `test_model_cpu.py::test_topk_choice_matches_the_faster_row_at_every_profiled_shape`; GPU test g |
+| `install_decode_topk_canon` | glm5next `sparse_indexer.get_indexer_topk` (vLLM), process-wide | the indexer's decode top-k (1-token chunks) returns its set in a varying order: `topk_canon` fixes set and order, as on the prefill path | `test_model_gpu.py::test_decode_topk_canonical`; `bench/margin.py --trace-topk` (issues.md, job 7522) |
+| `install_kpool_unaligned` | glm5next `sparse_indexer._kpool_compress_insert` and `kpool_compress.kpool_seed_tail_cache` (vLLM), process-wide | a chunk may start inside a 4-token indexer pool (prefix hits resume at the kept prompt's length); the fork's insert assumes pool-aligned starts. The straddling pool is written from the tail ring + batch rows with the same kernel | `test_kpool_cpu.py` (reference ops); `test_kpool_gpu.py` (fork ops, cache bytes bitwise vs unsplit) |
+| `install_indexer_split` | `DeepseekV32IndexerMetadataBuilder._split_indexer_prefill_chunks` (vLLM), process-wide | the indexer logits of one prefill go out in calls of at most 2 GiB, query rows in multiples of 512: DeepGEMM's `fp8_mqa_logits` costs the same per 512 query rows at long context, so the fork's greedy split (1,022 + 2 rows at 512k + 1k) paid a whole second call for 2 rows (issues.md, "Long context") | `test_indexer_split_cpu.py`; nsys at 512k |
 | `install_sparse_mla_split` | `flashinfer.decode.trtllm_batch_decode_with_kv_cache_mla`, process-wide | a launch over 32,768 rows returns without doing the work on B200; split as the target does (issues.md, "M2 results") | M2 `dsa_moe` at 64k/128k |
 | `install_autotune_memo` | FlashInfer `AutoTuner.choose_one`, process-wide | host time: memoize the tactic lookup outside tuning (same answer) | `test_host_trims_cpu.py::test_autotune_memo_matches_and_returns_callers_runner` |
 | `install_mm_fp4_skip_check` | `flashinfer.mm_fp4`, process-wide | host time: `skip_check=True` after the warm-up ran the checks | GPU tests c, d (same kernels, same token) |
@@ -31,6 +34,7 @@ priorities `StageModel` sets as vLLM's worker does.
 from __future__ import annotations
 
 import contextlib
+import functools
 import json
 import re
 import types
@@ -267,32 +271,52 @@ _ORIG_TOPK = None
 _DS_INPUT_ALIGN = 16
 
 
-def _deep_select(logits, row_ends, out, k):
-    torch.ops.deep_select.topk(logits, k, None, row_ends, False, False, None, out, None, -1, float("-inf"), False,
-                               False)
+# DeepSelect with sorted_index returns the canonical top-k itself (topk_canon's rule: the keys above the k-th value,
+# the lowest-index ties, ascending), so its rows skip canonicalize's extra read of the logits. Only set from the
+# GPU proof in bench/topk_determinism.py (every shape and data kind there: canonical, repeatable, batch-independent).
+DS_CANONICAL = False
+
+
+def _deep_select(logits, row_ends, out, k, sorted_index: bool = False):
+    torch.ops.deep_select.topk(logits, k, None, row_ends, False, sorted_index, None, out, None, -1, float("-inf"),
+                               False, False)
 
 
 def _routed_top_k_per_row_prefill(logits, ks, ke, dst, num_rows, stride0, stride1, k):
-    _top_k_per_row_prefill(logits, ks, ke, dst, num_rows, stride0, stride1, k)
-    if logits.shape[1] > k:      # more keys than k: fix the kernel's set and order (topk_canon.py)
+    canonical = _top_k_per_row_prefill(logits, ks, ke, dst, num_rows, stride0, stride1, k)
+    if logits.shape[1] <= k:      # at most k keys: all of them, nothing to fix
+        return
+    if not canonical:             # fix the kernel's set and order (topk_canon.py)
         topk_canon.canonicalize(logits, ks, ke, dst[:num_rows], k)
+        return
+    lo = 0
+    for a, b in canonical + [(num_rows, num_rows)]:     # the rows between DeepSelect's canonical row ranges
+        if a > lo:
+            topk_canon.canonicalize(logits[lo:a], ks[lo:a], ke[lo:a], dst[lo:a], k)
+        lo = max(lo, b)
 
 
-def _top_k_per_row_prefill(logits, ks, ke, dst, num_rows, stride0, stride1, k):
+def _top_k_per_row_prefill(logits, ks, ke, dst, num_rows, stride0, stride1, k) -> list[tuple[int, int]]:
+    """The top-k into dst; returns the row ranges whose answer is already canonical (DS_CANONICAL)."""
     segments = TOPK_SEGMENTS.get(ks.data_ptr())
     if segments is None or all(seg[3] == "vllm_cuda" for seg in segments):
         if TOPK_LOG is not None:
             TOPK_LOG.append((num_rows, logits.shape[1], "vllm_cuda"))
-        return _ORIG_TOPK(logits, ks, ke, dst, num_rows, stride0, stride1, k)
+        _ORIG_TOPK(logits, ks, ke, dst, num_rows, stride0, stride1, k)
+        return []
+    canonical = []
     for lo, hi, col, backend in segments:
         if TOPK_LOG is not None:
             TOPK_LOG.append((hi - lo, -1, backend))
         if backend == "deep_select":
             # Row r's keys are [col, ke[r]); DeepSelect takes no row start, so the view starts at the request's
             # first key and the ends are relative to it. Indices come back relative to col, as vLLM's do to ks.
-            _deep_select(logits[lo:hi, col:], ke[lo:hi] - col, dst[lo:hi], k)
+            _deep_select(logits[lo:hi, col:], ke[lo:hi] - col, dst[lo:hi], k, sorted_index=DS_CANONICAL)
+            if DS_CANONICAL:
+                canonical.append((lo, hi))
         else:
             _ORIG_TOPK(logits[lo:hi], ks[lo:hi], ke[lo:hi], dst[lo:hi], hi - lo, stride0, stride1, k)
+    return canonical
 
 
 def _topk_segments(start_idx, end_idx, query_start_loc_cpu, compressed_seq_lens_cpu, query_slice, top_k=512):
@@ -339,6 +363,245 @@ def install_topk_router() -> None:
         return md
 
     idx.build_prefill_chunk_metadata = build_and_route
+
+
+_ORIG_DECODE_TOPK = None
+DECODE_TOPK_CANON = True      # bench/margin.py cases may turn it off (the before/after of the same process)
+# Which top-k selects the decode rows: "prefill" (vLLM's top_k_per_row_prefill), "deep_select", or "kernel" (vLLM's
+# decode dispatcher: cooperative/persistent). The cooperative kernel returned a wrong set, run to run, on a real
+# 131,072-pool row (issues.md, job 7558); the prefill top-k gave a valid one every time.
+DECODE_TOPK_PATH = "prefill"
+
+
+def canonical_decode_topk(backend: str):
+    """The indexer's decode top-k (`indexer_topk.get_indexer_topk` call site), then `topk_canon`: the same set and
+    order for the same logits, as on the prefill path. vLLM's decode kernels return their set in an order that varies
+    run to run (issues.md, jobs 7522, 7551), and the sparse attention sums in that order; the cooperative kernel also
+    returned a wrong set on a real 131,072-pool row (7558), so the rows go to DECODE_TOPK_PATH. Rows end where the
+    decode kernels end them; few long rows, so the split canonicalization."""
+    from vllm.model_executor.layers import indexer_topk
+
+    fn = _ORIG_DECODE_TOPK(backend)
+
+    def run(logits, seq_lens, next_n, dst, k, max_seq_len):
+        path = DECODE_TOPK_PATH if _ORIG_TOPK is not None else "kernel"
+        if path == "deep_select" and not indexer_topk.is_deep_select_supported(logits, k):
+            path = "prefill"
+        if path == "deep_select":
+            _deep_select(logits, fn._row_ends(seq_lens, next_n, logits.shape[0]), dst, k)
+        elif path == "prefill":
+            ke = fn._row_ends(seq_lens, next_n, logits.shape[0])
+            _ORIG_TOPK(logits, torch.zeros_like(ke), ke, dst, logits.shape[0], logits.stride(0), logits.stride(1), k)
+        else:
+            fn(logits, seq_lens, next_n, dst, k, max_seq_len)
+        if DECODE_TOPK_CANON and logits.shape[1] > k:
+            ke = fn._row_ends(seq_lens, next_n, logits.shape[0])
+            topk_canon.canonicalize_split(logits, torch.zeros_like(ke), ke, dst, k)
+
+    return run
+
+
+def install_decode_topk_canon() -> None:
+    """Canonicalize the glm5next indexer's decode top-k (chunks of at most 256 tokens take that path)."""
+    global _ORIG_DECODE_TOPK
+    import vllm.models.glm5next.nvidia.sparse_indexer as si
+
+    if _ORIG_DECODE_TOPK is not None:
+        return
+    _ORIG_DECODE_TOPK = si.get_indexer_topk
+    si.get_indexer_topk = functools.cache(canonical_decode_topk)
+
+
+# ---------------------------------------------------------------- kpool indexer: chunks that start inside a pool
+# The fork's prefill K insert (`sparse_indexer._kpool_compress_insert`) pools each completing token with the 3 rows
+# before it in the batch, so it assumes every chunk starts on a pool boundary (start % 4 == 0). A prefix hit resumes
+# at the kept prompt's length and a chunk may end anywhere, so a chunk can start inside a pool: its first complete
+# pool holds `start % 4` tokens of the earlier chunk, which sit in the request's tail ring (state_blocks[5], seeded at
+# the end of every prefill chunk and kept with the context). The override masks that pool out of the batch-wide
+# insert and, before the tail seed overwrites the ring, writes it with the same compress kernel from ring + batch
+# rows (bitwise the pool an unsplit prefill writes: bf16 K and gate in both, same kernel).
+
+@dataclass
+class KpoolHeads:
+    """One microbatch's prefill requests whose chunk starts inside a pool and completes it."""
+    rows: torch.Tensor      # [U, kpool] int64: prefill-slice row of each pool token (ring tokens: any valid row)
+    ring: torch.Tensor      # [U, kpool] bool: the token is from an earlier chunk (read from the tail ring)
+    blocks: torch.Tensor    # [U] int64: the request's tail block
+    last: torch.Tensor      # [U] int64: row of the pool's last token, whose slot is the pool's
+
+
+KPOOL_HEADS: dict[int, KpoolHeads] = {}   # prefill-slice slot-mapping data_ptr -> heads (set per microbatch)
+_KPOOL_PENDING: list[tuple] = []          # insert -> seed hand-off within one indexer call
+_ORIG_KPOOL = None
+
+
+def kpool_heads(starts, q_lens, row_starts, tail_blocks, first: int, row0: int, kpool: int):
+    """Host side: the straddling pools of requests `first..` (the indexer's prefill requests). `row_starts[r]` is
+    request r's first row in the batch, `row0` the prefill slice's first row. Returns numpy (rows, ring, blocks, last)
+    or None."""
+    import numpy as np
+
+    rows, ring, blocks, last = [], [], [], []
+    for r in range(first, len(starts)):
+        m = int(starts[r]) % kpool
+        need = kpool - m
+        if m == 0 or int(q_lens[r]) < need:     # aligned, or the pool does not complete in this chunk (the ring has it)
+            continue
+        end = int(row_starts[r]) - row0 + need - 1
+        j = np.arange(kpool)
+        rows.append(np.maximum(end - (kpool - 1) + j, end - need + 1))
+        ring.append(j < m)
+        blocks.append(int(tail_blocks[r]))
+        last.append(end)
+    if not rows:
+        return None
+    return (np.stack(rows).astype(np.int64), np.stack(ring), np.asarray(blocks, dtype=np.int64),
+            np.asarray(last, dtype=np.int64))
+
+
+def kpool_heads_all(starts, q_lens, row_starts, tail_blocks, kpool: int):
+    """`kpool_heads` of every request, rows counted from the batch's first row, and each head's request: built
+    before the microbatch's one H2D copy, when the indexer's split into decodes and prefills is not known yet."""
+    h = kpool_heads(starts, q_lens, row_starts, tail_blocks, 0, 0, kpool)
+    req = [r for r in range(len(starts)) if int(starts[r]) % kpool and int(q_lens[r]) >= kpool - int(starts[r]) % kpool]
+    return h, req
+
+
+def kpool_heads_suffix(heads, req: list[int], first: int, row0: int):
+    """The heads of requests `first..` with rows counted from `row0` (the indexer's prefill slice), from
+    `kpool_heads_all`: a suffix of its arrays (numpy or device tensors, no copy but the row offsets), or None."""
+    import bisect
+
+    i = bisect.bisect_left(req, first)
+    if heads is None or i == len(req):
+        return None
+    rows, ring, blocks, last = (a[i:] for a in heads)
+    return (rows - row0 if row0 else rows), ring, blocks, (last - row0 if row0 else last)
+
+
+_KPOOL_WINDOWS: dict = {}
+_KPOOL_WINDOWS_OLD: list = []       # outgrown tables stay allocated: queued kernels may still read them
+
+
+def kpool_windows(n: int, kpool: int, device) -> torch.Tensor:
+    """[n, kpool] int64: row r's pool window r-kpool+1 .. r, clamped at 0. A view of one per-device table (grown on
+    demand) instead of 7 small launches per DSA layer; the stage-0 host launches these before its first MoE."""
+    key = (str(device), kpool)
+    t = _KPOOL_WINDOWS.get(key)
+    if t is None or t.shape[0] < n:
+        m = max(n, 8192, 0 if t is None else 2 * t.shape[0])
+        pos = torch.arange(m, device=device)
+        if t is not None:
+            _KPOOL_WINDOWS_OLD.append(t)
+        t = (pos - (kpool - 1)).clamp_min(0)[:, None] + torch.arange(kpool, device=device)[None, :]
+        _KPOOL_WINDOWS[key] = t
+    return t[:n]
+
+
+def kpool_compress_insert(k, gate_score, ape, kv_cache, slot_mapping, kpool, head_dim, round_scale, *, ops=None):
+    """`sparse_indexer._kpool_compress_insert`, with straddling pools masked out and handed to the tail seed."""
+    ops = ops or _ORIG_KPOOL["ops"]
+    assert not _KPOOL_PENDING, "kpool: a straddling pool was not written (no tail seed after the insert)"
+    n = slot_mapping.shape[0]
+    heads = KPOOL_HEADS.get(slot_mapping.data_ptr()) if n else None
+    if n >= kpool:
+        write_mask = slot_mapping >= 0
+        write_mask[:kpool - 1] = False          # rows whose pool starts before the slice
+        if heads is not None:
+            write_mask.index_fill_(0, heads.last, False)   # not `[idx] = False`: that copies the scalar H2D and syncs
+        idx = kpool_windows(n, kpool, k.device)
+        ops.kpool_compress_and_write_cache(kv_cache, k[idx], gate_score[idx], ape, slot_mapping.to(torch.int64),
+                                           pool_size=kpool, head_dim=head_dim, write_mask=write_mask,
+                                           round_scale=round_scale, write_cache=True, return_compressed=False)
+    if heads is not None:
+        _KPOOL_PENDING.append((heads, k, gate_score, ape, kv_cache, slot_mapping, kpool, head_dim, round_scale))
+
+
+def kpool_seed_tail_cache(tail_kv_cache, key, gate_score, tslot, kpool, head_dim=128, *, ops=None, seed=None):
+    """`kpool_ops.kpool_seed_tail_cache`, first writing the straddling pools from the ring the seed overwrites."""
+    ops = ops or _ORIG_KPOOL["ops"]
+    seed = seed or _ORIG_KPOOL["seed"]
+    if _KPOOL_PENDING:
+        heads, k, g, ape, kv_cache, sm, kp, hd, rs = _KPOOL_PENDING.pop()
+        assert k.data_ptr() == key.data_ptr() and kp == kpool, "kpool: seed is not for the pending insert"
+        ring = heads.ring[:, :, None]
+        slot_k = torch.where(ring, tail_kv_cache[heads.blocks, 0], k[heads.rows])
+        slot_s = torch.where(ring, tail_kv_cache[heads.blocks, 1], g[heads.rows])
+        ops.kpool_compress_and_write_cache(kv_cache, slot_k, slot_s, ape, sm[heads.last].to(torch.int64),
+                                           pool_size=kp, head_dim=hd, write_mask=None, round_scale=rs,
+                                           write_cache=True, return_compressed=False)
+    seed(tail_kv_cache, key, gate_score, tslot, kpool, head_dim)
+
+
+def install_kpool_unaligned() -> None:
+    """Route the fork's kpool prefill insert and tail seed through the overrides above (process-wide)."""
+    global _ORIG_KPOOL
+    import vllm.models.glm5next.nvidia.sparse_indexer as si
+    from vllm.models.glm5next.nvidia.ops import kpool_compress as kops
+
+    if _ORIG_KPOOL is not None:
+        return
+    _ORIG_KPOOL = {"ops": types.SimpleNamespace(kpool_compress_and_write_cache=kops.kpool_compress_and_write_cache),
+                   "seed": kops.kpool_seed_tail_cache}
+    si._kpool_compress_insert = kpool_compress_insert
+    kops.kpool_seed_tail_cache = kpool_seed_tail_cache
+
+
+# ---------------------------------------------------------------- indexer prefill split
+
+INDEXER_MAX_LOGITS_BYTES = 2 << 30   # one call's FP32 logits (the fork's default is 512 MiB)
+INDEXER_ROW_ALIGN = 512              # query rows per DeepGEMM mqa_logits step at long context
+_ORIG_INDEXER_SPLIT = None
+
+
+def split_indexer_prefill_chunks(seq_lens: list[int], query_lens: list[int], workspace_size: int,
+                                 max_logits_bytes: int = INDEXER_MAX_LOGITS_BYTES, request_offset: int = 0,
+                                 align: int = INDEXER_ROW_ALIGN) -> list[tuple[slice, slice]]:
+    """The fork's `_split_indexer_prefill_chunks` (requests packed while their keys fit the workspace and rows x keys
+    fit the logits budget; one request too large for the budget is cut along its query rows), except that a request
+    cut along its rows is cut into multiples of `align` rows when the budget holds at least that many.
+
+    Why: DeepGEMM's `fp8_mqa_logits` takes the same time for 1 to 512 query rows at long context and grows per 512
+    rows (L1 rows at 131,072 keys: 0.284 ms at 128 rows, 0.288 at 512, 0.573 at 1,024). The fork cut 1,024 rows at 512k
+    context (131,328 pools) into 1,022 + 2 under its 512 MiB budget: 0.58 + 0.24 ms per layer instead of 0.57 (job
+    7404). Here: one call of 1,024 rows; 8,192 rows go as 3,584 + 3,584 + 1,024."""
+    chunks: list[tuple[slice, slice]] = []
+    n, max_elems, end = len(seq_lens), max_logits_bytes // 4, 0
+    while end < n:
+        start, m, k = end, 0, 0
+        while end < n:
+            nm, nk = m + query_lens[end], k + seq_lens[end]
+            if nk <= workspace_size and nm * nk <= max_elems:
+                m, k, end = nm, nk, end + 1
+            else:
+                break
+        if end == start:
+            m, k, end = query_lens[end], seq_lens[end], end + 1
+        max_q = max(1, max_elems // k) if k > 0 else max(1, m)
+        if max_q < m and max_q >= align:
+            max_q -= max_q % align
+        req = slice(start + request_offset, end + request_offset)
+        chunks += [(req, slice(q, min(q + max_q, m))) for q in range(0, m, max_q)]
+    return chunks
+
+
+def install_indexer_split() -> None:
+    """Route the indexer metadata builder's prefill split through `split_indexer_prefill_chunks` (process-wide; the
+    builder's own `max_logits_bytes`, from VLLM_SPARSE_INDEXER_MAX_LOGITS_MB, is replaced by
+    INDEXER_MAX_LOGITS_BYTES)."""
+    global _ORIG_INDEXER_SPLIT
+    from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerMetadataBuilder as B
+
+    if _ORIG_INDEXER_SPLIT is not None:
+        return
+    _ORIG_INDEXER_SPLIT = B.__dict__["_split_indexer_prefill_chunks"]
+
+    def split(seq_lens_cpu, query_lens_cpu, workspace_size, max_logits_bytes, request_offset=0):
+        return split_indexer_prefill_chunks([int(v) for v in seq_lens_cpu.tolist()],
+                                            [int(v) for v in query_lens_cpu.tolist()], workspace_size,
+                                            INDEXER_MAX_LOGITS_BYTES, request_offset)
+
+    B._split_indexer_prefill_chunks = staticmethod(split)
 
 
 # ---------------------------------------------------------------- sparse MLA launch size

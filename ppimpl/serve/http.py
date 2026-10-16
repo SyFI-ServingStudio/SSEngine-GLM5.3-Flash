@@ -17,17 +17,17 @@ def usage(prompt_tokens: int, cached: int = 0) -> dict:
             "prompt_tokens_details": {"cached_tokens": cached}}
 
 
-def sse_body(req_id: str, tok: int, n: int) -> bytes:
+def sse_body(req_id: str, tok: int, n: int, cached: int = 0) -> bytes:
     """One event with the token, one usage event, [DONE]."""
     token_event = {"id": req_id, "choices": [{"index": 0, "token_ids": [tok], "finish_reason": "length"}],
                    "usage": None}
-    usage_event = {"id": req_id, "choices": [], "usage": usage(n)}
+    usage_event = {"id": req_id, "choices": [], "usage": usage(n, cached)}
     return b"data: " + _enc.encode(token_event) + b"\n\ndata: " + _enc.encode(usage_event) + b"\n\ndata: [DONE]\n\n"
 
 
-def json_body(req_id: str, tok: int, n: int) -> bytes:
+def json_body(req_id: str, tok: int, n: int, cached: int = 0) -> bytes:
     return _enc.encode({"id": req_id, "choices": [{"index": 0, "token_ids": [tok], "finish_reason": "length"}],
-                        "usage": usage(n)})
+                        "usage": usage(n, cached)})
 
 
 async def read_body(receive) -> bytes:

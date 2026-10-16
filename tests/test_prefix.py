@@ -143,3 +143,72 @@ def test_waiting_size_counts_what_is_cached_at_arrival():
     assert hit.fresh == 2000 and s.backlog() == 2500                     # the backlog counts new tokens
     mb = s.next_microbatch(0)
     assert [c.req.req_id for c in mb] == ["a1", "b1"] and mb[0].start == 100_000
+
+
+def test_run_watch_stops_the_client_at_the_first_fault(tmp_path):
+    """bench/run.py fails fast: a worker traceback, a failed client step or a dead server stops the client."""
+    import subprocess
+    import sys
+
+    from bench.run import run_fault, watch
+
+    def procs():
+        server = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        client = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        return server, client
+
+    (tmp_path / "server.log").write_text("cpus: {}\nserving\n")
+    (tmp_path / "client.log").write_text("sessions 1/9 | steps 3/90 completed=3 failed=0 | elapsed=1.0s\n")
+    server, client = procs()
+    try:
+        assert run_fault(tmp_path, server, {}) is None
+        (tmp_path / "worker2.log").write_text("Traceback (most recent call last):\n  boom\n")
+        assert watch(tmp_path, server, client, 30, every_s=0.1) == "worker2.log: Traceback (most recent call last):"
+        assert client.poll() is not None
+        (tmp_path / "worker2.log").unlink()
+        with open(tmp_path / "client.log", "a") as f:
+            f.write("sessions 2/9 | steps 4/90 completed=3 failed=1 | elapsed=1.5s\n")
+        assert run_fault(tmp_path, server, {}) == "client: failed=1"
+        server.kill()
+        server.wait()
+        assert run_fault(tmp_path, server, {}).startswith("server exited with")
+    finally:
+        for p in (server, client):
+            p.kill()
+
+
+def test_window_metrics_match_the_handoff_metrics_script(tmp_path):
+    """bench.prefix's port of data/metrics.py gives its numbers over 20 minutes (req-frontend log, v12: post = submit),
+    and a shorter window counts only rounds whose first token comes inside it."""
+    import json
+    import subprocess
+    import sys
+
+    from bench.common import HANDOFF
+    import numpy as np
+
+    from bench.prefix import real_arrays, window_metrics
+
+    rng = np.random.default_rng(1)
+    lines = []
+    for i in range(300):
+        submit = 1000.0 + i * 0.5 + rng.random()
+        ttft = float(rng.uniform(5, 4000))
+        prefix = int(rng.integers(0, 50000))
+        lines.append({"outcome": {"request_id": f"r{i}", "status": "SUCCESS", "submit_timestamp": submit,
+                                  "post_timestamp": submit, "first_token_id_ms": ttft,
+                                  "server_usage": {"prompt_tokens": prefix + 100,
+                                                   "cached_prompt_tokens": int(prefix * rng.random())}},
+                      "source": {"data": {"input_len": 100, "prefix_len": prefix}}})
+    f = tmp_path / "requests.jsonl"
+    f.write_text("".join(json.dumps(x) + "\n" for x in lines))
+    ref = json.loads(subprocess.run([sys.executable, str(HANDOFF / "data/metrics.py"), str(f)], check=True,
+                                    capture_output=True, text=True).stdout)
+    rows = real_arrays(f)
+    got = window_metrics(rows, 20 * 60e3)
+    for k in ("rounds", "rounds_per_s", "new_tokens_per_s", "computed_tokens_per_s", "prefix_hit_share"):
+        assert got[k] == pytest.approx(ref[k], rel=1e-12)
+    for p in ("p50", "p90", "p99", "max"):
+        assert got["ttft_s"][p] == pytest.approx(ref["ttft_s"][p], rel=1e-12)
+    short = window_metrics(rows, 60e3)
+    assert short["rounds"] == int((rows[1] < 60e3).sum()) < got["rounds"]

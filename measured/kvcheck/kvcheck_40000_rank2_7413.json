@@ -1,0 +1,110 @@
+{
+ "stage": 2,
+ "prompt_tokens": 40000,
+ "chunk": 8000,
+ "chunk_b": 8192,
+ "variants": {
+  "whole_filler": {
+   "rel_l2": 0.0,
+   "max_abs": 0.0,
+   "finite": true,
+   "per_chunk": null
+  },
+  "chunked": {
+   "rel_l2": 0.0,
+   "max_abs": 0.0,
+   "finite": true,
+   "per_chunk": [
+    {
+     "start": 0,
+     "tokens": 8000,
+     "rel_l2": 0.0
+    },
+    {
+     "start": 8000,
+     "tokens": 8000,
+     "rel_l2": 0.0
+    },
+    {
+     "start": 16000,
+     "tokens": 8000,
+     "rel_l2": 0.0
+    },
+    {
+     "start": 24000,
+     "tokens": 8000,
+     "rel_l2": 0.0
+    },
+    {
+     "start": 32000,
+     "tokens": 8000,
+     "rel_l2": 0.0
+    }
+   ]
+  },
+  "chunked_b": {
+   "rel_l2": 0.0,
+   "max_abs": 0.0,
+   "finite": true,
+   "per_chunk": [
+    {
+     "start": 0,
+     "tokens": 8192,
+     "rel_l2": 0.0
+    },
+    {
+     "start": 8192,
+     "tokens": 8192,
+     "rel_l2": 0.0
+    },
+    {
+     "start": 16384,
+     "tokens": 8192,
+     "rel_l2": 0.0
+    },
+    {
+     "start": 24576,
+     "tokens": 8192,
+     "rel_l2": 0.0
+    },
+    {
+     "start": 32768,
+     "tokens": 7232,
+     "rel_l2": 0.0
+    }
+   ]
+  },
+  "scrambled": {
+   "rel_l2": 0.0,
+   "max_abs": 0.0,
+   "finite": true,
+   "per_chunk": [
+    {
+     "start": 0,
+     "tokens": 8000,
+     "rel_l2": 0.0
+    },
+    {
+     "start": 8000,
+     "tokens": 8000,
+     "rel_l2": 0.0
+    },
+    {
+     "start": 16000,
+     "tokens": 8000,
+     "rel_l2": 0.0
+    },
+    {
+     "start": 24000,
+     "tokens": 8000,
+     "rel_l2": 0.0
+    },
+    {
+     "start": 32000,
+     "tokens": 8000,
+     "rel_l2": 0.0
+    }
+   ]
+  }
+ }
+}

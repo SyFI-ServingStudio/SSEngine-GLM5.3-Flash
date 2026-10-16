@@ -13,7 +13,7 @@ Construction:
 
 Forward runs the layers inside vLLM's forward context; no host sync: plan -> metadata (host) -> GPU work.
 
-CUDA graphs (`cuda_graphs`): a microbatch of up to the largest bucket (`GRAPH_BUCKETS`, powers of 2) is padded to its
+CUDA graphs (`cuda_graphs`): a microbatch of up to the largest bucket (`GRAPH_BUCKETS`) is padded to its
 bucket and replayed from the fork's breakable CUDA graph (`vllm.compilation.breakable_cudagraph`): one capture per
 bucket of the whole stage forward, cut at the ops the fork marks as eager breaks (MLA attention, the kpool indexer,
 our KDA prefill), which run eagerly on each replay with the microbatch's own metadata. The captured segments (mHC,
@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import time
 import warnings
 from pathlib import Path
 
@@ -46,7 +47,12 @@ HIDDEN_WIDTH = 4 * 4096
 TACTICS = Path(os.environ.get("PPIMPL_FI_TACTICS",
                               Path(__file__).resolve().parents[1] / "data" / "flashinfer_tactics_b200.json"))
 RESERVE_GB = 13.6     # 1_contract.md §1: activations and workspace beside weights and KV (and the CUDA graph pool)
-GRAPH_BUCKETS = (128, 256, 512, 1024, 2048, 4096, 8192)   # token counts captured as CUDA graphs
+# token counts captured as CUDA graphs: 128, then every 256 to 8192 (33). A microbatch pads to its bucket, so
+# coarse buckets cost compute: with powers of 2 a 3,000-token prompt ran as 4,096 (round 0 TTFT 114 vs 96.7 ms
+# target, x1.18; job 7462), and on the N=400 smoke's stage-0 sizes (7569) the pad was 3.8% of the tokens (every 1024:
+# 1.5%; every 256: 0.6%). The graph pool is shared and sized by the 8192 bucket, so more buckets cost little memory.
+GRAPH_BUCKETS = (128,) + tuple(range(256, 8192 + 1, 256))
+LONG_WARMUP = 65536    # context at which warm-up runs its long continuation chunks (StageModel.warmup)
 
 
 def graph_bucket(num_tokens: int, buckets) -> int | None:
@@ -67,6 +73,10 @@ def build_vllm_config(checkpoint: str, max_num_batched_tokens: int, max_model_le
     # sparse MLA through TRTLLM's MQA kernel for every prefill (config 25), as the targets price it: the fork's dense
     # MHA prefill for prompts within the top-k (<= 2,048 pools) is slower (M2: DSA layer x1.11 at 2k)
     vc.attention_config.sparse_mla_force_mqa = True
+    # enforce_eager turns vLLM's JIT kernel warm-up off (VllmConfig: "equivalent to --kernel_config.
+    # enable_jit_warmup=False"), and with it every kernel's registration of its compile keys; StageModel compiles
+    # them in warm-up (`_warm_jit_keys`), so keep it on (7693: 1 registration with it off)
+    vc.kernel_config.enable_jit_warmup = True
     return vc
 
 
@@ -165,6 +175,24 @@ class GraphEntry:
         self.out: tuple = ()
 
 
+def graph_capture(pool):
+    """The fork's BreakableCUDAGraphCapture, except that each graph segment is replayed as soon as it is captured.
+    An eager break runs during capture (it is not captured), on inputs the segments before it would have computed;
+    without the replay those are whatever the shared graph pool last held there (another bucket's tensors, read as
+    other dtypes: NaN keys, so NaN logits and out-of-range top-k rows: the illegal memory access with 12 buckets in one
+    pool, 3,072 after 8,192-4,096, job 7559). With it, a capture is an ordinary forward of the dummy plan."""
+    from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
+
+    class Capture(BreakableCUDAGraphCapture):
+        def _end_segment(self) -> None:
+            g = self._current_graph if self._capturing else None
+            super()._end_segment()
+            if g is not None:
+                g.replay()
+
+    return Capture(pool=pool)
+
+
 class StageModel:
     def __init__(self, cfg, stage: int, device: torch.device, *, layers: range | None = None,
                  first: bool | None = None, last: bool | None = None, num_blocks: int | None = None,
@@ -200,7 +228,12 @@ class StageModel:
         init_vllm_distributed(device)
         init_workspace_manager(device)
 
-        with set_default_torch_dtype(vc.model_config.dtype), torch.device(device):
+        # vLLM's JIT kernels register their compile-key space while the model is built (as GPUModelRunner's init
+        # does under JitWarmupRegistry.capture); `warmup` compiles every key (`_warm_jit_keys`)
+        from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
+
+        self.jit_registry = JitWarmupRegistry(vc)
+        with set_default_torch_dtype(vc.model_config.dtype), torch.device(device), self.jit_registry.activate():
             with pp_patch.stage_scope(self.layer_range, self.first, self.last):
                 model = initialize_model(vllm_config=vc)
         model.load_weights(pp_patch.stage_weights(Path(ckpt), self.layer_range, self.first, self.last))
@@ -225,7 +258,10 @@ class StageModel:
             if layer.layer_kind == "kda":
                 pp_patch.route_kda(layer.self_attn)
         pp_patch.install_topk_router()
+        pp_patch.install_kpool_unaligned()
+        pp_patch.install_decode_topk_canon()
         pp_patch.install_sparse_mla_split()
+        pp_patch.install_indexer_split()
         # host trims (no kernel or argument changes): env cache, FlashInfer tactic memo / mm_fp4 skip_check, plain
         # parameters
         self.host_trims = self.install_host_trims() if host_trims else None
@@ -251,9 +287,13 @@ class StageModel:
         self.graphs: dict[int, GraphEntry] = {}
         self.graph_info: dict = {"enabled": False}
         if warmup:
+            t0 = time.perf_counter()
             self.warmup()
+            warmup_s = round(time.perf_counter() - t0, 1)
             if st["cuda_graphs"] if cuda_graphs is None else cuda_graphs:
                 self.capture_graphs()
+            self.graph_info["warmup_s"] = warmup_s
+            self.graph_info["jit_warmup"] = self.jit_warmup
 
     def install_host_trims(self) -> dict:
         mods = [m for m in (*self.layers, self.embed, self.norm, self.lm_head) if m is not None]
@@ -266,7 +306,10 @@ class StageModel:
         autotuned pass at the microbatch budget, as vLLM's `kernel_warmup` does. Shapes: one request at the full
         budget (indexer and both top-k paths), then two requests, one continuing a cached prefix (conv and KDA initial
         state, chunk start > 0), then every power-of-2 length from 512 below the budget, a length not divisible by
-        16, and the first layer's mHC pre at every split count. Uses blocks 1.. before any request holds them.
+        16, one request alone continuing a cached prefix (start divisible by 16 and not; and past `LONG_WARMUP` when the
+        pool and max_model_len hold it), the served shapes of `_warm_served_shapes` (decode rows, many requests
+        continuing prefixes, unaligned pool starts), and the first layer's mHC pre at every split count. Uses blocks
+        1.. before any request holds them.
         `self.tactics` records the source."""
         from types import SimpleNamespace as NS
 
@@ -314,9 +357,93 @@ class StageModel:
                 run(NS(mb_id=-3, chunks=[chunk("wb", 0, p, 1)]))
                 p *= 2
             run(NS(mb_id=-4, chunks=[chunk("wo", 0, 1000, 1)]))
+            # one request alone continuing its cached prefix, as every round >= 1 is: the KDA state gather of one
+            # slot loaded a torch module on the first such request (8k + 1k, 7432: 23 ms cuLibraryLoadData + 11.5
+            # ms lazy kernel load); and the same at a start and length not divisible by 16 (P = 100,003)
+            run(NS(mb_id=-5, chunks=[chunk("wc", 1024, 256, 1)]))
+            run(NS(mb_id=-6, chunks=[chunk("wu", 1003, 253, 1)]))
+            # past 64k of context (when the pool holds it): the sparse-MLA index remap at the long top-k width
+            # (NUM_TOPK_TOKENS 2176, 180 ms Triton compile on the first chunk ending at 65,536, job 7505) and
+            # topk_canon (the indexer is wider than k), at a row count divisible by 4 and not (its scratch rows are
+            # 16-byte aligned or not: a 1,699-row chunk compiled three kernels, 1.2 s, job 7505)
+            if (self.num_blocks - 1 - 6) * B >= LONG_WARMUP + 1003 + 253 \
+                    and LONG_WARMUP + 1003 + 253 <= self.vc.model_config.max_model_len:
+                run(NS(mb_id=-7, chunks=[chunk("wl", LONG_WARMUP, 256, 1)]))
+                run(NS(mb_id=-8, chunks=[chunk("wv", LONG_WARMUP + 1003, 253, 1)]))
+            for mb_id, specs in self._warm_served_shapes():
+                run(NS(mb_id=mb_id, chunks=self._warm_chunks(specs)))
             self._warm_mhc_pre()
+        self._warm_jit_keys()
         torch.cuda.synchronize(self.device)
         pp_patch.clear_autotune_memo()     # tactics may have changed while tuning
+
+    def _warm_chunks(self, specs: list[tuple[int, int]]) -> list:
+        """Warm-up chunks (start, tokens), each continuing a cached prefix of `start` tokens, on blocks 1.. laid out
+        one request after another (6 state blocks each)."""
+        from types import SimpleNamespace as NS
+
+        B, base, out = self.kv.block_tokens, 1, []
+        for i, (start, n) in enumerate(specs):
+            nb = -(-(start + n) // B)
+            out.append(NS(req_id=f"ws{i}", start=start, num_tokens=n, kv_blocks=list(range(base, base + nb)),
+                          is_last=True, state_blocks=list(range(base + nb, base + nb + 6)), token_ids=[1] * n))
+            base += nb + 6
+        return out
+
+    def _warm_served_shapes(self):
+        """The served microbatch shapes whose kernels the earlier warm-up shapes did not compile (smoke 7658: 11
+        Triton compiles per stage during the run, 0.3-3.3 s pipeline stalls). Triton compiles a kernel per constexpr
+        value and per specialization of its integer and pointer arguments (an integer divisible by 16 or not, a
+        pointer 16-byte aligned or not), so each kernel has to run at every class the server meets:
+        - rows past k pools (topk_canon kth / count / finish) at row counts 2 and 3 mod 4 (its scratch rows are
+          16-byte aligned or not by the row count), and 6,246 rows (7658's microbatch 2);
+        - a 1-token append after a cached prefix (the indexer's decode metadata, the kpool decode update, the split
+          canonicalization) at every g0 table width (`StageMetadata.table_width`: powers of 2 of blocks, and the cap
+          at max_model_len), which also covers the split canonicalization's piece counts;
+        - 1, 2 and 3 such rows ahead of prefill requests that start inside a pool (the kpool insert with its write
+          mask and tail seed, on slices offset by the decode rows);
+        - 2 to 9 requests continuing cached prefixes, with and without one starting fresh (the indexer's prefill
+          chunk metadata over request slices).
+        Shapes the KV pool, the microbatch budget or max_model_len cannot hold are skipped. Yields
+        (mb_id, [(start, tokens)])."""
+        B = self.kv.block_tokens
+        free = self.num_blocks - 1
+        mml = self.vc.model_config.max_model_len
+
+        def fits(specs):
+            return (sum(-(-(st + n) // B) + 6 for st, n in specs) <= free
+                    and sum(n for _, n in specs) <= self.max_tokens and all(st + n <= mml for st, n in specs))
+
+        shapes = [[(8192, 254)], [(8192, 255)], [(8192, 6246)]]
+        b = 1
+        while True:                            # one 1-token append per table width, the last one at the cap
+            P = b * B - 5
+            if P + 1 > mml - 1:
+                shapes.append([(mml - 2, 1)])
+                break
+            shapes.append([(P, 1)])
+            b *= 2
+        prefills = [(15290, 646), (36051, 1203), (20001, 300)]           # starts 2, 3, 1 mod 4
+        for d in (1, 2, 3):
+            shapes.append([(40001 + 7 * i, 1) for i in range(d)] + prefills)
+        for r in range(2, 10):
+            reqs = [(20789 + 997 * i, 128 + 61 * i) for i in range(r)]
+            shapes.append(reqs)
+            shapes.append(reqs[:-1] + [(0, 300)])
+        for i, specs in enumerate(shapes):
+            if fits(specs):
+                yield -100 - i, specs
+
+    def _warm_jit_keys(self) -> None:
+        """Compile every compile key vLLM's JIT kernels declare for this model (`JitWarmupRegistry.warmup`, as vLLM's
+        `kernel_warmup` does): each Triton integer argument at 1, divisible by 16 and neither, each pointer 16-byte
+        aligned and not. Shapes alone miss classes the server meets (smoke 7683: BuildPrefillChunkMetadataKernel at
+        an unaligned request slice with a query slice divisible by 16, mb 1095, 72-83 ms on every stage). Keys
+        already compiled by the shapes above are cache hits."""
+        t0 = time.perf_counter()
+        self.jit_registry.warmup()
+        self.jit_warmup = {"registrations": len(self.jit_registry), "s": round(time.perf_counter() - t0, 1)}
+        print(f"stage {self.stage}: JIT key warm-up {self.jit_warmup}", flush=True)
 
     def _warm_mhc_pre(self) -> None:
         """The standalone mHC pre of the stage's first layer (layer 0 after the input head, or after the stage edge)
@@ -357,7 +484,6 @@ class StageModel:
 
     def _capture_graphs(self, buckets) -> dict:
         import gc
-        import time
         from types import SimpleNamespace as NS
 
         B = self.kv.block_tokens
@@ -381,9 +507,7 @@ class StageModel:
                 with self._graph_context(b, e):
                     self._graph_body(e)                       # eager once at this shape, PIECEWISE paths
                 torch.cuda.synchronize(self.device)
-                from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
-
-                e.capture = BreakableCUDAGraphCapture(pool=pool)
+                e.capture = graph_capture(pool)
                 with self._graph_context(b, e), e.capture:
                     e.out = self._graph_body(e)
                 torch.cuda.synchronize(self.device)

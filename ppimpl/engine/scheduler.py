@@ -56,6 +56,10 @@ class Request:
     read_start_ns: int | None = None
     read_land_ns: int | None = None
     admit_ns: int | None = None
+    hit_memo: tuple | None = None      # (kept context, hit): KvManager's comparison of the prompt with it
+    output_token: int | None = None    # the token the prompt got (server; kept with the context)
+    room_wait_ns: int | None = None    # first time it was at the head and its footprint did not fit
+    admit_info: dict | None = None     # KvManager.allocate: how the prefix cache served it (hit_kind, ...)
 
     @property
     def remaining(self) -> int:
@@ -400,6 +404,8 @@ class Scheduler:
             if n == 0:
                 break
             if src != LANDED and not self.kv.fits(r):
+                if r.room_wait_ns is None:
+                    r.room_wait_ns = now_ns
                 break
             self._take(src)
             if src != LANDED:
@@ -429,6 +435,8 @@ class Scheduler:
             return "passed"
         if not self.kv.fits(r):
             self.stats["blocked_reads"] += 1
+            if r.room_wait_ns is None:
+                r.room_wait_ns = now_ns
             return "blocked"
         r.hbm_tokens = self.kv.allocate(r)
         r.alloc = self.kv.held[r.req_id]

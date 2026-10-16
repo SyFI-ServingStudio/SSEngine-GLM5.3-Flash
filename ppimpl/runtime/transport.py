@@ -19,7 +19,7 @@ import zmq
 
 class Chunk(msgspec.Struct, array_like=True):
     req_id: str
-    start: int                    # tokens of this request already in KV (computed by earlier chunks)
+    start: int                    # tokens of this request already in KV (cached + computed by earlier chunks)
     num_tokens: int               # tokens computed in this chunk
     kv_blocks: list[int]          # DSA blocks covering [0, start + num_tokens)
     state_blocks: list[int]       # 6 KDA state blocks
@@ -53,6 +53,7 @@ class StageDone(msgspec.Struct, tag=True):
     start_ns: int                 # GPU start of the stage's first kernel (host clock)
     end_ns: int                   # GPU end of its last kernel, before the send
     tokens: list[tuple[str, int]] | None = None   # stage 3: (req_id, greedy token) per is_last chunk
+    host_ns: tuple[int, int, int] | None = None    # host clock: plan received, forward called, forward returned
 
 
 class WorkerError(msgspec.Struct, tag=True):
