@@ -103,6 +103,7 @@ class Controller:
         self.intake_cpus: set[int] | None = None
         self.intakes_ready: set[bytes] = set()
         self.slabs = SlabReader()            # the intakes' shared-memory prompt slabs (ppimpl/serve/slab.py)
+        self.slab_views: set[str] = set()    # requests admitted on a view of a slab, not yet copied out (_own)
         self.answered: dict[str, dict] = {}  # answered, response not yet sent: id -> log record
         self.pack, self.unpack = msgspec.msgpack.Encoder(), msgspec.msgpack.Decoder()
 
@@ -340,6 +341,8 @@ class Controller:
                 if self.timer_at is not None and time.time_ns() >= self.timer_at:
                     self.timer_at = None
                 self._pump()
+                for req_id in list(self.slab_views):
+                    self._own(req_id)
                 if time.monotonic() >= next_check:
                     next_check = time.monotonic() + 1.0
                     self._check_procs()
@@ -375,7 +378,7 @@ class Controller:
         if kind == b"Q" or kind == b"M":
             key, req_id, arrival_ns, *stamps = self.unpack.decode(frames[2])
             ids = np.frombuffer(frames[3], np.int32) if kind == b"Q" else \
-                self.slabs.copy(*self.unpack.decode(frames[3]))
+                self.slabs.view(*self.unpack.decode(frames[3]))
             recv_ns = time.time_ns()     # the ids are here
             why = self.failed or (None if self.sched.kv.fits_ever(len(ids))
                                   else f"prompt of {len(ids)} tokens does not fit the KV pool")
@@ -389,6 +392,8 @@ class Controller:
             while req_id in self.live:
                 req_id, k = f"{base}#{k}", k + 1
             self.live.add(req_id)
+            if kind == b"M":
+                self.slab_views.add(req_id)   # _own copies them after this round's dispatch
             self._admit(req_id, ids, arrival_ns, Remote(ident, key), (*stamps, recv_ns))
         elif kind == b"D":
             req_id, sent_ns = self.unpack.decode(frames[2])
@@ -492,6 +497,8 @@ class Controller:
             now = time.time_ns()
             done = []
             for req_id, tok in d.tokens:
+                if req_id in self.slab_views:   # before its context is kept
+                    self._own(req_id)
                 req = self.reqs[req_id][0]
                 req.output_token = tok
                 self.sched.finish(req)
@@ -499,8 +506,21 @@ class Controller:
             if done:
                 self.loop.call_soon_threadsafe(self._answered, done)
 
+    def _own(self, req_id: str):
+        """A request admitted on a view of an intake's slab: copy its ids out (the intake reuses the range once the
+        request is answered; the scheduler's kept contexts and the response log keep them longer)."""
+        self.slab_views.discard(req_id)
+        entry = self.reqs.get(req_id)
+        if entry is None:
+            return
+        req, _, info = entry
+        req.token_ids = req.token_ids.copy()
+        info["_prompt"] = req.token_ids
+
     def _reply(self, req: Request, tok: int, now: int) -> list:
         """Send the request's answer (intake) or return it for the event loop (in-process HTTP)."""
+        if req.req_id in self.slab_views:
+            self._own(req.req_id)
         _, fut, info = self.reqs.pop(req.req_id)
         info["token_ms"] = self._ms(now)
         info["token"] = tok

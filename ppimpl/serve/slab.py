@@ -3,8 +3,9 @@
 A 512k-token prompt is 2.1 MB of int32 ids. Sent as a zmq frame over tcp it took 2-4 ms from the intake's send to
 the controller's receive (CPU fake server, 512k bring-up sessions); a small frame takes 0.4-0.8 ms. Instead, each
 intake owns one file in /dev/shm (`Slab`), parses long prompts' ids into it and sends only (offset, count); the
-controller maps the same file (`SlabReader`) and copies the ids out on receipt. The intake frees the range when the
-request is answered (the controller copied it long before). Prompts below `SLAB_FROM` bytes, and any that do not
+controller maps the same file (`SlabReader`) and admits the request on a view of the ids, then copies them out after
+its first dispatch (off the arrival -> dispatch path). The intake frees the range when the request is answered (the
+controller copied it long before, or just before the answer). Prompts below `SLAB_FROM` bytes, and any that do not
 fit, go as a zmq frame as before.
 
 The file is created before the intake's ready message, which carries its name; the controller maps it when it
@@ -83,4 +84,9 @@ class SlabReader:
             os.close(fd)
 
     def copy(self, name: str, offset: int, n: int) -> np.ndarray:
-        return np.frombuffer(self.maps[name], np.int32, n, offset).copy()
+        return self.view(name, offset, n).copy()
+
+    def view(self, name: str, offset: int, n: int) -> np.ndarray:
+        """The ids in place (read-only): valid until the controller answers the request (the intake then frees the
+        range), so whoever keeps them past that copies them first (Controller._own)."""
+        return np.frombuffer(self.maps[name], np.int32, n, offset)

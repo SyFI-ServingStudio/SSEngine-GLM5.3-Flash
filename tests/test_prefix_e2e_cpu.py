@@ -179,3 +179,29 @@ def test_off_by_default(tmp_path):
         assert srv.stop() == 0
     cache = json.loads((tmp_path / "run/cache.json").read_text())
     assert cache["keep_sessions"] is False and cache["hits"] == 0 and cache["kept_sessions"] == 0
+
+
+def test_long_prompts_through_the_slab(server):
+    """Prompts of at least SLAB_FROM bytes of ids go through an intake's shared-memory slab (intake2); the controller
+    admits them on a view of the slab and copies them out before the intake reuses the range: the kept context, the
+    exact repeat and the logged prompt hash are the prompt's own after later long prompts reuse the range. (A kept
+    view would always read the latest prompt parsed into the range: a prompt that differs inside the kept context
+    would then hit.)"""
+    from ppimpl.runtime.controller import prompt_sha256
+    from ppimpl.serve.slab import SLAB_FROM
+
+    srv, c = server
+    n = SLAB_FROM // 4 + 500                    # 8 KV blocks: two such contexts fit the pool
+    a = c.new_tokens(n)
+    tok, _ = c.send("s_a0", a)
+    b = c.new_tokens(n)
+    c.send("s_b0", b)                           # same connection, same intake: the slab range of a again
+    a1 = a + [tok] + c.new_tokens(5)
+    assert c.send("s_a1", a1)[1] == n
+    assert c.send("s_b1", list(b), token_of="s_b0")[1] == n
+    changed = list(b)
+    changed[n - 100] = changed[n - 100] % 1000 + 1             # same first tokens, differs inside b's context
+    assert c.send("s_x", changed + [tok] + c.new_tokens(5))[1] == 0
+    srv.stop()
+    sha = {r["id"]: r["prompt_sha256"] for r in map(json.loads, (srv.run_dir / "server_requests.jsonl").open())}
+    assert sha["s_a0"] == prompt_sha256(a) and sha["s_b0"] == prompt_sha256(b) and sha["s_a1"] == prompt_sha256(a1)
