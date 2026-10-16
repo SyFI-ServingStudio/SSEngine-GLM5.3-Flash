@@ -109,6 +109,38 @@ class HostProfile:
             self.prof = None
 
 
+class FirstUse:
+    """After `Ready`: vLLM's JIT monitor (Triton, CuTeDSL and TileLang compiles, Triton autotuning; verbose: the
+    specialization) plus, per Triton compile or disk-cache load, the microbatch and the host time it took: "stage S
+    mb M: first use after warm-up: triton <kernel> T ms". Warm-up is meant to have run every variant
+    (StageModel.warmup); each such line is one it missed. The hooks run only on a compile path, never on a cached
+    launch."""
+
+    def __init__(self, stage: int):
+        self.stage, self.mb, self.t0 = stage, None, {}
+
+    def install(self):
+        try:
+            from triton import knobs
+        except ImportError:
+            return
+        from vllm.utils import jit_monitor
+
+        knobs.runtime.jit_cache_hook = self._start
+        knobs.runtime.jit_post_compile_hook = self._done
+        jit_monitor.activate(mode="warn", verbose=True)    # chains to self._done
+
+    def _start(self, **kw):
+        self.t0[str(kw.get("key"))] = time.perf_counter()
+        return False                      # compile as usual
+
+    def _done(self, **kw):
+        t = self.t0.pop(str(kw.get("key")), None)
+        ms = -1.0 if t is None else 1e3 * (time.perf_counter() - t)
+        name = getattr(kw.get("fn"), "name", "?")
+        print(f"stage {self.stage} mb {self.mb}: first use after warm-up: triton {name} {ms:.1f} ms", flush=True)
+
+
 class Reporter(threading.Thread):
     """Owns the worker's report socket. Items: a message to send as is, or a finished-microbatch record."""
 
@@ -182,6 +214,9 @@ def run_worker(cfg: RunConfig, stage: int):   # makes inference tensors, which a
         window = ProfileWindow(cfg.profile_mbs if cuda else None)
         hostprof = HostProfile(stage, cfg.run_dir)
         print(f"stage {stage} cpus: {cpu_list(cpus) if cpus else 'not pinned'}, threads {threads()}", flush=True)
+        first_use = FirstUse(stage)
+        if cuda:
+            first_use.install()
         reporter.q.put(Ready(stage, model.num_blocks))
         while True:
             while not plans.poll(1000):
@@ -204,6 +239,7 @@ def run_worker(cfg: RunConfig, stage: int):   # makes inference tensors, which a
             clock.maybe_reanchor()
             hidden_in = pipe.recv(plan.num_tokens, model.hidden_width) if stage > 0 else None
             start = clock.mark()
+            first_use.mb = plan.mb_id
             hostprof.before(plan.mb_id)
             out = model.forward(plan, hidden_in)
             hostprof.after(plan.mb_id)
