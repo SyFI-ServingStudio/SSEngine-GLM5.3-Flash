@@ -150,7 +150,10 @@ class Controller:
             self.intake.bind(cfg.intake_addr())
         self.plans = []
         pkg_root = str(Path(__file__).resolve().parents[2])
+        # expandable segments: 32k-token microbatches of long contexts peak near the GPU's capacity, and fixed-size
+        # segments left 7.2 GB reserved but unusable when stage 2 ran out of memory (even N=400, 7738 mb 4649)
         env = {**os.environ, "PYTHONUNBUFFERED": "1",
+               "PYTORCH_CUDA_ALLOC_CONF": os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True"),
                "PYTHONPATH": os.pathsep.join(filter(None, [pkg_root, os.environ.get("PYTHONPATH")]))}
         for s in range(self.n):
             log = open(self.run_dir / f"worker{s}.log", "w")
