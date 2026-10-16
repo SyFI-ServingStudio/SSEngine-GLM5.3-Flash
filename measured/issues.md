@@ -436,7 +436,7 @@ where the chunks keep whole's microbatch shapes (8,192-aligned); other chunkings
 measured in the same job per stage, KL within 4x, top-1 equal. The indexer fix itself is checked bitwise on its own
 ops (`tests/test_kpool_gpu.py`).
 
-## Unaligned prefix check: 3 token differences, all near ties; one run-to-run nondeterminism (M4, jobs 7476, 7498, 7503) — open
+## Unaligned prefix check: 3 token differences, all near ties (M4, jobs 7476, 7498, 7503) — decided; the decode-path part fixed below
 
 `bench/prefix_check.py --p-shift 1,2,3` (bring-up sessions with P + 1/2/3; cache-on half 7476, cache-off half 7498 on
 free ports after 7476's port clash): hit = P 40/40; round-1 token equal 38/40, same round-1 prompt 38/40. The
@@ -452,8 +452,47 @@ one process; bf16 logits as the server's argmax takes them):
 All are near ties under bench/check_tokens.py's rule (margin < 3 nats, each side's token in its schedule's top 2),
 so the check counts them and passes (`bench/margin.py --judge`; preflight runs it on any difference). Two are round 0,
 where neither server uses the cache: the same prompt in the same chunks gave another token in another server process
-(35: 25 vs 5053 at margin 0.5), and session 27's margin moves between repeats in one process (1.375 → 1.875). Both
-end with a 1–3-token chunk (P = 8,192 k + 1..3), which goes to the indexer's decode path; the bring-up's aligned P
-(7403) never made such a chunk and gave 40/40. Suspect (unverified): the decode-path top-k (`get_indexer_topk`) is
-not canonicalized like the prefill top-k (`topk_canon`, "Indexer top-k was not deterministic"), so equal pool scores
-can come back in another order and sparse MLA sums in index order. Not chased here: it moves tokens only at near ties.
+(35: 25 vs 5053 at margin 0.5), and session 27's margin moves between repeats in one process (1.375 → 1.875). Only
+a 1-token chunk takes the indexer's decode path (its decode threshold is next_n = 1; 2- and 3-token chunks are
+prefill): session 27 (P = 131,073) ends with one, and its in-process variation was the decode top-k (next entry).
+Session 35 ends with a 3-token prefill chunk: 20 repeats in one process were bitwise equal (7522), so its cross-process
+difference is not the decode top-k; it stays a near tie under the margin rule.
+
+## Indexer decode top-k: order not fixed, and a wrong set on a 131,072-pool row — fixed (M4, jobs 7522–7568)
+
+Kind: run-to-run nondeterminism and a vLLM kernel bug. A 1-token chunk takes the indexer's decode path, whose top-k
+(`indexer_topk.get_indexer_topk`: cooperative up to 64 rows, persistent above) had no canonicalization. `bench/margin.py
+--trace-topk` (20 repeats of the same prompt in one process, hashes of every layer's top-k rows and logits):
+
+| Prompt, last chunk | 7522 / 7549 (vLLM's top-k as is) | 7568 (fix) |
+|---|---|---|
+| s27, P 131,072 + 1 token (decode path) | 20 / 20 distinct FP32 logits; token 11 or 448; margin 0.125–3.5 | 1 logits (6 repeats) |
+| s32, P 524,288 + 1 token (decode path) | 20 / 20 distinct logits (margin 9.5–10.5, token stable) | 1 logits |
+| 3-token and 300-token chunks at 131k and 512k (prefill path, control) | 1 logits in 20 | — |
+
+Cause, per layer: at stage 0 layer 0 the decode pool logits were bitwise equal in every repeat, the top-k set equal
+and its order different; the sparse attention sums in index order, so the layer's output bits moved and every later
+layer's logits and sets with them. `bench/topk_check.py` (7551, 7567; random rows, 1–128 rows, 4,096–131,072 pools,
+with and without ties): both kernels always return a valid top-k, in a varying order; with ties the set varies too.
+On the real row of s32 at 524,288 (stage 0, layer 0: 131,072 pools, no ties) the cooperative kernel returned an
+invalid set in some calls (7558, 7568: rerun 5 times per repeat on the same logits; a key above the k-th value left
+out), so canonicalizing its answer is not enough there (7549: still 2 distinct logits in 20 repeats). The fork's
+known persistent_topk medium-path bug (≤32 rows, 8k–32k context) did not show on the random rows.
+
+Fix (`pp_patch.install_decode_topk_canon`): the decode rows go through vLLM's prefill top-k (`top_k_per_row_prefill`,
+ks = 0, ke = the decode kernels' row ends) and then `topk_canon.canonicalize_split` (the canonical rule for few long
+rows: 4,096-column pieces, a count pass and a write pass; the canonical kernels also never write past k slots now).
+`DECODE_TOPK_PATH` keeps "kernel" and "deep_select" for measurement. Checks: `test_model_gpu.py::test_decode_topk_canonical`
+(each path, 4 shapes, equal to the torch reference) and topk_check: 110/110 cases canonical on every path. Cost at
+512k (7540, nsys, one 1-token row at P 524,288, median of 3 microbatches, against vLLM's top-k as is: stage compute
+6.4 / 6.4 / 6.7 / 3.0 ms):
+
+| Decode top-k | Stage 0 | Stage 1 | Stage 2 | Stage 3 | Sum |
+|---|---|---|---|---|---|
+| kernel + canon | +155 us | +42 us | +95 us | +81 us | +372 us |
+| prefill + canon (default) | +270 us | +79 us | +166 us | +187 us | +702 us |
+| deep_select + canon | +143 us | +4 us | +95 us | +97 us | +339 us |
+
+`canonicalize_split` is 33–55 us per stage (count + write); `topKPerRowPrefill` (108–184 us) replaces
+`cooperative_topk_cs16` (30–46 us). deep_select would halve the cost, but only the prefill top-k was checked on the
+real 131,072-pool row (7558, 7568), so it stays the default.
