@@ -76,7 +76,7 @@ if triton is not None:
             tie = ((x == kth) & m).to(tl.int32)
             take = ((x > kth) & m) | ((tie != 0) & (tl.cumsum(tie, axis=0) + ties <= need))
             slot = tl.cumsum(take.to(tl.int32), axis=0) - 1 + pos
-            tl.store(drow + slot, cols - lo, mask=take)
+            tl.store(drow + slot, cols - lo, mask=take & (slot < K))   # never past the row, whatever the input
             pos += tl.sum(take.to(tl.int32), axis=0)
             ties += tl.sum(tie, axis=0)
         tl.store(drow + offs_k, tl.full((KP,), -1, tl.int32), mask=(offs_k >= pos) & (offs_k < K))
@@ -152,7 +152,7 @@ if triton is not None:
             tie = ((x == kth) & m).to(tl.int32)
             take = ((x > kth) & m) | ((tie != 0) & (tl.cumsum(tie, axis=0) + ties <= need))
             slot = tl.cumsum(take.to(tl.int32), axis=0) - 1 + pos
-            tl.store(drow + slot, cols - lo, mask=take)
+            tl.store(drow + slot, cols - lo, mask=take & (slot < K))   # never past the row, whatever the input
             pos += tl.sum(take.to(tl.int32), axis=0)
             ties += tl.sum(tie, axis=0)
         if b == 0:

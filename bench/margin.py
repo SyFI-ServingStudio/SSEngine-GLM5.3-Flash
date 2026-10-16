@@ -3,7 +3,8 @@
   python -m bench.margin <cases.json> [--repeats 3] [--out measured/margins/<name>.json]
 
 cases.json: [{"name": str, "file": <.npy int32 token ids>, "schedule": [[start, tokens, is_last], ...],
-"decode_canon": true}, ...] (decode_canon false: without pp_patch's decode top-k canonicalization). Each
+"decode_canon": true, "decode_topk": "kernel"}, ...] (decode_canon false: without pp_patch's decode top-k
+canonicalization; decode_topk "prefill": the decode rows through vLLM's prefill top-k). Each
 case runs `--repeats` times on the same KV and state blocks (one request, a fresh start each time), each schedule
 entry as one microbatch, as the server runs a request alone. At every is_last entry: the last position's logits,
 bf16 as the server's argmax takes them (`StageModel.output_head`) and FP32, their top-5 and the top-1 minus top-2
@@ -72,8 +73,11 @@ def _install_topk_trace() -> None:
 
 def _install_decode_trace() -> None:
     """After the stage model's patches (so it sees the top-k the model uses): the decode path's pool logits and
-    top-k. The indexer looks `get_indexer_topk` up at call time, also on CUDA-graph replays (an eager break)."""
+    top-k. The indexer looks `get_indexer_topk` up at call time, also on CUDA-graph replays (an eager break). Also
+    runs vLLM's kernel 5 more times on the same logits and checks each answer is a valid top-k."""
     import hashlib
+
+    import torch
 
     import vllm.models.glm5next.nvidia.sparse_indexer as si
 
@@ -96,6 +100,25 @@ def _install_decode_trace() -> None:
                     kth = float(v.topk(min(k, L)).values[-1]) if L else 0.0
                     rows.append({"keys": L, "ties_at_kth": int((v == kth).sum()),
                                  "above_kth": int((v > kth).sum())})
+                # the bare kernel again on these logits: is each answer a valid top-k (wrong set vs reordering)?
+                def valid(dd):
+                    ok = True
+                    for r, L in enumerate(lens):
+                        sel = dd[r, :min(k, L)]
+                        m = torch.ones(L, dtype=torch.bool)
+                        m[sel.clamp(0, L - 1).long()] = False
+                        ok &= bool((sel >= 0).all() and (sel < L).all() and sel.unique().numel() == sel.numel()
+                                   and (L <= k or lg[r, :L][~m].min() >= lg[r, :L][m].max()))
+                    return ok
+
+                raw_valid, raw_sets = [], set()
+                for _ in range(5):
+                    d1 = torch.full_like(dst, -1)
+                    d0(logits, seq_lens, next_n, d1, k, *rest)
+                    d1 = d1.cpu()
+                    raw_sets.add(hashlib.sha1(d1.sort(dim=-1).values.numpy().tobytes()).hexdigest()[:16])
+                    raw_valid.append(valid(d1))
+                rows.append({"raw_valid": raw_valid, "raw_sets": len(raw_sets), "used_valid": valid(d)})
                 TRACE["decode"].append([hashlib.sha1(b"".join(lg[r, :L].numpy().tobytes()
                                                              for r, L in enumerate(lens))).hexdigest()[:16],
                                         hashlib.sha1(d.numpy().tobytes()).hexdigest()[:16],
@@ -145,6 +168,7 @@ def _worker(rank: int, cases: list[dict], repeats: int, port: int, out: str, tra
         for c in cases:
             t = toks[c["name"]]
             pp_patch.DECODE_TOPK_CANON = c.get("decode_canon", True)   # a case may run without it (before/after)
+            pp_patch.DECODE_TOPK_PATH = c.get("decode_topk", "kernel")
             for rep in range(repeats):
                 t0 = time.time()
                 for i, (s, n, last) in enumerate(c["schedule"]):
@@ -266,7 +290,14 @@ def variation(out: Path) -> dict:
                                                         if len({d["decode"][i][1] for d in dec}) > 1],
                       "decode_topk_set_vary": [i for i in range(nl) if len({d["decode"][i][2] for d in dec}) > 1],
                       "backend": dec[0].get("backend"),
-                      "max_ties_at_kth": max(r["ties_at_kth"] for d in dec for x in d["decode"] for r in x[3])}
+                      "max_ties_at_kth": max(r["ties_at_kth"] for d in dec for x in d["decode"] for r in x[3]
+                                             if "ties_at_kth" in r),
+                      "kernel_invalid_layers": sorted({i for d in dec for i, x in enumerate(d["decode"])
+                                                      for r in x[3] if "raw_valid" in r and not all(r["raw_valid"])}),
+                      "used_invalid_layers": sorted({i for d in dec for i, x in enumerate(d["decode"])
+                                                    for r in x[3] if r.get("used_valid") is False}),
+                      "kernel_set_varies_layers": sorted({i for d in dec for i, x in enumerate(d["decode"])
+                                                         for r in x[3] if r.get("raw_sets", 1) > 1})}
             rep.setdefault(k, {})[f"stage{st}"] = {"layers": layers, "order_or_set_varies": order,
                                                   "set_varies": sets, **dv}
     for e in rep.values():

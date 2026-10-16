@@ -346,6 +346,7 @@ def install_topk_router() -> None:
 
 _ORIG_DECODE_TOPK = None
 DECODE_TOPK_CANON = True      # bench/margin.py cases may turn it off (the before/after of the same process)
+DECODE_TOPK_PATH = "kernel"   # or "prefill": vLLM's prefill top-k (top_k_per_row_prefill) on the decode rows
 
 
 def canonical_decode_topk(backend: str):
@@ -356,7 +357,11 @@ def canonical_decode_topk(backend: str):
     fn = _ORIG_DECODE_TOPK(backend)
 
     def run(logits, seq_lens, next_n, dst, k, max_seq_len):
-        fn(logits, seq_lens, next_n, dst, k, max_seq_len)
+        if DECODE_TOPK_PATH == "prefill" and _ORIG_TOPK is not None:
+            ke = fn._row_ends(seq_lens, next_n, logits.shape[0])
+            _ORIG_TOPK(logits, torch.zeros_like(ke), ke, dst, logits.shape[0], logits.stride(0), logits.stride(1), k)
+        else:
+            fn(logits, seq_lens, next_n, dst, k, max_seq_len)
         if DECODE_TOPK_CANON and logits.shape[1] > k:
             ke = fn._row_ends(seq_lens, next_n, logits.shape[0])
             topk_canon.canonicalize_split(logits, torch.zeros_like(ke), ke, dst, k)
