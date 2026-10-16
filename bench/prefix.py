@@ -219,7 +219,7 @@ def _k(n):
 
 def bringup_md(lines: list[dict]) -> str:
     targets = {(t["prefix_tokens"], t["computed_tokens"]): t for t in json.loads((HANDOFF / "data/prefix_targets.json").read_text())}
-    out = ["| P | A | n | hit = P | Round 0 TTFT (ms) | Round 1 TTFT (ms) | Stage 0 | Stage 1 | Stage 2 | Stage 3 | "
+    out = ["| P | A | n | hit = P | Round 0 TTFT p50 (ms) | Round 1 TTFT p50 (ms) | Stage 0 | Stage 1 | Stage 2 | Stage 3 | "
            "Each send | Token = no cache |", "|---|---|---|---|---|---|---|---|---|---|---|---|"]
     groups = {}
     for x in lines:
@@ -228,8 +228,10 @@ def bringup_md(lines: list[dict]) -> str:
         t = targets.get((P, A))
         ok = [x for x in xs if x.get("round1_stages")]
         med = lambda f: float(np.median([f(x) for x in ok])) if ok else None   # noqa: E731
-        r0 = float(np.median([x["round0_ttft_ms"] for x in xs if x["round0_ttft_ms"] is not None]))
-        r1 = med(lambda x: x["round1_ttft_ms"])
+        r0s = [x["round0_ttft_ms"] for x in xs if x["round0_ttft_ms"] is not None]
+        r1s = [x["round1_ttft_ms"] for x in ok]
+        r0, r1 = float(np.median(r0s)), med(lambda x: x["round1_ttft_ms"])
+        tail = lambda v: f"; p90 {np.percentile(v, 90):.1f}, p99 {np.percentile(v, 99):.1f}" if v else ""  # noqa: E731
         st = [med(lambda x, s=s: x["round1_stages"][s]["compute_ms"]) for s in range(4)]
         sends = med(lambda x: float(np.mean(x["round1_sends_ms"]))) if ok and all(x["round1_sends_ms"] for x in ok) else None
         hits = sum(x["round1_cached_tokens"] == P for x in xs)
@@ -240,7 +242,8 @@ def bringup_md(lines: list[dict]) -> str:
         cell = lambda m, tv: f"{m:.1f} / {tv:.1f} (x{_r(m, tv)})" if m is not None and tv else "–"   # noqa: E731
         send = f"{sends:.3f} / {tr['microbatches'][0]['send_ms'][0]:.3f}" if sends is not None and tr else "–"
         out.append(f"| {_k(P)} | {_k(A) if A else '?'} | {len(xs)} | {hits}/{len(xs)} | "
-                   f"{cell(r0, t['round0']['ttft_ms'] if t else None)} | {cell(r1, tr['ttft_ms'] if tr else None)} | "
+                   f"{cell(r0, t['round0']['ttft_ms'] if t else None)}{tail(r0s)} | "
+                   f"{cell(r1, tr['ttft_ms'] if tr else None)}{tail(r1s)} | "
                    + " | ".join(cell(st[s], tr["microbatches"][0]["compute_ms"][s] if tr else None) for s in range(4))
                    + f" | {send} | {tok} |")
     return "\n".join(out)
@@ -277,6 +280,9 @@ def sessions_md(runs: dict[int, dict]) -> str:
     return "\n".join(out)
 
 
+NOTES = "## Notes"   # prefix_cache.md from this heading on is written by hand; summarize keeps it
+
+
 def summarize(root: Path, out: Path) -> Path:
     parts = ["# Prefix cache and chunked prefill (5_prefix_cache.md)", ""]
     b = root / "prefix_bringup"
@@ -284,8 +290,8 @@ def summarize(root: Path, out: Path) -> Path:
     if (b / "requests.jsonl").exists():
         lines = bringup(b, off if off.exists() else None)
         (out / "prefix_bringup.jsonl").write_text("".join(json.dumps(x) + "\n" for x in lines))
-        parts += ["## Prefix bring-up", "", "Measured / target (ratio), medians over each case's sessions; stage "
-                  "compute and sends from CUDA events (microbatches.jsonl).", "", bringup_md(lines), ""]
+        parts += ["## Prefix bring-up", "", "Measured / target (ratio), medians (p50) over each case's sessions, "
+                  "TTFT also p90 and p99 over them; stage compute and sends from CUDA events (microbatches.jsonl).", "", bringup_md(lines), ""]
     on = root / "prefix_check_on"
     if (on / "server_requests.jsonl").exists() and (off / "server_requests.jsonl").exists():
         c = check(on, off)
@@ -293,15 +299,26 @@ def summarize(root: Path, out: Path) -> Path:
         parts += ["## Cache on vs off", "", f"{c['round1']} round-1 prompts, {c['round1_hit']} with a hit; "
                   f"{c['round1_match']} tokens equal to the no-cache token; all rounds {c['all_match']}/{c['rounds']}.",
                   ""]
+    u = root / "prefix_check_unaligned.json"
+    if u.exists():
+        c = json.loads(u.read_text())
+        parts += ["## Cache on vs off, unaligned P", "", f"P + {c['p_shift']} (cycled) on the bring-up sessions: "
+                  f"{c['sessions']} sessions, hit = P {c['hit_is_P']}, round-1 token equal to no-cache "
+                  f"{c['round1_match']}, same prompt {c['same_prompt']} (bench/prefix_check.py --p-shift).", ""]
     runs = {}
     for d in sorted(root.glob("prefix_n*")):
-        if (d / "requests.jsonl").exists() and (d / "metrics.json").exists():
-            runs[int(re.sub(r"\D", "", d.name))] = sessions(d)
+        m = re.fullmatch(r"prefix_n(\d+)", d.name)
+        if m and (d / "requests.jsonl").exists() and (d / "metrics.json").exists():
+            runs[int(m.group(1))] = sessions(d)
     if runs:
         parts += ["## Sessions", "", sessions_md(runs), ""]
         (out / "prefix_sessions.json").write_text(json.dumps(runs, indent=1) + "\n")
     path = out / "prefix_cache.md"
-    path.write_text("\n".join(parts))
+    notes = ""
+    if path.exists() and NOTES in path.read_text():      # the hand-written part is kept
+        text = path.read_text()
+        notes = text[text.index(NOTES):]
+    path.write_text("\n".join(parts) + ("\n" + notes if notes else ""))
     return path
 
 
