@@ -1,5 +1,6 @@
 """Design constants of handoff glm53_flash_pp4_b200_v1 and the run config (`python -m ppimpl serve --config`)."""
 
+import os
 from pathlib import Path
 
 import msgspec
@@ -13,6 +14,14 @@ HIDDEN_WIDTH = 4 * 4096      # 4-stream mHC residual, BF16: 32 KiB per token bet
 MB_TOKENS = 8192             # plain scheduler: microbatch budget and chunk size
 MAX_IN_FLIGHT = 4
 LAYER_SPLIT = [12, 11, 11, 11]
+
+# The weights: Hugging Face nvidia/GLM-5.3-Flash-NVFP4 at this revision, in the hub cache under HF_HOME
+# (`hf download nvidia/GLM-5.3-Flash-NVFP4 --revision <CHECKPOINT_REVISION>`). PPIMPL_CHECKPOINT names another directory.
+CHECKPOINT_REPO = "nvidia/GLM-5.3-Flash-NVFP4"
+CHECKPOINT_REVISION = "da920bb0b9f4a06727223a349e55468e38352348"
+CHECKPOINT = os.environ.get("PPIMPL_CHECKPOINT") or str(
+    Path(os.environ.get("HF_HOME") or Path.home() / ".cache" / "huggingface") / "hub"
+    / f"models--{CHECKPOINT_REPO.replace('/', '--')}" / "snapshots" / CHECKPOINT_REVISION)
 
 
 class SchedulerConfig(msgspec.Struct, forbid_unknown_fields=True):

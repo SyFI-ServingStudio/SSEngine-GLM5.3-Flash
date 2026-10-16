@@ -1,22 +1,24 @@
 #!/bin/bash
-#SBATCH -p main
 #SBATCH --gres=gpu:4
 #SBATCH --time=00:30:00
 #SBATCH -J pp-nodecheck
-#SBATCH -o /raid/kanzhu/ServingStudio/pp-impl/lanes/measure/measured/nodecheck_runs/%x-%j.out
 # Node check (2_kernels.md §4): re-measure the stratified sample with the
 # ServingStudioSim profiler (wt-pp-main) in --fresh mode against a scratch copy
 # of profile.db. One lane per allocated GPU takes the (kind, backend) calls.
 # NC_ONLY: optional regex over "<kind>\t<backend>" to re-run a subset of calls;
-# NC_SKIP_H2D=1 skips the H2D bandwidth measurement.
+# NC_SKIP_H2D=1 skips the H2D bandwidth measurement. Usage, from the repo root:
+#   sbatch -p main -o measured/logs/%x-%j.out bench/slurm/nodecheck.sbatch
+# PPIMPL_SIM: a ServingStudioSim checkout of pp-main with its profiler venv (`uv sync` there); default
+# <main tree>/third_party/ServingStudioSim (bench/slurm/env.sh).
+# VIBESIM_VLLM_FORK_ROOT (required): a built checkout of the vLLM fork at 892da0822f with its own .venv, the
+# profiler's vllm env.
 set -u
-LANE=/raid/kanzhu/ServingStudio/pp-impl/lanes/measure
-SIM=/raid/kanzhu/ServingStudio/wt-pp-main
-SPECS=$LANE/measured/nodecheck_specs
-OUT=$LANE/measured/nodecheck_runs/$SLURM_JOB_ID
+source "${SLURM_SUBMIT_DIR:-$(dirname "$0")/../..}/bench/slurm/env.sh"
+SIM=${PPIMPL_SIM:-$MAIN/third_party/ServingStudioSim}
+SPECS=$ROOT/measured/nodecheck_specs
+OUT=$ROOT/measured/nodecheck_runs/$SLURM_JOB_ID
 mkdir -p "$OUT"
-set -a; source /raid/kanzhu/ServingStudio/.env; set +a
-export VIBESIM_VLLM_FORK_ROOT=/raid/kanzhu/ServingStudio/wt-flash-dflash2/alignment/profiler/vllm
+: "${VIBESIM_VLLM_FORK_ROOT:?set it to a built fork checkout at 892da0822f with its .venv}"
 cp "$SIM/profiling/profile.db" "$OUT/scratch_profile.db"
 cd "$SIM"
 {
@@ -27,7 +29,7 @@ cd "$SIM"
   nvidia-smi topo -m
 } > "$OUT/env.txt" 2>&1
 # Host DRAM -> HBM bandwidth for the setup record (pinned memory, fork venv torch).
-[ "${NC_SKIP_H2D:-0}" = 1 ] || timeout 300 $VIBESIM_VLLM_FORK_ROOT/.venv/bin/python $LANE/bench/nodecheck/h2d_bw.py > "$OUT/h2d_bw.txt" 2>&1
+[ "${NC_SKIP_H2D:-0}" = 1 ] || timeout 300 $VIBESIM_VLLM_FORK_ROOT/.venv/bin/python $ROOT/bench/nodecheck/h2d_bw.py > "$OUT/h2d_bw.txt" 2>&1
 
 IFS=',' read -r -a DEVS <<< "$CUDA_VISIBLE_DEVICES"
 NL=${#DEVS[@]}
@@ -48,7 +50,7 @@ run_lane() {
     local tag="${kind}__${backend}"
     echo "$(date -Is) lane$i dev=$dev start $tag n=$n uptime=$(cut -d' ' -f1-3 /proc/loadavg)" >> "$OUT/progress.log"
     # run_call.sh: own session; on timeout it kills that session only.
-    CUDA_VISIBLE_DEVICES=$dev "$LANE/bench/kernels/run_call.sh" 1200 "$OUT/$tag.json" "$OUT/$tag.err" \
+    CUDA_VISIBLE_DEVICES=$dev "$ROOT/bench/kernels/run_call.sh" 1200 "$OUT/$tag.json" "$OUT/$tag.err" \
       uv run --no-sync python -m launcher kernel-profile run "$kind" \
       --backend "$backend" --specs "$SPECS/$file" --fresh --gpu-name "NVIDIA B200" \
       --db "$OUT/scratch_profile.db" --json

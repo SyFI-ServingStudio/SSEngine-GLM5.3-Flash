@@ -15,9 +15,13 @@ ROOT = Path(__file__).resolve().parents[1]
 # under lanes/.
 MAIN = ROOT.parents[1] if ROOT.parent.name == "lanes" else ROOT
 MEASURED = ROOT / "measured"
-HANDOFF = Path(os.environ.get("PPIMPL_HANDOFF",       # the handoff package (read-only): data/ traces and targets
-                              "/raid/kanzhu/ServingStudio/wt-pp-main/doc/handoff/glm53_flash_pp4_b200_v1"))
-ENWIK9 = Path(os.environ.get("PPIMPL_ENWIK9", "/raid/kanzhu/ServingStudio/data/corpus/enwik9"))
+# A ServingStudioSim checkout of branch pp-main (env/make_env.sh clones it): the handoff package (read-only: data/
+# traces and targets) and req-frontend, the client.
+SIM = Path(os.environ.get("PPIMPL_SIM") or MAIN / "third_party" / "ServingStudioSim")
+HANDOFF = SIM / "doc" / "handoff" / "glm53_flash_pp4_b200_v1"
+REQ_FRONTEND = SIM / "alignment" / "load_generator" / "req-frontend"
+# The prompt corpus (http://mattmahoney.net/dc/enwik9.zip, unzipped; env/make_env.sh fetches it).
+ENWIK9 = Path(os.environ.get("PPIMPL_ENWIK9") or MAIN / "third_party" / "enwik9")
 
 KV_BLOCKS = 16           # ceil(131072 / 8576)
 NUM_BLOCKS = 1 + KV_BLOCKS + 6

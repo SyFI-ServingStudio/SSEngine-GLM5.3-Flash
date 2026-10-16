@@ -748,7 +748,7 @@ def _check_flashkda(spec: dict, config: dict) -> list[dict]:
 
 
 def check_kda_flashinfer(spec: dict, config: dict) -> list[dict]:
-    """FlashInfer nightly 0.7.2.dev20261008 (pp-impl/.venv, or profile_envs/flashinfer_kda with --kda-flashinfer)."""
+    """FlashInfer nightly 0.7.2.dev20261008, as in pp-impl/.venv."""
     from profiling.runners.attention import kda_chunk_prefill_flashinfer as mod
     from profiling.runners.attention.kda_chunk_prefill_reference import kda_chunk_prefill_reference, rmse_ratio
 
@@ -802,7 +802,6 @@ def main() -> int:
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--configs", default="", help="comma-separated config numbers (default: all)")
     parser.add_argument("--rows", default="smallest,largest")
-    parser.add_argument("--kda-flashinfer", action="store_true", help="config 5 with the row's own callable")
     opts = parser.parse_args()
     wanted = {int(c) for c in opts.configs.split(",") if c}
     configs = [c for c in load_configs() if not wanted or c["config"] in wanted]
@@ -811,7 +810,7 @@ def main() -> int:
     failures = 0
     with opts.out.open("a") as sink:
         for config in configs:
-            check = check_kda_flashinfer if opts.kda_flashinfer else CHECKS[(config["kind"], config["backend"])]
+            check = CHECKS[(config["kind"], config["backend"])]
             for which in opts.rows.split(","):
                 spec = config[which]
                 start = time.time()

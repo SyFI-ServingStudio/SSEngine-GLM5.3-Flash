@@ -1,19 +1,13 @@
 #!/bin/bash
-# GPU tests (f) CUDA graph replay vs eager per stage and (g) top-k canonicalization (tests/test_model_gpu.py). Usage:
-#   sbatch -p main --time=00:10:00 -o measured/logs/%j.out bench/slurm/gtest.sbatch
+# GPU tests (tests/test_*_gpu.py, marker gpu), selected by a pytest -k expression. Usage, from the repo root:
+#   sbatch -p main --time=00:10:00 -o measured/logs/%j.out bench/slurm/gtest.sbatch ["graph_replay or topk_canonical"]
+#   sbatch -p main --time=00:20:00 --gres=gpu:4 -o measured/logs/%j.out bench/slurm/gtest.sbatch "transport or serve_http"
+# Default: (f) CUDA graph replay vs eager per stage and (g) top-k canonicalization, on one GPU.
 #SBATCH --gres=gpu:1
 #SBATCH -J ppm-gtest
 set -uo pipefail
-cd "$SLURM_SUBMIT_DIR"
-set -a; source /raid/kanzhu/ServingStudio/.env; set +a
-export TMPDIR=/raid/tmp/kanzhu/ppt$SLURM_JOB_ID; mkdir -p "$TMPDIR"
-export HF_HOME=/raid/hf HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
-export PYTHONPATH=/raid/kanzhu/ServingStudio/pp-impl/third_party/causal_conv1d_try/pkg${PYTHONPATH:+:$PYTHONPATH}
-PY=/raid/kanzhu/ServingStudio/pp-impl/.venv/bin/python
-echo "job $SLURM_JOB_ID host $(hostname) gpus ${CUDA_VISIBLE_DEVICES:-?}"
-uptime
-$PY -m pytest tests/test_model_gpu.py -m gpu -k "graph_replay or topk_canonical" -v
+source "${SLURM_SUBMIT_DIR:-$(dirname "$0")/../..}/bench/slurm/env.sh"
+$PY -m pytest tests -m gpu -k "${1:-graph_replay or topk_canonical}" -v
 rc=$?
 uptime
-rm -rf "$TMPDIR"
 exit $rc

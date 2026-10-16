@@ -1,6 +1,8 @@
 import random
 import socket
 
+import pytest
+
 
 def free_port_block(n: int = 8) -> int:
     """A base port with n free consecutive ports (HTTP, zmq, torch.distributed), below the ephemeral range so
@@ -19,3 +21,10 @@ def free_port_block(n: int = 8) -> int:
         if ok:
             return base
     raise RuntimeError("no free port block")
+
+
+def pytest_configure(config):
+    from bench.common import HANDOFF
+
+    if not HANDOFF.is_dir():   # most CPU tests read the handoff's traces and targets
+        raise pytest.UsageError(f"handoff not found at {HANDOFF}: set PPIMPL_SIM or run env/make_env.sh (README)")

@@ -6,8 +6,9 @@ from pathlib import Path
 import pytest
 
 from ppimpl import kernels as K
+from ppimpl.config import CHECKPOINT
 
-CKPT = Path("/raid/hf/hub/models--nvidia--GLM-5.3-Flash-NVFP4/snapshots/da920bb0b9f4a06727223a349e55468e38352348")
+CKPT = Path(CHECKPOINT)
 
 
 def test_manifest_has_35_configs_in_order():

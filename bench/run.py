@@ -27,13 +27,12 @@ from pathlib import Path
 
 import yaml
 
-from bench.common import ENWIK9, HANDOFF, ROOT
+from bench.common import ENWIK9, HANDOFF, REQ_FRONTEND, ROOT
+from ppimpl.config import CHECKPOINT
 from ppimpl.runtime.cpus import cpu_list
 
-WS = Path("/raid/kanzhu/ServingStudio")
-REQ_FRONTEND = Path(os.environ.get("PPIMPL_REQ_FRONTEND", WS / "wt-pp-main/alignment/load_generator/req-frontend"))
 CLIENT_BIN = Path(os.environ.get("PPIMPL_REQ_FRONTEND_BIN", ROOT / "build/req-frontend/release/session_runner"))
-CHECKPOINT = Path("/raid/hf/hub/models--nvidia--GLM-5.3-Flash-NVFP4/snapshots/da920bb0b9f4a06727223a349e55468e38352348")
+CHECKPOINT = Path(CHECKPOINT)
 PYTHON = sys.executable
 NSYS = shutil.which("nsys") or "/usr/local/cuda/bin/nsys"
 
@@ -305,8 +304,7 @@ def submit(args) -> None:
 #SBATCH -o {logs}/%j.out
 {f"#SBATCH -d {args.dependency}" if args.dependency else ""}
 set -e
-source {WS}/.env
-cd {ROOT}
+source {ROOT}/bench/slurm/env.sh
 {shlex.join(inner)}
 """
     path = logs / f"job_{'_'.join(args.names)}.sbatch"[:200]

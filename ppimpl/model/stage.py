@@ -35,10 +35,10 @@ import torch
 os.environ.setdefault("VLLM_USE_BREAKABLE_CUDAGRAPH", "1")
 
 from ppimpl import kernels  # noqa: E402
+from ppimpl.config import CHECKPOINT  # noqa: E402
 from ppimpl.model import kv_tensors, pp_patch  # noqa: E402
 from ppimpl.model.metadata import StageMetadata  # noqa: E402
 
-CHECKPOINT = "/raid/hf/hub/models--nvidia--GLM-5.3-Flash-NVFP4/snapshots/da920bb0b9f4a06727223a349e55468e38352348"
 HIDDEN_WIDTH = 4 * 4096
 # FlashInfer tactics, tuned once (bench/tune_tactics.py) and loaded at warm-up with tuning off, as vLLM loads its
 # persisted configs: start-up skips ~150 s of MoE profiling and every stage, run and test uses the same tactics.
