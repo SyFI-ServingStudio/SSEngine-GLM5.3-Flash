@@ -47,6 +47,7 @@ TACTICS = Path(os.environ.get("PPIMPL_FI_TACTICS",
                               Path(__file__).resolve().parents[1] / "data" / "flashinfer_tactics_b200.json"))
 RESERVE_GB = 13.6     # 1_contract.md §1: activations and workspace beside weights and KV (and the CUDA graph pool)
 GRAPH_BUCKETS = (128, 256, 512, 1024, 2048, 4096, 8192)   # token counts captured as CUDA graphs
+LONG_WARMUP = 65536    # context at which warm-up runs its long continuation chunks (StageModel.warmup)
 
 
 def graph_bucket(num_tokens: int, buckets) -> int | None:
@@ -268,8 +269,8 @@ class StageModel:
         autotuned pass at the microbatch budget, as vLLM's `kernel_warmup` does. Shapes: one request at the full
         budget (indexer and both top-k paths), then two requests, one continuing a cached prefix (conv and KDA initial
         state, chunk start > 0), then every power-of-2 length from 512 below the budget, a length not divisible by
-        16, one request alone continuing a cached prefix (start divisible by 16 and not), and the first layer's mHC
-        pre at every split count. Uses blocks 1.. before any request holds them.
+        16, one request alone continuing a cached prefix (start divisible by 16 and not; and past `LONG_WARMUP` when the
+        pool holds it), and the first layer's mHC pre at every split count. Uses blocks 1.. before any request holds them.
         `self.tactics` records the source."""
         from types import SimpleNamespace as NS
 
@@ -322,6 +323,13 @@ class StageModel:
             # ms lazy kernel load); and the same at a start and length not divisible by 16 (P = 100,003)
             run(NS(mb_id=-5, chunks=[chunk("wc", 1024, 256, 1)]))
             run(NS(mb_id=-6, chunks=[chunk("wu", 1003, 253, 1)]))
+            # past 64k of context (when the pool holds it): the sparse-MLA index remap at the long top-k width
+            # (NUM_TOPK_TOKENS 2176, 180 ms Triton compile on the first chunk ending at 65,536, job 7505) and
+            # topk_canon (the indexer is wider than k), at a row count divisible by 4 and not (its scratch rows are
+            # 16-byte aligned or not: a 1,699-row chunk compiled three kernels, 1.2 s, job 7505)
+            if (self.num_blocks - 1 - 6) * B >= LONG_WARMUP + 1003 + 253:
+                run(NS(mb_id=-7, chunks=[chunk("wl", LONG_WARMUP, 256, 1)]))
+                run(NS(mb_id=-8, chunks=[chunk("wv", LONG_WARMUP + 1003, 253, 1)]))
             self._warm_mhc_pre()
         torch.cuda.synchronize(self.device)
         pp_patch.clear_autotune_memo()     # tactics may have changed while tuning

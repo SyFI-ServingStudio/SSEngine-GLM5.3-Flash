@@ -28,6 +28,11 @@ wave w2 "$GP --buckets 1536" "$GP --buckets 8192" \
         "env CUDA_LAUNCH_BLOCKING=1 $GP --eager 3000"
 wave graphs "$PY -m bench.graphs --stage 0 --out $OUT/graphs_s0.json" "$PY -m bench.graphs --stage 1 --out $OUT/graphs_s1.json" \
         "$PY -m bench.graphs --stage 2 --out $OUT/graphs_s2.json" "$PY -m bench.graphs --stage 3 --out $OUT/graphs_s3.json"
+elif [ "${SET:-1}" = 3 ]; then   # SET=3: every stage as the server builds it (warm-up, the stage's GRAPH_BUCKETS)
+G3="--full-pool --together --buckets 128,256,512,1024,2048,4096,8192"
+wave s3 "$PY -m bench.graph_probe --stage 0 $G3" "$PY -m bench.graph_probe --stage 1 $G3" \
+        "$PY -m bench.graph_probe --stage 2 $G3" "$PY -m bench.graph_probe --stage 3 $G3"
+fail=0; for i in 0 1 2 3; do grep -q "capture .* ok" $OUT/s3_$i.log || fail=1; done; [ $fail = 0 ] || { echo "== FAILED"; exit 1; }
 else   # SET=2: as the server builds a stage (whole KV pool, every bucket in one capture_graphs call)
 wave s2a "$GP --full-pool --together --buckets $B57" "$GP --full-pool --together --buckets 128,256,512,1024,2048,4096,8192" \
          "$GP --together --buckets $B57" "$GP --full-pool --together --buckets 8192,7168"
