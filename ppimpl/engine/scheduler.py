@@ -15,7 +15,8 @@ The scheduler of 6_scheduler.md §2, built on the plain one (`SchedulerConfig`; 
   (cached tokens, HBM or tier, do not count); ties go by arrival.
 - **Budget.** `mb_tokens`; with `load_budget` at most 4,096 tokens up to a backlog of 1M rising linearly to
   `mb_tokens` at 3M; with `even_split` at most ceil(B / 4) kept in [512, mb_tokens]. The backlog B is the started
-  prompts' unscheduled tokens, the waiting prompts' new tokens and the in-flight microbatches' tokens.
+  prompts' unscheduled tokens, the waiting prompts' new tokens (beyond the session's previous context, even if that
+  must be recomputed: `Request.fresh`) and the in-flight microbatches' tokens.
 - **Force-schedule** (`force_after_ms`): a request whose wait since it arrived has reached the bound goes first.
 - **Tiers** (phase D, `tiers`): when the order reaches a waiting round that DRAM or SSD holds more of than HBM, its
   read starts (if its footprint fits; the footprint is held until it lands) and it leaves the queue. A read that
@@ -44,6 +45,7 @@ class Request:
     token_ids: list[int] | None = None
     session: object = None             # kept-context key: the session (replay) or a content key (server)
     prefix_tokens: int = 0             # declared prefix: tokens the prompt shares with its session's previous context
+    backlog_prefix: int | None = None  # server (no declared prefix): KvManager.shared_prefix at arrival, for `fresh`
     cached: int = 0                    # prompt tokens already in KV at admission (HBM hit or tier read)
     computed: int = 0                  # prompt tokens scheduled so far
     alloc: Allocation | None = None
@@ -67,8 +69,9 @@ class Request:
 
     @property
     def fresh(self) -> int:
-        """New tokens: what the request adds to the backlog while it waits."""
-        return self.num_tokens - self.prefix_tokens
+        """New tokens: what the request adds to the backlog while it waits (beyond the declared prefix, even when the
+        prefix must be recomputed, as the simulator counts it)."""
+        return self.num_tokens - (self.prefix_tokens if self.backlog_prefix is None else self.backlog_prefix)
 
 
 @dataclass
@@ -233,6 +236,8 @@ class Scheduler:
             if hit is not None:
                 rank = max(rank, hit[1])
         req.size = req.num_tokens - rank
+        if req.token_ids is not None and not req.prefix_tokens:     # server: no declared prefix
+            req.backlog_prefix = self.kv.shared_prefix(req)
         self.policy.push(req)
         if self.overdue is not None:
             self.overdue.arrivals.append(req)

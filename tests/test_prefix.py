@@ -132,6 +132,26 @@ def test_chunked_continuation_after_a_hit_and_cached_token_accounting():
     assert r1.cached == r1.hbm_tokens == 20_000
 
 
+def test_server_backlog_counts_new_tokens_without_a_declared_prefix():
+    """The server has token ids, no declared prefix: a waiting round adds its tokens beyond its session's previous
+    context to the backlog, also when that context was evicted and must be recomputed (as the simulator counts)."""
+    per = blocks_for(2 * BLOCK_TOKENS)
+    kv = KvManager(2 * per, keep_sessions=True, content_keys=True)
+    s = Scheduler(kv, SchedulerConfig(order="srpt", mb_tokens=32768, load_budget=True), dispatch_ahead=0)
+    n = 2 * BLOCK_TOKENS - 100
+    ids = {k: [k * 100_000 + i for i in range(n)] for k in (1, 2, 3)}
+    for k in (1, 2):
+        serve(kv, Request(f"s{k}", n, session=kv.find_session(ids[k]), token_ids=ids[k]))
+    serve(kv, Request("s3", n, session=kv.find_session(ids[3]), token_ids=ids[3]))    # evicts session 1
+    assert kv.stats["evicted_sessions"] == 1
+    for name, k in (("hit", 2), ("evicted", 1), ("first", 9)):
+        tok = ids[k] + [7] * 500 if k in ids else [9_000_000 + i for i in range(500)]
+        r = Request(name, len(tok), session=kv.find_session(tok), token_ids=tok)
+        s.add(r, 0)
+        assert r.fresh == 500, (name, r.fresh, r.size)
+    assert s.backlog() == 1500
+
+
 def test_waiting_size_counts_what_is_cached_at_arrival():
     kv = KvManager(1000, keep_sessions=True)
     s = Scheduler(kv, SchedulerConfig(order="srpt"), dispatch_ahead=0)

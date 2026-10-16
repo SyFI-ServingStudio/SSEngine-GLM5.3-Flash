@@ -221,6 +221,19 @@ class KvManager:
         k = self.kept.get(req.session)
         return 0 if k is None else self._hit(k, req)
 
+    def shared_prefix(self, req) -> int:
+        """Tokens the prompt shares with its session's previous context, as the trace declares it: the HBM hit, else
+        what it shares with a kept context it does not extend (superseded), else the length of its evicted context.
+        The load budget's backlog counts a waiting round by its tokens beyond this (the simulator counts a round's
+        new tokens, not the prefix it recomputes after an eviction). For the server, which has no declared prefix."""
+        if req.session is None or not self.keep_sessions:
+            return 0
+        k = self.kept.get(req.session)
+        if k is not None:
+            hit = self._hit(k, req)
+            return hit or min(common_prefix(k.content, req.token_ids) or 0, req.num_tokens - 1)
+        return min(self.evicted.get(req.session, 0), req.num_tokens - 1)
+
     def repeat_token(self, req) -> int | None:
         """A prompt identical to a kept context: nothing new to compute from its KDA state, and the answer is the
         token that prompt already got (greedy). Returns it and refreshes the context, or None. req-frontend's prefix
