@@ -404,6 +404,16 @@ pool need nothing (the seed stashes them). Checks: `tests/test_kpool_cpu.py` (to
 P = 8193+1/2/3, two requests in one microbatch equal the unsplit pools; the fork's insert alone does not),
 `tests/test_prefix_e2e_cpu.py::test_unaligned_hits_resume_exactly`; on GPU (job 7430): see "M4 preflight" below.
 
+Cost, fixed (7540 before, 7601 after; nsys, `bench/margin.py` cases_resume_cost: P 100,000 / 100,003 / 100,004 resumed
+with A 256 / 1,024, `bench/mb_kernels.py --base p100000`). Before, P 100,003 cost +3.8 / +2.8 / +4.9 / +13.2 ms of
+stage compute at A 256 (stages 0–3; busy unchanged within 0.33 ms; launch span 55 → 275–330 ms), while
+P 100,004 cost nothing: one cudaStreamSynchronize and one scalar cudaMemcpyAsync per DSA layer from
+`write_mask[heads.last] = False` in `pp_patch.kpool_compress_insert` (PyTorch copies the Python scalar to the device
+and syncs). The GPU extra was ~100 us per stage. Now `write_mask.index_fill_(0, heads.last, False)`: no sync, the
+same memcpy count as P 100,000, and P 100,003 is +0.03–0.20 ms (A 256) / +0.04–0.55 ms (A 1,024), as P 100,004
+(−0.09–+0.21 ms). Tokens and margins equal before and after; `tests/test_kpool_gpu.py` passes (7601). Commit 4db4c64
+(heads through the pinned Pack) blamed the pageable heads copy; it had no measurable effect.
+
 ## Setup differences in the M4 runs (5_prefix_cache.md §2 "What the targets assume")
 
 - **Exact repeats.** req-frontend's prefix preflight sends one 8k prompt twice and refuses a server that reports no
