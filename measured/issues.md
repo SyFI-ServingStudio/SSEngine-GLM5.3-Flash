@@ -507,6 +507,25 @@ rows: 4,096-column pieces, a count pass and a write pass; the canonical kernels 
 `cooperative_topk_cs16` (30–46 us). deep_select would halve the cost, but only the prefill top-k was checked on the
 real 131,072-pool row (7558, 7568), so it stays the default.
 
+## Under load the GPUs run at the 1,000 W power cap: full microbatches x1.02–1.06 over the fit (M4, job 7658) — setup difference
+
+Kind: setup difference, not a hand-off bug. The microbatch fit was measured unloaded at full SM clock (1,965 MHz).
+In the 20-minute-shaped smoke (7658, nvidia-smi every 200 ms joined to each microbatch's GPU interval) the clock
+reason inside full 8,192-token microbatches is sw_power_cap in 92–94% of samples; SM clock falls from ~1,700 to
+~1,570 MHz as board power rises to ~975 W, and stage time over the fit follows it (r = 0.70–0.78 against
+1965 / SM clock; at contexts below 32k, x1.035–1.069 below 1,700 MHz, x0.95–0.98 at 1,900 MHz or more). Stages 2/3
+stay ~2–3% above stages 0/1 at the same clock (GPU placement, perf lane main bdd697e). Details:
+`prefix_cache.md` notes, "Full 8,192-token microbatches over the fit".
+
+## CUDA graph check: one eager repeat differed once on stage 3 (M4, job 7658) — not reproduced
+
+`bench/graphs.py --stage 3` (33 buckets) failed one case in 7658: bucket 4,864, padded plan (T 4,829), the eager body
+on the graph's static buffers did not repeat bitwise (and so the replay did not equal it); tokens equal. Every other
+case on all four stages passed. Not reproduced (7661): `bench/graph_repeat_probe.py` ran that case eager 8x and replay
+8x bitwise, plus buckets 2,304 / 3,328 / 4,352 / 5,376 / 6,400 / 7,424 on stage 3 and 4,608 / 4,864 / 5,120 on stage 2
+(5–8 repeats each, all bitwise), and `bench/graphs.py --stage 3` passed in full. Recorded as a rare run-to-run
+difference in some kernel; the probe names the first differing module if it recurs.
+
 ## vLLM reference: FlashKDA drifts past ~24k tokens; references use the Triton KDA prefill (kvaudit)
 
 Kind: setup difference in the reference. It affects every long-context accuracy target, the token checks and the KV

@@ -136,7 +136,34 @@ target exactly that. Full microbatches on stages 2–3 (+6%) make stage 3 the sl
 microbatches on stages 2–3. Scheduling order is not the gap (same policy, same chunk shapes); M5's scheduler work
 does not explain it.
 
+**Smoke 7658 on the merged tree (longctx da56287, 33 graph buckets: 128 and every 256 to 8,192).** 2,040 rounds,
+failed 0; full 1,792, none_first_round 307, superseded 5 (188,750 tokens recomputed), evicted 0, no admit waits.
+TTFT p50 / p90 / p99 0.48 / 2.19 / 4.27 s against the same-window target 0.39 / 1.28 / 3.55; our engine's replay at the
+fit's stage times 0.42 / 1.39 / 3.57 (x1.10 / x1.08 / x1.01 of target), so scheduling explains at most x1.10 and the
+rest is stage time over the fit. Uptime load 4.7 before, 11 after. By size (table above): the 256-step buckets brought
+1,024–4,095-token microbatches from x1.18–1.21 (7569) to x1.04–1.07 and 4,096–8,191 from x1.19–1.23 to x1.14–1.16;
+below 1,024 tokens x1.24–1.53 (+0.6–1.2 s per stage, host-bound small microbatches: lane longctx's stage-0 host work).
+
+**Full 8,192-token microbatches over the fit: the power cap, not the batch.** nvidia-smi every 200 ms (SAMPLE=1,
+`slurm/gpu_samples_7658.csv`) joined to each microbatch's GPU interval: the reason is sw_power_cap in 92–94% of the
+samples inside full microbatches; SM clock falls over the run from ~1,700 to ~1,570 MHz as power rises from ~720 to
+~975 W (limit 1,000 W), and the ratio rises with it (stage 2 by quartile x1.030 / 1.052 / 1.108 / 1.082, stage 3
+x1.023 / 1.041 / 1.102 / 1.066). At contexts below 32k, by SM clock (stages 0 / 1 / 2 / 3): below 1,700 MHz x1.035 /
+1.036 / 1.069 / 1.055; at 1,900 MHz or more x0.967 / 0.950 / 0.981 / 0.956; ratio against 1965 / SM clock r = 0.70 /
+0.75 / 0.77 / 0.78. Temperature does not order it (stage 1 runs hottest, 68 C, with the lowest ratio). At the same
+clock stages 2/3 stay ~2–3% above stages 0/1, as perf lane's placement finding (main bdd697e). Requests per
+microbatch had no effect (7569). Not a lane-m4 fix: the fit was measured at full clock; under sustained load the
+GPUs run at the 1,000 W cap.
+
+**form_lead_ms (7658, worker_host.jsonl from longctx's 1934aff).** Stage 0, plan formed -> forward returned with all
+GPU work enqueued: p50 / p90 / p99 7.2 / 10.1 / 41.5 ms (formed -> received 0.8 / 1.0 / 2.4; forward host 6.5 / 9.1 /
+39.0). The p99 is 8,192-token microbatches at 56k–134k contexts (101 microbatches over 20 ms of forward host time).
+135 of 1,830 queued plans were enqueued after the previous stage-0 end: 69% formed less than 20 ms before that end
+(the plan formed late, not slow to enqueue), the rest slow forwards (4 over 100 ms). REAL_FORM_LEAD_MS 35 -> 45
+(14d505b). The long-context forward host time is lane longctx's.
+
 **Sessions N=400 and N=500: not run yet.** On hold until three fixes are in lane-m4: lane longctx's graph buckets
-(the 3,000-token padding) and its stage-0 host launch gap, and the unaligned-P per-DSA-layer sync (done, 9d73048).
+(done, merged; 33 buckets 8589f94), its stage-0 host launch gap (pending), and the unaligned-P per-DSA-layer sync
+(done, 9d73048).
 Then one smoke with the new req-frontend and two parallel 4-GPU jobs
 (`m4.sbatch prefix_n400`, `prefix_n500`), each failing fast on a server or worker traceback or client failed > 0.
