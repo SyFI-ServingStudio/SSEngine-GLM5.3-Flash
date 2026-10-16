@@ -24,6 +24,7 @@ norms, GEMMs, MoE, quantization, MLA KV write) read only static buffers: positio
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import time
 import warnings
@@ -375,6 +376,7 @@ class StageModel:
             self._warm_mhc_pre()
         self._warm_jit_keys()
         torch.cuda.synchronize(self.device)
+        self._log_own_kernel_variants()
         pp_patch.clear_autotune_memo()     # tactics may have changed while tuning
 
     def _warm_chunks(self, specs: list[tuple[int, int]]) -> list:
@@ -427,6 +429,10 @@ class StageModel:
         prefills = [(15290, 646), (36051, 1203), (20001, 300)]           # starts 2, 3, 1 mod 4
         for d in (1, 2, 3):
             shapes.append([(40001 + 7 * i, 1) for i in range(d)] + prefills)
+        # the same with prefill tokens divisible by 16 (the tail seed at a slot slice offset by the decode rows and a
+        # token count divisible by 16: budget N=500 7730 mb 16263, 1 decode row + 6,352 prefill tokens, 45 ms)
+        for d in (1, 2, 3):
+            shapes.append([(40001 + 7 * i, 1) for i in range(d)] + prefills[:2] + [(20001, 311)])
         for r in range(2, 10):
             reqs = [(20789 + 997 * i, 128 + 61 * i) for i in range(r)]
             shapes.append(reqs)
@@ -436,6 +442,23 @@ class StageModel:
         for i, specs in enumerate(shapes):
             if fits(specs):
                 yield -100 - i, specs
+
+    def _log_own_kernel_variants(self) -> None:
+        """Print the compiled specializations of the Triton kernels vLLM's JitWarmupRegistry does not declare (ours and
+        the fork's kpool ops), so a first use in a run can be matched against what the warm-up left compiled."""
+        from triton.runtime.jit import JITFunction
+
+        import ppimpl.model.topk_canon as tc
+        from vllm.models.glm5next.nvidia.ops import kpool_compress as kops
+
+        out = {}
+        for mod in (kops, tc):
+            for name, fn in vars(mod).items():
+                fn = getattr(fn, "fn", fn) if not isinstance(fn, JITFunction) else fn
+                if isinstance(fn, JITFunction):
+                    caches = [c[0] for c in fn.device_caches.values()]
+                    out[name] = sum(len(c) for c in caches)
+        print(f"stage {self.stage}: own Triton kernel variants after warm-up {json.dumps(out)}", flush=True)
 
     def _warm_jit_keys(self) -> None:
         """Compile every compile key vLLM's JIT kernels declare for this model (`JitWarmupRegistry.warmup`, as vLLM's
