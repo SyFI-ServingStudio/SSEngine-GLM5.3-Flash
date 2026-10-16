@@ -1,6 +1,6 @@
 #!/bin/bash
 # Handoff runs (bench/run.py) on one 4-GPU server, one run name after another, on the repo's defaults (CE transport,
-# intake_procs 4, CUDA graphs). Run names come from RUNS, partition and --time from the sbatch command line; the runs
+# intake_procs 16, CUDA graphs). Run names come from RUNS, partition and --time from the sbatch command line; the runs
 # go to OUT (default measured/runs_m3), so `python -m bench.report --summarize measured/runs_m3 --out measured` writes
 # measured/iteration.md over every job's runs. Usage, from the repo root:
 #   mkdir -p measured/runs_m3/slurm
