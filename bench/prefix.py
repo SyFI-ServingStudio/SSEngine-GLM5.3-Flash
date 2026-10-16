@@ -131,7 +131,7 @@ def replay_window(run_dir: Path, n: int, window_ms: float) -> dict | None:
 FIT_BINS = [(0, 256), (256, 1024), (1024, 8192), (8192, 8193)]
 
 
-def stage_fit(run_dir: Path) -> dict:
+def stage_fit(run_dir: Path, bins: list[tuple[int, int]] = FIT_BINS) -> dict:
     """Per stage and microbatch size (tokens), the run's summed compute over the handoff's fit for the same
     microbatches (microbatch_fit.json: a + b tokens + c pairs), and stage 0's idle time while a round was waiting
     (it had arrived and its first chunk had not started): gaps between stage 0's microbatches, from the gap's start or
@@ -140,10 +140,10 @@ def stage_fit(run_dir: Path) -> dict:
 
     fit = StageModel(HANDOFF)
     mbs = [m for m in read_jsonl(run_dir / "microbatches.jsonl") if not any(q["id"] == PREFLIGHT for q in m["requests"])]
-    out = {"bins": [f"[{lo}, {hi})" if hi != 8193 else "8192" for lo, hi in FIT_BINS], "stages": []}
+    out = {"bins": [f"[{lo}, {hi})" if hi != lo + 1 else str(lo) for lo, hi in bins], "stages": []}
     for s in range(4):
         row = []
-        for lo, hi in FIT_BINS:
+        for lo, hi in bins:
             ms = [m for m in mbs if m["stage"] == s and lo <= sum(q["append"] for q in m["requests"]) < hi]
             meas = sum(m["compute_ms"] for m in ms)
             want = sum(fit.fit_ms(s, [(q["id"], q["prefix"], q["append"]) for q in m["requests"]]) for m in ms)
