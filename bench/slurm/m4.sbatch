@@ -15,6 +15,8 @@
 # cache-on half passed (the cache-on rounds are read from prefix_check_unaligned_on/); SKIP_CHECK=1 skips the prefix
 # check too. Token differences between the cache-on and cache-off servers go to the margin rule (bench/margin.py
 # --judge: each side's token in the top 2, margin < 3 nats).
+# SAMPLE=1: nvidia-smi samples (SM clock, power, temperature, throttle reasons) every 200 ms into
+# OUT/slurm/gpu_samples_<job>.csv. preflight also runs GTEST (-k) first, as margin does.
 # resume_nsys: bench/margin.py --nvtx on CASES (absolute paths, space-separated; default cases_resume_cost.json: P
 # 100,000 / 100,003 / 100,004 resumed with A 256 / 1,024) at each commit of REVS (default "worktree") under Nsight
 # Systems; bench/mb_kernels.py per stage and kernel (compare runs: python -m bench.mb_kernels --compare); GTEST as in margin.
@@ -34,11 +36,16 @@ P=$((20000 + ${SLURM_JOB_ID:-0} % 120 * 100))
 WHAT=${1:?check, preflight, margin, resume_nsys, bringup or prefix_n<N>}
 echo "== $(date -Is) gpus $G port $P: $WHAT"
 nvidia-smi --query-gpu=index,pci.bus_id,memory.used --format=csv,noheader
+if [ -n "${SAMPLE:-}" ]; then   # GPU clocks, power, temperature and throttle reasons every 200 ms, for the whole job
+  nvidia-smi -i "$G" --query-gpu=timestamp,index,clocks.sm,clocks.max.sm,power.draw,power.limit,temperature.gpu,utilization.gpu,clocks_throttle_reasons.active \
+    --format=csv,nounits -lms 200 > "$R/slurm/gpu_samples_${SLURM_JOB_ID:-local}.csv" 2>&1 &
+  SAMPLER=$!; trap 'kill $SAMPLER 2>/dev/null; rm -rf "$TMPDIR"' EXIT   # env.sh's trap too
+fi
 case $WHAT in
   check) $PY -m bench.prefix_check --out "$R" --port "$P"; rc=$? ;;
   preflight)
-    rc=0
-    if [ -z "${SKIP_KVCHECK:-}" ]; then
+    rc=0; [ -n "${GTEST:-}" ] && { $PY -m pytest tests -m gpu -k "$GTEST" -v; rc=$?; }   # GPU tests first
+    if (( rc == 0 )) && [ -z "${SKIP_KVCHECK:-}" ]; then
       $PY -m bench.kvcheck --prompt-len 32768 --chunk 8000 --chunk-b 8192 --exact chunked_b,whole_filler; rc=$?
       (( rc == 0 )) && { $PY -m bench.kvcheck --prompt-len 40000 --chunk 8001 --chunk-b 8190 --noise-len 32768; rc=$?; }
     fi
