@@ -176,37 +176,61 @@ def main() -> None:
     ap.add_argument("--prompt-len", type=int, default=32768)
     ap.add_argument("--chunk", type=int, default=8000)
     ap.add_argument("--chunk-b", type=int, default=8192, help="chunk size of `chunked_b` (0: skip it)")
-    ap.add_argument("--exact", action="store_true",
-                    help="exit 1 unless every variant equals `whole` bitwise (rows and logits); for chunk sizes "
-                         "at which every microbatch has one mHC split-K (148 // ceil(T / 64) == 1: T > 4,736) and "
-                         "every chunk starts on a 32-token KDA chunk (FlashInfer chunks from the sequence start, so a "
-                         "resume elsewhere sums the recurrence in other pieces: bf16-level differences)")
-    ap.add_argument("--max-kl", type=float,
-                    help="exit 1 unless every variant's last-position logits have whole's top-1 and KL <= this")
+    ap.add_argument("--exact", default="",
+                    help="comma-separated variants that must equal `whole` bitwise (rows and logits): those whose "
+                         "microbatches keep whole's shapes, i.e. chunks on 8,192-token boundaries (one mHC split-K "
+                         "count, starts on KDA's 32-token chunk grid)")
+    ap.add_argument("--noise-len", type=int,
+                    help="judge the other variants against this job's `--noise-variant` run at this prompt length "
+                         "(the batch-numerics baseline: 32768 in 8,000-token chunks leaves a 768-token last chunk, "
+                         "another split-K count): per stage, max per-chunk rel. L2 <= factor x the baseline's; "
+                         "logits: top-1 equal and KL <= factor^2 x the baseline's")
+    ap.add_argument("--noise-variant", default="chunked")
+    ap.add_argument("--noise-factor", type=float, default=2.0)
     a = ap.parse_args()
     import torch.multiprocessing as mp
 
     port = 21000 + (int(JOB) % 100) * 100 if JOB.isdigit() else 21000
     mp.spawn(_worker, args=(a.prompt_len, a.chunk, port, a.chunk_b or None), nprocs=4, join=True)
-    if a.max_kl is not None:
-        v3 = json.loads((OUT / f"kvcheck_{a.prompt_len}_rank3_{JOB}.json").read_text())["variants"]
-        bad = [f"{n}: top-1 {v['top1']}, KL {v['kl']:.3g}" for n, v in v3.items()
-               if v["top1"][0] != v["top1"][1] or v["kl"] > a.max_kl or not v["finite"]]
-        print(f"[kvcheck] max-kl {a.max_kl}: " + ("; ".join(bad) or "every variant within"), flush=True)
-        if bad:
-            raise SystemExit(1)
-    if a.exact:
-        bad = []
-        for rank in range(4):
-            rep = json.loads((OUT / f"kvcheck_{a.prompt_len}_rank{rank}_{JOB}.json").read_text())["variants"]
-            for name, v in rep.items():
-                d = v["max_abs_logit"] if rank == 3 else v["rel_l2"]
-                if d != 0 or not v["finite"]:
-                    bad.append(f"stage {rank} {name}: {d}")
-        print("[kvcheck] exact: " + ("all variants bitwise equal to whole" if not bad else "; ".join(bad)), flush=True)
-        if bad:
-            raise SystemExit(1)
+    if a.exact or a.noise_len:
+        raise SystemExit(judge(a.prompt_len, [x for x in a.exact.split(",") if x], a.noise_len, a.noise_variant,
+                               a.noise_factor))
 
+
+def judge(L: int, exact: list[str], noise_len: int | None, noise_variant: str, factor: float) -> int:
+    """The preflight rule: exactness where the microbatch shapes are whole's, a noise baseline elsewhere."""
+    rep = [json.loads((OUT / f"kvcheck_{L}_rank{r}_{JOB}.json").read_text())["variants"] for r in range(4)]
+    base = None if noise_len is None else \
+        [json.loads((OUT / f"kvcheck_{noise_len}_rank{r}_{JOB}.json").read_text())["variants"][noise_variant]
+         for r in range(4)]
+
+    def dist(v, r):
+        if r == 3:
+            return v["max_abs_logit"]
+        return max([v["rel_l2"], *(c["rel_l2"] for c in (v.get("per_chunk") or []))])
+
+    bad, lines = [], []
+    for name in rep[0]:
+        vs = [rep[r][name] for r in range(4)]
+        if not all(v["finite"] for v in vs):
+            bad.append(f"{name}: not finite")
+        if name in exact:
+            d = [dist(vs[r], r) for r in range(4)]
+            lines.append(f"{name} exact: {d}")
+            if any(d):
+                bad.append(f"{name}: not bitwise {d}")
+        elif base is not None and name != "whole_filler":
+            lim = [factor * dist(base[r], r) for r in range(3)]
+            d = [dist(vs[r], r) for r in range(3)]
+            kl, kl_lim = vs[3]["kl"], factor ** 2 * base[3]["kl"]
+            lines.append(f"{name}: stage rel. L2 {[round(x, 3) for x in d]} (limit {[round(x, 3) for x in lim]}), "
+                         f"KL {kl:.3g} (limit {kl_lim:.3g}), top-1 {vs[3]['top1']}")
+            if any(x > y for x, y in zip(d, lim)) or kl > kl_lim or vs[3]["top1"][0] != vs[3]["top1"][1]:
+                bad.append(f"{name}: outside the noise baseline")
+    for x in lines:
+        print(f"[kvcheck] judge {L}: {x}", flush=True)
+    print(f"[kvcheck] judge {L}: " + ("; ".join(bad) if bad else "pass"), flush=True)
+    return 1 if bad else 0
 
 if __name__ == "__main__":
     main()

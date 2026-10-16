@@ -5,9 +5,10 @@
 #   sbatch -p priority -J ppimpl --time=00:30:00 -o measured/runs_m4/slurm/%j.out bench/slurm/m4.sbatch bringup
 #   sbatch -p priority -J ppimpl --time=00:20:00 -o measured/runs_m4/slurm/%j.out bench/slurm/m4.sbatch preflight
 #   sbatch -p priority -J ppimpl --time=00:28:00 -o measured/runs_m4/slurm/%j.out bench/slurm/m4.sbatch prefix_n400
-# preflight (before any long run), stopping at the first failure: kvcheck with chunk starts inside 4-token indexer
-# pools (40,000 tokens in 8,001- and 8,190-token chunks; not bitwise, since KDA resumes off its 32-token chunk grid:
-# top-1 equal and KL <= 1e-3, the batch-numerics floor is 2.5e-4, job 7395), prefix_check with P + 1/2/3
+# preflight (before any long run), stopping at the first failure: kvcheck at 32,768 tokens (8,192-token chunks must be
+# bitwise; 8,000-token chunks leave a 768-token chunk of another mHC split-K count: the batch-numerics baseline), then
+# at 40,000 tokens with chunk starts inside 4-token indexer pools and off KDA's 32-token grid (8,001 and 8,190: within
+# 2x the baseline per stage, KL within 4x, top-1 equal), prefix_check with P + 1/2/3
 # (prefix_check_unaligned), then a smoke of prefix_n400's first ~2 min (client limit 3m incl. ~45 s tokenization:
 # prefix_smoke_n400) that must end with failed=0. bench/run.py stops any run at the first fault (server or worker
 # traceback, server exit, client failed > 0).
@@ -30,7 +31,8 @@ nvidia-smi --query-gpu=index,pci.bus_id,memory.used --format=csv,noheader
 case $WHAT in
   check) $PY -m bench.prefix_check --out "$R" --port "$P"; rc=$? ;;
   preflight)
-    $PY -m bench.kvcheck --prompt-len 40000 --chunk 8001 --chunk-b 8190 --max-kl 1e-3; rc=$?
+    $PY -m bench.kvcheck --prompt-len 32768 --chunk 8000 --chunk-b 8192 --exact chunked_b,whole_filler; rc=$?
+    (( rc == 0 )) && { $PY -m bench.kvcheck --prompt-len 40000 --chunk 8001 --chunk-b 8190 --noise-len 32768; rc=$?; }
     (( rc == 0 )) && { $PY -m bench.prefix_check --out "$R" --port "$P" --p-shift 1,2,3 --name prefix_check_unaligned; rc=$?; }
     (( rc == 0 )) && { $PY -m bench.run prefix_n400 --inline --gpus "$G" --port "$P" --out-root "$R" --client-limit 3m \
                          --run-name prefix_smoke_n400; rc=$?; }
