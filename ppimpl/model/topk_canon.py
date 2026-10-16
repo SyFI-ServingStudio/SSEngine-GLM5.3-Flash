@@ -54,13 +54,16 @@ def canonical_topk_torch(logits, ks, ke, dst: torch.Tensor, k: int, block_elems:
 
 if triton is not None:
     @triton.jit
-    def _kth_kernel(logits_ptr, stride_l, ks_ptr, dst_ptr, stride_d, kth_ptr, nvalid_ptr, cnt_ptr,
+    def _kth_kernel(logits_ptr, stride_l, ks_ptr, ke_ptr, dst_ptr, stride_d, kth_ptr, nvalid_ptr, cnt_ptr,
                     K: tl.constexpr, KP: tl.constexpr):
         r = tl.program_id(0).to(tl.int64)
         lo = tl.load(ks_ptr + r).to(tl.int32)
+        hi = tl.load(ke_ptr + r).to(tl.int32)
         offs_k = tl.arange(0, KP)
         sel = tl.load(dst_ptr + r * stride_d + offs_k, mask=offs_k < K, other=-1)
-        valid = sel >= 0
+        # indices past the row count as unselected (DeepSelect writes junk on NaN logits): never read them
+        valid = (sel >= 0) & (sel < hi - lo)
+        tl.store(dst_ptr + r * stride_d + offs_k, tl.where(valid, sel, -1), mask=offs_k < K)
         v = tl.load(logits_ptr + r * stride_l + lo + sel, mask=valid, other=float("inf"))
         tl.store(kth_ptr + r, tl.min(v, axis=0))
         tl.store(nvalid_ptr + r, tl.sum(valid.to(tl.int32), axis=0))
@@ -136,7 +139,8 @@ def canonicalize(logits, ks, ke, dst: torch.Tensor, k: int) -> None:
     kp = triton.next_power_of_2(k)
     scratch = torch.empty(3, n, dtype=torch.int32, device=dst.device)
     kth, n_valid, cnt = scratch[0].view(torch.float32), scratch[1], scratch[2]
-    _kth_kernel[(n,)](logits, logits.stride(0), ks, dst, dst.stride(0), kth, n_valid, cnt, K=k, KP=kp, num_warps=4)
+    _kth_kernel[(n,)](logits, logits.stride(0), ks, ke, dst, dst.stride(0), kth, n_valid, cnt, K=k, KP=kp,
+                      num_warps=4)
     _count_kernel[(n, triton.cdiv(logits.shape[1], COUNT_BLOCK))](logits, logits.stride(0), ks, ke, kth, cnt,
                                                                   BLOCK=COUNT_BLOCK, num_warps=8)
     _finish_kernel[(n,)](logits, logits.stride(0), ks, ke, dst, dst.stride(0), kth, n_valid, cnt,
@@ -154,7 +158,7 @@ if triton is not None:
         row = logits_ptr + r * stride_l
         offs_k = tl.arange(0, KP)
         sel = tl.load(dst_ptr + r * stride_d + offs_k, mask=offs_k < K, other=-1)
-        valid = sel >= 0
+        valid = (sel >= 0) & (sel < hi - lo)    # as in _kth_kernel; the write pass rewrites the whole row
         kth = tl.min(tl.load(row + lo + sel, mask=valid, other=float("inf")), axis=0)
         if b == 0:
             tl.store(kth_ptr + r, kth)

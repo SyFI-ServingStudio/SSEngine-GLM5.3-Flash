@@ -94,6 +94,29 @@ def test_topk_canonical_matches_reference(rows, width, two_requests):
             assert torch.equal(start, ref)
 
 
+@pytest.mark.parametrize("rows,width", [(300, 700), (3, 131072)])
+def test_topk_canonical_ignores_out_of_row_indices(rows, width):
+    """DeepSelect writes junk indices (0x3F3F3F3F, left-over values) for rows with NaN logits (warm-up on
+    uninitialized KV, job 7670): canonicalization never reads past the row and returns indices within it."""
+    import torch
+
+    from ppimpl.model.topk_canon import canonicalize, canonicalize_split
+
+    dev, k = torch.device("cuda", 0), 512
+    g = torch.Generator(device=dev).manual_seed(1)
+    lg = torch.randn(rows, width, device=dev, generator=g)
+    lg[::7, ::5] = float("nan")
+    ks = torch.zeros(rows, dtype=torch.int32, device=dev)
+    ke = torch.minimum(1 + torch.arange(rows, device=dev) * 37, torch.tensor(width, device=dev)).to(torch.int32)
+    junk = torch.randint(0, width, (rows, k), device=dev, generator=g, dtype=torch.int32)
+    junk[:, ::3] = 0x3F3F3F3F
+    for fn in (canonicalize, canonicalize_split):
+        dst = junk.clone()
+        fn(lg, ks, ke, dst, k)
+        torch.cuda.synchronize()
+        assert ((dst >= -1) & (dst < (ke - ks)[:, None])).all()
+
+
 @pytest.mark.parametrize("path", ["prefill", "deep_select", "kernel"])
 @pytest.mark.parametrize("rows,width", [(1, 32768), (3, 131072), (64, 8192), (128, 4096)])
 def test_decode_topk_canonical(rows, width, path):
