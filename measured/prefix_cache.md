@@ -25,12 +25,14 @@ Measured / target over the same window: from the first submit to the last first 
 
 | Run | N | Window (s) | Rounds | Rounds/s | New tokens/s | Prefix hit share | TTFT p50 / p90 / p99 (s) |
 |---|---|---|---|---|---|---|---|
-| prefix_smoke_n400_7508 | 400 | 146 | 1954 / 2082 | 13.35 / 14.22 | 91.1k / 94.8k | 99.71% / 100.00% | 0.58 / 2.64 / 7.92 vs 0.37 / 1.14 / 1.86 (x1.59 / x2.33 / x4.25) |
-| └ replay (our engine, fit times; plain, dispatch_ahead 1, form lead 35 ms) | | | 2067 | 14.12 | 93.5k | 99.73% | 0.41 / 1.22 / 2.09 (x1.12 / x1.08 / x1.12 of target) |
-| prefix_smoke_n400_7569 | 400 | 149 | 2038 / 2105 | 13.64 / 14.08 | 93.7k / 94.7k | 99.72% / 100.00% | 0.46 / 1.83 / 3.32 vs 0.37 / 1.17 / 1.99 (x1.23 / x1.57 / x1.67) |
-| └ replay (our engine, fit times; plain, dispatch_ahead 1, form lead 35 ms) | | | 2090 | 13.98 | 94.5k | 99.74% | 0.41 / 1.25 / 2.20 (x1.11 / x1.07 / x1.11 of target) |
-| prefix_smoke_n400_7658 | 400 | 151 | 2040 / 2153 | 13.50 / 14.25 | 93.9k / 96.1k | 99.72% / 100.00% | 0.48 / 2.19 / 4.27 vs 0.39 / 1.28 / 3.55 (x1.24 / x1.72 / x1.20) |
-| └ replay (our engine, fit times; plain, dispatch_ahead 1, form lead 35 ms) | | | 2142 | 14.18 | 95.9k | 99.74% | 0.42 / 1.39 / 3.57 (x1.10 / x1.08 / x1.01 of target) |
+| prefix_smoke_n400_7508 | 400 | 146 | 1954 / 2063 | 13.35 / 14.09 | 91.1k / 93.4k | 99.71% / 99.73% | 0.58 / 2.64 / 7.92 vs 0.38 / 1.23 / 2.05 (x1.51 / x2.15 / x3.87) |
+| └ replay (our engine, fit times; plain, dispatch_ahead 1, form lead 35 ms) | | | 2067 | 14.12 | 93.5k | 99.73% | 0.39 / 1.22 / 2.08 (x1.02 / x0.99 / x1.01 of target) |
+| prefix_smoke_n400_7569 | 400 | 149 | 2038 / 2090 | 13.64 / 13.98 | 93.7k / 94.5k | 99.72% / 99.74% | 0.46 / 1.83 / 3.32 vs 0.39 / 1.28 / 2.14 (x1.17 / x1.43 / x1.55) |
+| └ replay (our engine, fit times; plain, dispatch_ahead 1, form lead 35 ms) | | | 2090 | 13.98 | 94.5k | 99.74% | 0.40 / 1.26 / 2.14 (x1.02 / x0.99 / x1.00 of target) |
+| prefix_smoke_n400_7658 | 400 | 151 | 2040 / 2139 | 13.50 / 14.16 | 93.9k / 95.9k | 99.72% / 99.74% | 0.48 / 2.19 / 4.27 vs 0.40 / 1.36 / 3.57 (x1.19 / x1.62 / x1.20) |
+| └ replay (our engine, fit times; plain, dispatch_ahead 1, form lead 35 ms) | | | 2145 | 14.20 | 96.0k | 99.74% | 0.41 / 1.40 / 3.61 (x1.02 / x1.03 / x1.01 of target) |
+
+Kernels compiled after warm-up (worker jit_stage<S>.jsonl; any fails the run): prefix_smoke_n400_7508 not monitored; prefix_smoke_n400_7569 not monitored; prefix_smoke_n400_7658 44 (by stage {0: 11, 1: 11, 2: 11, 3: 11}).
 
 Prefix cache per round (server_requests.jsonl hit_kind): rounds by kind, tokens recomputed because the kept context was superseded or evicted, waits for pool room:
 
@@ -46,20 +48,20 @@ Stage 0, plan formed -> its forward returned with all GPU work enqueued (ms, p50
 
 Stage time / fit (microbatch_fit.json) by microbatch size in tokens, summed over the run's microbatches (n); stage 0 idle while a round was already waiting (gaps), and from a round's arrival on an idle stage 0 to its start (arrivals):
 
-| Run | Stage | [0, 1024) | [1024, 4096) | [4096, 8192) | 8192 | Stage 0 idle, waiting | Stage 0 idle, arrival to start |
+| Run | Stage | [0, 256) | [256, 1024) | [1024, 8192) | 8192 | Stage 0 idle, waiting | Stage 0 idle, arrival to start |
 |---|---|---|---|---|---|---|---|
-| prefix_smoke_n400_7508 | 0 | x1.575 (197; +1.0 s) | x1.328 (213; +1.4 s) | x1.262 (123; +1.5 s) | x1.066 (1577; +6.0 s) | 13.84 s (1722 gaps) | 2.37 s (292 arrivals) |
-| prefix_smoke_n400_7508 | 1 | x1.310 (197; +0.6 s) | x1.277 (213; +1.2 s) | x1.217 (123; +1.2 s) | x1.092 (1577; +7.9 s) |  |  |
-| prefix_smoke_n400_7508 | 2 | x1.379 (197; +0.8 s) | x1.320 (213; +1.4 s) | x1.247 (123; +1.4 s) | x1.127 (1577; +11.1 s) |  |  |
-| prefix_smoke_n400_7508 | 3 | x1.368 (197; +0.8 s) | x1.317 (213; +1.4 s) | x1.255 (123; +1.4 s) | x1.122 (1577; +10.8 s) |  |  |
-| prefix_smoke_n400_7569 | 0 | x1.317 (256; +0.7 s) | x1.202 (257; +1.1 s) | x1.187 (151; +1.3 s) | x1.027 (1605; +2.5 s) | 2.77 s (1714 gaps) | 3.37 s (403 arrivals) |
-| prefix_smoke_n400_7569 | 1 | x1.091 (256; +0.2 s) | x1.183 (257; +1.0 s) | x1.195 (151; +1.3 s) | x1.025 (1605; +2.1 s) |  |  |
-| prefix_smoke_n400_7569 | 2 | x1.103 (256; +0.3 s) | x1.214 (257; +1.2 s) | x1.228 (151; +1.5 s) | x1.061 (1605; +5.5 s) |  |  |
-| prefix_smoke_n400_7569 | 3 | x1.102 (256; +0.3 s) | x1.212 (257; +1.2 s) | x1.224 (151; +1.5 s) | x1.064 (1605; +5.8 s) |  |  |
-| prefix_smoke_n400_7658 | 0 | x1.530 (256; +1.2 s) | x1.070 (264; +0.4 s) | x1.136 (167; +1.0 s) | x1.032 (1610; +2.9 s) | 3.80 s (1741 gaps) | 4.93 s (432 arrivals) |
-| prefix_smoke_n400_7658 | 1 | x1.244 (256; +0.6 s) | x1.036 (264; +0.2 s) | x1.138 (167; +1.0 s) | x1.022 (1610; +1.9 s) |  |  |
-| prefix_smoke_n400_7658 | 2 | x1.252 (256; +0.7 s) | x1.063 (264; +0.3 s) | x1.161 (167; +1.2 s) | x1.061 (1610; +5.4 s) |  |  |
-| prefix_smoke_n400_7658 | 3 | x1.270 (256; +0.7 s) | x1.070 (264; +0.4 s) | x1.162 (167; +1.2 s) | x1.049 (1610; +4.4 s) |  |  |
+| prefix_smoke_n400_7508 | 0 | x1.703 (59; +0.3 s) | x1.538 (138; +0.7 s) | x1.291 (336; +2.9 s) | x1.065 (1577; +5.9 s) | 13.84 s (1722 gaps) | 2.37 s (292 arrivals) |
+| prefix_smoke_n400_7508 | 1 | x1.308 (59; +0.1 s) | x1.313 (138; +0.5 s) | x1.243 (336; +2.3 s) | x1.091 (1577; +7.8 s) |  |  |
+| prefix_smoke_n400_7508 | 2 | x1.364 (59; +0.2 s) | x1.387 (138; +0.6 s) | x1.279 (336; +2.8 s) | x1.126 (1577; +11.1 s) |  |  |
+| prefix_smoke_n400_7508 | 3 | x1.350 (59; +0.2 s) | x1.376 (138; +0.6 s) | x1.282 (336; +2.8 s) | x1.121 (1577; +10.7 s) |  |  |
+| prefix_smoke_n400_7569 | 0 | x1.380 (72; +0.2 s) | x1.302 (184; +0.5 s) | x1.193 (408; +2.3 s) | x1.026 (1605; +2.4 s) | 2.77 s (1714 gaps) | 3.37 s (403 arrivals) |
+| prefix_smoke_n400_7569 | 1 | x1.009 (72; +0.0 s) | x1.117 (184; +0.2 s) | x1.189 (408; +2.2 s) | x1.024 (1605; +2.1 s) |  |  |
+| prefix_smoke_n400_7569 | 2 | x0.974 (72; -0.0 s) | x1.144 (184; +0.3 s) | x1.221 (408; +2.7 s) | x1.061 (1605; +5.4 s) |  |  |
+| prefix_smoke_n400_7569 | 3 | x0.990 (72; -0.0 s) | x1.138 (184; +0.3 s) | x1.219 (408; +2.7 s) | x1.063 (1605; +5.7 s) |  |  |
+| prefix_smoke_n400_7658 | 0 | x2.371 (77; +0.8 s) | x1.266 (179; +0.5 s) | x1.108 (431; +1.4 s) | x1.031 (1610; +2.9 s) | 3.80 s (1741 gaps) | 4.93 s (432 arrivals) |
+| prefix_smoke_n400_7658 | 1 | x1.701 (77; +0.4 s) | x1.094 (179; +0.2 s) | x1.094 (431; +1.2 s) | x1.021 (1610; +1.8 s) |  |  |
+| prefix_smoke_n400_7658 | 2 | x1.703 (77; +0.5 s) | x1.105 (179; +0.2 s) | x1.119 (431; +1.5 s) | x1.060 (1610; +5.4 s) |  |  |
+| prefix_smoke_n400_7658 | 3 | x1.748 (77; +0.5 s) | x1.113 (179; +0.2 s) | x1.122 (431; +1.6 s) | x1.048 (1610; +4.3 s) |  |  |
 
 ## Notes
 
@@ -104,7 +106,7 @@ first such hit). The indexer fix and its checks are in issues.md ("kpool indexer
   0 evictions, 0 preemptions; TTFT p50 / p90 / p99 0.46 / 1.83 / 3.32 s against the same-window target 0.37 / 1.17 /
   1.99 (table above); uptime load 65 before, 10 after.
 
-**Where the smoke's TTFT gap goes (7569 against the frozen sim, `bench/ttft_attrib.py`).** All 2,108 rounds the
+**Where the smoke's TTFT gap goes (7569 against v1's frozen sim run, `bench/ttft_attrib.py`).** All 2,108 rounds the
 server answered, matched to the sim run by request id (trace row); each round's server TTFT split along its critical
 path. Mean TTFT is +309 ms over the sim (round 0, 304 rounds: 1,034 vs 793 ms; resumed, 1,804: 846 vs 525). By part
 (real − sim, round 0 / resumed, ms):
@@ -138,11 +140,14 @@ does not explain it.
 
 **Smoke 7658 on the merged tree (longctx da56287, 33 graph buckets: 128 and every 256 to 8,192).** 2,040 rounds,
 failed 0; full 1,792, none_first_round 307, superseded 5 (188,750 tokens recomputed), evicted 0, no admit waits.
-TTFT p50 / p90 / p99 0.48 / 2.19 / 4.27 s against the same-window target 0.39 / 1.28 / 3.55; our engine's replay at the
-fit's stage times 0.42 / 1.39 / 3.57 (x1.10 / x1.08 / x1.01 of target), so scheduling explains at most x1.10 and the
-rest is stage time over the fit. Uptime load 4.7 before, 11 after. By size (table above): the 256-step buckets brought
-1,024–4,095-token microbatches from x1.18–1.21 (7569) to x1.04–1.07 and 4,096–8,191 from x1.19–1.23 to x1.14–1.16;
-below 1,024 tokens x1.24–1.53 (+0.6–1.2 s per stage, host-bound small microbatches: lane longctx's stage-0 host work).
+TTFT p50 / p90 / p99 0.48 / 2.19 / 4.27 s against the same-window v2 target 0.40 / 1.36 / 3.57 (x1.19 / x1.62 /
+x1.20); our engine's replay at v2's fit 0.41 / 1.40 / 3.61 (x1.02 / x1.03 / x1.01 of target), so scheduling explains
+at most x1.03 and the rest is stage time over the fit, 11 Triton compiles per stage after warm-up among it (5
+pipeline stalls of 0.3–3.3 s; fixed in warm-up, issues.md). Against v1 (whose hit rule kept partial hits) the target
+was 0.39 / 1.28 / 3.55 and the replay x1.10 / x1.08 / x1.01. Uptime load 4.7 before, 11 after. By size, in v1's
+fit and size classes: the 256-step buckets brought 1,024–4,095-token microbatches from x1.18–1.21 (7569) to x1.04–1.07
+and 4,096–8,191 from x1.19–1.23 to x1.14–1.16; below 1,024 tokens x1.24–1.53 (+0.6–1.2 s per stage: host-bound small
+microbatches, lane longctx's stage-0 host work, and the compile stalls).
 
 **Full 8,192-token microbatches over the fit: the power cap, not the batch.** nvidia-smi every 200 ms (SAMPLE=1,
 `slurm/gpu_samples_7658.csv`) joined to each microbatch's GPU interval: the reason is sw_power_cap in 92–94% of the
