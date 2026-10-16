@@ -23,8 +23,43 @@ from pathlib import Path
 from bench.nsys_trace import load, stage_numbers
 
 
+def api_calls(db: Path) -> dict[tuple[int, int], dict[str, list[float]]]:
+    """CUDA runtime calls made inside each `stage <s> mb <n>` range on its thread: name -> [count, host us]
+    (a cudaMemcpy from pageable memory or a stream/device synchronize there stalls the host mid-stage)."""
+    import re
+    import sqlite3
+
+    con = sqlite3.connect(db)
+    strings = dict(con.execute("SELECT id, value FROM StringIds"))
+    cols = {r[1] for r in con.execute("PRAGMA table_info(NVTX_EVENTS)")}
+    text = "COALESCE(text, (SELECT value FROM StringIds WHERE id = textId))" if "textId" in cols else "text"
+    rx = re.compile(r"^stage (\d+) mb (\d+)$")
+    ranges = defaultdict(list)
+    for label, a, b, tid in con.execute(f"SELECT {text}, start, end, globalTid FROM NVTX_EVENTS WHERE end IS NOT NULL"):
+        m = rx.match(label or "")
+        if m:
+            ranges[tid].append((a, b, int(m.group(1)), int(m.group(2))))
+    out: dict = defaultdict(lambda: defaultdict(lambda: [0, 0.0]))
+    for tid, rs in ranges.items():
+        rs.sort()
+        calls = con.execute("SELECT start, end, nameId FROM CUPTI_ACTIVITY_KIND_RUNTIME WHERE globalTid = ? "
+                            "ORDER BY start", (tid,)).fetchall()
+        i = 0
+        for a, b, st, mb in rs:
+            while i < len(calls) and calls[i][0] < a:
+                i += 1
+            j = i
+            while j < len(calls) and calls[j][0] <= b:
+                e = out[(st, mb)][strings.get(calls[j][2], str(calls[j][2]))]
+                e[0] += 1
+                e[1] += (calls[j][1] - calls[j][0]) / 1e3
+                j += 1
+    return out
+
+
 def summarize(db: Path, mbs: list[dict]) -> dict:
     per, _ = load(db)
+    api = api_calls(db)
     by_case: dict[str, list[int]] = defaultdict(list)
     for m in mbs:
         if m["is_last"]:
@@ -34,7 +69,7 @@ def summarize(db: Path, mbs: list[dict]) -> dict:
         ids = ids[1:] if len(ids) > 1 else ids
         stages = []
         for s in range(4):
-            comp, busy, lead, launch, kern = [], [], [], [], defaultdict(list)
+            comp, busy, lead, launch, kern, calls = [], [], [], [], defaultdict(list), defaultdict(list)
             for mb in ids:
                 ks = per.get((s, mb), [])
                 if not ks:
@@ -49,13 +84,17 @@ def summarize(db: Path, mbs: list[dict]) -> dict:
                     sums[k[2]] += (k[1] - k[0]) / 1e3
                 for name in sums:
                     kern[name].append(sums[name])
+                for name, (n_calls, us) in api.get((s, mb), {}).items():
+                    calls[name].append((n_calls, us))
             if not comp:
                 stages.append({})
                 continue
             stages.append({"compute_ms": statistics.median(comp), "busy_ms": statistics.median(busy),
                            "host_lead_ms": statistics.median(lead), "launch_ms": statistics.median(launch),
                            "kernels_us": {k: statistics.median(v + [0.0] * (len(comp) - len(v)))
-                                          for k, v in kern.items()}})
+                                          for k, v in kern.items()},
+                           "api": {k: [statistics.median([c for c, _ in v]), statistics.median([u for _, u in v])]
+                                   for k, v in calls.items()}})
         out[case] = {"microbatches": ids, "stages": stages}
     return out
 
@@ -77,6 +116,12 @@ def report(res: dict, base: str | None, top: int) -> None:
                          f"busy {st['busy_ms'] - bs['busy_ms']:+.3f})")
             print(line)
             if b and b["stages"][s]:
+                ba, sa = b["stages"][s].get("api", {}), st.get("api", {})
+                for k in sorted(set(ba) | set(sa)):
+                    c0, u0 = ba.get(k, [0, 0.0])
+                    c1, u1 = sa.get(k, [0, 0.0])
+                    if c0 != c1 or abs(u1 - u0) >= 50:
+                        print(f"    api {k}: {c0:g} -> {c1:g} calls, host {u0:.0f} -> {u1:.0f} us")
                 bk = b["stages"][s]["kernels_us"]
                 diff = {k: st["kernels_us"].get(k, 0.0) - bk.get(k, 0.0) for k in set(st["kernels_us"]) | set(bk)}
                 for k, d in sorted(diff.items(), key=lambda kv: -abs(kv[1]))[:top]:
