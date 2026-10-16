@@ -13,7 +13,7 @@ Construction:
 
 Forward runs the layers inside vLLM's forward context; no host sync: plan -> metadata (host) -> GPU work.
 
-CUDA graphs (`cuda_graphs`): a microbatch of up to the largest bucket (`GRAPH_BUCKETS`, powers of 2) is padded to its
+CUDA graphs (`cuda_graphs`): a microbatch of up to the largest bucket (`GRAPH_BUCKETS`) is padded to its
 bucket and replayed from the fork's breakable CUDA graph (`vllm.compilation.breakable_cudagraph`): one capture per
 bucket of the whole stage forward, cut at the ops the fork marks as eager breaks (MLA attention, the kpool indexer,
 our KDA prefill), which run eagerly on each replay with the microbatch's own metadata. The captured segments (mHC,
@@ -46,7 +46,9 @@ HIDDEN_WIDTH = 4 * 4096
 TACTICS = Path(os.environ.get("PPIMPL_FI_TACTICS",
                               Path(__file__).resolve().parents[1] / "data" / "flashinfer_tactics_b200.json"))
 RESERVE_GB = 13.6     # 1_contract.md §1: activations and workspace beside weights and KV (and the CUDA graph pool)
-GRAPH_BUCKETS = (128, 256, 512, 1024, 2048, 4096, 8192)   # token counts captured as CUDA graphs
+# token counts captured as CUDA graphs: powers of 2 to 1024, then every 1024 (and 1536). With powers of 2 only, a
+# 3,000-token prompt ran as 4,096 (round 0 TTFT 114 vs 96.7 ms target, x1.18; 4k: 121 ms, job 7462).
+GRAPH_BUCKETS = (128, 256, 512, 1024, 1536, 2048, 3072, 4096, 5120, 6144, 7168, 8192)
 
 
 def graph_bucket(num_tokens: int, buckets) -> int | None:
