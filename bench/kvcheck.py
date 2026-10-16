@@ -178,13 +178,23 @@ def main() -> None:
     ap.add_argument("--chunk-b", type=int, default=8192, help="chunk size of `chunked_b` (0: skip it)")
     ap.add_argument("--exact", action="store_true",
                     help="exit 1 unless every variant equals `whole` bitwise (rows and logits); for chunk sizes "
-                         "at which every microbatch has one mHC split-K (148 // ceil(T / 64) == 1: T > 4,736), so "
-                         "any difference is a hand-off bug")
+                         "at which every microbatch has one mHC split-K (148 // ceil(T / 64) == 1: T > 4,736) and "
+                         "every chunk starts on a 32-token KDA chunk (FlashInfer chunks from the sequence start, so a "
+                         "resume elsewhere sums the recurrence in other pieces: bf16-level differences)")
+    ap.add_argument("--max-kl", type=float,
+                    help="exit 1 unless every variant's last-position logits have whole's top-1 and KL <= this")
     a = ap.parse_args()
     import torch.multiprocessing as mp
 
     port = 21000 + (int(JOB) % 100) * 100 if JOB.isdigit() else 21000
     mp.spawn(_worker, args=(a.prompt_len, a.chunk, port, a.chunk_b or None), nprocs=4, join=True)
+    if a.max_kl is not None:
+        v3 = json.loads((OUT / f"kvcheck_{a.prompt_len}_rank3_{JOB}.json").read_text())["variants"]
+        bad = [f"{n}: top-1 {v['top1']}, KL {v['kl']:.3g}" for n, v in v3.items()
+               if v["top1"][0] != v["top1"][1] or v["kl"] > a.max_kl or not v["finite"]]
+        print(f"[kvcheck] max-kl {a.max_kl}: " + ("; ".join(bad) or "every variant within"), flush=True)
+        if bad:
+            raise SystemExit(1)
     if a.exact:
         bad = []
         for rank in range(4):
