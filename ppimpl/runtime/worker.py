@@ -21,6 +21,7 @@ import zmq
 
 from ppimpl.config import HIDDEN_WIDTH, RunConfig
 from ppimpl.runtime.cpus import cpu_list, pin_process, threads, worker_cpus
+from ppimpl.runtime.host_stamps import WorkerStamps
 from ppimpl.runtime.transport import (open_pipe, Plan, Ready, Shutdown, StageDone, WorkerError, decode_to_worker,
                                       encode, report_socket, worker_sockets)
 
@@ -214,6 +215,7 @@ def run_worker(cfg: RunConfig, stage: int):   # makes inference tensors, which a
         clock = Clock(device)
         window = ProfileWindow(cfg.profile_mbs if cuda else None)
         hostprof = HostProfile(stage, cfg.run_dir)
+        stamps = WorkerStamps(stage, cfg.run_dir, model)
         print(f"stage {stage} cpus: {cpu_list(cpus) if cpus else 'not pinned'}, threads {threads()}", flush=True)
         first_use = FirstUse(stage)
         if cuda:
@@ -244,7 +246,9 @@ def run_worker(cfg: RunConfig, stage: int):   # makes inference tensors, which a
             start = clock.mark()
             first_use.mb = plan.mb_id
             hostprof.before(plan.mb_id)
+            stamps.before(plan)
             out = model.forward(plan, hidden_in)
+            stamps.after()
             hostprof.after(plan.mb_id)
             end = clock.mark()
             host = (plan_ns, fwd_ns, time.time_ns())

@@ -11,9 +11,8 @@ direct - ahead is what the host costs the stage on the GPU timeline. With --idle
 thread sleeps X ms before each forward, as a worker blocks on its plan socket between microbatches) and
 `direct_spin` (it busy-waits X ms instead): what an idle, cold host thread adds. Also the host time of `forward` (perf
 counter), and with --profile one cProfile of a direct forward (top functions by own and by cumulative time).
-With --stamps, low-overhead host timings of direct forwards (sys.monitoring on the functions in STAMPS only, plus a
-stamp at the start of every graph segment and eager break): when each segment starts after the forward's start,
-and each function's inclusive time per forward.
+With --stamps, low-overhead host timings of direct forwards (ppimpl/runtime/host_stamps.py): when each graph
+segment and eager break starts after the forward's start, each chosen function's inclusive time, GC time.
 """
 
 from __future__ import annotations
@@ -27,77 +26,6 @@ import statistics
 import time
 from pathlib import Path
 from types import SimpleNamespace as NS
-
-# module:qualname of the host functions --stamps times (inclusive, per forward)
-STAMPS = [
-    "ppimpl.model.stage:StageModel.prepare", "ppimpl.model.stage:StageModel._run_graph",
-    "ppimpl.model.metadata:StageMetadata.build", "ppimpl.model.metadata:Pack.copy",
-    "ppimpl.model.metadata:StageMetadata._kda_plan", "ppimpl.model.pp_patch:kda_prefill_forward",
-    "ppimpl.model.pp_patch:kpool_compress_insert", "ppimpl.model.pp_patch:kpool_seed_tail_cache",
-    "ppimpl.model.pp_patch:_routed_top_k_per_row_prefill", "ppimpl.model.topk_canon:canonicalize",
-    "ppimpl.model.pp_patch:build_and_route",
-    "vllm.models.glm5next.nvidia.sparse_indexer:sparse_attn_indexer_kpool",
-    "vllm.model_executor.layers.attention.mla_attention:MLAAttention.forward_impl",
-    "vllm.v1.attention.backends.mla.flashinfer_mla_sparse:FlashInferMLASparseImpl.forward_mqa",
-    "vllm.v1.attention.backends.mla.flashinfer_mla_sparse:FlashInferMLASparseImpl._run_mqa_kernel",
-    "flashinfer.mla._core:trtllm_batch_decode_with_kv_cache_mla",
-    "flashinfer.kda_kernels.persistent.forward:fwd", "flashinfer.kda_kernels.persistent.forward:_launch_forward",
-    "vllm.utils.deep_gemm:fp8_fp4_mqa_logits", "triton.runtime.jit:JITFunction.run",
-]
-
-
-class Stamps:
-    """Inclusive host time of chosen functions (sys.monitoring PY_START/PY_RETURN on their code objects only)."""
-
-    def __init__(self, names, extra=()):
-        import importlib
-        import inspect
-        import sys
-
-        self.mon = sys.monitoring
-        self.tool = self.mon.PROFILER_ID
-        self.codes, self.total, self.calls, self.stack = {}, {}, {}, {}
-        for name in names:
-            mod, _, qual = name.partition(":")
-            try:
-                obj = importlib.import_module(mod)
-                for part in qual.split("."):
-                    obj = getattr(obj, part)
-                code = inspect.unwrap(obj).__code__
-            except Exception as e:  # noqa: BLE001 (a missing name is reported, not fatal)
-                print(f"[host_front] stamps: {name}: {type(e).__name__} {e}", flush=True)
-                continue
-            self.codes[code] = qual
-        for name, fn in extra:
-            self.codes[fn.__code__] = name
-        self.mon.use_tool_id(self.tool, "host_front")
-        ev = self.mon.events
-        self.mon.register_callback(self.tool, ev.PY_START, self._start)
-        self.mon.register_callback(self.tool, ev.PY_RETURN, self._end)
-        self.mon.register_callback(self.tool, ev.PY_UNWIND, self._end)
-
-    def on(self):
-        ev = self.mon.events
-        for code in self.codes:
-            self.mon.set_local_events(self.tool, code, ev.PY_START | ev.PY_RETURN)
-
-    def off(self):
-        for code in self.codes:
-            self.mon.set_local_events(self.tool, code, 0)
-
-    def _start(self, code, offset):
-        if code in self.codes:
-            self.stack.setdefault(code, []).append(time.perf_counter_ns())
-
-    def _end(self, code, offset, *rest):
-        st = self.stack.get(code)
-        if st:
-            t = time.perf_counter_ns() - st.pop()
-            if not st:                       # outermost call only (recursion)
-                q = self.codes[code]
-                self.total[q] = self.total.get(q, 0) + t
-                self.calls[q] = self.calls.get(q, 0) + 1
-
 
 def main():
     import torch
@@ -185,68 +113,43 @@ def main():
 
 
 def stamps(model, plan, hidden, dev, reps: int) -> dict:
-    """--stamps: segment start times and function times over `reps` direct forwards."""
+    """--stamps: segment start times and function times (ppimpl.runtime.host_stamps) over `reps` direct forwards,
+    medians per forward."""
     import torch
 
-    T = sum(c.num_tokens for c in plan.chunks)
-    e = model.graphs[min(b for b in model.graphs if b >= T)] if model.graphs else None
-    seg_t: list[list[float]] = []
-    t0 = [0]
-    if e is not None:
-        orig = list(e.capture.segments)
+    from ppimpl.runtime.host_stamps import HostStamps
 
-        def wrap(i, f):
-            def seg():
-                seg_t[-1].append((i, time.perf_counter_ns() - t0[0]))
-                return f()
-            return seg
-        e.capture.segments[:] = [wrap(i, f) for i, f in enumerate(orig)]
-    builders = {type(ag.get_metadata_builder()) for _, ag in model.meta.groups}
-    st = Stamps(STAMPS, [(f"{c.__name__}.build", c.build) for c in builders])
-    import gc
-    gct: dict = {}
-    gc_t0 = [0]
-
-    def gc_cb(phase, info):
-        if phase == "start":
-            gc_t0[0] = time.perf_counter_ns()
-        else:
-            g = f"gc gen{info['generation']}"
-            gct[g] = gct.get(g, 0) + time.perf_counter_ns() - gc_t0[0]
-            gct[g + " n"] = gct.get(g + " n", 0) + 1
-    host = []
+    st = HostStamps(model)
+    if st.missing:
+        print(f"[host_front] stamps: not found: {st.missing}", flush=True)
+    recs = []
     for r in range(reps + 3):
         torch.cuda.synchronize(dev)
-        seg_t.append([])
-        if r >= 3:
-            st.on()
-            if r == 3:
-                gc.callbacks.append(gc_cb)
-        t0[0] = time.perf_counter_ns()
+        st.begin()
         with torch.inference_mode():
             model.forward(plan, hidden)
-        host.append((time.perf_counter_ns() - t0[0]) / 1e6)
-        st.off()
+        rec = st.end()
         torch.cuda.synchronize(dev)
-    gc.callbacks.remove(gc_cb)
-    if e is not None:
-        e.capture.segments[:] = orig
-    kinds = ["graph" if getattr(f, "__name__", "") == "replay" else "eager" for f in (orig if e else [])]
-    starts = {}
-    for run in seg_t[3:]:
-        for i, t in run:
-            starts.setdefault(i, []).append(t / 1e6)
-    out = {"host_ms": round(statistics.median(host[3:]), 3),
-           "segments": [{"i": i, "kind": kinds[i] if i < len(kinds) else "?",
-                         "start_ms": round(statistics.median(v), 3)} for i, v in sorted(starts.items())],
-           "functions": {q: {"ms_per_forward": round(st.total[q] / 1e6 / reps, 3),
-                             "calls_per_forward": st.calls[q] / reps} for q in sorted(st.total, key=lambda q: -st.total[q])},
-           "gc": {g: (round(v / 1e6 / reps, 4) if not g.endswith(" n") else v / reps) for g, v in sorted(gct.items())}}
-    print(f"[host_front] stamps: forward host {out['host_ms']:.3f} ms (monitored); segment starts (ms):", flush=True)
-    print("  " + "  ".join(f"{d['i']}{d['kind'][0]}@{d['start_ms']:.3f}" for d in out["segments"]), flush=True)
-    for q, v in out["functions"].items():
-        print(f"  {v['ms_per_forward']:7.3f} ms  {v['calls_per_forward']:5.1f}x  {q}", flush=True)
-    print(f"  gc per forward (ms, collections): {out['gc']}", flush=True)
+        if r >= 3:
+            recs.append(rec)
+    med = statistics.median
+    segs: dict = {}
+    for rec in recs:
+        for i, k, t in rec["seg"]:
+            segs.setdefault((i, k), []).append(t)
+    fns: dict = {}
+    for rec in recs:
+        for q, (ms, n) in rec["fn"].items():
+            fns.setdefault(q, []).append((ms, n))
+    out = {"host_ms": round(med(r["host_ms"] for r in recs), 3), "gc_ms": round(med(r["gc_ms"] for r in recs), 3),
+           "segments": [[i, k, round(med(v), 3)] for (i, k), v in sorted(segs.items())],
+           "functions": {q: [round(med(m for m, _ in v), 3), v[0][1]]
+                         for q, v in sorted(fns.items(), key=lambda kv: -med(m for m, _ in kv[1]))}}
+    print(f"[host_front] stamps: forward host {out['host_ms']:.3f} ms (monitored), gc {out['gc_ms']:.3f} ms; "
+          "segment starts (ms):", flush=True)
+    print("  " + "  ".join(f"{i}{k}@{t:.3f}" for i, k, t in out["segments"]), flush=True)
+    for q, (ms, n) in out["functions"].items():
+        print(f"  {ms:7.3f} ms  {n:3d}x  {q}", flush=True)
     return out
 
 
