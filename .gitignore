@@ -5,8 +5,13 @@ __pycache__/
 goal.md
 progress.md
 notes.md
-measured/runs/
-third_party/vllm/
+measured/runs*/
 third_party/
 measured/logs/
 build/
+# measured/: the md tables and the handoff-format jsonl are tracked; raw outputs are not (history: 7598487)
+measured/batchflip/
+measured/graphs/
+measured/host/
+measured/kernels_runs/
+measured/nodecheck_runs/

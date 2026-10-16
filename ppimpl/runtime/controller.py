@@ -1,6 +1,6 @@
 """The controller: spawns the stage workers, admits requests, forms microbatches, dispatches plans, completes requests.
 
-Two threads. The HTTP server's event loop (ppimpl/server.py) only admits: `submit` checks a request, queues it and
+Two threads. The HTTP server's event loop (ppimpl/serve/server.py) only admits: `submit` checks a request, queues it and
 returns a future. The control thread owns everything else: it takes queued requests into the scheduler, receives the
 workers' reports, forms and dispatches microbatches and resolves the futures (`call_soon_threadsafe`). So a burst of
 thousands of requests cannot hold back a report or a dispatch: in one event loop the burst's handlers all ran before
@@ -50,7 +50,7 @@ ADMIT_BATCH = 64   # requests the control thread takes in before it looks at the
 
 
 class Remote(NamedTuple):
-    """A request that came from an intake process (ppimpl/intake.py): where its answer goes."""
+    """A request that came from an intake process (ppimpl/serve/intake.py): where its answer goes."""
     ident: bytes
     key: int
 
@@ -119,8 +119,6 @@ class Controller:
         pkg_root = str(Path(__file__).resolve().parents[2])
         env = {**os.environ, "PYTHONUNBUFFERED": "1",
                "PYTHONPATH": os.pathsep.join(filter(None, [pkg_root, os.environ.get("PYTHONPATH")]))}
-        if cfg.transport == "nccl" and cfg.nccl_channels:   # see RunConfig.compute_sms
-            env |= {"NCCL_MAX_NCHANNELS": str(cfg.nccl_channels), "NCCL_MAX_P2P_NCHANNELS": str(cfg.nccl_channels)}
         for s in range(self.n):
             log = open(self.run_dir / f"worker{s}.log", "w")
             self.procs.append(subprocess.Popen(
@@ -367,7 +365,7 @@ class Controller:
             if len(self.intakes_ready) == self.cfg.intake_procs:
                 for i in self.intakes_ready:
                     self.intake.send_multipart([i, b"G"])
-        elif kind == b"S":   # /shutdown at an intake: the serve process stops on SIGTERM (ppimpl/server.py)
+        elif kind == b"S":   # /shutdown at an intake: the serve process stops on SIGTERM (ppimpl/serve/server.py)
             os.kill(os.getpid(), signal.SIGTERM)
 
     def _admit(self, req_id: str, token_ids: list[int], arrival_ns: int, fut: asyncio.Future):

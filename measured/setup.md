@@ -1,14 +1,14 @@
 # Setup record (`1_contract.md` §6 Setup)
 
-Node `cayenne`, recorded 2026-10-15. Measured values only; anything not yet measured says so.
+One node, recorded 2026-10-15. Measured values only; anything not yet measured says so.
 
 ## Model
 
 | | |
 |---|---|
 | Checkpoint | `nvidia/GLM-5.3-Flash-NVFP4`, snapshot `da920bb0b9f4a06727223a349e55468e38352348` (the only snapshot on disk) |
-| Location | `HF_HOME=/raid/hf`, `/raid/hf/hub/models--nvidia--GLM-5.3-Flash-NVFP4/snapshots/da920bb0…`, 33 safetensors shards, 191 GB |
-| Text corpus | enwik9 at `/raid/kanzhu/ServingStudio/data/corpus/enwik9`, 1,000,000,000 bytes, md5 `e206c3450ac99950df65bf70ef61a12d` (matches §2.2) |
+| Location | `$HF_HOME/hub/models--nvidia--GLM-5.3-Flash-NVFP4/snapshots/da920bb0…`, 33 safetensors shards, 191 GB |
+| Text corpus | enwik9 at `<workspace>/data/corpus/enwik9`, 1,000,000,000 bytes, md5 `e206c3450ac99950df65bf70ef61a12d` (matches §2.2) |
 
 ## Serving code and kernel libraries
 

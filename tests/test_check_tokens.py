@@ -1,6 +1,6 @@
 """CPU test of bench/check_tokens.py on a stub run dir and a stub reference.
 
-run: python -m pytest lanes/measure/tests/test_check_tokens.py   (or plain python this file)
+run: python -m pytest tests/test_check_tokens.py
 """
 
 import hashlib
@@ -13,8 +13,7 @@ from pathlib import Path
 import numpy as np
 
 HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE.parent / "bench"))
-import check_tokens  # noqa: E402
+from bench import check_tokens  # noqa: E402
 
 REAL_REFERENCE = HERE.parent / "measured" / "reference.jsonl"
 
@@ -59,12 +58,12 @@ def test_stub_run():
         assert not res["summary"]["ok"]
         assert (t / "run" / "token_check.json").exists()
         # The CLI exits 1 on a failure and 0 once only passing requests remain.
-        cli = [sys.executable, str(HERE.parent / "bench" / "check_tokens.py"), str(t / "run"),
+        cli = [sys.executable, "-m", "bench.check_tokens", str(t / "run"),
                "--reference", str(t / "ref.jsonl"), "--min-margin", "0"]
-        assert subprocess.run(cli, capture_output=True).returncode == 1
+        assert subprocess.run(cli, capture_output=True, cwd=HERE.parent).returncode == 1
         write_ok = [r for r in reqs[:2]]
         (t / "run" / "server_requests.jsonl").write_text("".join(json.dumps(r) + "\n" for r in write_ok))
-        assert subprocess.run(cli, capture_output=True).returncode == 0
+        assert subprocess.run(cli, capture_output=True, cwd=HERE.parent).returncode == 0
 
 
 def test_real_reference_self_consistent():

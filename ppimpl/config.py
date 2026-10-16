@@ -1,5 +1,6 @@
 """Design constants of handoff glm53_flash_pp4_b200_v1 and the run config (`python -m ppimpl serve --config`)."""
 
+import os
 from pathlib import Path
 
 import msgspec
@@ -13,6 +14,15 @@ HIDDEN_WIDTH = 4 * 4096      # 4-stream mHC residual, BF16: 32 KiB per token bet
 MB_TOKENS = 8192             # plain scheduler: microbatch budget and chunk size
 MAX_IN_FLIGHT = 4
 LAYER_SPLIT = [12, 11, 11, 11]
+
+# The weights: Hugging Face nvidia/GLM-5.3-Flash-NVFP4 at this revision, in the hub cache under HF_HOME
+# (`hf download nvidia/GLM-5.3-Flash-NVFP4 --revision <CHECKPOINT_REVISION>`). PPIMPL_CHECKPOINT names another
+# directory.
+CHECKPOINT_REPO = "nvidia/GLM-5.3-Flash-NVFP4"
+CHECKPOINT_REVISION = "da920bb0b9f4a06727223a349e55468e38352348"
+CHECKPOINT = os.environ.get("PPIMPL_CHECKPOINT") or str(
+    Path(os.environ.get("HF_HOME") or Path.home() / ".cache" / "huggingface") / "hub"
+    / f"models--{CHECKPOINT_REPO.replace('/', '--')}" / "snapshots" / CHECKPOINT_REVISION)
 
 
 class SchedulerConfig(msgspec.Struct, forbid_unknown_fields=True):
@@ -54,7 +64,6 @@ class TierConfig(msgspec.Struct, forbid_unknown_fields=True):
 class FakeConfig(msgspec.Struct, forbid_unknown_fields=True):
     """FakeStageModel: no weights, a per-token delay, deterministic tokens."""
     us_per_token: float = 7.0         # stage time per token (57 ms per 8k microbatch ~ stage 0's target)
-    ms_per_mb: float = 0.0            # fixed stage time per microbatch
     num_blocks: int = 7144            # reported in Ready (incl. the null block): 7,143 usable = 61,258,368 tokens
     hidden_width: int = HIDDEN_WIDTH  # smaller only for CPU tests
 
@@ -62,8 +71,8 @@ class FakeConfig(msgspec.Struct, forbid_unknown_fields=True):
 class RunConfig(msgspec.Struct, forbid_unknown_fields=True):
     model: str = "fake"               # "fake" (FakeStageModel) or "glm53" (ppimpl.model.stage.StageModel)
     checkpoint: str | None = None
-    served_model_name: str = "glm53-flash-pp4"
-    device: str = "cuda"              # "cuda": NCCL p2p, worker s on cuda:s; "cpu": gloo (tests)
+    device: str = "cuda"              # "cuda": worker s on cuda:s, activations by copy engine (CePipe);
+                                      # "cpu": gloo (tests)
     host: str = "127.0.0.1"
     port: int = 8000                  # HTTP
     control_port: int | None = None   # zmq + torch.distributed ports: control_port .. control_port+5 (default port+1)
@@ -76,15 +85,9 @@ class RunConfig(msgspec.Struct, forbid_unknown_fields=True):
     pool_tokens: int | None = None    # cap on the KV pool, in tokens (1_contract.md §2.3)
     cuda_graphs: bool = True          # glm53: microbatches up to 8192 tokens replay a CUDA graph per power-of-2 bucket
                                       # (padded to it); larger ones run eagerly (ppimpl/model/stage.py)
-    transport: str = "ce"             # activations: "ce" copy engine into the receiver's ring (CePipe), or "nccl" p2p
-    # transport "nccl" only: persistent kernels with spin handoffs between CTAs (DeepGEMM mega_mhc, FlashInfer
-    # persistent KDA) run on this many SMs, and NCCL p2p on at most nccl_channels CTAs per kernel (a send and a receive:
-    # 2 x 8 of the 148), so an NCCL kernel beside them never keeps one of their CTAs from running (M3 saturated: 2.7x
-    # slower stages). "ce" uses no SMs for transport, and the kernels keep all 148.
-    compute_sms: int | None = 132
-    nccl_channels: int | None = 8
-    intake_procs: int = 4             # N intake processes on the port; 0: HTTP in the controller process
-                                      # (SO_REUSEPORT) that parse requests and pass them on over zmq (ppimpl/intake.py)
+    intake_procs: int = 16            # HTTP in N intake processes on the port (SO_REUSEPORT) that parse requests and
+                                      # pass them on over zmq (ppimpl/serve/intake.py); 0: HTTP in the controller.
+                                      # 16: first TTFT at 8k 0.25 s vs 0.42 s with 4 (measured/runs_intake)
     profile_mbs: list[int] | None = None  # [a, b): cudaProfilerStart at mb a, Stop after mb b-1 (bench/run.py --nsys)
     keep_sessions: bool = False       # phase B: exact prefix cache (kept sessions, LRU eviction of whole sessions)
     scheduler: SchedulerConfig = msgspec.field(default_factory=SchedulerConfig)  # mb_tokens: one-request runs set it >= the prompt

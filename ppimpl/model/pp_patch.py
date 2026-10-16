@@ -1,23 +1,33 @@
-"""Small overrides of the fork's glm5next modules for one pipeline stage (PLAN.md §1).
+"""Every runtime override of a library that ppimpl makes (PLAN.md §1: the vLLM fork is used as a library, not vendored).
 
-Nothing here edits `third_party/vllm`; every override is a per-instance attribute or a scoped module patch.
+Nothing here edits `third_party/vllm` or any installed package. Each override is a per-instance attribute, a module
+attribute swapped for the duration of a `with` block, or (marked "process-wide") a module attribute replaced once in a
+stage process, which serves this one model and nothing else. Each one is deliberate: the reason is in the second column
+and in the function's docstring, and the last column names what fails if it stops taking effect (a fork or FlashInfer
+upgrade that renames the target, say). "Manifest check" is `ppimpl.kernels.check_trace` on a traced forward: every GPU
+kernel a stage launches must be the manifest's for its position, with no fallback (GPU test d,
+`tests/test_model_gpu.py::test_chain_token_matches_vllm_and_manifest`; M2 `bench/layers.py` per run).
 
-- `stage_scope`: while the model is built, vLLM's layer range and first/last-rank checks follow our stage, so
-  `make_layers` creates only this stage's decoder layers (`PPMissingLayer` elsewhere), `embed_tokens` exists only on
-  stage 0 and `norm`/`lm_head` only on stage 3. vLLM's own process groups stay single-rank (tp = pp = 1).
-- `stage_weights`: iterate only this stage's tensors out of the checkpoint (names mapped to `Glm5NextForCausalLM`).
-- Stage edge: the sender applies its last layer's deferred `hc_post` and sends the 4-stream residual
-  `[T, 4 * 4096]` BF16; the receiver's first layer sees `post = None` and runs a standalone `hc_pre` (the fork's
-  decoder layer already does this for any layer without incoming state).
-- Kernel routing that follows the design rather than the fork (`measured/kernels_identity.md`, Decisions):
-  - every attention/FFN mHC boundary -> DeepGEMM `mega_mhc`, non-shifted (config 7), `MegaMhcPostPre`;
-  - KDA prefill -> Dao causal-conv1d channel-last, one launch per sequence, BF16 weight, conv state written (config
-    4), then FlashInfer `recurrent_kda` cute-dsl-persistent with FP32 state gathered/scattered per request (config 5),
-    `kda_prefill_forward`;
-  - indexer top-k -> per request and shape, DeepSelect or `topKPerRowPrefill`, whichever profiler row is faster
-    (configs 20/21), `install_topk_router`.
+| Override | Replaces (library) | Why | Proved by |
+|---|---|---|---|
+| `stage_scope` | `vllm.distributed.utils.get_pp_indices`, glm5next `model.get_pp_group` (vLLM), while the model is built | build only this stage's decoder layers, embedding on stage 0, norm/lm_head on stage 3; vLLM's own groups stay single-rank | GPU tests b, c (`edge`, `chain` vs vLLM TP4) |
+| `stage_weights` | the checkpoint iterator given to `load_weights` (vLLM) | read only this stage's tensors | `test_model_cpu.py::test_stage_weights_partition_the_text_model`; GPU tests b, c |
+| `edge_send` / `edge_recv` | the fork's PP hand-off, which drops the mHC deferred state | send the 4-stream residual after the last layer's `hc_post`; the receiver's first layer runs a standalone `hc_pre` (issues.md, "mHC boundary at the stage edge") | GPU test b (split vs unsplit) |
+| `route_mhc_boundaries` | each layer's `mhc_fused_post_pre_op` (vLLM TileLang) | DeepGEMM `mega_mhc`, non-shifted (config 7, `kernels_identity.md` Decisions) | manifest check (config 7) |
+| `route_hc_expand` | glm5next `model.hc_expand` (vLLM), process-wide | one vectorized concatenation; the fork's broadcast copy ran at ~1 TB/s (M2: input_head x3.3) | M2 `input_head` time (issues.md, "M2 results") |
+| `route_kda` | each KDA layer's `Glm5NextLinearAttention._forward` (vLLM) | Dao causal-conv1d (config 4) + FlashInfer persistent `recurrent_kda` (config 5) on our state blocks, as the design prices | manifest check (configs 4, 5); `bench/kvcheck.py` |
+| `install_topk_router` | `torch.ops._C.top_k_per_row_prefill` and `indexer.build_prefill_chunk_metadata` (vLLM), process-wide | per shape, DeepSelect or vLLM's kernel, whichever row is faster (configs 20/21); `topk_canon` makes the answer deterministic | manifest check (configs 20/21); `test_model_cpu.py::test_topk_choice_matches_the_faster_row_at_every_profiled_shape`; GPU test g |
+| `install_sparse_mla_split` | `flashinfer.decode.trtllm_batch_decode_with_kv_cache_mla`, process-wide | a launch over 32,768 rows returns without doing the work on B200; split as the target does (issues.md, "M2 results") | M2 `dsa_moe` at 64k/128k |
+| `install_autotune_memo` | FlashInfer `AutoTuner.choose_one`, process-wide | host time: memoize the tactic lookup outside tuning (same answer) | `test_host_trims_cpu.py::test_autotune_memo_matches_and_returns_callers_runner` |
+| `install_mm_fp4_skip_check` | `flashinfer.mm_fp4`, process-wide | host time: `skip_check=True` after the warm-up ran the checks | GPU tests c, d (same kernels, same token) |
+| `plain_parameters` | vLLM parameter subclasses on the loaded weights | host time: no `__torch_function__` round trip per op | `test_host_trims_cpu.py::test_plain_parameters_same_storage_and_attrs` |
+| `install_host_trims` | also `vllm.envs.enable_envs_cache()`, as vLLM's engine does after start-up | host time | as above |
+
+Elsewhere, same rules: `kv_tensors.design_split` (vLLM `get_pp_indices` around the KV group function: the design's
+split, `test_model_cpu.py::test_kv_groups_place_layers_by_the_design_split`) and, as settings rather than patches,
+`stage.build_vllm_config` (`sparse_mla_force_mqa`: short prompts stay on sparse MLA as priced) and the IR op
+priorities `StageModel` sets as vLLM's worker does.
 """
-
 from __future__ import annotations
 
 import contextlib
@@ -30,9 +40,9 @@ from pathlib import Path
 
 import torch
 from torch import nn
+
 from ppimpl import kernels
 from ppimpl.model import topk_canon
-from ppimpl import kernels
 
 HIDDEN = 4096
 HC = 4
@@ -331,37 +341,6 @@ def install_topk_router() -> None:
     idx.build_prefill_chunk_metadata = build_and_route
 
 
-# ---------------------------------------------------------------- forced routing (M2)
-
-
-def force_routing(gate, source) -> None:
-    """The MoE gate still runs its GEMM, then hands the experts `source()` (FP32 [>= T, 288] logits) instead of
-    its output; when `source()` is None the real router output goes through."""
-    orig = gate.forward
-
-    def forward(x):
-        out = orig(x)
-        logits = source()
-        if logits is None:
-            return out
-        forced = logits[: x.shape[0]]
-        return (forced, out[1]) if isinstance(out, tuple) else forced
-
-    gate.forward = forward
-
-
-def forced_routing_logits(per_expert_batches: list[int], num_tokens: int, top_k: int, device) -> torch.Tensor:
-    """FP32 router logits whose top-k, under DeepSeek-V3 routing with the layer's correction bias, gives exactly
-    `per_expert_batches` tokens per expert (profiling/runners/moe/exact_topk.py builds the assignment). Selected
-    logits saturate the sigmoid at 1 and the others at 0, so a bias spread below 1 cannot change the choice."""
-    from profiling.runners.moe.exact_topk import exact_topk_ids
-
-    ids = exact_topk_ids(num_tokens=num_tokens, top_k=top_k, per_expert_batches=tuple(per_expert_batches))
-    logits = torch.full((num_tokens, len(per_expert_batches)), -30.0, dtype=torch.float32, device=device)
-    logits.scatter_(1, torch.tensor(ids, dtype=torch.int64, device=device), 30.0)
-    return logits
-
-
 # ---------------------------------------------------------------- sparse MLA launch size
 
 SPARSE_MLA_MAX_ROWS = 32768
@@ -403,7 +382,8 @@ def install_sparse_mla_split(max_rows: int = SPARSE_MLA_MAX_ROWS) -> None:
 # ---------------------------------------------------------------- host trims (M3: stage-0 host time, job 7091)
 #
 # Per-call Python that returns the same answer on every call of a serving process, hoisted or memoized. None of them
-# changes a launched kernel or its arguments (bench/host.py measures the host time; the chain/edge checks stay exact).
+# changes a launched kernel or its arguments (host time: measured/issues.md, "Host launch time", jobs 7091/7113; the
+# chain/edge checks stay exact).
 
 AUTOTUNE_MEMO: dict = {}
 AUTOTUNE_MEMO_STATS = {"hit": 0, "miss": 0, "bypass": 0}

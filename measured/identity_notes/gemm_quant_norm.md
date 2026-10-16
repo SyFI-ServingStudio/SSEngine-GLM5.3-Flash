@@ -40,7 +40,7 @@ Token-range notes:
 
 # Identity: NVFP4 dense FFN + routed-expert input quant (configs 8, 9, 10, 11, 29)
 
-Paths: RUNNER = `/raid/kanzhu/ServingStudio/wt-pp-main` at `git show e3c5fcf4ef:<path>`; FORK = `/raid/kanzhu/ServingStudio/pp-impl/third_party/vllm` at 892da0822f (prefix `vllm/` omitted below).
+Paths: RUNNER = `<workspace>/wt-pp-main` at `git show e3c5fcf4ef:<path>`; FORK = `<workspace>/pp-impl/third_party/vllm` at 892da0822f (prefix `vllm/` omitted below).
 Rows' env (e3c5fcf4ef `profiling/exec/env.py:129-131`): `vllm_env` = `vibesim-profiler-vllm:cu130-3f667d7e` (fork 3f667d7, FlashInfer 0.6.18, cutlass-dsl 4.6.2, torch 2.13.0).
 Checkpoint: `quant_method=modelopt`, `quant_algo=NVFP4`, group 16. Layers 0–2 are `mlp_layer_types=dense` and their `mlp.*` is not in `ignore`, so dense FFN is NVFP4. `mlp.gate` and `mlp.shared_experts*` are excluded (BF16). `swiglu_limit=10.0`, `n_group=1`, `topk_group=1`, `scoring_func=sigmoid`, `noaux_tc`, `norm_topk_prob=True`, `moe_router_dtype=float32`.
 The fork commits are not ancestors of each other: 892da0822f is the line rebased onto upstream 04730e8.
@@ -154,7 +154,7 @@ The fork commits are not ancestors of each other: 892da0822f is the line rebased
 - **VERDICT**: SAME (same function, args and layout).
 - **VERSIONS**:
   - vLLM wrappers 3f667d7→892da0822f: `flashinfer_scaled_fp4_mm` and `flashinfer_mm_fp4` are identical. The `nvfp4/flashinfer.py` diff only replaces `weights_padding_cols` with `nvfp4_weight_padding_bytes`, which is 0 at these shapes. CuteDsl is still first in `_POSSIBLE_NVFP4_KERNELS`.
-  - FlashInfer 0.6.18 vs 0.7.0, comparing the uv-cache wheel `/raid/kanzhu/ServingStudio/uv-cache/archive-v0/QBxZX3G_jkAYIKXEueumD/flashinfer` (assumed to match the image's 0.6.18; the image was not inspected) with `pp-impl/.venv`:
+  - FlashInfer 0.6.18 vs 0.7.0, comparing the uv-cache wheel `<workspace>/uv-cache/archive-v0/QBxZX3G_jkAYIKXEueumD/flashinfer` (assumed to match the image's 0.6.18; the image was not inspected) with `pp-impl/.venv`:
     - `gemm/gemm_mm_fp4_cute_dsl.py` and `dense_blockscaled_gemm_sm100_common.py` are identical.
     - `dense_blockscaled_gemm_sm100.py` only adds two unused `NamedBarrier` attributes.
     - `gemm/kernels/utils.py` extends `_M_BUCKETS` from ≤4096 to ≤32768 and drops the swap penalty for m>8192.

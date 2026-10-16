@@ -79,7 +79,7 @@ Outside ±10% by rank: smallest 22 (fresh − DB +0.23 to +3.17 µs); median 4 (
 
 ## How it was run
 
-Slurm jobs 7020, 7074, 7079 (`bench/nodecheck/run_nodecheck.sbatch`; later jobs re-ran single calls after a
+Slurm jobs 7020, 7074, 7079 (`bench/slurm/nodecheck.sbatch`; later jobs re-ran single calls after a
 spec fix), one profiler CLI call per (kind, backend), one GPU per lane:
 `uv run --no-sync python -m launcher kernel-profile run <kind> --backend <b> --specs <file> --fresh
 --gpu-name "NVIDIA B200" --db <scratch copy of profile.db> --json` in `wt-pp-main` (ServingStudioSim at the

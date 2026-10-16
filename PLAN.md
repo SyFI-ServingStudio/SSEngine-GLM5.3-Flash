@@ -33,8 +33,7 @@ Two gaps in the fork that we close with small overrides in `ppimpl/model/pp_patc
 library version, and how the profiler row calls it. It serves three uses: the M1 identity check against the profiler
 rows, one entry point for `bench/` and the correctness tests, and a startup check that a stage's traced GPU kernels
 are exactly the manifest's (no silent fallback to another backend). Indexer top-k picks DeepSelect or vLLM
-`topKPerRowPrefill` per shape, whichever row is faster (`2_kernels.md` §3), from a table in `kernels.py`. A kernel we
-must change goes to `ppimpl/kernels_patched/` (empty until needed).
+`topKPerRowPrefill` per shape, whichever row is faster (`2_kernels.md` §3), from a table in `kernels.py`.
 
 ## 2. Process model
 
@@ -47,15 +46,15 @@ must change goes to `ppimpl/kernels_patched/` (empty until needed).
                     │ stage 0 is free              │
                     └──┬────────┬────────┬────────┬┘  plans (zmq)        ▲ tokens, stage timings, read landings
                  GPU0  ▼  GPU1  ▼  GPU2  ▼  GPU3  ▼                       │
-               stage 0 ─NCCL─▶ stage 1 ─NCCL─▶ stage 2 ─NCCL─▶ stage 3 ───┘
+               stage 0 ──CE──▶ stage 1 ──CE──▶ stage 2 ──CE──▶ stage 3 ───┘
                layers 0–11    12–22          23–33          34–44 + norm + lm_head
 ```
 
 - The controller sends each microbatch plan to all four workers at once. Plans carry the chunks
   `(request, first token, tokens, cached prefix, state slot, block ids)`, which requests finish in this microbatch,
   and any tier copy orders.
-- The workers pass activations stage to stage by NCCL point-to-point: the 4-stream residual plus mHC state, 32 KiB per
-  token. Stage 3 returns greedy tokens.
+- The workers pass activations stage to stage by a copy-engine copy into the next GPU's ring (CUDA IPC, stream
+  wait/write flags; `ppimpl/runtime/README.md`): the 4-stream residual, 32 KiB per token. Stage 3 returns greedy tokens.
 - Stage compute runs back to back on each GPU with no host gaps. Planning and metadata building for microbatch k+1
   overlap with compute of microbatch k.
 - Server logs `microbatches.jsonl` and `reads.jsonl` in the format of `1_contract.md` §3.
@@ -70,24 +69,28 @@ pp-impl/
   ppimpl/
     config.py            design constants and run config: split [12,11,11,11], pool tokens, budgets, tiers
     kernels.py           kernel manifest (above); top-k per-shape choice
-    kernels_patched/     only kernels we modify (empty)
     __main__.py          serve: spawn controller + 4 workers
-    server.py            /inference/v1/generate (token ids in/out, usage.cached_tokens), /health
+    serve/               HTTP: bare ASGI app under uvicorn, /inference/v1/generate (token ids in/out,
+                         usage.cached_tokens), /health; intake processes (intake_procs, default 4) parse requests
     model/
       stage.py           build one stage via vLLM (VllmConfig, PP rank), load only its layers' weights
-      pp_patch.py        mHC post/comb across the stage edge; make_empty_intermediate_tensors
+      pp_patch.py        every run-time override of the fork / FlashInfer, indexed in its docstring
       kv_tensors.py      one page pool per stage: DSA FP8 KV pages and KDA state slots as vLLM tensor views
       metadata.py        our block tables / state slots → vLLM MLA, indexer, GDN metadata + forward context
     runtime/
-      transport.py       NCCL p2p for activations; zmq control channel
+      transport.py       activations: copy-engine ring over CUDA IPC (gloo on CPU); plans and reports over zmq
       worker.py          stage loop: plan → (recv) → forward → (send) → report; executes tier copies
       controller.py      drives the scheduler, ≤4 in flight, dispatches plans, completes requests
+      dispatch.py        when the controller forms the next microbatch (predicted stage-0 end)
+      cpus.py            CPU pinning of the processes
     engine/
       kv.py              block pool accounting (8,576-token blocks, 6 state blocks per request), admission,
                          exact prefix cache, LRU eviction of whole sessions
       scheduler.py       plain scheduler, then steps 1–4: shortest first, load budget, even split, force-schedule
       tiers.py           DRAM/SSD index, per-tier read channel, read-wait bound, copy-up, SSD written on DRAM eviction
   bench/
+    common.py            paths (PPIMPL_SIM, PPIMPL_ENWIK9) and helpers shared by the harnesses
+    slurm/               job scripts; env.sh holds their path variables and defaults
     run.py               one entry per handoff workload: server + req-frontend in one Slurm job → measured/runs/<name>/
     configs/             req-frontend yamls for every handoff run
     layers.py            M2: one layer of each type through ppimpl.model, GPU time by nsys
@@ -97,7 +100,8 @@ pp-impl/
                          correctness vs FP32 (2_kernels.md §5), one stage vs the unsplit model, 4-stage
                          pipeline token vs reference, kernels.py manifest vs traced kernels
   measured/              handoff "What to record" outputs; issues.md
-  third_party/vllm       (ignored) fork checkout at 892da0822f, build outputs copied from a same-HEAD tree
+  env/                   make_env.sh, check_env.py, requirements.lock
+  third_party/           (ignored) the fork at 892da0822f, ServingStudioSim, enwik9 (env/make_env.sh)
   .venv                  (ignored) shared env
 ```
 
@@ -108,7 +112,7 @@ handoff's order, and the next phase starts only when they pass or every miss is 
 
 | Phase | Builds | Evaluates (handoff milestone) |
 |---|---|---|
-| A. Pipeline | env; `model/*`; `runtime/*`; `server.py`; `engine/kv.py` without reuse; plain scheduler | M1 kernels (`2_kernels.md`): call-path identity with the profiler rows, FP32 correctness, node check · M2 layers (`3_layers.md`) · M3 iteration (`4_iteration.md`): one request, saturated, output vs vLLM reference |
+| A. Pipeline | env; `model/*`; `runtime/*`; `serve/*`; `engine/kv.py` without reuse; plain scheduler | M1 kernels (`2_kernels.md`): call-path identity with the profiler rows, FP32 correctness, node check · M2 layers (`3_layers.md`) · M3 iteration (`4_iteration.md`): one request, saturated, output vs vLLM reference |
 | B. Prefix cache | exact hits with the KDA state at the prompt end; kept sessions; LRU whole-session eviction; cached-token reporting | M4 (`5_prefix_cache.md`): prefix bring-up, sessions N=400/500 HBM only, microbatch fit |
 | C. Scheduler | steps 1–4 (`6_scheduler.md` §2) | M5: scheduling check chunk for chunk, force check, sessions per step |
 | D. Offloading | DRAM then SSD tiers, own-stage storage first (balanced storage gained nothing on the targets), SSD written on DRAM eviction | M6 (`7_offloading.md`): tier bring-up, sessions at full / Tiers / SSD-heavy memory = the final targets |
@@ -124,7 +128,7 @@ with the profiler, only configurations where the callable or version differs.
 - **Phase A, two implementers in parallel**, each in its own worktree under `lanes/`, after the interfaces in
   §2 are written down as `ppimpl/runtime/README.md`:
   - *model*: env, `model/*`, `bench/layers.py`;
-  - *runtime*: `runtime/*`, `server.py`, `engine/kv.py` (no reuse yet), plain `engine/scheduler.py`,
+  - *runtime*: `runtime/*`, `serve/*`, `engine/kv.py` (no reuse yet), plain `engine/scheduler.py`,
     `bench/run.py`. It develops against a fake stage model with the same interface, then integrates.
 - **measure**: `measured/setup.md`, kernel node check, call-path identity table; at M3 the vLLM TP4+EP reference.
 - Phases B–D: one implementer each, on the integrated code.

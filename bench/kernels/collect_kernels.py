@@ -1,6 +1,6 @@
 """Collect the pp-impl re-measure into measured/kernels.jsonl and measured/kernels.md (2_kernels.md §8).
 
-usage: python collect_kernels.py <queue_dir> <measured_dir>
+usage: python -m bench.kernels.collect_kernels <queue_dir> <measured_dir>
 Reads done/<stem>.rows.jsonl (handoff rows), out/<stem>.json (CLI --fresh results, same order),
 knames/<stem>/*.jsonl (worker hook: per-spec CUPTI kernel names and provenance notes).
 """
@@ -11,8 +11,7 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from make_queue import CONFIGS  # noqa: E402
+from bench.kernels.make_queue import CONFIGS
 
 TOL = 0.10
 
@@ -114,7 +113,7 @@ def main(queue, measured):
             lines.append(f"- {o['ratio']:.3f}: DB {o['db_time_ms']:.4g} ms, real {o['real_time_ms']:.4g} ms, `{json.dumps(s)}`")
         lines.append("")
     lines += ["## How it was run", "",
-              "Slurm jobs on the `priority` partition (`bench/kernels/run_queue.sbatch`), 2 GPUs each, one lane per GPU",
+              "Slurm jobs on the `priority` partition (`bench/slurm/kernels_queue.sbatch`), 2 GPUs each, one lane per GPU",
               "taking chunks of one (kind, backend) from `kernels_runs/queue` (`bench/kernels/make_queue.py`: <= 50 rows,",
               "<= 12 for the NVFP4 MoE, strided over sizes). Each chunk is one call of",
               "`uv run --no-sync python bench/kernels/ppimpl_profile.py run <kind> --backend <b> --specs <chunk> --fresh",

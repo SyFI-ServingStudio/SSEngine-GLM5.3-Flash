@@ -1,8 +1,8 @@
 """KV cache and KDA state correctness on GPU: one prompt computed whole, in chunks, and in chunks on scrambled blocks.
 
-    python bench/kvcheck.py [--prompt-len 32768] [--chunk 8000]     # 4 GPUs
+    python -m bench.kvcheck [--prompt-len 32768] [--chunk 8000]     # 4 GPUs
 
-Four processes, one `StageModel` each, joined by the serving transport (`open_pipe`: RunConfig's default, the CE
+Four processes, one `StageModel` each, joined by the serving transport (`open_pipe`: the CE
 ring), as in the runtime. Stages 0-2 run `StageModel.forward` with CUDA graphs on (chunks up to 8,192 tokens replay
 a graph); stage 3 runs the same layers eagerly and returns the last position's logits (graph replay equals eager,
 GPU test f). The same prompt (the first L tokens of enwik9) runs as:
@@ -24,16 +24,12 @@ import argparse
 import json
 import os
 import random
-import sys
 import time
-from pathlib import Path
 from types import SimpleNamespace as NS
 
-LANE = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(LANE))
-sys.path.insert(0, str(LANE / "bench"))
+from bench.common import MEASURED, enwik9_tokens
 
-OUT = LANE / "measured" / "kvcheck"
+OUT = MEASURED / "kvcheck"
 JOB = os.environ.get("SLURM_JOB_ID", "local")
 FILLER = 1000
 NUM_BLOCKS = 96          # blocks 1.. ; a 32k prompt needs 4 KV + 6 state, a filler 1 + 6
@@ -82,7 +78,6 @@ def _worker(rank: int, L: int, chunk: int, port: int) -> None:
     from ppimpl.config import HIDDEN_WIDTH, RunConfig, SchedulerConfig
     from ppimpl.model.stage import CHECKPOINT, StageModel, bench_config
     from ppimpl.runtime.transport import open_pipe
-    from layers import enwik9_tokens
     from vllm.forward_context import set_forward_context
 
     dev = torch.device("cuda", rank)
@@ -92,8 +87,8 @@ def _worker(rank: int, L: int, chunk: int, port: int) -> None:
     t0 = time.time()
     m = StageModel(bench_config(L + FILLER, cuda_graphs=True), rank, dev, num_blocks=NUM_BLOCKS,
                    max_model_len=L + 8576, cuda_graphs=rank < 3)   # stage 3 eager: it returns logits
-    print(f"[kvcheck] rank {rank} layers {m.layer_range} built in {time.time() - t0:.0f} s, transport "
-          f"{rc.transport}, graphs {getattr(m, 'graph_info', None)}", flush=True)
+    print(f"[kvcheck] rank {rank} layers {m.layer_range} built in {time.time() - t0:.0f} s, "
+          f"graphs {getattr(m, 'graph_info', None)}", flush=True)
     ids = enwik9_tokens(CHECKPOINT, L + 8 * FILLER)
     tokens, fillers = ids[:L], [ids[L + FILLER * i:L + FILLER * (i + 1)] for i in range(8)]
     last_start = (L - 1) // chunk * chunk          # first token of the prompt's last chunk
@@ -145,8 +140,7 @@ def _worker(rank: int, L: int, chunk: int, port: int) -> None:
                             "finite": bool(torch.isfinite(x).all())}
     OUT.mkdir(parents=True, exist_ok=True)
     path = OUT / f"kvcheck_{L}_rank{rank}_{JOB}.json"
-    path.write_text(json.dumps({"stage": rank, "prompt_tokens": L, "chunk": chunk, "transport": rc.transport,
-                                "variants": report}, indent=1))
+    path.write_text(json.dumps({"stage": rank, "prompt_tokens": L, "chunk": chunk, "variants": report}, indent=1))
     print(f"[kvcheck] rank {rank}: {json.dumps(report)}", flush=True)
     pipe.close()
 

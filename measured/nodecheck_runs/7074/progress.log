@@ -1,3 +1,0 @@
-2026-10-15T04:10:36-07:00 lane0 dev=0 start dsa_mqa_logits_prefill__deepgemm_fp8 n=3 uptime=30.25 18.34 16.16
-2026-10-15T04:10:53-07:00 lane0 dev=0 done dsa_mqa_logits_prefill__deepgemm_fp8 rc=0
-2026-10-15T04:10:53-07:00 all lanes done; uptime:  04:10:53 up 11 days, 14:52, 43 users,  load average: 24.71, 17.70, 15.98

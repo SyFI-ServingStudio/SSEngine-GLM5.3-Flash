@@ -121,7 +121,7 @@ def main(specs_dir, *run_dirs):
             lines.append(f"- `{o['kind']}` / `{o['backend']}` ({o['rank']}): {o['status']} {o['error'] or ''}")
     jobs = sorted({str(o["job"]) for o in out_rows if o["job"]})
     lines += ["", "## How it was run", "",
-              f"Slurm jobs {', '.join(jobs)} (`bench/nodecheck/run_nodecheck.sbatch`; later jobs re-ran single calls after a",
+              f"Slurm jobs {', '.join(jobs)} (`bench/slurm/nodecheck.sbatch`; later jobs re-ran single calls after a",
               "spec fix), one profiler CLI call per (kind, backend), one GPU per lane:",
               "`uv run --no-sync python -m launcher kernel-profile run <kind> --backend <b> --specs <file> --fresh",
               "--gpu-name \"NVIDIA B200\" --db <scratch copy of profile.db> --json` in `wt-pp-main` (ServingStudioSim at the",

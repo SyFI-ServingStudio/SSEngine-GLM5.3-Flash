@@ -5,7 +5,7 @@ import json
 import numpy as np
 import pytest
 
-import report
+from bench import report
 
 
 def write_run(d, kind, length, mbs, client, trace_ids, t0_unix_ns=1_000_000_000_000_000_000, sreq=None):

@@ -1,1 +1,0 @@
-uptime before one_1k:  04:10:01 up 11 days, 14:51, 43 users,  load average: 13.92, 13.98, 14.71

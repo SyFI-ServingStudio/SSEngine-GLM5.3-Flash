@@ -1,4 +1,5 @@
-"""End to end on 4 GPUs: FakeStageModel, NCCL p2p of the real 32 KiB/token activations. Run through Slurm."""
+"""End to end on 4 GPUs: FakeStageModel, the copy-engine transport of the real 32 KiB/token activations. Run through
+Slurm."""
 
 import asyncio
 import json
@@ -11,8 +12,7 @@ from e2e import Server, check_microbatches, check_responses, send_all
 pytestmark = pytest.mark.gpu
 
 
-@pytest.mark.parametrize("transport", ["nccl", "ce"])
-def test_serve_http_gpu(tmp_path, transport):
+def test_serve_http_gpu(tmp_path):
     torch = pytest.importorskip("torch")
     if torch.cuda.device_count() < 4:
         pytest.skip("needs 4 GPUs")
@@ -20,7 +20,7 @@ def test_serve_http_gpu(tmp_path, transport):
     lengths = [1, 100, 1000, 5000, 8191, 8192, 8193, 20000, 3000, 12000, 7, 16384, 65536] * 3
     prompts = {f"req{i}": n for i, n in enumerate(lengths)}
     port = free_port_block()
-    srv = Server(tmp_path / "run", port, device="cuda", transport=transport, fake={"us_per_token": us})
+    srv = Server(tmp_path / "run", port, device="cuda", fake={"us_per_token": us})
     try:
         srv.wait_ready()
         res = asyncio.run(send_all(port, prompts))

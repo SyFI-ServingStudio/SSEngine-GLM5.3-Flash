@@ -38,7 +38,7 @@ fastapi-cloud-cli==0.26.0
 fastar==0.12.0
 fastsafetensors==0.4.0
 filelock==4.1.0
-flashinfer-python @ file:///raid/kanzhu/ServingStudio/pp-impl/third_party/wheels/flashinfer_python-0.7.2.dev20261008-py3-none-any.whl
+flashinfer-python @ https://github.com/flashinfer-ai/whl/releases/download/nightly-v0.7.2-20261008/flashinfer_python-0.7.2.dev20261008-py3-none-any.whl#sha256=35b41bb54be1531de35b41a4668c97c9955fb8676eb66ac857ec44334fc60b84
 frozenlist==1.8.0
 fsspec==2026.9.0
 googleapis-common-protos==1.75.5

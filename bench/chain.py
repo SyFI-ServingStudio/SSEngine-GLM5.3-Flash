@@ -1,15 +1,15 @@
 """Model correctness on GPU: the stage split against the unsplit layers, and the 4-stage chain against vLLM.
 
-    python bench/chain.py split  [--prompt-len 1024]   # 1 GPU: layers 0-22 unsplit vs split at 12 (stage edge)
-    python bench/chain.py chain  [--prompt-len 1024]   # 4 GPUs: StageModel 0..3, NCCL send/recv, greedy token
-    python bench/chain.py vllm   [--prompt-len 1024]   # 4 GPUs: vLLM fork TP4 + EP on the same prompt (reference)
+    python -m bench.chain split  [--prompt-len 1024]   # 1 GPU: layers 0-22 unsplit vs split at 12 (stage edge)
+    python -m bench.chain chain  [--prompt-len 1024]   # 4 GPUs: StageModel 0..3, serving transport, greedy token
+    python -m bench.chain vllm   [--prompt-len 1024]   # 4 GPUs: vLLM fork TP4 + EP on the same prompt (reference)
 
 `split` (test b): one model holding layers 0-22 runs them (i) back to back, as one stage would, and (ii) as stage 0
 (0-11) + edge (`hc_post`, flatten, view) + stage 1 (12-22, standalone `hc_pre`); both end with layer 22's `hc_post`.
 Reports the relative error of (ii) against (i).
-`chain` (tests c, d): four processes, one `StageModel` each, joined in one 4-rank NCCL world (vLLM's groups are
-single-rank inside it, as in the runtime); hidden rows go stage to stage by `dist.send`/`recv`. Stage 3 returns the
-greedy token and its top-5 logits; every stage traces its forward and checks it against the kernel manifest.
+`chain` (tests c, d): four processes, one `StageModel` each, joined by the serving transport (`open_pipe`, the CE
+ring, as in the runtime and bench/kvcheck.py). Stage 3 returns the greedy token and its top-5 logits; every stage
+traces its forward and checks it against the kernel manifest.
 `vllm` runs the reference on the same token ids (max_tokens 1, greedy, top-5 logprobs).
 Prompt: the first L tokens of enwik9. Results: `measured/chain/<mode>_<L>_<job>.json`.
 """
@@ -19,16 +19,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import sys
 import time
-from pathlib import Path
-from types import SimpleNamespace
 
-LANE = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(LANE))
-sys.path.insert(0, str(LANE / "bench"))
+from bench.common import MEASURED, NUM_BLOCKS, enwik9_tokens, one_request_plan
 
-OUT = LANE / "measured" / "chain"
+OUT = MEASURED / "chain"
 JOB = os.environ.get("SLURM_JOB_ID", "local")
 
 
@@ -40,7 +35,6 @@ def _write(name: str, data: dict) -> None:
 
 
 def _prompt(L: int) -> list[int]:
-    from layers import enwik9_tokens
     from ppimpl.model.stage import CHECKPOINT
 
     return enwik9_tokens(CHECKPOINT, L)
@@ -48,9 +42,8 @@ def _prompt(L: int) -> list[int]:
 
 def split(L: int) -> None:
     import torch
-    from layers import NUM_BLOCKS, one_request_plan
     from ppimpl.model import pp_patch
-    from ppimpl.model.stage import CHECKPOINT, StageModel, bench_config
+    from ppimpl.model.stage import StageModel, bench_config
     from vllm.forward_context import set_forward_context
 
     dev = torch.device("cuda", 0)
@@ -106,9 +99,8 @@ def edge(L: int) -> None:
     (B) by the fork's fused TileLang post+pre, (C) by hc_post then a standalone hc_pre (the stage edge); and the
     unsplit 0-22 run repeated (noise), and with the fork's fused op at every boundary."""
     import torch
-    from layers import NUM_BLOCKS, one_request_plan
     from ppimpl.model import pp_patch
-    from ppimpl.model.stage import CHECKPOINT, StageModel, bench_config
+    from ppimpl.model.stage import StageModel, bench_config
     from vllm.forward_context import set_forward_context
     from vllm.model_executor.layers.mhc import MHCFusedPostPreOp
 
@@ -176,15 +168,14 @@ def edge(L: int) -> None:
 
 def _chain_worker(rank: int, L: int, port: int, profile: bool) -> None:
     import torch
-    import torch.distributed as dist
-    from layers import NUM_BLOCKS, one_request_plan
     from ppimpl import kernels as km
-    from ppimpl.model.stage import HIDDEN_WIDTH, StageModel, bench_config
+    from ppimpl.config import HIDDEN_WIDTH, RunConfig, SchedulerConfig
+    from ppimpl.model.stage import StageModel, bench_config
+    from ppimpl.runtime.transport import open_pipe
 
     dev = torch.device("cuda", rank)
     torch.cuda.set_device(dev)
-    dist.init_process_group("nccl", init_method=f"tcp://127.0.0.1:{port}", rank=rank, world_size=4,
-                            device_id=dev)
+    pipe = open_pipe(RunConfig(port=port, scheduler=SchedulerConfig(mb_tokens=L)), rank, dev, HIDDEN_WIDTH)
     cfg = bench_config(max(L, 8192))
     t0 = time.time()
     m = StageModel(cfg, rank, dev, num_blocks=NUM_BLOCKS, max_model_len=max(L, 8192) + 8576)
@@ -194,20 +185,23 @@ def _chain_worker(rank: int, L: int, port: int, profile: bool) -> None:
     result = {"stage": rank, "layers": [m.layer_range.start, m.layer_range.stop]}
 
     def step():
-        hidden = None
-        if rank > 0:
-            hidden = torch.empty(L, HIDDEN_WIDTH, dtype=torch.bfloat16, device=dev)
-            dist.recv(hidden, rank - 1)
+        hidden = pipe.recv(L, HIDDEN_WIDTH) if rank > 0 else None
         b = m.prepare(plan)
         if rank < 3:
-            out = m.run(b, hidden)
-            dist.send(out.contiguous(), rank + 1)
+            out = m.run(b, hidden).contiguous()
+            done = torch.cuda.Event()
+            done.record()
+            if hidden is not None:
+                pipe.release()
+            pipe.send(out, done)
             return out
         from vllm.forward_context import set_forward_context
 
         with set_forward_context(b.attn, m.vc, num_tokens=b.num_tokens, slot_mapping=b.slots):
             x, r, p, c = m.run_layers(b, hidden)
-            return m.head_logits(b, x, r, p, c)
+            logits = m.head_logits(b, x, r, p, c)
+        pipe.release()
+        return logits
 
     with torch.inference_mode():
         out = step()          # first pass (JIT/autotune), then the measured/traced one
@@ -236,8 +230,7 @@ def _chain_worker(rank: int, L: int, port: int, profile: bool) -> None:
                        "top5_logprobs": torch.log_softmax(logits, -1)[top.indices].tolist(),
                        "finite": bool(torch.isfinite(logits).all().item())})
     _write(f"chain_{L}_rank{rank}", result)
-    dist.barrier()
-    dist.destroy_process_group()
+    pipe.close()
 
 
 def chain(L: int, profile: bool) -> None:

@@ -1,4 +1,4 @@
-"""Activation pipes on 2-4 GPUs: CePipe (copy engine into the receiver's ring) delivers the same bytes as NCCL Pipe,
+"""Activation pipe on 2-4 GPUs: CePipe (copy engine into the receiver's ring) delivers exactly the bytes stage 0 sent,
 across ring wrap-around, with a slow last stage so the sender has to wait for free slots. Run through Slurm."""
 
 import time
@@ -19,15 +19,13 @@ def sent(i: int, n: int, device):
     return torch.randint(-32768, 32767, (n, WIDTH), dtype=torch.int16, device=device, generator=g).view(torch.bfloat16)
 
 
-def _stage(stage: int, n: int, transport: str, port: int, out_path: str):
+def _stage(stage: int, n: int, port: int, out_path: str):
     import torch
-    from ppimpl.runtime.transport import CePipe, Pipe
+    from ppimpl.runtime.transport import CePipe
 
     device = torch.device("cuda", stage)
     torch.cuda.set_device(device)
-    init = f"tcp://127.0.0.1:{port}"
-    pipe = (CePipe(stage, n, device, init, MAX_IN_FLIGHT, ROWS, WIDTH) if transport == "ce"
-            else Pipe(stage, n, device, init))
+    pipe = CePipe(stage, n, device, f"tcp://127.0.0.1:{port}", MAX_IN_FLIGHT, ROWS, WIDTH)
     got = []
     t0 = time.perf_counter()
     for i, rows in enumerate(SIZES):
@@ -49,22 +47,16 @@ def _stage(stage: int, n: int, transport: str, port: int, out_path: str):
         torch.save({"got": [g.view(torch.int16).cpu() for g in got], "ms": ms}, out_path)
 
 
-def _run(transport: str, n: int, tmp_path):
-    import torch.multiprocessing as mp
-    out = str(tmp_path / f"{transport}.pt")
-    mp.start_processes(_stage, args=(n, transport, free_port_block(2), out), nprocs=n, start_method="spawn")
-    import torch
-    return torch.load(out)
-
-
-def test_ce_matches_nccl(tmp_path):
+def test_ce_delivers_the_sent_bytes(tmp_path):
     torch = pytest.importorskip("torch")
     n = min(4, torch.cuda.device_count())
     if n < 2:
         pytest.skip("needs 2 GPUs")
-    ce, nccl = _run("ce", n, tmp_path), _run("nccl", n, tmp_path)
+    import torch.multiprocessing as mp
+    out = str(tmp_path / "ce.pt")
+    mp.start_processes(_stage, args=(n, free_port_block(2), out), nprocs=n, start_method="spawn")
+    ce = torch.load(out)
     for i, rows in enumerate(SIZES):
         want = sent(i, rows, torch.device("cuda", 0)).view(torch.int16).cpu()
-        assert torch.equal(ce["got"][i], want), f"ce microbatch {i}"
-        assert torch.equal(nccl["got"][i], want), f"nccl microbatch {i}"
-    print(f"{n} stages: ce {ce['ms']:.1f} ms, nccl {nccl['ms']:.1f} ms")
+        assert torch.equal(ce["got"][i], want), f"microbatch {i}"
+    print(f"{n} stages: ce {ce['ms']:.1f} ms")

@@ -3,6 +3,11 @@
 Two kinds (`1_contract.md` §6): **setup difference** (names the targets it affects) and **implementation gap**
 (measured, target, suspected cause).
 
+The one-off probes cited below (`bench/batchflip.py`, `batchflip_prompts.py`, `cold.py`, `host.py`, `p2p.py`,
+`vllm_batch.py`) were removed once their findings were recorded here; they are in git history at `7598487`.
+Raw outputs (per-job json under `batchflip/`, `graphs/`, `host/`, run directories and logs) are not tracked; those
+cited here are in git history at `7598487`. Tracked: the md tables and the handoff-format jsonl.
+
 ## Design difference: mHC boundary at the stage edge (M2/M3)
 
 - The targets price the first layer of stages 1–3 with the fused `attn_mhc_post_pre` (DeepGEMM mega), while the send
@@ -220,6 +225,10 @@ record the smaller SSD tier each run actually had.
   0→1 also waits for stage 0's host (stage 0 is host-bound there; CUDA graphs are the fix).
 - Left for now (orchestrator): sends 1k 0.17–0.28 ms vs 0.068, 8k 0.47–0.65 ms vs 0.482; cause not traced; at 1k the
   excess is ~0.4 ms of one_1k's 60 ms TTFT. Revisit only if one_1k still misses after CUDA graphs.
+- Code removed after M3: the NCCL activation transport on CUDA (`transport: nccl`, NCCL `Pipe`). It lost every A/B
+  (7279: saturated_8k 136.1k vs 139.6k tok/s, saturated_1k 144.2k vs 150.0k, one-request hops 2× slower; tables here
+  and in "Copy-engine transport" below). CE is the only GPU transport; CPU stages keep gloo (`GlooPipe`). The code is
+  in git history at `7598487`.
 
 ## Setup difference: one-request runs of 64k and 128k cap the KV pool (M3)
 
@@ -267,6 +276,8 @@ logprobs. One-request runs keep judging nearly every request. The rejected optio
 of T: it gives the alone result in any batch, but mHC is slower at small T, and the TP-vs-PP difference to vLLM would
 still need the margin rule.
 Data: `measured/batchflip/{7170,7172}_s*.json`, `7174_s0.json`, `vllm_7173.json`, `measured/host/overlap_s1_716{4,5}.json`.
+The per-microbatch host sync used for 7162 (`PPIMPL_SYNC_EACH_MB=1`) was removed from the worker once this was
+decided; `bench/overlap.py` (GPU test e) keeps the no-race check.
 
 ## Implementation gap, fixed: persistent kernels stalled beside NCCL p2p kernels (M3 saturated)
 
@@ -285,6 +296,8 @@ Data: `measured/batchflip/{7170,7172}_s*.json`, `7174_s0.json`, `vllm_7173.json`
 - Cost: with 8 channels a send takes ~2.5× its target (8k 1.2 ms vs 0.48 ms; 128k 18.5 vs 7.5 ms). In one-request
   runs that is 3 × 0.7 ms at 8k (0.3% of TTFT) and 3 × 11 ms at 128k (1%). The copy-engine transport (entry above)
   would remove both the SM sharing and the send gap.
+- Code removed with the NCCL transport: `RunConfig.compute_sms`, `nccl_channels` and the worker's
+  `limit_persistent_grids`. CE sends use no SMs, so nothing needs a cap (git history at `7598487`).
 
 ## Implementation gap: first-request TTFT in saturated runs (M3) — 8k fixed by intake processes; 1k–4k is the client
 
@@ -342,6 +355,8 @@ Data: `measured/batchflip/{7170,7172}_s*.json`, `7174_s0.json`, `vllm_7173.json`
   (DeepGEMM and KDA grids, splits), not the transport (bitwise in the GPU test) or batching. ce runs vLLM's SM count.
   Unconfirmed: a ce run with compute_sms 132 would match nccl's tokens if this is the cause. Every judged request
   passes either way.
+  `compute_sms` is gone with the NCCL transport, so this check would now need a code change (DeepGEMM `set_num_sms`
+  and the KDA plan's SM count, as in `limit_persistent_grids` at `7598487`).
 - The indexer top-k was also not deterministic then (section "Indexer top-k was not deterministic", fixed after
   7279), which alone can flip tokens run to run at 8k; the final M3 run (deterministic top-k) separates the two.
 

@@ -9,7 +9,7 @@ import glob
 import os
 from pathlib import Path
 
-WORKER_CORES = 2   # physical cores per worker, both hyperthreads: main thread, reporter, gloo/NCCL, zmq, CUDA driver
+WORKER_CORES = 2   # physical cores per worker, both hyperthreads: main thread, reporter, gloo, zmq, CUDA driver
 CONTROLLER_CORES = 2   # with intake processes: the controller's own, the intakes get the rest
 
 

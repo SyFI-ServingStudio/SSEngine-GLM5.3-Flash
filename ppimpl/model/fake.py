@@ -1,6 +1,6 @@
 """FakeStageModel: the StageModel interface (ppimpl/runtime/README.md) without weights.
 
-Per microbatch it takes `ms_per_mb + us_per_token * T` of stage time: a `torch.cuda._sleep` spin on the GPU (calibrated
+Per microbatch it takes `us_per_token * T` of stage time: a `torch.cuda._sleep` spin on the GPU (calibrated
 once at start-up), or `time.sleep` on CPU. Tokens are deterministic: `fake_token(req_id, prompt length)`. To check the
 transport, stage 0 writes `row % 128` into column 0 of the hidden rows it sends, and stage 3 adds
 `hidden[last row, 0] - last row % 128` (0 when every row arrived in place) to the token.
@@ -57,7 +57,7 @@ class FakeStageModel:
         return cycles / a.elapsed_time(b)
 
     def stage_ms(self, num_tokens: int) -> float:
-        return self.cfg.fake.ms_per_mb + self.cfg.fake.us_per_token * num_tokens / 1e3
+        return self.cfg.fake.us_per_token * num_tokens / 1e3
 
     def forward(self, plan, hidden_in: torch.Tensor | None) -> torch.Tensor:
         T = sum(c.num_tokens for c in plan.chunks)

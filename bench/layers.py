@@ -17,8 +17,8 @@ first kernel start to its last kernel end; per-position times add the kernels th
 is attributed to the module whose forward launched it (record_function scopes on every submodule; the launch's CUPTI
 correlation id links kernel and scope).
 
-    python bench/layers.py --lengths 1024,8192 [--runs 10] [--routing forced,router] [--no-autotune]
-    python bench/layers.py --summarize          # measured/layers.jsonl -> measured/layers.md
+    python -m bench.layers --lengths 1024,8192 [--runs 10] [--routing forced,router] [--no-autotune]
+    python -m bench.layers --summarize          # measured/layers.jsonl -> measured/layers.md
 
 Outputs: `measured/layers.jsonl` (one line per (prompt length, layer type, routing), §7, appended; the summary
 takes the latest line per key), `measured/layers_raw/L<L>_<routing>.json` (every kernel of one run with its scope
@@ -40,19 +40,9 @@ import tempfile
 import time
 import traceback
 from pathlib import Path
-from types import SimpleNamespace
 
-LANE = Path(__file__).resolve().parents[1]
-PPIMPL = LANE.parents[1] if LANE.parent.name == "lanes" else LANE
-SIM = PPIMPL / "third_party" / "sim_7bb224a6"
-for p in (str(LANE), str(SIM)):
-    if p not in sys.path:
-        sys.path.insert(0, p) if p == str(LANE) else sys.path.append(p)
+from bench.common import HANDOFF, MEASURED, NUM_BLOCKS, PROFILER, enwik9_tokens, one_request_plan, sleep_cycles_per_ms
 
-HANDOFF = Path(os.environ.get("PPIMPL_HANDOFF",
-                              "/raid/kanzhu/ServingStudio/wt-pp-main/doc/handoff/glm53_flash_pp4_b200_v1"))
-ENWIK9 = Path(os.environ.get("PPIMPL_ENWIK9", "/raid/kanzhu/ServingStudio/data/corpus/enwik9"))
-MEASURED = LANE / "measured"
 LENGTHS = (1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072)
 TYPES = ("input_head", "first_kda_dense", "kda_dense", "kda_moe", "dsa_moe", "output_head")
 MOE_TYPES = ("kda_moe", "dsa_moe")
@@ -67,8 +57,6 @@ README_STAGE_MS = {     # handoff README, one request, whole prompt in one micro
     8192: (57.1, 54.1, 55.3, 55.7), 16384: (111.7, 103.9, 106.8, 107.4), 32768: (220.4, 203.1, 209.0, 209.9),
     65536: (431.2, 395.5, 406.9, 408.4), 131072: (871.5, 792.6, 821.2, 823.9),
 }
-KV_BLOCKS = 16           # ceil(131072 / 8576)
-NUM_BLOCKS = 1 + KV_BLOCKS + 6
 
 
 # ================================================================ kernel -> position rules
@@ -378,27 +366,36 @@ def load_targets() -> dict:
     return out
 
 
-def enwik9_tokens(checkpoint: str, n: int) -> list[int]:
-    from tokenizers import Tokenizer
+def force_routing(gate, source) -> None:
+    """The MoE gate still runs its GEMM, then hands the experts `source()` (FP32 [>= T, 288] logits) instead of
+    its output; when `source()` is None the real router output goes through."""
+    orig = gate.forward
 
-    tok = Tokenizer.from_file(str(Path(checkpoint) / "tokenizer.json"))
-    nbytes = 8 * n
-    while True:
-        with open(ENWIK9, "rb") as f:
-            text = f.read(nbytes).decode("utf-8", errors="ignore")
-        ids = tok.encode(text, add_special_tokens=False).ids
-        if len(ids) >= n:
-            return ids[:n]
-        nbytes *= 2
+    def forward(x):
+        out = orig(x)
+        logits = source()
+        if logits is None:
+            return out
+        forced = logits[: x.shape[0]]
+        return (forced, out[1]) if isinstance(out, tuple) else forced
+
+    gate.forward = forward
 
 
-def one_request_plan(tokens: list[int]):
-    L = len(tokens)
-    n = -(-L // 8576)
-    chunk = SimpleNamespace(req_id="r0", start=0, num_tokens=L, kv_blocks=list(range(1, 1 + n)),
-                            state_blocks=list(range(1 + KV_BLOCKS, 1 + KV_BLOCKS + 6)), is_last=True,
-                            token_ids=tokens)
-    return SimpleNamespace(mb_id=0, chunks=[chunk])
+def forced_routing_logits(per_expert_batches: list[int], num_tokens: int, top_k: int, device):
+    """FP32 router logits whose top-k, under DeepSeek-V3 routing with the layer's correction bias, gives exactly
+    `per_expert_batches` tokens per expert (profiling/runners/moe/exact_topk.py builds the assignment). Selected
+    logits saturate the sigmoid at 1 and the others at 0, so a bias spread below 1 cannot change the choice."""
+    import torch
+
+    if str(PROFILER) not in sys.path:     # the frozen profiler tree is not an installed package
+        sys.path.append(str(PROFILER))
+    from profiling.runners.moe.exact_topk import exact_topk_ids
+
+    ids = exact_topk_ids(num_tokens=num_tokens, top_k=top_k, per_expert_batches=tuple(per_expert_batches))
+    logits = torch.full((num_tokens, len(per_expert_batches)), -30.0, dtype=torch.float32, device=device)
+    logits.scatter_(1, torch.tensor(ids, dtype=torch.int64, device=device), 30.0)
+    return logits
 
 
 class Routing:
@@ -430,19 +427,6 @@ def check_forced(model, logits, counts) -> int:
 
 
 # ================================================================ measurement
-
-
-def sleep_cycles_per_ms() -> float:
-    import torch
-
-    torch.cuda.synchronize()
-    a, b = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
-    cycles = 50_000_000
-    a.record()
-    torch.cuda._sleep(cycles)
-    b.record()
-    b.synchronize()
-    return cycles / a.elapsed_time(b)
 
 
 def host_syncs(model, plan) -> list[dict]:
@@ -592,7 +576,6 @@ def trace_check(parsed: dict) -> dict:
 
 def bench(args) -> None:
     import torch
-    from ppimpl.model import pp_patch
     from ppimpl.model.stage import CHECKPOINT, StageModel, bench_config
 
     targets = load_targets()
@@ -608,7 +591,7 @@ def bench(args) -> None:
     for layer in model.layers:
         gate = getattr(getattr(layer, "mlp", None), "gate", None)
         if gate is not None and hasattr(gate, "e_score_correction_bias"):
-            pp_patch.force_routing(gate, Routing.get)
+            force_routing(gate, Routing.get)
     install_scopes(model)
     cpm = sleep_cycles_per_ms()
     tokens_all = enwik9_tokens(CHECKPOINT, max(lengths))
@@ -621,7 +604,7 @@ def bench(args) -> None:
         tL = time.time()
         plan = one_request_plan(tokens_all[:L])
         counts = targets[(L, "dsa_moe")]["moe_per_expert_batches"]
-        forced = pp_patch.forced_routing_logits(counts, L, 8, dev)
+        forced = forced_routing_logits(counts, L, 8, dev)
         bad = check_forced(model, forced, counts)
         extra_common = {"forced_layers_off": bad, "autotune": bool(args.autotune)}
         try:

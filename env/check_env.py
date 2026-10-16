@@ -1,4 +1,5 @@
-"""Import every kernel library pp-impl uses and print its version (CPU only; no kernel launches).
+"""Import every kernel library pp-impl uses, check its version against ENV.md, and check that the custom ops and the
+FlashInfer KDA backend the manifest names are registered (CPU only; no kernel launches). Exits non-zero on any miss.
 
     .venv/bin/python env/check_env.py [--markdown]
 """
@@ -19,11 +20,15 @@ def version(dist: str) -> str:
         return "-"
 
 
-def check(name: str, fn) -> tuple[str, str, bool]:
+def check(name: str, fn, want: str | None = None) -> tuple[str, str, bool]:
+    """`want`: the ENV.md version, which must appear in the reported value."""
     try:
-        return name, str(fn()), True
+        value = str(fn())
     except Exception as exc:  # report, keep going
         return name, f"FAILED: {exc!r}"[:200], False
+    if want is not None and want not in value:
+        return name, f"{value} (want {want})", False
+    return name, value, True
 
 
 def git_head(path: Path) -> str:
@@ -38,8 +43,8 @@ def rows() -> list[tuple[str, str, bool]]:
     import torch
 
     out = [
-        check("python", lambda: sys.version.split()[0]),
-        check("torch", lambda: f"{torch.__version__} (CUDA {torch.version.cuda})"),
+        check("python", lambda: sys.version.split()[0], "3.12."),
+        check("torch", lambda: f"{torch.__version__} (CUDA {torch.version.cuda})", "2.13.0+cu130"),
         check("cuBLAS (nvidia-cublas)", lambda: version("nvidia-cublas") if version("nvidia-cublas") != "-" else version("nvidia-cublas-cu13")),
     ]
 
@@ -79,16 +84,16 @@ def rows() -> list[tuple[str, str, bool]]:
         return "recurrent_kda backend available"
 
     out += [
-        check("vllm (fork)", vllm_info),
-        check("flashinfer-python", lambda: importlib.import_module("flashinfer").__version__),
-        check("nvidia-cutlass-dsl", lambda: version("nvidia-cutlass-dsl")),
-        check("triton", lambda: importlib.import_module("triton").__version__),
-        check("tilelang", lambda: importlib.import_module("tilelang").__version__),
-        check("DeepGEMM (vendored)", deep_gemm),
+        check("vllm (fork)", vllm_info, "HEAD 892da0822f"),
+        check("flashinfer-python", lambda: importlib.import_module("flashinfer").__version__, "0.7.2.dev20261008"),
+        check("nvidia-cutlass-dsl", lambda: version("nvidia-cutlass-dsl"), "4.8.0"),
+        check("triton", lambda: importlib.import_module("triton").__version__, "3.7.1"),
+        check("tilelang", lambda: importlib.import_module("tilelang").__version__, "0.1.12"),
+        check("DeepGEMM (vendored)", deep_gemm, "2.8.0"),
         check("DeepSelect", lambda: ext("vllm._deepselect_C", "deep_select", "topk")),
         check("FlashKDA", lambda: ext("vllm._flashkda_C", "_flashkda_C", "fwd")),
         check("vLLM _C", lambda: ext("vllm._custom_ops", "_C", "top_k_per_row_prefill")),
-        check("causal-conv1d (Dao; KDA short conv)", causal_conv1d),
+        check("causal-conv1d (Dao; KDA short conv)", causal_conv1d, "1.7.0"),
         check("FlashInfer KDA cute-dsl-persistent", kda_persistent),
         check("ninja (FlashInfer JIT)", ninja),
     ]

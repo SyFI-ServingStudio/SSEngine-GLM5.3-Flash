@@ -1,89 +1,78 @@
 # Environment
 
-One shared environment for every lane, outside the worktrees:
+The version record of pp-impl's environment. `env/make_env.sh` builds it from public sources and `env/check_env.py`
+checks it (README, "Reproduce").
+
+## Layout
+
+One environment for the repo and every lane worktree under `lanes/`, in the main tree (all ignored by git):
 
 | Path | What |
 |---|---|
-| `pp-impl/.venv` | Python 3.12 venv (uv). `import vllm` resolves to `third_party/vllm`. |
-| `pp-impl/third_party/vllm` | Detached git worktree of the fork repository at `892da0822f`, plus the compiled outputs copied from a built tree of the same HEAD (no rebuild) |
-| `pp-impl/third_party/sim_7bb224a6/profiling` | ServingStudioSim profiler package at the handoff's frozen commit (`git archive`). Input builders and references for the M1 checks. |
-| `pp-impl/third_party/causal_conv1d_try/pkg` | Dao causal-conv1d 1.7.0 built from source for torch 2.13 (on `PYTHONPATH`; the KDA short conv) |
-| `pp-impl/third_party/wheels` | the FlashInfer nightly wheel |
+| `.venv` | Python 3.12 venv (uv), the packages of `env/requirements.lock` |
+| `third_party/vllm` | the vLLM fork at `892da0822f`, installed editable: `import vllm` resolves here |
+| `third_party/ServingStudioSim` | ServingStudioSim at `820adda0` (branch `pp-main`): the handoff package and req-frontend (`PPIMPL_SIM` overrides it) |
+| `third_party/sim_7bb224a6/profiling` | the profiler package at the handoff's frozen commit `7bb224a6` (`git archive`): input builders and references for the M1/M2 checks |
+| `third_party/enwik9` | the prompt corpus (`PPIMPL_ENWIK9` overrides it) |
+| `third_party/wheels` | the causal-conv1d wheel built here, reused when the venv is rebuilt |
+| `third_party/downloads` | downloads, each checked by sha256 |
 
-All of these are ignored by git.
+The weights are in the Hugging Face cache (`HF_HOME`), or at `PPIMPL_CHECKPOINT` (`ppimpl/config.py`).
 
 ## Versions
 
-From `env/check_env.py`:
+From `env/check_env.py`, which fails on any other version:
 
-| Library | Version |
-|---|---|
-| torch | 2.13.0+cu130 (CUDA 13.0) |
-| cuBLAS | 13.1.1.3 |
-| vLLM fork | 0.1.dev21920+g892da0822 (`third_party/vllm`, HEAD `892da0822f`) |
-| FlashInfer | 0.7.2.dev20261008 (nightly, main at 73b63f88): the build the KDA rows used; replaces the fork's pinned 0.7.0 |
-| nvidia-cutlass-dsl | 4.8.0 (was 4.7.1) |
-| Triton | 3.7.1 |
-| TileLang | 0.1.12 |
-| DeepGEMM | 2.8.0, vendored in the fork (`vllm/third_party/deep_gemm`) |
-| DeepSelect | the fork's `vllm._deepselect_C` (`torch.ops.deep_select.topk`) |
-| FlashKDA | the fork's `vllm._flashkda_C` (`torch.ops._flashkda_C.fwd`) |
-| causal-conv1d (Dao) | 1.7.0. The released cu13 wheel is built for torch 2.10 and fails against torch 2.13 (`undefined symbol c10::impl::cow::materialize_cow_storage`), so it is built from source. |
+| Library | Version | Source |
+|---|---|---|
+| Python | 3.12 | uv |
+| torch | 2.13.0+cu130 (CUDA 13.0) | PyPI |
+| cuBLAS | 13.1.1.3 | PyPI (torch's pin) |
+| vLLM fork | 0.1.dev21920+g892da0822 (`third_party/vllm`, HEAD `892da0822f`) | https://github.com/serendipity-zk/vllm, branch `servingstudio-alignment` |
+| FlashInfer | 0.7.2.dev20261008 (nightly, main at `73b63f88`): the build the KDA rows used; replaces the fork's pinned 0.7.0 | https://github.com/flashinfer-ai/whl/releases/tag/nightly-v0.7.2-20261008, sha256 in `env/requirements.lock` |
+| nvidia-cutlass-dsl | 4.8.0 (the fork pins 4.7.1) | PyPI |
+| Triton | 3.7.1 | PyPI |
+| TileLang | 0.1.12 | PyPI |
+| DeepGEMM | 2.8.0, vendored in the fork (`vllm/third_party/deep_gemm`) | the fork's native build |
+| DeepSelect | the fork's `vllm._deepselect_C` (`torch.ops.deep_select.topk`) | the fork's native build |
+| FlashKDA | the fork's `vllm._flashkda_C` (`torch.ops._flashkda_C.fwd`) | the fork's native build |
+| causal-conv1d (Dao) | 1.7.0, built from the source tag against torch 2.13. The released cu13 wheel is built for torch 2.10 and fails to load with 2.13 (`undefined symbol c10::impl::cow::materialize_cow_storage`). | https://github.com/Dao-AILab/causal-conv1d, tag `v1.7.0` |
 
 Two kernels follow the design rather than the fork (`measured/kernels_identity.md`, Decisions):
 - KDA chunked prefill uses FlashInfer `recurrent_kda(backend="cute-dsl-persistent")`. That backend exists only in the
   nightly the rows used, so the venv carries FlashInfer 0.7.2.dev20261008 with cutlass-dsl 4.8.0 instead of the
   fork's pins (0.7.0 / 4.7.1). `uv pip check` reports exactly these two pins as mismatched. The fork imports and
   dispatches with it. MoE (30), `mm_fp4` (9, 11) and sparse MLA (25) then run on this FlashInfer too.
-- The KDA short conv uses Dao causal-conv1d (below).
+- The KDA short conv uses Dao causal-conv1d.
 
-The freeze before the switch is kept at `third_party/wheels/freeze_before_fi_nightly.txt`.
+`env/requirements.lock` is the venv's `uv pip freeze` without the editable fork and causal-conv1d.
 
-## Recreate
+## How `make_env.sh` builds it
 
-Prerequisites:
-- A built checkout of the fork at `892da0822f` with its own uv venv. We use
-  `/raid/kanzhu/ServingStudio/wt-flash-dflash2/alignment/profiler/vllm`, read only.
-- `uv`, run as the normal user, never as root.
-- The workspace `.env` sourced, so `TMPDIR` and `UV_CACHE_DIR` point at `/raid/kanzhu/ServingStudio/{tmp,uv-cache}`.
-  Keep `TMPDIR` short: vLLM's zmq ipc path is `TMPDIR` + a uuid and must fit in 107 characters.
+1. `uv venv --python 3.12 .venv`, then `uv pip install -r env/requirements.lock`. FlashInfer comes by URL with its
+   sha256.
+2. Clones the fork and checks out `892da0822f`. It installs it as the fork's `ALIGNMENT.md` says: editable
+   (`uv pip install -e`) with `VLLM_USE_PRECOMPILED=1`. The native extensions come from the upstream vLLM wheel of the
+   fork's base commit `04730e8` (`https://wheels.vllm.ai/04730e8…/vllm-0.30.1rc1.dev97+g04730e827-…x86_64.whl`,
+   sha256 `a6eb62ee…`); the fork changes no native code against that base (`git diff 04730e8 892da0822f -- csrc cmake
+   CMakeLists.txt setup.py rust` is empty). Every native file in that wheel is byte-identical to the build this
+   repo's measurements ran on. To compile instead, see the fork's `docs/contributing/incremental_build.md`.
+3. Builds causal-conv1d 1.7.0 from the source tag into `third_party/wheels/` (`uv build --no-build-isolation`, CUDA
+   13 toolkit at `CUDA_HOME`, `MAX_JOBS` default 16: about 10 minutes) and installs it.
+4. Clones ServingStudioSim at `820adda0` with the req-frontend submodule
+   (https://github.com/uw-syfi/request-factory at `7f6aa9d8`), and `git archive 7bb224a6 profiling` into
+   `third_party/sim_7bb224a6`.
+5. Downloads enwik9 (http://mattmahoney.net/dc/enwik9.zip) and checks the zip's and the file's sha256.
+6. Runs `env/check_env.py`.
 
-```bash
-set -a; source /raid/kanzhu/ServingStudio/.env; set +a
-lanes/model/env/make_env.sh /raid/kanzhu/ServingStudio/pp-impl \
-    /raid/kanzhu/ServingStudio/wt-flash-dflash2/alignment/profiler/vllm
-```
+Run it as the normal user, never as root, with a short `TMPDIR`: vLLM's zmq ipc path is `TMPDIR` + a uuid and must fit
+in 107 characters (`bench/slurm/env.sh` makes one short TMPDIR per job under `PPIMPL_TMP`).
 
-`make_env.sh` does four things:
-1. `git worktree add --detach third_party/vllm 892da0822f` from the fork repository. Then `rsync --files-from
-   env/build_outputs.txt`: the 24 ignored build outputs of the built tree (`_C`, `_deepselect_C`, `_flashkda_C`,
-   FlashMLA, the vendored DeepGEMM, FA2/FA3 and so on).
-2. Downloads the FlashInfer nightly wheel into `third_party/wheels/` and checks its sha256. Then `uv venv --python
-   /usr/bin/python3.12 .venv` and `uv pip install -r env/requirements.lock`. The lock file is this venv's
-   `uv pip freeze` without `-e vllm`: the reference venv's packages with FlashInfer and cutlass-dsl replaced.
-3. Copies the reference venv's editable-vllm finder, `.pth` and dist-info, and rewrites their paths to
-   `third_party/vllm`.
-4. `git archive 7bb224a6 profiling` from `wt-pp-main` into `third_party/sim_7bb224a6`.
+## Other tools
 
-Then it runs `env/check_env.py`, which imports every library above and exits non-zero if a required one fails.
-
-Dao causal-conv1d, built from the v1.7.0 source against this venv's torch:
-
-```bash
-T=/raid/kanzhu/ServingStudio/pp-impl/third_party/causal_conv1d_try
-curl -sL -o $T/src.tar.gz https://github.com/Dao-AILab/causal-conv1d/archive/refs/tags/v1.7.0.tar.gz
-mkdir -p $T/src && tar -xzf $T/src.tar.gz -C $T/src
-CUDA_HOME=/usr/local/cuda-13.1 PATH=/usr/local/cuda-13.1/bin:$PATH CAUSAL_CONV1D_FORCE_BUILD=TRUE MAX_JOBS=32 \
-  uv pip install --python /raid/kanzhu/ServingStudio/pp-impl/.venv/bin/python --no-build-isolation --no-deps \
-  --no-cache --target $T/pkg $T/src/causal-conv1d-1.7.0
-# use: PYTHONPATH=$T/pkg
-```
-
-## Use
-
-```bash
-set -a; source /raid/kanzhu/ServingStudio/.env; set +a
-/raid/kanzhu/ServingStudio/pp-impl/.venv/bin/python ...
-```
-
-GPU work goes through Slurm (`bench/slurm/*.sbatch`); the scripts source `.env` and call the venv's Python directly.
+- `cargo` (Rust): `bench/run.py` builds req-frontend's `session_runner` on first use.
+- `/usr/bin/ninja` 1.11.1 for FlashInfer's JIT: processes that share `~/.cache/flashinfer` with another ninja version
+  hash build commands differently and rebuild every object. `check_env.py` warns when another ninja is first on PATH.
+- The M1 kernel re-measure (`bench/slurm/kernels_*.sbatch`) runs the ServingStudioSim profiler from
+  `third_party/ServingStudioSim` with that checkout's own uv project env (`uv sync` there) and its CUPTI extension
+  (`MOESIM_CUPTI_BUILD_DIR`); see the profiler's README.

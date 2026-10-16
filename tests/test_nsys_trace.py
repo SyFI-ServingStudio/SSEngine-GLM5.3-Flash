@@ -7,8 +7,8 @@ import types
 
 import pytest
 
-import report
-import nsys_trace as tr
+from bench import nsys_trace as tr
+from bench import report
 from test_report import outcome, write_run
 
 MS = 1_000_000
@@ -60,13 +60,9 @@ def build_db(path, nmb=3):
             con.execute("INSERT INTO NVTX_EVENTS VALUES (?,?,?,?,?,?)",
                         (int(H * MS), int((H + 2) * MS), 59, None if k % 2 else text, pid(s) + 1000 + s,
                          sid(text) if k % 2 else None))
-            if s > 0:
-                launch(s, H + 0.1, [(T - 0.4, T - 0.05, "ncclDevKernel_SendRecv")])
             launch(s, H + 0.2, [(T, T + 3, "gemm_a")])
             launch(s, H + 0.3, [(T + 3.5, T + 6, "rmsnorm")])
             launch(s, H + 0.4, [(T + 6, T + 8, "gemm_a"), (T + 8.2, T + 10, "moe")])   # a graph launch: one id
-            if s < 3:
-                launch(s, H + 1.0, [(T + 10.05, T + 10.4, "ncclDevKernel_SendRecv")])
     launch(0, 1.0, [(1.0, 2.0, "outside_any_range")])                              # not in an mb range
     con.execute("INSERT INTO NVTX_EVENTS VALUES (?,?,?,?,?,?)",                     # stage 0 only: partial mb
                 (int(500 * MS), int(502 * MS), 59, f"stage 0 mb {nmb}", pid(0) + 1000, None))
@@ -89,8 +85,6 @@ def test_trace_per_microbatch_numbers(tmp_path):
             assert st["busy_ms"] == A(9.3)
             assert st["gaps_ms"] == A(0.7)
             assert st["kernels"] == 4
-            assert st["nccl_recv_ms"] == (None if s == 0 else A(0.35))
-            assert st["nccl_send_ms"] == (None if s == 3 else A(0.35))
         assert [x["ms"] for x in m["sends"]] == [A(LAG - STAGE_T)] * 3
         assert m["gpu_span_ms"] == A(3 * LAG + STAGE_T)
     assert res["stage0_gap_ms"] == [A(0.0)] * 2
@@ -144,11 +138,9 @@ def test_report_uses_trace_with_events_beside(tmp_path):
         assert [s["start_ms"] for s in line["stages"]] == [A(s * LAG) for s in range(4)]
         assert [x["ms"] for x in line["sends"]] == [A(0.5)] * 3
         assert [x["event_ms"] for x in line["sends"]] == [A(0.55)] * 3
-        assert line["sends"][0]["nccl_send_ms"] == A(0.35)
-        assert line["sends"][2]["nccl_recv_ms"] == A(0.35)
         assert line["gpu_span_ms"] == A(41.5) and line["event_gpu_span_ms"] == A(41.85)
         assert line["host_ms"] == A(50.0 - 41.5)
-    assert {k["name"] for k in rep["kernels"]} >= {"gemm_a", "rmsnorm", "moe", "ncclDevKernel_SendRecv"}
+    assert {k["name"] for k in rep["kernels"]} >= {"gemm_a", "rmsnorm", "moe"}
     md = report.summarize(tmp_path / "runs").read_text()
     assert "Kernels (nsys)" in md and "| 8k | 0.700 / 0.700 / 0.700 / 0.700 |" in md
 

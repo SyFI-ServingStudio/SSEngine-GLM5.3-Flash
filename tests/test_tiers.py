@@ -1,7 +1,7 @@
 import json
 
 import pytest
-from replay import HANDOFF
+from bench.replay import HANDOFF
 
 from ppimpl.config import BLOCK_TOKENS, SchedulerConfig, TierConfig
 from ppimpl.engine.kv import KvManager

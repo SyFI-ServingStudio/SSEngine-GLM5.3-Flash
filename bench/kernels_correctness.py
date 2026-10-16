@@ -5,7 +5,7 @@ from `third_party/sim_7bb224a6`), references from the runners and the vLLM fork'
 writes the comparisons. Where the fork calls a different callable than the profiler row (configs 4, 5, 7, 33;
 see `measured/kernels_identity.md`) both are checked when both are importable.
 
-    python bench/kernels_correctness.py --out measured/kernels_correctness.jsonl [--configs 1,2,...]
+    python -m bench.kernels_correctness --out measured/kernels_correctness.jsonl [--configs 1,2,...]
 
 One JSON line per (config, row, callable): max abs error, error relative to the reference's max, RMS error ratio,
 violations of `|a - r| <= atol + rtol * |r|`, the tolerance and where it comes from, pass.
@@ -17,23 +17,17 @@ import argparse
 import collections
 import json
 import math
-import os
 import sys
 import time
 import traceback
 from pathlib import Path
 
-LANE = Path(__file__).resolve().parents[1]
-PPIMPL = LANE.parents[1] if LANE.parent.name == "lanes" else LANE
-SIM = PPIMPL / "third_party" / "sim_7bb224a6"
-SPECS = Path(
-    os.environ.get(
-        "PPIMPL_KERNEL_SPECS",
-        "/raid/kanzhu/ServingStudio/wt-pp-main/doc/handoff/glm53_flash_pp4_b200_v1/data/kernel_specs.jsonl",
-    )
-)
-VLLM_TESTS = PPIMPL / "third_party" / "vllm"
-for path in (str(SIM), str(VLLM_TESTS)):
+from bench.common import HANDOFF, MAIN, PROFILER
+
+SPECS = HANDOFF / "data" / "kernel_specs.jsonl"
+VLLM_TESTS = MAIN / "third_party" / "vllm"
+# neither tree is an installed package: the profiler's `profiling` and the fork's `tests` import from their roots
+for path in (str(PROFILER), str(VLLM_TESTS)):
     if path not in sys.path:
         sys.path.append(path)
 
@@ -753,7 +747,7 @@ def _check_flashkda(spec: dict, config: dict) -> list[dict]:
 
 
 def check_kda_flashinfer(spec: dict, config: dict) -> list[dict]:
-    """FlashInfer nightly 0.7.2.dev20261008 (pp-impl/.venv, or profile_envs/flashinfer_kda with --kda-flashinfer)."""
+    """FlashInfer nightly 0.7.2.dev20261008, as in pp-impl/.venv."""
     from profiling.runners.attention import kda_chunk_prefill_flashinfer as mod
     from profiling.runners.attention.kda_chunk_prefill_reference import kda_chunk_prefill_reference, rmse_ratio
 
@@ -807,7 +801,6 @@ def main() -> int:
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--configs", default="", help="comma-separated config numbers (default: all)")
     parser.add_argument("--rows", default="smallest,largest")
-    parser.add_argument("--kda-flashinfer", action="store_true", help="config 5 with the row's own callable")
     opts = parser.parse_args()
     wanted = {int(c) for c in opts.configs.split(",") if c}
     configs = [c for c in load_configs() if not wanted or c["config"] in wanted]
@@ -816,7 +809,7 @@ def main() -> int:
     failures = 0
     with opts.out.open("a") as sink:
         for config in configs:
-            check = check_kda_flashinfer if opts.kda_flashinfer else CHECKS[(config["kind"], config["backend"])]
+            check = CHECKS[(config["kind"], config["backend"])]
             for which in opts.rows.split(","):
                 spec = config[which]
                 start = time.time()
