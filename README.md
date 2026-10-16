@@ -35,6 +35,7 @@ Goal: small codebase, maximum reuse.
 | `tests/` | `pytest -q` runs the CPU tests; `-m gpu` the GPU tests |
 | `measured/` | measurements in the handoff's `measured/` format; `issues.md` is the gap log |
 | `lanes/` | per-lane git worktrees (ignored) |
+| `old-wt/` | retired lane worktrees and snapshots, kept with their branches (ignored) |
 
 ## Reproduce
 
