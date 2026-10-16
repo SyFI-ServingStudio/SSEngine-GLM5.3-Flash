@@ -190,3 +190,21 @@ def test_pacing_does_not_bind_when_stage0_is_slowest():
     gaps, _, _ = simulate(DispatchRule(4, True, 3.0, 1.0), n_mb=60, stage_ms=[12.0, 10.0, 10.0, 10.0], out=b)
     assert max(gaps[5:]) == pytest.approx(0.0, abs=1e-6)
     assert a["starts"][59] == b["starts"][59]
+
+
+def test_pacing_uses_stage0_rate_for_a_size_the_later_stages_have_not_seen():
+    """force_check_plain: a 1,024-token microbatch, then 8,192-token chunks. Stages 1-3 have only the 1,024-token rate
+    (fixed cost included) when the second chunk would form; extrapolating it held stage 0 idle for ~40 ms."""
+    r = DispatchRule(4, True, 45.0, 2.0)
+    ms = lambda x: int(x * MS)
+    r.dispatched(0, 0, 1024)
+    r.stage0_done(0, 0, ms(13)); r.stage_done(0, 0, 0, ms(13))
+    for s in (1, 2, 3):
+        r.stage_done(s, 0, ms(13 * s), ms(13 * s + 12))
+    r.dispatched(1, ms(13), 8192)
+    r.stage0_done(1, ms(13), ms(63)); r.stage_done(0, 1, ms(13), ms(63))
+    assert r.stage_ns(1, 8192) == pytest.approx(ms(50), rel=1e-6)          # stage 0's 8,192 rate, not 1,024's
+    assert r.stage_ns(1, 1024) == pytest.approx(ms(12), rel=1e-6)          # its own sample
+    v, at = r.decide(1, ms(64))
+    assert v == NOW                                                        # stage 1 frees at 113: start now
+

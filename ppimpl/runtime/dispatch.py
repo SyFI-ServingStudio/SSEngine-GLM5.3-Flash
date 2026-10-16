@@ -16,7 +16,10 @@ per stage from the fit), the extra in-flight plan does not wait at stage 0 but q
 every round it carries pays the queue in its TTFT (budget N=500, 7730: 21 ms mean before stage 2). So a plan forms
 only when it would reach every later stage no earlier than `pace_margin_ms` before that stage frees: the in-flight
 plans' stage ends (reported, or predicted from per-stage EWMAs as above) give each stage's free time, and the next
-plan is assumed to have the last plan's tokens. It forms the predicted host time (dispatch to stage-0 start, an EWMA
+plan is assumed to have the last plan's tokens. A later stage with no sample in a size bucket yet uses stage 0's
+rate for it when stage 0 has one: stage 0 reports a new size first, and the nearest smaller bucket's rate carries
+the per-microbatch fixed cost (force_check_plain 7753: 1,024-token rates put the first 8,192-token chunk at 94 ms on
+stages 1-3, measured 50; stage 0 idled 40 ms twice and the 32k TTFT went from 0.41 to 0.48 s). It forms the predicted host time (dispatch to stage-0 start, an EWMA
 per size bucket over plans that found stage 0 idle; `lead_ms` before any sample) ahead of that start. When stage 0
 is the slowest, pacing never binds. Chosen over a cap of 4 in flight with the queued plan counted (ead8d9a, reverted):
 that cap forms on exit reports, which left the slowest stage idle 5.2% vs 2.9% (even N=500 7741 vs budget N=500 7730)
@@ -110,6 +113,15 @@ class DispatchRule:
         if stage == self.num_stages - 1:
             del self.flight[mb_id]
 
+    def stage_ns(self, stage: int, tokens: int) -> float:
+        """Predicted compute of `tokens` on `stage`; a later stage without a sample in that size bucket takes stage 0's
+        rate for it, if stage 0 has one."""
+        p = self.stage_pred[stage]
+        b = p.bucket(tokens)
+        if stage > 0 and b not in p.rate and b in self.pred.rate:
+            return self.pred.rate[b] * tokens
+        return p.predict_ns(tokens)
+
     def paced_form_ns(self, now_ns: int) -> int | None:
         """Pacing: the host time at which the next plan should form (None: no constraint)."""
         if self.pace_ns is None or not self.flight or any(not p.rate for p in self.stage_pred):
@@ -121,11 +133,11 @@ class DispatchRule:
             for s in range(self.num_stages):
                 e = ends[s]
                 if e is None:
-                    e = max(max(prev, free[s]) + self.stage_pred[s].predict_ns(tokens), now_ns)
+                    e = max(max(prev, free[s]) + self.stage_ns(s, tokens), now_ns)
                 free[s] = prev = e
         start, ahead = None, 0.0
         for s in range(1, self.num_stages):
-            ahead += self.stage_pred[s - 1].predict_ns(self.last_tokens)
+            ahead += self.stage_ns(s - 1, self.last_tokens)
             t = free[s] - ahead
             start = t if start is None else max(start, t)
         host = self.host.predict_ns(self.last_tokens)
