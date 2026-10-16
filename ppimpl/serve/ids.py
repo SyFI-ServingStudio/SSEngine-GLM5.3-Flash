@@ -164,3 +164,128 @@ def parse_slow_ids(raw) -> np.ndarray:
     if len(ids) != inner.count(b",") + 1 or (len(ids) and (ids.min() < 0 or ids.max() >= 2**31)):
         raise ValueError("token_ids: not a list of int32 ids")
     return ids.astype(np.int32)
+
+
+STREAM_FROM = 1 << 18        # bodies (Content-Length) from which the ids are parsed while the body arrives
+SEGMENT_INLINE = 1 << 14     # array pieces shorter than this are parsed on the event loop, longer ones on _pool
+HEAD_MAX = 1 << 16           # the key must start within this many bytes, else the whole body takes parse_body
+
+
+def _pool_get() -> concurrent.futures.ThreadPoolExecutor:
+    global _pool
+    if _pool is None:
+        _pool = concurrent.futures.ThreadPoolExecutor(PARSE_THREADS - 1, thread_name_prefix="parse")
+    return _pool
+
+
+def _parse_piece(piece: bytes, stop: int):
+    out = np.empty(len(piece) // 2 + 1, np.int32)
+    n, end = _parse_ints(np.frombuffer(piece, np.uint8), 0, stop, out)
+    return out, n, end, stop if stop >= 0 else len(piece) - 1
+
+
+class StreamParser:
+    """Parses `token_ids` while the body arrives, on the same terms as `parse_fast` (or it gives up: `finish`
+    returns None and the caller parses the whole body). `feed` each body chunk; the array's text is cut at its
+    last comma so far, and each piece is parsed on the thread pool while the next chunk is read."""
+
+    def __init__(self, rest_decoder: msgspec.json.Decoder):
+        self.rest_decoder = rest_decoder
+        self.chunks: list[bytes] = []
+        self.ok = numba is not None and FAST
+        self.pre = b""             # before the array (state 0)
+        self.head = None           # the body up to the array's `[`
+        self.carry = b""           # array text after the last comma fed
+        self.parts: list = []      # (future or result) per piece, in order
+        self.tail: list[bytes] = []
+        self.state = 0             # 0: before the array, 1: in it, 2: after it
+
+    def feed(self, chunk: bytes) -> None:
+        self.chunks.append(chunk)
+        if not self.ok:
+            return
+        if self.state == 2:
+            self.tail.append(chunk)
+        elif self.state == 1:
+            self._array(chunk)
+        else:
+            self.pre += chunk
+            i = self.pre.find(KEY)
+            if i < 0:
+                self.ok = len(self.pre) < HEAD_MAX
+                return
+            if i == 0 or self.pre[i - 1] == 0x5C:
+                self.ok = False
+                return
+            j = i + len(KEY)
+            while j < len(self.pre) and self.pre[j] in b" \t\r\n":
+                j += 1
+            if j >= len(self.pre):
+                return                          # wait for the `:`
+            if self.pre[j] != 0x3A:
+                self.ok = False
+                return
+            j += 1
+            while j < len(self.pre) and self.pre[j] in b" \t\r\n":
+                j += 1
+            if j >= len(self.pre):
+                return                          # wait for the `[`
+            if self.pre[j] != 0x5B:
+                self.ok = False
+                return
+            self.key_at = i
+            self.head, rest, self.pre = self.pre[:j], self.pre[j + 1:], b""
+            self.state = 1
+            self._array(rest)
+
+    def _array(self, data: bytes) -> None:
+        if self.carry:
+            data = self.carry + data
+            self.carry = b""
+        r = data.find(b"]")
+        if r >= 0:
+            self._piece(data[:r + 1], -1)
+            self.state = 2
+            if r + 1 < len(data):
+                self.tail.append(data[r + 1:])
+            return
+        c = data.rfind(b",")
+        if c < 0:
+            self.carry = data
+            return
+        self._piece(data[:c + 1], c)
+        self.carry = data[c + 1:]
+
+    def _piece(self, piece: bytes, stop: int) -> None:
+        if len(piece) < SEGMENT_INLINE:
+            self.parts.append(_parse_piece(piece, stop))
+        else:
+            self.parts.append(_pool_get().submit(_parse_piece, piece, stop))
+
+    def finish(self, alloc=None):
+        """(request with token_ids == [], int32 ids, alloc's token or None) or None (parse the whole body).
+        alloc(n) -> (token, int32 array of n) or None: where to put the ids (else a new array)."""
+        if not self.ok or self.state != 2:
+            return None
+        res = [p.result() if isinstance(p, concurrent.futures.Future) else p for p in self.parts]
+        if any(n < 0 or end != want for _, n, end, want in res):
+            return None
+        # `[]` is one piece "]", which the loop rejects (no digits): it falls back, and the old path answers
+        tail = b"".join(self.tail)
+        if KEY in self.head[:self.key_at] or KEY in tail:
+            return None
+        try:
+            body = self.rest_decoder.decode(self.head + b"[]" + tail)
+        except (msgspec.ValidationError, msgspec.DecodeError):
+            return None
+        if body.token_ids:
+            return None
+        pieces = [o[:n] for o, n, _, _ in res]
+        dst = alloc(sum(n for _, n, _, _ in res)) if alloc is not None else None
+        if dst is None:
+            return body, np.concatenate(pieces), None
+        np.concatenate(pieces, out=dst[1])
+        return body, dst[1], dst[0]
+
+    def body(self) -> bytes:
+        return b"".join(self.chunks)

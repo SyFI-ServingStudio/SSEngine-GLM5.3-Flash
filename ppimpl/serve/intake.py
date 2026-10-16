@@ -5,7 +5,10 @@ passes them to the controller's control thread over zmq; the token comes back th
 then serves no HTTP, so a burst of requests no longer queues behind one event loop.
 
 DEALER (identity = index) <-> controller ROUTER (RunConfig.intake_addr), frames:
-  intake -> controller: [b"R"] ready | [b"Q", msgpack (key, req_id, arrival_ns, body_ns, parsed_ns), int32 ids] request
+  intake -> controller: [b"R", slab name] ready
+                        | [b"Q", msgpack (key, req_id, arrival_ns, body_ns, parsed_ns), int32 ids] request
+                        | [b"M", the same msgpack, msgpack (slab name, offset, count)] request whose ids are in the
+                          intake's shared-memory slab (ppimpl/serve/slab.py), freed when the request is answered
                         (body_ns: body read; parsed_ns: ids parsed, just before the send)
                         | [b"D", msgpack (req_id, response_ns)] response sent | [b"S"] /shutdown
   controller -> intake: [b"G"] all intakes ready (/health 200 from now on)
@@ -16,6 +19,7 @@ import asyncio
 import os
 import signal
 import socket
+import sys
 import time
 import uuid
 
@@ -27,6 +31,7 @@ import zmq.asyncio
 
 from ppimpl.config import RunConfig
 from ppimpl.serve import ids as ids_mod
+from ppimpl.serve.slab import SLAB_FROM, Slab
 from ppimpl.serve.http import SamplingParams, error, json_body, read_body, reply, sse_body
 
 
@@ -67,6 +72,7 @@ class Intake:
         self.pack = msgspec.msgpack.Encoder()
         self.unpack = msgspec.msgpack.Decoder()
         self.pending: dict[int, asyncio.Future] = {}
+        self.in_slab: dict[int, int] = {}      # key -> slab offset of its ids
         self.next_key = 0
         self.go = False
 
@@ -94,7 +100,8 @@ class Intake:
                 self.sock.setsockopt(zmq.RCVHWM, 0)
                 self.sock.connect(self.cfg.intake_addr())
                 ids_mod.warm()
-                await self.sock.send_multipart([b"R"])
+                self.slab = Slab()
+                await self.sock.send_multipart([b"R", self.slab.name.encode()])
                 self.tasks = [asyncio.create_task(self._answers()), asyncio.create_task(self._watch_parent())]
             await send({"type": f"lifespan.{kind}.complete"})
             if kind == "shutdown":
@@ -102,6 +109,7 @@ class Intake:
                     t.cancel()
                 self.sock.close(linger=0)
                 self.ctx.term()
+                self.slab.unlink()
                 return
 
     async def _answers(self):
@@ -110,16 +118,19 @@ class Intake:
             kind = frames[0]
             if kind == b"A":
                 key, req_id, tok, cached = self.unpack.decode(frames[1])
+                self._free(key)
                 fut = self.pending.pop(key, None)
                 if fut is not None and not fut.done():
                     fut.set_result((req_id, tok, cached))
             elif kind == b"E":
                 key, why = self.unpack.decode(frames[1])
+                self._free(key)
                 fut = self.pending.pop(key, None)
                 if fut is not None and not fut.done():
                     fut.set_exception(RuntimeError(why))
             elif kind == b"G":
                 self.go = True
+                self.slab.unlink()        # the controller has it mapped
 
     async def _watch_parent(self):
         parent = os.getppid()
@@ -127,25 +138,58 @@ class Intake:
             await asyncio.sleep(1.0)
         os.kill(os.getpid(), signal.SIGTERM)
 
+    def _free(self, key: int) -> None:
+        off = self.in_slab.pop(key, None)
+        if off is not None:
+            self.slab.free(off)
+
+    def _alloc(self, n: int):
+        off = self.slab.alloc(4 * n) if 4 * n >= SLAB_FROM else None
+        return None if off is None else (off, self.slab.ids(off, n))
+
     async def _generate(self, scope, receive, send):
         arrival_ns = time.time_ns()
-        raw = await read_body(receive)
-        body_ns = time.time_ns()
-        try:
-            body, ids = parse_body(raw, self.dec, self.rest_dec)
-        except (msgspec.ValidationError, msgspec.DecodeError, ValueError) as e:
-            return await error(send, str(e))
-        if body.sampling_params.max_tokens != 1:
-            return await error(send, "this server computes prefill and one output token (max_tokens 1)")
-        if not len(ids):
-            return await error(send, "empty prompt")
+        size = next((int(v) for k, v in scope["headers"] if k == b"content-length"), 0)
+        off = None
+        if size >= ids_mod.STREAM_FROM:      # parse the ids while the body arrives
+            sp = ids_mod.StreamParser(self.rest_dec)
+            while True:
+                msg = await receive()
+                sp.feed(msg.get("body", b""))
+                if not msg.get("more_body"):
+                    break
+            body_ns = time.time_ns()
+            got = sp.finish(self._alloc)
+            raw = None if got is not None else sp.body()
+        else:
+            raw = await read_body(receive)
+            body_ns = time.time_ns()
+        if raw is not None:
+            try:
+                body, ids = parse_body(raw, self.dec, self.rest_dec)
+            except (msgspec.ValidationError, msgspec.DecodeError, ValueError) as e:
+                return await error(send, str(e))
+            dst = self._alloc(len(ids))
+            if dst is not None:
+                off, dst[1][:] = dst[0], ids
+        else:
+            body, ids, off = got
+        if body.sampling_params.max_tokens != 1 or not len(ids):
+            if off is not None:
+                self.slab.free(off)
+            return await error(send, "empty prompt" if body.sampling_params.max_tokens == 1 else
+                               "this server computes prefill and one output token (max_tokens 1)")
         req_id = next((v.decode() for k, v in scope["headers"] if k == b"x-request-id"), None) \
             or body.rid or uuid.uuid4().hex
         key, self.next_key = self.next_key, self.next_key + 1
         fut = asyncio.get_running_loop().create_future()
         self.pending[key] = fut
-        await self.sock.send_multipart([b"Q", self.pack.encode((key, req_id, arrival_ns, body_ns, time.time_ns())),
-                                        ids.data], copy=False)
+        meta = self.pack.encode((key, req_id, arrival_ns, body_ns, time.time_ns()))
+        if off is not None:
+            self.in_slab[key] = off
+            await self.sock.send_multipart([b"M", meta, self.pack.encode((self.slab.name, off, len(ids)))])
+        else:
+            await self.sock.send_multipart([b"Q", meta, ids.data], copy=False)
         try:
             final_id, tok, cached = await fut
         except RuntimeError as e:
@@ -157,8 +201,14 @@ class Intake:
         await self.sock.send_multipart([b"D", self.pack.encode((final_id, time.time_ns()))])
 
 
+# The ids parse runs on threads while the event loop reads the body (ids.StreamParser); each piece needs the GIL to
+# start and to return. Python's default switch interval (5 ms) let them wait for a busy event loop that long.
+SWITCH_INTERVAL_S = 5e-5
+
+
 def run_intake(cfg: RunConfig, index: int):
     signal.signal(signal.SIGINT, signal.SIG_IGN)   # the controller stops us (SIGTERM)
+    sys.setswitchinterval(SWITCH_INTERVAL_S)
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)

@@ -48,6 +48,7 @@ from ppimpl.runtime.cpus import CONTROLLER_CORES, cpu_list, pin_process, split_c
 from ppimpl.runtime.dispatch import NOW, WAIT, DispatchRule
 from ppimpl.runtime.transport import (Chunk, Plan, Ready, Shutdown, StageDone, WorkerError, decode_to_controller,
                                       encode, for_stage)
+from ppimpl.serve.slab import SlabReader
 
 READY_TIMEOUT_S = 1800   # a real stage loads its weights and captures graphs before Ready
 WAKE_ADDR = "inproc://ppimpl-control-wake"
@@ -97,6 +98,7 @@ class Controller:
         self.intake_procs: list[subprocess.Popen] = []
         self.intake_cpus: set[int] | None = None
         self.intakes_ready: set[bytes] = set()
+        self.slabs = SlabReader()            # the intakes' shared-memory prompt slabs (ppimpl/serve/slab.py)
         self.answered: dict[str, dict] = {}  # answered, response not yet sent: id -> log record
         self.pack, self.unpack = msgspec.msgpack.Encoder(), msgspec.msgpack.Decoder()
 
@@ -365,10 +367,11 @@ class Controller:
 
     def _from_intake(self, frames: list[bytes]):
         ident, kind = frames[0], frames[1]
-        if kind == b"Q":
-            recv_ns = time.time_ns()
+        if kind == b"Q" or kind == b"M":
             key, req_id, arrival_ns, *stamps = self.unpack.decode(frames[2])
-            ids = np.frombuffer(frames[3], np.int32)
+            ids = np.frombuffer(frames[3], np.int32) if kind == b"Q" else \
+                self.slabs.copy(*self.unpack.decode(frames[3]))
+            recv_ns = time.time_ns()     # the ids are here
             why = self.failed or (None if self.sched.kv.fits_ever(len(ids))
                                   else f"prompt of {len(ids)} tokens does not fit the KV pool")
             if why:
@@ -386,6 +389,8 @@ class Controller:
             req_id, sent_ns = self.unpack.decode(frames[2])
             self.log_response(self.answered.pop(req_id), sent_ns)
         elif kind == b"R":
+            if len(frames) > 2:
+                self.slabs.attach(frames[2].decode())
             self.intakes_ready.add(ident)
             if len(self.intakes_ready) == self.cfg.intake_procs:
                 for i in self.intakes_ready:
