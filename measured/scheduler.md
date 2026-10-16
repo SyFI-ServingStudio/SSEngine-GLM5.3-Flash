@@ -157,8 +157,20 @@ Stage time / fit by microbatch tokens 0–255 / 256–1023 / 1024–8191 / 8192 
   srpt8k N=400 (stage balance 1.040 / 1.022 / 1.060 / 1.063): 5 in flight 0.313 / 0.393 / 1.87, real 0.33 / 0.41 /
   1.94. With pacing 2 ms: 0.272 / 0.363 / 1.91, against sim x1.06 0.27 / 0.36 / 2.02. Throughput is unchanged
   (25.59 vs 25.61).
-- Fix a152856 (off by default; run name `sched_<step>_n<N>_pace`, margin 2 ms). A plan forms only when it would reach
-  every later stage no earlier than the margin before that stage frees. The check uses per-stage EWMAs of the
-  reported stage times and assumes the next plan has the last plan's tokens. The plan forms that far ahead of the
-  predicted host time (dispatch to stage-0 start, sampled when stage 0 was idle). When stage 0 is the slowest stage,
-  pacing never binds.
+- **Fix ead8d9a: at most 4 in flight, the early-formed plan counted** (6_scheduler.md §2). Early forming (the form
+  lead) stays within that cap. Once the pipeline is full, the next plan forms on the stage-3 exit report, and stage 0
+  waits for report + form + first kernel. In 7730 that is 1.1 ms p50 from exit to dispatch, plus 0.5-1.2 ms from
+  dispatch to the stage-0 start. Replay throughput (r/s) and TTFT p50 / p90 / p99 (s) by the delay from forming to
+  the stage-0 start (host):
+
+  | host (ms) | budget N=500: 4 in flight | 5 in flight | 5 + pacing 2 ms | srpt8k N=400: 4 in flight | 5 in flight | 5 + pacing |
+  |---|---|---|---|---|---|---|
+  | 0 | 27.56, 0.176 / 0.715 / 5.06 | 27.52, 0.210 / 0.836 / 5.09 | 27.53, 0.174 / 0.714 / 5.58 | 25.62, 0.274 / 0.362 / 1.86 | 25.59, 0.313 / 0.393 / 1.87 | 25.61, 0.272 / 0.363 / 1.91 |
+  | 2 | 27.60, 0.188 / 0.753 / 4.94 | 27.53, 0.210 / 0.835 / 4.80 | 27.56, 0.179 / 0.716 / 4.98 | 25.61, 0.276 / 0.362 / 1.85 | 25.58, 0.313 / 0.394 / 1.89 | 25.58, 0.275 / 0.366 / 1.92 |
+  | 3 | 27.51, 0.178 / 0.717 / 5.86 | 27.54, 0.209 / 0.835 / 4.76 | 27.53, 0.179 / 0.721 / 4.91 | 25.60, 0.276 / 0.363 / 1.90 | 25.58, 0.313 / 0.394 / 1.87 | 25.60, 0.276 / 0.368 / 2.00 |
+  | 7 | 27.32, 0.183 / 0.731 / 6.20 | 27.55, 0.209 / 0.834 / 5.22 | 27.52, 0.181 / 0.722 / 5.60 | 25.55, 0.279 / 0.368 / 1.93 | 25.59, 0.313 / 0.394 / 1.86 | 25.60, 0.280 / 0.371 / 1.97 |
+  | 10 | 27.17, 0.191 / 0.745 / 6.87 | 27.55, 0.209 / 0.837 / 4.80 | 27.53, 0.184 / 0.727 / 5.34 | 25.53, 0.283 / 0.374 / 2.05 | 25.58, 0.314 / 0.395 / 1.87 | 25.59, 0.283 / 0.377 / 2.00 |
+
+  At the measured 2-3 ms, 4 in flight is within 0.3% of 5 in flight for both steps (the replay's run-to-run spread is
+  of that order). It loses 0.8% only at 7 ms (budget's 4,096-token microbatches). Pacing (a152856, off, no run
+  names) is kept in the code but not used.
