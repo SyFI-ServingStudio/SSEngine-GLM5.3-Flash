@@ -174,6 +174,7 @@ class Controller:
         num_blocks = pool_size([r.num_blocks for r in ready], cfg.pool_tokens)
         self.rule = DispatchRule(cfg.max_in_flight, cfg.dispatch_ahead >= 1, cfg.form_lead_ms, cfg.pace_margin_ms,
                                  self.n)
+        # the scheduler's own cap is not the binding one: the rule admits the extra queued plan
         self.sched = Scheduler(KvManager(num_blocks, keep_sessions=cfg.keep_sessions, content_keys=True),
                                cfg.scheduler, None, self.rule.cap, 1)
         self.mb_log = open(self.run_dir / "microbatches.jsonl", "w")

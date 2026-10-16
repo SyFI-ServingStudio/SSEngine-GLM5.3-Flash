@@ -37,11 +37,11 @@ def test_queued_plan_forms_lead_before_predicted_end():
     assert r.decide(2, 1 * MS) == (NO, None)   # one already queued
     r.stage0_done(0, 0, 50 * MS)               # plan 1 starts at 50 ms; predicted end 100 ms
     assert r.predicted_end_ns() == 100 * MS
-    assert r.decide(3, 60 * MS) == (WAIT, 97 * MS)
-    assert r.decide(3, 97 * MS) == (NOW, None)  # the 4th, queued behind plan 1
-    assert r.decide(4, 97 * MS) == (NO, None)   # never a 5th: the queued plan counts (6_scheduler.md §2)
+    assert r.decide(4, 60 * MS) == (WAIT, 97 * MS)
+    assert r.decide(4, 97 * MS) == (NOW, None)  # the 5th, queued behind plan 1
+    assert r.decide(5, 97 * MS) == (NO, None)   # never a 6th
     r.dispatched(2, 97 * MS, 8192)
-    assert r.decide(3, 98 * MS) == (NO, None)   # stage 0 has a running and a queued plan
+    assert r.decide(4, 98 * MS) == (NO, None)   # stage 0 has a running and a queued plan
 
 
 def test_prediction_starts_at_dispatch_when_stage0_was_idle():
@@ -54,6 +54,7 @@ def test_prediction_starts_at_dispatch_when_stage0_was_idle():
 
 def test_without_queue_one_stage0_must_be_free():
     r = DispatchRule(4, False, 3.0)
+    assert r.cap == 4
     r.dispatched(0, 0, 8192)
     assert r.decide(1, 0) == (NO, None)
 
@@ -146,18 +147,17 @@ def simulate(rule: DispatchRule | None, n_mb=60, stage_ms=10.0, report_ms=0.3, f
     return gaps, state["peak"], state["queued"]
 
 
-def test_rule_keeps_four_in_flight_and_leaves_the_exit_report_gap():
-    """Equal stages, 4 in flight with the queued plan counted: once the pipeline is full, the next plan forms on the
-    stage-3 exit report, so stage 0 waits report + form each microbatch (the real server: ~2 ms; the old rule's 5th
-    in-flight plan hid it but queued before any slower later stage)."""
+def test_rule_closes_the_stage0_host_gap():
+    old_gaps, old_peak, _ = simulate(None)
+    assert old_peak == 4
+    assert max(old_gaps[10:]) > 1.0                    # report -> form -> plan, every microbatch
     gaps, peak, queued = simulate(DispatchRule(4, True, 3.0))
-    assert peak == 4 and queued <= 1
-    assert max(gaps[:3]) == pytest.approx(0.0, abs=1e-6)   # filling: the queued plan forms ahead
-    assert max(gaps[10:]) == pytest.approx(0.3 + 0.8, abs=1e-3)
+    assert peak == 5 and queued <= 1
+    assert max(gaps[3:]) == pytest.approx(0.0, abs=1e-6)   # back to back once a sample exists
 
 
 def test_lead_shorter_than_host_time_leaves_the_difference():
-    gaps, _, _ = simulate(DispatchRule(5, True, 0.5), form_ms=0.8)      # 5 in flight: stage 0 never waits on an exit
+    gaps, _, _ = simulate(DispatchRule(4, True, 0.5), form_ms=0.8)
     assert max(gaps[5:]) == pytest.approx(0.3, abs=1e-3)
 
 
@@ -169,7 +169,7 @@ def test_pacing_moves_the_queue_before_a_slow_stage_to_forming_time():
 
     def run(margin):
         out = {}
-        simulate(DispatchRule(5, True, 3.0, margin), n_mb=80, stage_ms=stage_ms, out=out)
+        simulate(DispatchRule(4, True, 3.0, margin), n_mb=80, stage_ms=stage_ms, out=out)
         ids = range(20, 75)
         queue2 = max((out["starts"][k][2] - out["ends"][k][1]) / MS for k in ids)
         idle2 = max((out["starts"][k + 1][2] - out["ends"][k][2]) / MS for k in ids)
@@ -186,7 +186,7 @@ def test_pacing_moves_the_queue_before_a_slow_stage_to_forming_time():
 
 def test_pacing_does_not_bind_when_stage0_is_slowest():
     a, b = {}, {}
-    simulate(DispatchRule(5, True, 3.0), n_mb=60, stage_ms=[12.0, 10.0, 10.0, 10.0], out=a)
-    gaps, _, _ = simulate(DispatchRule(5, True, 3.0, 1.0), n_mb=60, stage_ms=[12.0, 10.0, 10.0, 10.0], out=b)
+    simulate(DispatchRule(4, True, 3.0), n_mb=60, stage_ms=[12.0, 10.0, 10.0, 10.0], out=a)
+    gaps, _, _ = simulate(DispatchRule(4, True, 3.0, 1.0), n_mb=60, stage_ms=[12.0, 10.0, 10.0, 10.0], out=b)
     assert max(gaps[5:]) == pytest.approx(0.0, abs=1e-6)
     assert a["starts"][59] == b["starts"][59]

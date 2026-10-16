@@ -1,26 +1,26 @@
 """When the controller forms the next microbatch. Pure: the caller passes the clock.
 
-At most `max_in_flight` (4) microbatches are in flight, the formed-early plan included (6_scheduler.md §2):
+The targets have no host time between consecutive stage-0 microbatches. With at most `max_in_flight` (4) microbatches
+on 4 stages, the next one could only form after the stage-3 exit of microbatch k-3 is reported, and stage 0 would wait
+on report -> form -> plan -> enqueue every time. So:
 - stage 0 idle: form at once, if fewer than `max_in_flight` are in flight;
-- stage 0 busy: one more plan may wait queued behind the running one (`queue_one`), if fewer than `max_in_flight` are
-  in flight; it forms `lead_ms` before the running plan's predicted stage-0 end, leaving the host time to form, send
-  and enqueue it while stage 0 still computes. At most one plan is queued.
-With 4 in flight, the next plan forms on the stage-3 exit report. Stage 0 then waits for report -> form -> first
-kernel, ~2 ms (budget N=500 7730: stage-3 end to dispatch p50 1.1 ms, dispatch to stage-0 start 0.5-1.2 ms); the
-replay at a 2-3 ms host delay gives the same throughput as with a 5th plan (within 0.3%). A 5th in flight (the
-rule until M5) queued in front of a stage slower than stage 0 instead and added that queue to every round's TTFT
-(7730: 21 ms mean before stage 2; replay TTFT p50 0.210 s vs 0.178 s).
+- stage 0 busy: one more plan may wait queued behind the running one (`queue_one`), even as the `max_in_flight + 1`-th;
+  it forms `lead_ms` before the running plan's predicted stage-0 end, leaving the host time to form, send and enqueue
+  it while stage 0 still computes. At most one plan is queued.
 Predicted stage-0 end = the running plan's start (its dispatch, or the previous plan's stage-0 end if later) + its
 predicted compute: a per-token EWMA of measured stage-0 times, one per power-of-two size bucket (the nearest bucket's
 rate when its own has no sample yet). Without any sample the queued plan forms at once.
 
-Pacing (`pace_margin_ms`, None: off; not used by the runs). When a later stage is slower than stage 0, a plan formed
-early queues in front of it. So a plan forms
+Pacing (`pace_margin_ms`; the server's default 2 ms, None: off). When a later stage is slower than stage 0 (stage balance differs per GPU and
+per stage from the fit), the extra in-flight plan does not wait at stage 0 but queues in front of that stage, and
+every round it carries pays the queue in its TTFT (budget N=500, 7730: 21 ms mean before stage 2). So a plan forms
 only when it would reach every later stage no earlier than `pace_margin_ms` before that stage frees: the in-flight
 plans' stage ends (reported, or predicted from per-stage EWMAs as above) give each stage's free time, and the next
 plan is assumed to have the last plan's tokens. It forms the predicted host time (dispatch to stage-0 start, an EWMA
 per size bucket over plans that found stage 0 idle; `lead_ms` before any sample) ahead of that start. When stage 0
-is the slowest, pacing never binds.
+is the slowest, pacing never binds. Chosen over a cap of 4 in flight with the queued plan counted (ead8d9a, reverted):
+that cap forms on exit reports, which left the slowest stage idle 5.2% vs 2.9% (even N=500 7741 vs budget N=500 7730)
+and made force_check_even's 1k TTFT p50 x1.10 (larger microbatches); replay TTFT is the same for both.
 """
 
 from collections import deque
@@ -83,8 +83,8 @@ class DispatchRule:
 
     @property
     def cap(self) -> int:
-        """In-flight limit the scheduler is built with (the same as the rule's)."""
-        return self.max_in_flight
+        """In-flight limit the scheduler is built with: the controller's rule is the binding one."""
+        return self.max_in_flight + (1 if self.queue_one else 0)
 
     def dispatched(self, mb_id: int, now_ns: int, tokens: int):
         self.on_stage0.append([mb_id, now_ns, tokens])
@@ -156,7 +156,7 @@ class DispatchRule:
         busy = len(self.on_stage0)
         if busy == 0:
             return (NOW, None) if in_flight < self.max_in_flight else (NO, None)
-        if not self.queue_one or busy >= 2 or in_flight >= self.max_in_flight:
+        if not self.queue_one or busy >= 2 or in_flight > self.max_in_flight:
             return NO, None
         end = self.predicted_end_ns()
         if end is None or now_ns >= end - self.lead_ns:
