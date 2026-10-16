@@ -17,8 +17,11 @@ Round k (k >= 1) hits P + (k - 1) * A tokens and computes A. Only one session is
 `arrival_time_ms` is the session's start, in ms from the start of replay; every round of a session carries it, and
 the client sends round k when round k-1's token is back plus `tool_wait_after_ms` of round k-1.
 
+Each file also comes as `*_w1s.csv`, with 1 s instead of 10 s between a round's token and the next round (the
+handoff waits 10 s; the wait is only idle GPU time, and the GPU replay uses 1 s). Same slots.
+
 The compressed versions (each session right after the previous one ends, plus 1 s) need the sessions' durations,
-so prefix_targets_ext.py writes them from the simulator run.
+so prefix_targets_ext.py writes them from the simulator run; split_by_p.py cuts them into parts.
 
 usage: python make_prefix_ext.py
 """
@@ -31,15 +34,14 @@ TWO_ROUND = dict(prefixes=[2 * K, 3000, 4 * K, 8 * K, 16 * K, 32 * K, 64 * K, 10
                  appends=[256, 1 * K, 8 * K], rounds=2, slot_ms=30_000)
 MULTI_ROUND = dict(prefixes=[8 * K, 128 * K, 512 * K], appends=[256, 1 * K, 8 * K], rounds=4, slot_ms=60_000)
 SESSIONS_PER_CASE = 5
-TOOL_WAIT_MS = 10_000
 HEADER = ["request_id", "session_id", "round_idx", "arrival_time_ms", "prefix_len", "input_len", "output_len",
           "tool_wait_after_ms"]
 
 
-def session_rows(session: int, at_ms: float, prefix: int, append: int, rounds: int) -> list[list]:
+def session_rows(session: int, at_ms: float, prefix: int, append: int, rounds: int, wait_ms: int) -> list[list]:
     rows, prompt = [], prefix
     for k in range(rounds):
-        wait = f"{TOOL_WAIT_MS if k < rounds - 1 else 0:.6f}"
+        wait = f"{wait_ms if k < rounds - 1 else 0:.6f}"
         if k == 0:
             rows.append([f"session_{session}_round_{k:06d}", session, k, f"{at_ms:.6f}", 0, prefix, 1, wait])
         else:
@@ -49,7 +51,7 @@ def session_rows(session: int, at_ms: float, prefix: int, append: int, rounds: i
     return rows
 
 
-def write(name: str, prefixes: list[int], appends: list[int], rounds: int, slot_ms: int) -> None:
+def write(name: str, prefixes: list[int], appends: list[int], rounds: int, slot_ms: int, wait_ms: int) -> None:
     with open(HERE / name, "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(HEADER)
@@ -57,11 +59,12 @@ def write(name: str, prefixes: list[int], appends: list[int], rounds: int, slot_
         for prefix in prefixes:
             for append in appends:
                 for _ in range(SESSIONS_PER_CASE):
-                    w.writerows(session_rows(session, slot_ms * session, prefix, append, rounds))
+                    w.writerows(session_rows(session, slot_ms * session, prefix, append, rounds, wait_ms))
                     session += 1
     print(HERE / name, session, "sessions")
 
 
 if __name__ == "__main__":
-    write("prefix_sessions_ext.csv", **TWO_ROUND)
-    write("prefix_multiround_ext.csv", **MULTI_ROUND)
+    for suffix, wait_ms in (("", 10_000), ("_w1s", 1_000)):
+        write(f"prefix_sessions_ext{suffix}.csv", **TWO_ROUND, wait_ms=wait_ms)
+        write(f"prefix_multiround_ext{suffix}.csv", **MULTI_ROUND, wait_ms=wait_ms)
