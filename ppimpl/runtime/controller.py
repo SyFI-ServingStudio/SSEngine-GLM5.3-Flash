@@ -95,6 +95,10 @@ class Controller:
         self.timer_at: int | None = None     # host ns at which the dispatch rule wants to be asked again
         # intake processes (cfg.intake_procs): all their messages go through the control thread
         self.intake = None
+        # sockets made by start(); None/empty until then, so stop() after a failed start() closes what exists and
+        # the start error is the one raised
+        self.ctx = self.reports = self.wake_rx = self.wake_tx = None
+        self.plans: list = []
         self.intake_procs: list[subprocess.Popen] = []
         self.intake_cpus: set[int] | None = None
         self.intakes_ready: set[bytes] = set()
@@ -228,8 +232,9 @@ class Controller:
                 await asyncio.to_thread(p.wait, 60)
             except subprocess.TimeoutExpired:
                 p.kill()
-        for sock in (*self.plans, self.reports, self.wake_rx, self.wake_tx, *([self.intake] if self.intake else [])):
-            sock.close(linger=0)
+        for sock in (*self.plans, self.reports, self.wake_rx, self.wake_tx, self.intake):
+            if sock is not None:
+                sock.close(linger=0)
         for f in ("mb_log", "req_log", "plan_log"):
             if hasattr(self, f):
                 getattr(self, f).close()

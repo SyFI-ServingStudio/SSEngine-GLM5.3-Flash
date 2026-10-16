@@ -66,3 +66,25 @@ def sleep_cycles_per_ms() -> float:
     b.record()
     b.synchronize()
     return cycles / a.elapsed_time(b)
+
+
+def free_port_block(start: int, width: int = 10, step: int = 10, below: int = 32768) -> int:
+    """The first base port from `start` (in steps of `step`) whose `width` ports nothing listens on: a server uses
+    HTTP = base, then base + 1 .. base + 2 + stages (zmq, torch.distributed, intake). Other jobs on the node (other
+    lanes, other users, a leftover server) can hold any of them: 7476's cache-off server lost its intake port to one.
+    Below the ephemeral range, so client connections never hold them."""
+    import socket
+
+    for base in range(start, below - width, step):
+        free = True
+        for p in range(base, base + width):
+            with socket.socket() as s:
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                try:
+                    s.bind(("127.0.0.1", p))
+                except OSError:
+                    free = False
+                    break
+        if free:
+            return base
+    raise RuntimeError(f"no {width} free ports from {start}")
