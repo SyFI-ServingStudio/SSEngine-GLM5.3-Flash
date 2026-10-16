@@ -384,3 +384,47 @@ the keys equal to it, in ascending order. It is a Triton kernel, one program per
 8k rows × 2k pools and 0.6 ms at 32k × 8k (3 calls per stage). Rows of at most 512 keys are unchanged (the kernel
 already returns all of them in order). After the fix: 0 of 150 stage-3 8k runs differ. vLLM keeps the
 nondeterministic order; this is a tie-break choice, not a parity change.
+
+## vLLM reference: FlashKDA drifts past ~24k tokens; references use the Triton KDA prefill (kvaudit)
+
+Kind: setup difference in the reference. It affects every long-context accuracy target, the token checks and the KV
+checks. Measured in `measured/kvaudit.md` (findings 4–8).
+
+**Cause.** vLLM's `cmake/external_projects/flashkda.cmake` pins FlashKDA b59532f, the commit before upstream 17a037d
+("Keep the recurrent state in fp32 between tiles"). The installed `_flashkda_C` was built 2026-10-11 from that pin.
+Its kernel 2 holds the [K, V] state as bf16 and rounds it every 16 tokens. The error builds up in slow-decay heads.
+- Against a float64 recurrence on identical inputs (`bench/kvaudit/kda_probe.py`; jobs 7524, 7539), at 512k:
+
+  | head | FlashKDA | ours (FlashInfer persistent) |
+  |---|---|---|
+  | layer 1, head 45 | 0.045 → 0.72 | 0.003 → 0.016 |
+  | layer 2, head 56 | 0.08 → 0.46 | 0.002 |
+
+  For context, the fork's Triton chunk kernel stays at 0.003.
+- Downstream, the effect on ours vs vLLM grows with length:
+  - layer-3 MLA latent: 0.069 → 0.39 along the prompt;
+  - layer-3 indexer top-k overlap: 0.56, against 0.92 noise.
+- Top-1 and KL stay unaffected.
+
+**Decision (user, 2026-10-16).**
+- vLLM accuracy references use `--kda-prefill-backend triton`. This covers `bench/slurm/reference.sbatch`, the
+  `vllm` mode of `bench/chain.py`, and `bench/kvaudit/vllm_side.py`, where it is now the default.
+- With the Triton prefill (7530), ours vs vLLM at 512k is at noise in every layer:
+  - layer 1 state: 0.016;
+  - layer-3 MLA: 0.062, flat along the prompt;
+  - layer-3 top-k overlap: 0.92.
+- Timing references keep FlashKDA as served. Our kernels do not change.
+
+**The fork's Triton `l2norm_fwd` overflows int32.** This is the first kernel of `chunk_kda_with_fused_gate`
+(`bench/kvaudit/kda_fault.py`, job 7534).
+- It makes an illegal memory access once T × 64 × 128 > 2^31 elements: it fails at 262,208 tokens per call and runs at
+  262,080. This looks like int32 offsets.
+- FlashInfer persistent and FlashKDA both run 524,288 tokens in one call.
+- With the Triton prefill, `max_num_batched_tokens` must stay below 262,144. The default of 16,384 is fine.
+
+**Ours: a small recorded drift, not pursued.** At 512k, layer 1 head 45 (the slowest-decaying head, mean log decay
+-0.0048 per token) goes from 0.003 to 0.016 against float64, with the state at 0.015. All other heads are flat at
+0.002–0.004.
+- This is about 45x below FlashKDA in the same head, but above the Triton chunk kernel (0.003).
+- It does not reach top-1 or KL.
+- Decision (user): record it, and don't pursue it now.
