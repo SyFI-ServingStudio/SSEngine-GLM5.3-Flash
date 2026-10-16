@@ -14,7 +14,8 @@ Indexer top-k picks DeepSelect or vLLM `topKPerRowPrefill` per shape, whichever 
 both rows in `kernel_specs.jsonl`).
 
 Kernel-name patterns marked `names_verified=False` are taken from the profiler runners and library sources; the
-manifest test (`tests/test_manifest_trace.py`) confirms them on a traced stage.
+manifest check (`check_trace`, GPU test
+`tests/test_model_gpu.py::test_chain_token_matches_vllm_and_manifest`) confirms them on a traced stage.
 """
 
 from __future__ import annotations

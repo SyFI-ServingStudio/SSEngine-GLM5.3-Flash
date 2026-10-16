@@ -1,6 +1,6 @@
 # Call-path identity: configs 4, 5, 1, 7, 33, 30 (KDA conv / KDA prefill / mHC / NVFP4 MoE)
 
-Paths: `WT` = /raid/kanzhu/ServingStudio/wt-pp-main, `FORK` = /raid/kanzhu/ServingStudio/pp-impl/third_party/vllm (HEAD 892da0822f),
+Paths: `WT` = <workspace>/wt-pp-main, `FORK` = <workspace>/pp-impl/third_party/vllm (HEAD 892da0822f),
 `FI070` = pp-impl/.venv/.../site-packages/flashinfer (0.7.0). Checkpoint config: hidden 4096, hc_mult 4, hc_eps 1e-6,
 hc_sinkhorn_iters 20, rms_norm_eps 1e-5, KDA 64 heads x 128, short_conv_kernel_size 4, linear_lower_bound -5.0, 288 experts,
 top-8, n_group 1, topk_group 1, routed_scaling_factor 2.5, scoring sigmoid, noaux_tc, swiglu_limit 10.0,

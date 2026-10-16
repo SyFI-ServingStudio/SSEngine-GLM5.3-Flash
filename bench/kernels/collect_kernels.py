@@ -113,7 +113,7 @@ def main(queue, measured):
             lines.append(f"- {o['ratio']:.3f}: DB {o['db_time_ms']:.4g} ms, real {o['real_time_ms']:.4g} ms, `{json.dumps(s)}`")
         lines.append("")
     lines += ["## How it was run", "",
-              "Slurm jobs on the `priority` partition (`bench/kernels/run_queue.sbatch`), 2 GPUs each, one lane per GPU",
+              "Slurm jobs on the `priority` partition (`bench/slurm/kernels_queue.sbatch`), 2 GPUs each, one lane per GPU",
               "taking chunks of one (kind, backend) from `kernels_runs/queue` (`bench/kernels/make_queue.py`: <= 50 rows,",
               "<= 12 for the NVFP4 MoE, strided over sizes). Each chunk is one call of",
               "`uv run --no-sync python bench/kernels/ppimpl_profile.py run <kind> --backend <b> --specs <chunk> --fresh",
