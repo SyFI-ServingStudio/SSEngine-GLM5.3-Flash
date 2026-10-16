@@ -31,7 +31,11 @@ grep -q "PORT IN USE" "$LOGS/env.txt" && { echo "port conflict"; exit 1; }
 
 SERVE=(serve "$SNAP" --served-model-name "$MODEL" --tensor-parallel-size 4 --enable-expert-parallel
   --kv-cache-dtype fp8_e4m3 --max-model-len 1048576 --no-enable-prefix-caching --language-model-only
-  --tokens-only --enable-prompt-tokens-details --host 127.0.0.1 --port "$PORT")
+  --tokens-only --enable-prompt-tokens-details --host 127.0.0.1 --port "$PORT"
+  # accuracy reference: the Triton KDA prefill, not FlashKDA (pin b59532f drifts in slow-decay heads past ~24k tokens,
+  # measured/kvaudit.md). Its l2norm faults on one call over 262,143 tokens: keep max_num_batched_tokens at the
+  # default (16,384 on B200). Timing references keep FlashKDA as served.
+  --kda-prefill-backend triton)
 echo "$PY -m vllm.entrypoints.cli.main ${SERVE[*]}" > "$LOGS/serve_cmd.txt"
 srun --overlap --gres=gpu:4 -n1 $PY -m vllm.entrypoints.cli.main "${SERVE[@]}" > "$LOGS/server.log" 2>&1 &
 SERVER=$!

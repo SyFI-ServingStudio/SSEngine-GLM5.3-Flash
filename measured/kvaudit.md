@@ -200,6 +200,18 @@ flags anything at or above 3x noise (and above 1e-3).
      (16,384 in the audit). The fault matters only for the Triton prefill with a single call over 262,143 tokens.
    - The probe now calls FlashKDA and the Triton kernel in 16,384-token pieces, carrying the state, as vLLM does.
 
+## Decisions (user, 2026-10-16)
+
+1. **vLLM accuracy references use `--kda-prefill-backend triton`.** These are the token and KV checks at long
+   context.
+   - The default is now `triton` in `bench/kvaudit/vllm_side.py`, `bench/slurm/reference.sbatch` and
+     `bench/chain.py vllm`.
+   - `max_num_batched_tokens` must stay below 262,144 (finding 8). The default of 16,384 is fine.
+   - Timing references keep FlashKDA as served.
+   - Our kernels do not change.
+2. **Our 512k drift is recorded, not pursued now.** Layer 1 head 45 goes from 0.003 to 0.016 against float64. That
+   is about 45x better than FlashKDA, and top-1 and KL are unaffected. See `measured/issues.md`.
+
 ## Rerun
 
 From the worktree root, with `/raid/kanzhu/ServingStudio/.env` sourced:

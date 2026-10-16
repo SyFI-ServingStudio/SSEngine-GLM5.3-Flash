@@ -121,8 +121,10 @@ def main() -> None:
     ap.add_argument("--length", type=int, required=True)
     ap.add_argument("--out", type=Path, default=None)
     ap.add_argument("--only", nargs="*", default=None, help="case names to run (default: all of the length)")
-    ap.add_argument("--kda-prefill-backend", default="auto", choices=("auto", "triton", "flashkda"),
-                    help="the fork's --kda-prefill-backend (auto = FlashKDA on SM100)")
+    # accuracy references use the Triton KDA prefill: vLLM's FlashKDA (pin b59532f) rounds the state to bf16 every
+    # 16 tokens and drifts in slow-decay heads past ~24k tokens (measured/kvaudit.md, issues.md)
+    ap.add_argument("--kda-prefill-backend", default="triton", choices=("auto", "triton", "flashkda"),
+                    help="the fork's --kda-prefill-backend (default triton; auto = FlashKDA on SM100)")
     a = ap.parse_args()
     import torch
     from vllm import LLM, SamplingParams
