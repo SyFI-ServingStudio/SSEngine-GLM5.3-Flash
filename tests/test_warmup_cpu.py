@@ -58,3 +58,13 @@ def test_any_compile_after_warm_up_fails_the_run(tmp_path):
     jit = in_run_jit(tmp_path)
     assert jit == {"compiles": 1, "by_stage": {1: 1}, "kernels": ["mb 880 _split_count_kernel 77.5 ms"]}
     assert "in-run JIT" in run_failure({"client_returncode": 0, "in_run_jit": jit}, tmp_path)
+
+
+def test_in_run_jit_reads_worker_logs_of_older_runs(tmp_path):
+    (tmp_path / "worker0.log").write_text(
+        "Kernel JIT monitor activated\nstage 0 mb 2: first use after warm-up: triton _kth_kernel 47.3 ms\n"
+        "stage 0 mb 880: first use after warm-up: triton _split_write_kernel 154.3 ms\n")
+    jit = in_run_jit(tmp_path)
+    assert jit["compiles"] == 2 and jit["by_stage"] == {0: 2}
+    (tmp_path / "worker0.log").write_text("no monitor in this run\n")
+    assert in_run_jit(tmp_path)["compiles"] is None

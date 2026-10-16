@@ -244,8 +244,10 @@ def smoke_md(rows: list[dict]) -> str:
     jits = [x for x in rows if x.get("in_run_jit") is not None]
     if jits:
         out += ["", "Kernels compiled after warm-up (worker jit_stage<S>.jsonl; any fails the run): "
-                + "; ".join(f"{x['run']} {x['in_run_jit']['compiles']}" + (f" (by stage {x['in_run_jit']['by_stage']})"
-                                                                           if x["in_run_jit"]["compiles"] else "")
+                + "; ".join(f"{x['run']} " + ("not monitored" if x["in_run_jit"]["compiles"] is None else
+                                              f"{x['in_run_jit']['compiles']}" + (
+                                                  f" (by stage {x['in_run_jit']['by_stage']})"
+                                                  if x["in_run_jit"]["compiles"] else ""))
                             for x in jits) + "."]
     kinds = [x for x in rows if x.get("cache_kinds")]
     if kinds:

@@ -552,6 +552,13 @@ def in_run_jit(run_dir: Path) -> dict:
     the distinct (microbatch, kernel) pairs of the first stage that compiled any."""
     rows = [json.loads(line) for f in sorted(run_dir.glob("jit_stage[0-9].jsonl")) for line in f.read_text().splitlines()
             if line.strip()]
+    if not rows:     # runs from before jit_stage<S>.jsonl: the workers' log lines (None: no monitor in that run)
+        pat = re.compile(r"stage (\d+) mb (-?\d+): first use after warm-up: triton (\S+) (-?[\d.]+) ms")
+        logs = [f.read_text(errors="replace") for f in sorted(run_dir.glob("worker[0-9].log"))]
+        if logs and not any("JIT monitor activated" in t for t in logs):
+            return {"compiles": None, "by_stage": {}, "kernels": []}
+        rows = [{"stage": int(m[1]), "mb": int(m[2]), "kernel": m[3], "ms": float(m[4])}
+                for t in logs for m in pat.finditer(t)]
     by_stage: dict[int, int] = {}
     for r in rows:
         by_stage[r["stage"]] = by_stage.get(r["stage"], 0) + 1
