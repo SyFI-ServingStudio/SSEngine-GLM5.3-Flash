@@ -270,7 +270,8 @@ class StageModel:
         autotuned pass at the microbatch budget, as vLLM's `kernel_warmup` does. Shapes: one request at the full
         budget (indexer and both top-k paths), then two requests, one continuing a cached prefix (conv and KDA initial
         state, chunk start > 0), then every power-of-2 length from 512 below the budget, a length not divisible by
-        16, and the first layer's mHC pre at every split count. Uses blocks 1.. before any request holds them.
+        16, one request alone continuing a cached prefix (start divisible by 16 and not), and the first layer's mHC
+        pre at every split count. Uses blocks 1.. before any request holds them.
         `self.tactics` records the source."""
         from types import SimpleNamespace as NS
 
@@ -318,6 +319,11 @@ class StageModel:
                 run(NS(mb_id=-3, chunks=[chunk("wb", 0, p, 1)]))
                 p *= 2
             run(NS(mb_id=-4, chunks=[chunk("wo", 0, 1000, 1)]))
+            # one request alone continuing its cached prefix, as every round >= 1 is: the KDA state gather of one
+            # slot loaded a torch module on the first such request (8k + 1k, 7432: 23 ms cuLibraryLoadData + 11.5
+            # ms lazy kernel load); and the same at a start and length not divisible by 16 (P = 100,003)
+            run(NS(mb_id=-5, chunks=[chunk("wc", 1024, 256, 1)]))
+            run(NS(mb_id=-6, chunks=[chunk("wu", 1003, 253, 1)]))
             self._warm_mhc_pre()
         torch.cuda.synchronize(self.device)
         pp_patch.clear_autotune_memo()     # tactics may have changed while tuning
