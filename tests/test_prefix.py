@@ -175,3 +175,40 @@ def test_run_watch_stops_the_client_at_the_first_fault(tmp_path):
     finally:
         for p in (server, client):
             p.kill()
+
+
+def test_window_metrics_match_the_handoff_metrics_script(tmp_path):
+    """bench.prefix's port of data/metrics.py gives its numbers over 20 minutes (req-frontend log, v12: post = submit),
+    and a shorter window counts only rounds whose first token comes inside it."""
+    import json
+    import subprocess
+    import sys
+
+    from bench.common import HANDOFF
+    import numpy as np
+
+    from bench.prefix import real_arrays, window_metrics
+
+    rng = np.random.default_rng(1)
+    lines = []
+    for i in range(300):
+        submit = 1000.0 + i * 0.5 + rng.random()
+        ttft = float(rng.uniform(5, 4000))
+        prefix = int(rng.integers(0, 50000))
+        lines.append({"outcome": {"request_id": f"r{i}", "status": "SUCCESS", "submit_timestamp": submit,
+                                  "post_timestamp": submit, "first_token_id_ms": ttft,
+                                  "server_usage": {"prompt_tokens": prefix + 100,
+                                                   "cached_prompt_tokens": int(prefix * rng.random())}},
+                      "source": {"data": {"input_len": 100, "prefix_len": prefix}}})
+    f = tmp_path / "requests.jsonl"
+    f.write_text("".join(json.dumps(x) + "\n" for x in lines))
+    ref = json.loads(subprocess.run([sys.executable, str(HANDOFF / "data/metrics.py"), str(f)], check=True,
+                                    capture_output=True, text=True).stdout)
+    rows = real_arrays(f)
+    got = window_metrics(rows, 20 * 60e3)
+    for k in ("rounds", "rounds_per_s", "new_tokens_per_s", "computed_tokens_per_s", "prefix_hit_share"):
+        assert got[k] == pytest.approx(ref[k], rel=1e-12)
+    for p in ("p50", "p90", "p99", "max"):
+        assert got["ttft_s"][p] == pytest.approx(ref["ttft_s"][p], rel=1e-12)
+    short = window_metrics(rows, 60e3)
+    assert short["rounds"] == int((rows[1] < 60e3).sum()) < got["rounds"]

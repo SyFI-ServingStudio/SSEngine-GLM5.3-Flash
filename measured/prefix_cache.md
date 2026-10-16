@@ -23,6 +23,14 @@ Measured / target (ratio), medians (p50) over each case's sessions, TTFT also p9
 
 P + 1,2,3 (cycled) on the bring-up sessions: 40 sessions, hit = P 40, round-1 token equal to no-cache 38, same prompt 38 (bench/prefix_check.py --p-shift).
 
+## Sessions smoke
+
+Measured / target over the same window: from the first submit to the last first token of the smoke, the target run (measured/sessions_sim/, bench/sim_rounds.py: the frozen simulator run of data/session_targets.json) cut there by data/metrics.py's rule (rounds whose first token comes inside it).
+
+| Run | N | Window (s) | Rounds | Rounds/s | New tokens/s | Prefix hit share | TTFT p50 / p90 / p99 (s) |
+|---|---|---|---|---|---|---|---|
+| prefix_smoke_n400_7508 | 400 | 146 | 1954 / 2082 | 13.35 / 14.22 | 91.1k / 94.8k | 99.71% / 100.00% | 0.58 / 2.64 / 7.92 vs 0.37 / 1.14 / 1.86 (x1.59 / x2.33 / x4.25) |
+
 ## Notes
 
 Runs (measured/runs_m4/, raw, untracked): `prefix_check_on/off` (job 7403), `prefix_bringup` (7404, Nsight window of

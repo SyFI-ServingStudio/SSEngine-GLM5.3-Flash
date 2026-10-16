@@ -1,0 +1,40 @@
+[
+ {
+  "run": "prefix_smoke_n400_7508",
+  "max_sessions": 400,
+  "window_s": 146.39178762109373,
+  "measured": {
+   "window_s": 146.39178762109373,
+   "rounds": 1954,
+   "rounds_per_s": 13.347743283643368,
+   "new_tokens_per_s": 91082.37706961871,
+   "prompt_tokens_per_s": 538284.5874111423,
+   "computed_tokens_per_s": 92383.11260331448,
+   "prefix_hit_share": 0.997091392878621,
+   "ttft_s": {
+    "p50": 0.581812255859375,
+    "p90": 2.63970546875,
+    "p99": 7.917552470703128,
+    "max": 10.1684453125
+   },
+   "rounds_ttft_over_60s": 0
+  },
+  "target": {
+   "window_s": 146.39178762109373,
+   "rounds": 2082,
+   "rounds_per_s": 14.22210927151765,
+   "new_tokens_per_s": 94773.22618609024,
+   "prompt_tokens_per_s": 585848.2186308262,
+   "computed_tokens_per_s": 94785.45364795192,
+   "prefix_hit_share": 0.9999751006220031,
+   "ttft_s": {
+    "p50": 0.3661128692626953,
+    "p90": 1.13530263671875,
+    "p99": 1.8615075878906253,
+    "max": 2.194150146484375
+   },
+   "rounds_ttft_over_60s": 0
+  },
+  "target_source": "/raid/kanzhu/ServingStudio/wt-pp-main/logs/20261013_1_pp4_sched/plain/c400"
+ }
+]

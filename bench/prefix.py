@@ -5,7 +5,8 @@ prefix_n<N>).
   python -m bench.prefix summarize <runs root> --out measured
       measured/prefix_bringup.jsonl (one line per bring-up session, §8) and measured/prefix_cache.md (both tables
       with targets and ratios, the microbatch check, the cache counters); reads <runs root>/prefix_bringup,
-      prefix_check_on, prefix_check_off and every prefix_n<N>.
+      prefix_check_on, prefix_check_off, every prefix_n<N> and every prefix_smoke_n<N>* (against the target run cut
+      to the smoke's window: measured/sessions_sim/, written once by bench/sim_rounds.py).
 
 Clocks. The server's logs are in ms from its t0 (t0.json: the first request it received). With the prefix cache on,
 req-frontend first sends its preflight (one 8k prompt twice, `PREFLIGHT`), so the server's t0 is earlier than the
@@ -25,7 +26,7 @@ from pathlib import Path
 
 import numpy as np
 
-from bench.common import HANDOFF
+from bench.common import HANDOFF, MEASURED
 from bench.report import load_trace, read_jsonl, trace_request
 
 PREFLIGHT = "req-frontend-prefix-cache-preflight"
@@ -45,6 +46,90 @@ def client_rows(run_dir: Path) -> dict[str, dict]:
             "submit_unix_ms": o["submit_timestamp"] * 1e3, "ttft_ms": o.get("first_token_id_ms"),
             "prompt_tokens": u.get("prompt_tokens"), "cached": u.get("cached_prompt_tokens")}
     return out
+
+
+# --- metrics over a window (the handoff's data/metrics.py, ported: a smoke against the same window of the target run)
+
+def real_arrays(requests: Path):
+    """(arrival, first token, prompt, new, prefix, cached) of req-frontend's log, ms from the first submit, as
+    data/metrics.py's `real` returns them (successful rounds with a first token)."""
+    arr, first, prompt, new, prefix, cached, t0 = [], [], [], [], [], [], None
+    for r in read_jsonl(requests):
+        o = r.get("outcome", r)
+        t0 = o["submit_timestamp"] * 1e3 if t0 is None else min(t0, o["submit_timestamp"] * 1e3)
+        if o.get("first_token_id_ms") is None or o.get("post_timestamp") is None \
+                or str(o.get("status")).upper() != "SUCCESS":
+            continue
+        u = o.get("server_usage") or {}
+        arr.append(o["submit_timestamp"] * 1e3)
+        first.append(o["post_timestamp"] * 1e3 + o["first_token_id_ms"])
+        prompt.append(u.get("prompt_tokens") or 0)
+        cached.append(u.get("cached_prompt_tokens") or 0)
+        new.append(r["source"]["data"]["input_len"])
+        prefix.append(r["source"]["data"].get("prefix_len") or 0)
+    return (np.array(arr) - t0, np.array(first) - t0, np.array(prompt), np.array(new), np.array(prefix),
+            np.array(cached))
+
+
+def sim_arrays(doc: dict):
+    """The same arrays of a simulator run exported by bench/sim_rounds.py (data/metrics.py's `sim`)."""
+    arr = np.asarray(doc["arrival_ms"], dtype=float)
+    new, prefix = np.asarray(doc["new"]), np.asarray(doc["prefix"])
+    return arr, arr + np.asarray(doc["ttft_ms"], dtype=float), prefix + new, new, prefix, np.asarray(doc["cached"])
+
+
+def window_metrics(rows, window_ms: float) -> dict:
+    """data/metrics.py's numbers over [0, window_ms): rounds whose first token comes inside it."""
+    arr, first, prompt, new, prefix, cached = rows
+    m = first < window_ms
+    s = window_ms / 1e3
+    ttft = (first - arr)[m] / 1e3
+    return {"window_s": s, "rounds": int(m.sum()), "rounds_per_s": m.sum() / s,
+            "new_tokens_per_s": float(new[m].sum() / s), "prompt_tokens_per_s": float(prompt[m].sum() / s),
+            "computed_tokens_per_s": float((prompt[m] - cached[m]).sum() / s),
+            "prefix_hit_share": float(cached[m].sum() / max(prefix[m].sum(), 1)),
+            "ttft_s": {**{p: float(np.percentile(ttft, q)) for p, q in (("p50", 50), ("p90", 90), ("p99", 99))},
+                       "max": float(ttft.max())} if m.any() else None,
+            "rounds_ttft_over_60s": int((ttft > 60).sum())}
+
+
+def sim_rounds(n: int, setting: str = "plain_hbm") -> dict | None:
+    import gzip
+
+    f = MEASURED / "sessions_sim" / f"{setting}_c{n}.json.gz"
+    if not f.exists():
+        return None
+    with gzip.open(f, "rt") as fh:
+        return json.load(fh)
+
+
+def smoke(run_dir: Path, n: int) -> dict:
+    """A short sessions run (bench/run.py --client-limit) against the target run cut to the same window: from the
+    first submit to the last first token the client logged (it logs no round still waiting when it stops)."""
+    real = real_arrays(run_dir / "requests.jsonl")
+    window = float(real[1].max()) + 1e-3      # the last logged first token counts
+    sim = sim_rounds(n)
+    return {"run": run_dir.name, "max_sessions": n, "window_s": window / 1e3,
+            "measured": window_metrics(real, window),
+            "target": None if sim is None else window_metrics(sim_arrays(sim), window),
+            "target_source": None if sim is None else sim["source"]}
+
+
+def smoke_md(rows: list[dict]) -> str:
+    out = ["| Run | N | Window (s) | Rounds | Rounds/s | New tokens/s | Prefix hit share | TTFT p50 / p90 / p99 (s) |",
+           "|---|---|---|---|---|---|---|---|"]
+    for x in rows:
+        m, t = x["measured"], x["target"] or {}
+        tt, ts = m["ttft_s"] or {}, (t.get("ttft_s") or {})
+        ttft = (" / ".join(f"{tt.get(p, float('nan')):.2f}" for p in ("p50", "p90", "p99")) + " vs "
+                + " / ".join(f"{ts.get(p, float('nan')):.2f}" for p in ("p50", "p90", "p99"))
+                + (" (" + " / ".join(f"x{_r(tt[p], ts[p])}" for p in ("p50", "p90", "p99")) + ")" if ts else ""))
+        out.append(f"| {x['run']} | {x['max_sessions']} | {x['window_s']:.0f} | {m['rounds']} / {t.get('rounds', '–')} | "
+                   f"{m['rounds_per_s']:.2f} / {t.get('rounds_per_s', float('nan')):.2f} | "
+                   f"{m['new_tokens_per_s'] / 1e3:.1f}k / {t.get('new_tokens_per_s', float('nan')) / 1e3:.1f}k | "
+                   f"{100 * m['prefix_hit_share']:.2f}% / {100 * t.get('prefix_hit_share', float('nan')):.2f}% | "
+                   f"{ttft} |")
+    return "\n".join(out)
 
 
 def server_rows(run_dir: Path) -> dict[str, dict]:
@@ -313,6 +398,17 @@ def summarize(root: Path, out: Path) -> Path:
     if runs:
         parts += ["## Sessions", "", sessions_md(runs), ""]
         (out / "prefix_sessions.json").write_text(json.dumps(runs, indent=1) + "\n")
+    smokes = []
+    for d in sorted(root.glob("prefix_smoke_n*")):
+        m = re.match(r"prefix_smoke_n(\d+)", d.name)
+        if m and (d / "requests.jsonl").exists():
+            smokes.append(smoke(d, int(m.group(1))))
+    if smokes:
+        parts += ["## Sessions smoke", "", "Measured / target over the same window: from the first submit to the last "
+                  "first token of the smoke, the target run (measured/sessions_sim/, bench/sim_rounds.py: the frozen "
+                  "simulator run of data/session_targets.json) cut there by data/metrics.py's rule (rounds whose "
+                  "first token comes inside it).", "", smoke_md(smokes), ""]
+        (out / "prefix_smoke.json").write_text(json.dumps(smokes, indent=1) + "\n")
     path = out / "prefix_cache.md"
     notes = ""
     if path.exists() and NOTES in path.read_text():      # the hand-written part is kept
