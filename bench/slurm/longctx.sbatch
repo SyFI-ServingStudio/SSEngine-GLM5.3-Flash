@@ -5,6 +5,7 @@
 # indexer: the topk_canon GPU test, then bench/longctx_indexer.py on GPU 0 (mqa_logits / top-k / topk_canon at 8k-512k context, fork vs our split).
 # gpu_tests: the GPU tests of topk_canon and the graph/eager exactness (tests/test_model_gpu.py -k "canonical or graph").
 # topk_det: bench/topk_determinism.py (is DeepSelect's top-k already canonical?), GPU 0.
+# par: the `python -m` commands in PAR (";"-separated), one process per GPU, in waves of 4; logs in OUT/par_<job>.
 # runs: the bench.run commands in RUNS (";"-separated argument lists, e.g. "prefix_bringup --trace X --run-name a;
 #   prefix_bringup --trace Y --run-name b"), each on a fresh server, one after another, into OUT (default
 #   measured/runs_lc); stops at the first failure. Uptime before and after each.
@@ -28,6 +29,16 @@ case $WHAT in
           echo "== $(date -Is) rc=$rc uptime $(uptime)"
           (( rc == 0 )) || break
         done ;;
+  par) IFS=, read -ra G <<< "${CUDA_VISIBLE_DEVICES:-0,1,2,3}"; IFS=';' read -ra CMDS <<< "${PAR:?PAR}"; rc=0
+       D=${OUT:-measured/runs_lc}/par_$JOB; mkdir -p $D
+       for ((k = 0; k < ${#CMDS[@]}; k += ${#G[@]})); do      # waves of one process per GPU
+         pids=()
+         for ((i = 0; i < ${#G[@]} && k + i < ${#CMDS[@]}; i++)); do
+           echo "== $(date -Is) gpu ${G[$i]}: ${CMDS[$((k + i))]}"
+           CUDA_VISIBLE_DEVICES=${G[$i]} $PY -m ${CMDS[$((k + i))]} > $D/$((k + i)).log 2>&1 & pids+=($!)
+         done
+         for i in "${!pids[@]}"; do wait ${pids[$i]}; r=$?; rc=$(( rc || r )); echo "   [$((k + i))] rc=$r"; grep -h "^\[" $D/$((k + i)).log | tail -6; done
+       done ;;
   *) echo "unknown: $WHAT"; exit 2 ;;
 esac
 uptime
