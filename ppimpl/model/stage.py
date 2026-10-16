@@ -403,7 +403,8 @@ class StageModel:
         - 1, 2 and 3 such rows ahead of prefill requests that start inside a pool (the kpool insert with its write
           mask and tail seed, on slices offset by the decode rows);
         - 2 to 9 requests continuing cached prefixes, with and without one starting fresh (the indexer's prefill
-          chunk metadata over request slices).
+          chunk metadata over request slices);
+        - 3, 4, 8 and 16 fresh 1,024-token prompts (the shortest-first scheduler's first microbatches).
         Shapes the KV pool, the microbatch budget or max_model_len cannot hold are skipped. Yields
         (mb_id, [(start, tokens)])."""
         B = self.kv.block_tokens
@@ -430,6 +431,8 @@ class StageModel:
             reqs = [(20789 + 997 * i, 128 + 61 * i) for i in range(r)]
             shapes.append(reqs)
             shapes.append(reqs[:-1] + [(0, 300)])
+        for r in (3, 4, 8, 16):                # several fresh prompts in one microbatch (6_scheduler.md's shortest-first
+            shapes.append([(0, 1024)] * r)     # microbatches: 7708's first 4x1k / 8x1k one took +16-25 ms of host time)
         for i, specs in enumerate(shapes):
             if fits(specs):
                 yield -100 - i, specs
