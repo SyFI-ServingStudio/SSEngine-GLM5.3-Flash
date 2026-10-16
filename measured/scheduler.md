@@ -170,7 +170,8 @@ Stage time / fit by microbatch tokens 0–255 / 256–1023 / 1024–8191 / 8192 
   srpt8k N=400 (stage balance 1.040 / 1.022 / 1.060 / 1.063): 5 in flight 0.313 / 0.393 / 1.87, real 0.33 / 0.41 /
   1.94. With pacing 2 ms: 0.272 / 0.363 / 1.91, against sim x1.06 0.27 / 0.36 / 2.02. Throughput is unchanged
   (25.59 vs 25.61).
-- **Fix ead8d9a: at most 4 in flight, the early-formed plan counted** (6_scheduler.md §2). Early forming (the form
+- **Tried ead8d9a: at most 4 in flight, the early-formed plan counted** (6_scheduler.md §2; reverted, see "Dispatch
+  decision" below). Early forming (the form
   lead) stays within that cap. Once the pipeline is full, the next plan forms on the stage-3 exit report, and stage 0
   waits for report + form + first kernel. In 7730 that is 1.1 ms p50 from exit to dispatch, plus 0.5-1.2 ms from
   dispatch to the stage-0 start. Replay throughput (r/s) and TTFT p50 / p90 / p99 (s) by the delay from forming to
@@ -186,7 +187,7 @@ Stage time / fit by microbatch tokens 0–255 / 256–1023 / 1024–8191 / 8192 
 
   At the measured 2-3 ms, 4 in flight is within 0.3% of 5 in flight for both steps (the replay's run-to-run spread is
   of that order). It loses 0.8% only at 7 ms (budget's 4,096-token microbatches). Pacing (a152856, off, no run
-  names) is kept in the code but not used.
+  names) was kept in the code; it became the default (1a5c8e7).
 - **Stage balance (stages 2/3 slower than the fit's ratio): power cap, per stage.** Under no sustained load the stages
   match the fit equally (force checks, 1,024-8,191-token bin: s0 / s1 / s2 / s3 x0.98 / 1.00 / 1.00 / 1.00). In the
   session runs, every GPU sits at its 1,000 W cap for 93-96% of busy samples. The stages that draw more power clock
@@ -194,7 +195,7 @@ Stage time / fit by microbatch tokens 0–255 / 256–1023 / 1024–8191 / 8192 
   - 7709 (GPUs 4-7): SM 1603 / 1624 / 1606 / 1592 MHz at 932 / 924 / 936 / 936 W;
   - 7730 (GPUs 0-3): SM 1628 / 1601 / 1546 / 1579 MHz at 950 / 950 / 963 / 964 W.
   Stage time / fit follows the clocks (7730: s1 x1.049, s2 x1.097). The sim applies one x1.06 to every stage, so it
-  keeps stage 0 the slowest. Not a software fix; with 4 in flight the imbalance no longer turns into queueing.
+  keeps stage 0 the slowest. Not a software fix; pacing keeps the imbalance from turning into queueing.
 
 ### Sessions: budget N=400 (sched_budget_n400_7733, cap 4 + JIT warm-up)
 - 25.16 r/s, 86.9k new, TTFT 0.17/0.60/2.26 s, 0 in-run JITs (the tail seed has 4 variants after warm-up). Sim x1.06:
@@ -214,7 +215,7 @@ Stage time / fit by microbatch tokens 0–255 / 256–1023 / 1024–8191 / 8192 
 - **Cap 4 bubble while saturated.** Stage-2 idle at 720-1200 s is 3.4% (7733, cap 4) against 0.7% (7730, cap 5,
   N=500). Of it, 1.2% waits on a full plan formed on an exit report and 1.7% on plans delayed by earlier ones. The
   closed loop (sum of the stages + host) / 4 = 34.1 ms is only 0.5 ms below stage 2's 34.6 ms, so host jitter (p90 4.7
-  ms) opens bubbles. Estimated at ~1% of the run. Cap 5 + pacing (a152856) is the alternative; the coordinator decides.
+  ms) opens bubbles. Estimated at ~1% of the run. Decision: cap 5 + pacing (below).
 
 ### Sessions: even N=500 (7741) and good N=400 (7742), cap 4 + expandable segments + regrow
 - **even N=400 (7738): stage 2 ran out of memory** at ~240 s, allocating 2 GiB for MLA decode output. The microbatch
@@ -234,3 +235,26 @@ Stage time / fit by microbatch tokens 0–255 / 256–1023 / 1024–8191 / 8192 
 - force_check_even 7738 (cap 4): 1k TTFT p50 16.29 s vs 14.77 (x1.10). Cap 4 forms on exits, so the 1k prompts
   arriving at 200/s pile into larger microbatches: 1276 microbatches, mean 12.9k tokens, against 1351 and 12.2k
   (7728, cap 5); the target has 1429.
+
+### Dispatch decision: 5 in flight + pacing 2 ms (1a5c8e7)
+- Cap 4 left bubbles once saturated (stage-2 idle 5.2% in even N=500 7741 vs 2.9% at cap 5; force_check_even 1k p50
+  x1.10). The default is back to 5 in flight (one plan queued behind stage 0's running one), and the queued plan
+  forms only when it would reach every later stage no earlier than 2 ms before that stage frees (per-stage EWMAs,
+  the next plan assumed as large as the last, host time predicted from stage-0 idle samples). Replay: p50 as cap 4,
+  throughput as cap 5 (table above).
+- From 16:11 PDT req-frontend frees a session's slot at its last token (365fba07); the replay does the same
+  (b9fa4d5). Session runs before that are marked "slot held, old client".
+
+### Sessions: good N=500 (sched_good_n500_7744, cap 4, old client)
+- 25.28 r/s, 89.8k new, TTFT 0.43/4.70/61.72 s, max 67.0, 1014 over 60 s. Sim x1.06: 0.38/5.50/61.89, max 66.9, 1024
+  (x1.16/x0.85/x1.00).
+- **p50 x1.16: stage 0 (the bottleneck in both runs) idles 4.4% at 120-1200 s; the sim's is busy 99-100%.** By
+  in-flight count at the gap: 2.4% at 4 (the cap-4 bubble; 3,891 gaps, p50 3.6 ms), 1.7% at 3 (host between exit
+  report and the next stage-0 start, p50 1.0 ms), 0.4% with 1-2 in flight. even N=500 7741 (cap 4) shows the same
+  (5.2%: 3.2% at 4, 1.7% at 3). Per microbatch, stage 0 is within ±3% of sim x1.06 in every token bin (4,096-8,191:
+  36.7 vs 35.7 ms).
+- With less capacity the backlog grows, so the good step forms bigger microbatches (16k-32k tokens: 3,051 vs 1,969),
+  and every round waits for and traverses bigger ones. By arrival window, p50 is above the sim in the start-up burst
+  (120-240 s: 543 vs 424 ms; 240-360 s: 238 vs 166) and at 720-960 s (696 vs 622, 1051 vs 884); computed tokens are
+  −5% to −6% at 480-720 s. The slot rule costs ≤0.6% at N=500. Cap 5 + pacing removes the 2.4%; 7758 measures it.
+
