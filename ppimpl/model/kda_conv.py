@@ -7,17 +7,17 @@ per stage microbatch on stage 2, 1.12 ms of kernels plus 0.18 ms of launch gaps 
 
 Here, per layer:
 - `_conv_kernel`: one program per (token block of one sequence, channel block), its rows in order with the previous 3
-  rows in registers; x rows before the sequence start come from its conv state (or are 0 for a fresh request);
-  out = SiLU(sum_w weight[c, w] * x[t - 3 + w, c]) written into three contiguous [T, P] buffers (q, k, v; FlashInfer's
-  KDA takes them contiguous).
+  rows in registers and the next 4 loaded ahead; x rows before the sequence start come from its conv state (or are 0
+  for a fresh request); out = SiLU(sum_w weight[c, w] * x[t - 3 + w, c]) written into three contiguous [T, P] buffers
+  (q, k, v; FlashInfer's KDA takes them contiguous).
 - `_state_kernel`: one program per (sequence, channel block) after it: the last 3 x rows of the sequence (from its old
   state where the sequence is shorter) into its conv state.
 The arithmetic is the Dao kernel's SASS (sm_100, built with --use_fast_math): fma.rn.ftz from 0 over w = 0..3, then
 x * rcp.approx.ftz(1 + ex2.approx.ftz(x * -log2(e))), in inline PTX so the compiler cannot reorder or refuse FTZ.
-Measured (bench/kda_conv_bench.py, job 7917, B200, BLOCK_T 16 / BLOCK_C 512 / 4 warps, the best of 24): ~111 us per
-layer at 4,096 rows whatever the sequence count, vs Dao 111 (1 sequence), 137 (2), 166 (4), 226 (7 short); q, k, v
-and the conv states bitwise equal in every case. A first version on 2D tiles (each output reading 4 shifted rows) was
-bitwise but 171 us (job 7910).
+Measured (bench/kda_conv_bench.py, job 7927, B200, BLOCK_T 16 / BLOCK_C 512 / 4 warps, within 1% of the best of 36):
+~78 us per layer at 4,096 rows whatever the sequence count, vs Dao 111 (1 sequence), 137 (2), 166 (4), 225 (7 short);
+q, k, v and the conv states bitwise equal in every case. Earlier versions, also bitwise: 2D tiles, each output reading
+4 shifted rows, 171 us (job 7910); the row loop without the lookahead, 111 us (job 7917).
 """
 
 from __future__ import annotations
