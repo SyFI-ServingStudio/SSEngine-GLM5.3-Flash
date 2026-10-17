@@ -350,6 +350,28 @@ Per P, mean of 5 sessions, ms; targets from `tier_targets.json` (`bench/tiers.py
 - `busy_waits` and `blocked_by_write` were 0 in 7960 (every write landed before HBM needed its blocks); 7955 predates
   the counters.
 
+**Step 1b, the capacity-squeezed DRAM settings (jobs 7969 h25d37_dram and 7970 h12d19_dram, N = 400; run at the
+same time, 7969 on GPUs 0-3 / NUMA 0, 7970 on GPUs 4-7 / NUMA 1).** Both settings are squeezed on purpose and fall
+into a metastable collapse in the simulator and here alike: hits drop to 0 and every round recomputes its prompt
+(~350 rounds per 2 min). Their r/s depends on the 2-minute window the collapse starts in, so they are compared per
+window before the collapse, plus the collapse window (`bench.tiers --setting`; simulator from request_slo.parquet,
+prefix_tiers_w0.csv, prefix_cache_event):
+
+| Setting | Rounds per 2 min, sim / ours | Hit share before collapse | DRAM reads per 2 min, sim restores / ours | Collapse window |
+|---|---|---|---|---|
+| h25d37 | 1667 2796 2765 3417 3457 2404 1647 / 1665 2791 2745 3332 3194 2325 1110 | 0.83-0.91 / 0.83-0.90 | 9 155 226 587 852 796 430 / 10 156 228 566 847 762 357 | min 14-16 / min 12-16 (fewer rounds at 12-14) |
+| h12d19 | 1666 2497 1674 1104 371 / 1664 2492 1757 2293 1216 348 | 0.83 0.84 0.79 0.55 / 0.83 0.83 0.79 0.83 0.60 | 78 482 534 330 0 / 83 520 669 1215 453 0 | min 6-8 / min 8-10 |
+
+- h25d37 matches window by window until the collapse (HBM evictions 96-1047 vs 109-1072 per window); the collapse
+  starts in the same windows, ours with fewer rounds at minute 12-14: r/s -5%, TTFT p90 +44%.
+- h12d19 is +24% r/s because its collapse comes one window later: before it, ours evicts more from HBM (899 / 1077
+  vs 758 / 862 per window) and serves more rounds from DRAM. A tipping point: read latency, admission order and
+  write landing move it. Not chased further; M6 is judged on full_dram and the *_ssd128 sessions (SLO-meeting).
+- Reads under load queue: a read with no other tier op in flight takes 5.9 ms p50 (recv 0.43, notify 0.32 ms, as
+  idle), one behind 5-20 other reads (928 MB ahead) 37.9 ms; writes ahead of a read are 0 MB at the median. One
+  receive thread submits every op in order (1.8-3.6 ms of submit per read under load) and a read's copy rate is
+  ~27 GB/s by its GPU span: split by the per-batch trace from job 7976 on (`tier_trace_s*.jsonl`).
+
 ## 10. Targets (v2-realistic, replace the handoff's numbers)
 
 Computed by the coordinator with the realistic-input profile (ServingStudioSim wt-pp-hitrule
