@@ -535,9 +535,9 @@ class Controller:
                                       "compute_ms": round((d.end_ns - d.start_ns) / 1e6, 4),
                                       "requests": reqs}) + "\n")
         if d.host_ns is not None:
-            plan, call, ret = (round(self._ms(t), 4) for t in d.host_ns)
+            plan, call, ready, ret = (round(self._ms(t), 4) for t in d.host_ns)
             self.host_log.write(json.dumps({"stage": d.stage, "index": d.mb_id, "plan_ms": plan, "forward_ms": call,
-                                            "return_ms": ret}) + "\n")
+                                            "ready_ms": ready, "return_ms": ret}) + "\n")
         if left == 1:
             del self.inflight_plans[d.mb_id]
         else:
