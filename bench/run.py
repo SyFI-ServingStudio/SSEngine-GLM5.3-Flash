@@ -104,6 +104,20 @@ def trace_for(kind: str, length: int) -> Path:
     return HANDOFF / "data/bringup" / f"{'one' if kind == 'one' else 'uni'}_{length // 1024}k.csv"
 
 
+def gpu_bus(gpus: str | None) -> list[str] | None:
+    """PCI bus id of each listed GPU (stage s on gpus[s]; nvidia-smi index = CUDA device, CUDA_DEVICE_ORDER=PCI_BUS_ID),
+    or None without nvidia-smi."""
+    if not gpus:
+        return None
+    try:
+        out = subprocess.run(["nvidia-smi", "--query-gpu=index,pci.bus_id", "--format=csv,noheader"],
+                             capture_output=True, text=True, check=True, timeout=30).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    bus = {i.strip(): b.strip() for i, b in (line.split(",") for line in out.strip().splitlines())}
+    return [bus.get(g.strip()) for g in gpus.split(",")]
+
+
 def server_config(kind: str, length: int, use_fake: bool, run_dir: Path, device: str = "cuda", **extra) -> dict:
     cfg = {"model": "fake" if use_fake else "glm53", "device": device, "run_dir": str(run_dir),
            # one request is one microbatch: the budget holds the whole prompt (4_iteration.md §2)
@@ -283,7 +297,7 @@ def execute(run_dir: Path, server_cfg: dict, client_cfg: dict, *, port: int, met
         argv = ["timeout", client_limit, *argv]
     (run_dir / "client_command.txt").write_text(shlex.join(argv) + "\n")
     meta = {**meta, "port": port, "job_id": os.environ.get("SLURM_JOB_ID"), "host": os.uname().nodename,
-            "gpus": os.environ.get("CUDA_VISIBLE_DEVICES"),
+            "gpus": os.environ.get("CUDA_VISIBLE_DEVICES"), "gpu_bus": gpu_bus(os.environ.get("CUDA_VISIBLE_DEVICES")),
             "run_cpus": cpu_list(os.sched_getaffinity(0)),
             "ppimpl_commit": git_rev(ROOT), "req_frontend_commit": git_rev(REQ_FRONTEND),
             "client": client_info()}   # fails before the server starts if the binary is not REQ_FRONTEND's build

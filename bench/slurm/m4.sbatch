@@ -38,9 +38,30 @@ R=$ROOT/${OUT:-measured/runs_m4}
 mkdir -p "$R/slurm"
 export CUDA_DEVICE_ORDER=PCI_BUS_ID   # CUDA device i = the i-th GPU listed, as nvidia-smi numbers them
 G=${CUDA_VISIBLE_DEVICES:-0,1,2,3}
-# GPU_ORDER=reverse: stage s on the job's GPU 3-s (stage/GPU A/B: is a stage slow for its GPU or its work); the run
-# name gets _gpurev. Workers take CUDA device = stage, CPUs on that GPU's NUMA node (ppimpl/runtime/cpus.py).
-[ "${GPU_ORDER:-}" = reverse ] && G=$(tr , '\n' <<< "$G" | tac | paste -sd, -)
+# GPU_ORDER (stage -> GPU placement; workers take CUDA device = stage, CPUs on that GPU's NUMA node: ppimpl/runtime/
+# cpus.py). Unset: stage s on the job's GPU s. "2,3,0,1": stage s on the job's GPU G[s] (run name _gpu2301).
+# "reverse": 3,2,1,0 (_gpurev). "cool_late": stages 2-3 (the busiest) on the job's two coolest GPUs, 0-1 on the rest
+# (_gpucool); a GPU is hot when it is the 3rd or 4th of its group of 4 in the node's PCI bus order (/proc/driver/
+# nvidia/gpus): the upper two slots of each half run ~10 C hotter and 40-75 MHz slower under the power cap (7900, 7907).
+GSUF=
+case ${GPU_ORDER:-} in
+  "") ;;
+  reverse) G=$(tr , '\n' <<< "$G" | tac | paste -sd, -); GSUF=_gpurev ;;
+  cool_late) G=$($PY - "$G" <<'PYEOF'
+import os, subprocess, sys
+g = sys.argv[1].split(",")
+out = subprocess.run(["nvidia-smi", "--query-gpu=index,pci.bus_id", "--format=csv,noheader"], capture_output=True,
+                     text=True, check=True).stdout
+bus = {i.strip(): b.strip().lower()[4:] for i, b in (l.split(",") for l in out.strip().splitlines())}
+node = sorted(os.listdir("/proc/driver/nvidia/gpus"))
+rank = {i: node.index(bus[i]) for i in g}
+cool = sorted(g, key=lambda i: (rank[i] % 4 >= 2, rank[i]))
+print(",".join(sorted(cool[2:], key=rank.get) + cool[:2]))
+PYEOF
+) || exit 1; GSUF=_gpucool ;;
+  *) IFS=, read -ra GG <<< "$G"; G=$(for i in ${GPU_ORDER//,/ }; do echo "${GG[$i]:?GPU_ORDER $GPU_ORDER}"; done | paste -sd, -)
+     GSUF=_gpu${GPU_ORDER//,/} ;;
+esac
 P=$((20000 + ${SLURM_JOB_ID:-0} % 120 * 100))
 WHAT=${1:?check, preflight, margin, resume_nsys, bringup, prefix_n<N>, sched_check_<step>, force_check_<step> or sched_<step>_n<N>}
 if (( $# > 1 )); then   # several runs in one GPU window, one after another, stopping at the first failure
@@ -107,7 +128,7 @@ case $WHAT in
   bringup) $PY -m bench.run prefix_bringup --inline --nsys --nsys-mbs "${NSYS_MBS:-564:631}" --gpus "$G" --port "$P" \
              --out-root "$R" ${BRINGUP_ARGS:-}; rc=$? ;;
   prefix_n*|sched_check_*|force_check_*|sched_*_n*)   # BY_JOB=1: into <name>_<job>/ with the job's GPU samples
-    N=$WHAT${DISPATCH:+_$DISPATCH}; [ "${GPU_ORDER:-}" = reverse ] && N=${N}_gpurev; [ -n "${BY_JOB:-}" ] && N=${N}_$JOB
+    N=$WHAT${DISPATCH:+_$DISPATCH}$GSUF; [ -n "${BY_JOB:-}" ] && N=${N}_$JOB
     $PY -m bench.run "$WHAT" --inline --gpus "$G" --port "$P" --out-root "$R" --run-name "$N" \
       ${DISPATCH:+--dispatch "$DISPATCH"}; rc=$?
     [ -n "${SAMPLE:-}" ] && [ -d "$R/$N" ] && cp "$R/slurm/gpu_samples_$JOB.csv" "$R/$N/gpu_samples.csv" ;;
