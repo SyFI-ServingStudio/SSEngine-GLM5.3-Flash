@@ -11,7 +11,7 @@ the microbatch count against data/force_check_targets.json; the 1k submit rate (
 records stage time / fit by microbatch size (bench.prefix.stage_fit), since under overload a few percent of stage time
 moves TTFT by several times that.
 **Sessions** (§5): data/metrics.py's numbers, stage busy and stage time / fit against data/session_targets.json
-(setting <step>_hbm), and the simulator at GPU time x1.06 (measured/sessions_sim/mult106.json) where it has the step.
+(setting <step>_hbm).
 """
 
 from __future__ import annotations
@@ -177,10 +177,7 @@ def session_line(run_dir: Path, step: str, n: int) -> dict:
     s["stage_fit_bins"] = stage_fit(run_dir, BINS)
     targets = {(t["setting"], t["max_sessions"]): t for t in json.loads((HANDOFF / "data/session_targets.json")
                                                                         .read_text())}
-    mult_path = MEASURED / "sessions_sim" / "mult106.json"
-    mult = {(r["setting"], r["max_sessions"]): r for r in json.loads(mult_path.read_text())} \
-        if mult_path.exists() else {}
-    s.update(step=step, n=n, target=targets.get((f"{step}_hbm", n)), sim_x106=mult.get((f"{step}_hbm", n)),
+    s.update(step=step, n=n, target=targets.get((f"{step}_hbm", n)),
              old_client=json.loads((run_dir / "t0.json").read_text())["t0_unix_ns"] < SLOT_AT_LAST_TOKEN_FROM_NS,
              run=run_dir.name, commit=_commit(json.loads((run_dir / "run.json").read_text())))
     return s
@@ -190,15 +187,32 @@ def _r(a, b):
     return f"{a / b:.2f}" if a is not None and b else "–"
 
 
+def _target_keys() -> dict[str, set]:
+    """The steps (checks) and (setting, N) pairs (sessions) the handoff has targets for."""
+    def load(name):
+        p = HANDOFF / "data" / name
+        return json.loads(p.read_text()) if p.exists() else {}
+
+    return {"sched_check": set(load("sched_check_targets.json")), "force_check": set(load("force_check_targets.json")),
+            "sessions": {(t["setting"], t["max_sessions"]) for t in load("session_targets.json") or []}}
+
+
 def summarize(root: Path, out: Path) -> Path:
+    """The tables of the latest run per step (and N). A handoff may cover only some steps (v2-realistic: good only):
+    runs of a step it has no target for are listed under the tables, not compared."""
     parts = ["# The scheduler (6_scheduler.md)", "",
-             "Real runs (bench/run.py, each on a freshly started server) against the handoff v2 targets. Written by "
-             "`python -m bench.sched summarize`; the part from \"## Notes\" on is kept.", ""]
+             f"Real runs (bench/run.py, each on a freshly started server) against the targets of `{HANDOFF.name}`. "
+             "Written by `python -m bench.sched summarize`; the part from \"## Notes\" on is kept.", ""]
+    have = _target_keys()
+    untargeted: list[str] = []
     # scheduling check
     rows = []
     for step in STEPS:
         d = _latest(root, f"sched_check_{step}")
         if d is None:
+            continue
+        if step not in have["sched_check"]:
+            untargeted.append(d.name)
             continue
         c = check(d)
         rows.append(c)
@@ -223,7 +237,9 @@ def summarize(root: Path, out: Path) -> Path:
     rows = []
     for step in STEPS:
         d = _latest(root, f"force_check_{step}")
-        if d is not None:
+        if d is not None and step not in have["force_check"]:
+            untargeted.append(d.name)
+        elif d is not None:
             rows.append(check(d))
     if rows:
         (out / "force_check.jsonl").write_text("".join(json.dumps(
@@ -252,7 +268,9 @@ def summarize(root: Path, out: Path) -> Path:
             d = _latest(root, f"sched_{step}_n{n}")
             if d is None and step == "plain":
                 d = _latest(root, f"prefix_n{n}")
-            if d is not None and (d / "requests.jsonl").exists() and (d / "metrics.json").exists():
+            if d is not None and (f"{step}_hbm", n) not in have["sessions"]:
+                untargeted.append(d.name)
+            elif d is not None and (d / "requests.jsonl").exists() and (d / "metrics.json").exists():
                 lines.append(session_line(d, step, n))
     if lines:
         (out / "scheduler_sessions.json").write_text(json.dumps(lines, indent=1, default=str) + "\n")
@@ -279,14 +297,6 @@ def summarize(root: Path, out: Path) -> Path:
                 f"| {' / '.join(f'{100 * b:.0f}' for b in s['stage_busy'])}% vs "
                 f"{' / '.join(f'{100 * b:.0f}' for b in t.get('stage_busy', []))}% "
                 f"| {s['in_run_jit']['compiles']} |")
-            if (x := s["sim_x106"]) is not None:
-                xt = x["ttft_s"]
-                parts.append(
-                    f"| └ sim x{x['gpu_time_multiplier']:g} | | | {x['rounds_per_s']:.1f} "
-                    f"| {x['new_tokens_per_s'] / 1e3:.1f}k | {x['computed_tokens_per_s'] / 1e3:.1f}k "
-                    f"| {100 * x['prefix_hit_share']:.2f}% | {xt['p50']:.2f} / {xt['p90']:.2f} / {xt['p99']:.2f} / "
-                    f"{xt['max']:.1f} (measured x{_r(tt['p50'], xt['p50'])} / x{_r(tt['p90'], xt['p90'])} / "
-                    f"x{_r(tt['p99'], xt['p99'])}) | {x['rounds_ttft_over_60s']} | | |")
         parts += ["", "Stage time / fit by microbatch tokens " + " / ".join(BIN_LABELS)
                   + "; hit kinds; GPU busy SM MHz / W / power-capped share:", "",
                   "| Step | N | Stage time / fit | Rounds by hit kind | GPU |", "|---|---|---|---|---|"]
@@ -296,6 +306,8 @@ def summarize(root: Path, out: Path) -> Path:
                             for g, v in (s.get("gpu") or {}).items()) or "–"
             parts.append(f"| {LABEL[s['step']]} | {s['n']} | {_fit_str(s['stage_fit_bins'])} | {kinds} | {gpu} |")
         parts.append("")
+    if untargeted:
+        parts += [f"Runs without a target in `{HANDOFF.name}` (not compared): " + ", ".join(untargeted) + ".", ""]
     path = out / "scheduler.md"
     notes = ""
     if path.exists() and (m := re.search(r"^## Notes$", path.read_text(), re.M)):
