@@ -294,7 +294,35 @@ into nothing (its slots are reused). HBM eviction waits for the session's write 
 Status (2026-10-17): the code of 1a and 2a is in and passes on CPU (`tests/test_tiers_slots.py`: index, op order,
 pins; `tests/test_tier_copy.py`: quarters; `tests/test_tier_worker.py`: four engines' DRAM and SSD round trips,
 demote, copy-up, staging; `tests/test_tiers_e2e_cpu.py`: the server with the fake model through DRAM and SSD).
-`tests/test_tier_bytes_gpu.py` (§8, DRAM and SSD) has not run yet; no GPU run before the design is confirmed.
+`tests/test_tier_bytes_gpu.py` (§8, DRAM and SSD) passed on GPU: job 7937 (direct) and job 7944 (two hops).
+
+**Step 1a DRAM bring-up (job 7955, 2026-10-17 04:24, load 8.4 at start; two hops, ring depth 2 x chunk 4; DRAM 48
+GB per GPU; the bring-up pool of 1,234,944 tokens, so Ready = 145 blocks and every round 1 reads from DRAM).**
+Per P, p50 of 5 sessions, ms; targets from `tier_targets.json` (`bench/tiers.py --target dram`):
+
+| P | Round-1 TTFT (target) | Read (target) | Read on the GPUs | Send -> submit / done -> landed | TTFT - read vs HBM-hit target |
+|---|---|---|---|---|---|
+| 32k | 58.24 (54.0) | 3.58 (1.72) | 2.4 (35-40 GB/s per GPU) | 0.3 / 0.4 | 54.7 vs 52.7 |
+| 128k | 63.77 (58.1) | 6.69 (4.67) | 5.2 (44-48 GB/s) | 0.4 / 0.4 | 57.1 vs 53.7 |
+| 512k | 82.88 (73.5) | 17.71 (16.46) | 16.0 (52 GB/s) | 0.4 / 0.4 | 65.2 vs 57.5 |
+
+- In the server each worker submits its own share, and a 512k read runs at line rate on every GPU (52 GB/s); the
+  probe's lower rates (§2.3) came from submitting four engines from one thread.
+- The read misses its target at 32k (+1.9 ms): ~0.7 ms of messaging (controller -> worker, worker -> controller)
+  and 2.4 ms of copies for 90 MB (two chunks: the first host hop cannot overlap anything, the last NVLink hop is a
+  tail).
+- **Attribution (job 7960: the same bring-up on the full pool, tiers on, every round 1 an HBM hit).** Ready = 7,144
+  blocks on every stage with tiers on. Round-1 TTFT p50 on HBM hits: 54.99 / 57.53 / 65.79 ms at 32k / 128k / 512k
+  (targets 52.7 / 53.7 / 57.5). Per-stage compute of round 1 is the same with and without the DRAM read (512k:
+  21.76 / 19.67 / 21.14 / 21.64 ms vs 21.86 / 19.69 / 21.18 / 21.64), so the tiers do not slow compute, and the DRAM
+  run's TTFT is the HBM-hit TTFT plus the read: 58.21 / 63.53 / 82.37 = HBM hit + 3.2 / 6.0 / 16.6 ms. Against this
+  engine's HBM hit plus the target read time (56.71 / 62.20 / 82.25 ms) the DRAM tier is +2.6% / +2.1% / +0.1%. The
+  rest of the gap to the DRAM target (512k: 82.37 vs 73.9) is the engine's own long-context round 1 (65.79 vs 57.5
+  on HBM hits, +14%), an M5 compute gap, not M6.
+- **Free HBM with the full pool and the ring (job 7960):** 15.25 / 38.27 / 4.24 / 2.24 GB on stages 0-3 after the
+  model, CUDA graphs, the 7,144-block KV pool, before the 0.206 GB ring. Stage 3 has the least room (2.24 GB).
+- `busy_waits` and `blocked_by_write` were 0 in 7960 (every write landed before HBM needed its blocks); 7955 predates
+  the counters.
 
 ## 10. Targets (v2-realistic, replace the handoff's numbers)
 
