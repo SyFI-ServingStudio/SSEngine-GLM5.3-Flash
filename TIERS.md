@@ -310,9 +310,26 @@ Per P, mean of 5 sessions, ms; targets from `tier_targets.json` (`bench/tiers.py
 
 - In the server each worker submits its own share, and a 512k read runs at line rate on every GPU (52 GB/s); the
   probe's lower rates (§2.3) came from submitting four engines from one thread.
-- The read misses its target at 32k (+1.9 ms): ~0.7 ms of messaging (controller -> worker, worker -> controller)
-  and 2.4 ms of copies for 90 MB (two chunks: the first host hop cannot overlap anything, the last NVLink hop is a
-  tail).
+- The read misses its target at 32k (+1.9 ms): messaging (controller -> worker, worker -> controller) and 2.4 ms of
+  copies for 90 MB (two chunks: the first host hop cannot overlap anything, the last NVLink hop is a tail).
+- **Where the read time goes (job 7966, lane-m6 b7730cb = main merged + per-op timing; two bring-ups in one
+  allocation, load 6-11).** `tier_ops.jsonl` now carries each op's submit time and GPU span (timing events), and
+  `bench.tiers` splits a read on the GPU that finished last: sent -> its tier thread took the op (recv), GPU span
+  from a mark recorded as submission began (gpu; the submit overlaps it), GPU end -> its TierDone sent (notify:
+  the done thread's wake from a blocking event), last TierDone -> landed in the scheduler (land). Mean of 5, ms:
+
+  | P | Read (target) | recv | submit | gpu | notify | land | Round-1 TTFT p50 (target) |
+  |---|---|---|---|---|---|---|---|
+  | 32k | 3.55 (1.72) | 0.46 | 0.74 | 2.09 | 0.52 | 0.34 | 57.44 (54.4) |
+  | 128k | 6.40 (4.67) | 0.46 | 1.41 | 5.00 | 0.39 | 0.36 | 62.18 (58.4) |
+  | 512k | 17.97 (16.46) | 0.55 | 3.51 | 16.19 | 0.32 | 0.43 | 81.38 (73.9) |
+
+  The copies are near the floor (32k: 2.09 vs 1.73 ms for 90 MB at 52 GB/s; 512k 16.2 ms = 53.8 GB/s); messaging
+  is ~1.3 ms per read at every P (recv + notify + land). The worker's GIL switch interval is not it: 0.5 ms vs
+  Python's 5 ms gave the same parts (32k recv 0.46 / 0.34, notify 0.52 / 0.49, land 0.34 / 0.37; read 3.55 /
+  3.44 ms) and the same stage compute (32k 19.37 / 18.31 / 18.14 / 18.59 ms vs 19.36 / 18.31 / 18.14 / 18.60), so
+  the switch was not kept. Each hop is a thread waking on a blocked wait (zmq poll, blocking CUDA event) on the
+  worker's 4 logical CPUs (48 threads). `busy_waits`, `blocked_by_write`, `passed_over` 0 in both runs.
 - **Attribution (job 7960: the same bring-up on the full pool, tiers on, every round 1 an HBM hit).** Ready = 7,144
   blocks on every stage with tiers on. Round-1 TTFT p50 on HBM hits: 54.99 / 57.53 / 65.79 ms at 32k / 128k / 512k
   (targets 52.7 / 53.7 / 57.5). Per-stage compute of round 1 is the same with and without the DRAM read (512k:
