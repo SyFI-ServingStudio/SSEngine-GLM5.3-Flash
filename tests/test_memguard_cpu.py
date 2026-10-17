@@ -63,8 +63,8 @@ def test_precheck_per_node(monkeypatch):
     monkeypatch.setattr(mg, "gpu_nodes", lambda: [0, 0, 0, 1])
     avail = {0: 400.0, 1: 900.0}
     monkeypatch.setattr(mg, "node_avail_gb", lambda n: avail[n])
-    assert mg.precheck(["x", "--dram-gb", "150", "--ssd-gb", "none"]) == 3      # node 0: 400 < 3 x 150 + 50
-    avail[0] = 520.0
+    assert mg.precheck(["x", "--dram-gb", "150", "--ssd-gb", "none"]) == 3      # node 0: 400 < 3 x 150 + 115
+    avail[0] = 570.0
     assert mg.precheck(["x", "--dram-gb", "150", "--ssd-gb", "none"]) == 0
     assert mg.precheck(["one_32k"]) == 0                                         # pins nothing: no node check
 

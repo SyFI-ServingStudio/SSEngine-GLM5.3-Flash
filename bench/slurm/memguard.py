@@ -29,7 +29,9 @@ from pathlib import Path
 GPUS = 4
 STAGING_GB = 8.0          # TierConfig.staging_gb's default
 HEADROOM_GB = 100.0
-NODE_HEADROOM_GB = 50.0   # per NUMA node, at start and while running
+NODE_HEADROOM_GB = 50.0   # per NUMA node while running
+NODE_START_GB = 115.0     # per NUMA node at start: the arenas' touch keeps ppimpl.kvpool.backends.TOUCH_RESERVE_GB
+                          # (114) free after its last 1 GiB piece, so a node that passes here is not short there
 PSI_START = 5.0           # % full avg10 to start
 PSI_STOP, PSI_STOP_S = 20.0, 30
 D_STOP_S = 10
@@ -100,7 +102,7 @@ def precheck(args: list[str]) -> int:
     if per_gpu_gb(args):
         gpus = gpu_nodes()
         for n in sorted(set(gpus)):
-            nneed = gpus.count(n) * per_gpu_gb(args) + NODE_HEADROOM_GB
+            nneed = gpus.count(n) * per_gpu_gb(args) + NODE_START_GB
             navail = node_avail_gb(n)
             ok = ok and navail > nneed
             nodes.append(f"node {n} free + file pages {navail:.0f} GB (need > {nneed:.0f})")
