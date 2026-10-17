@@ -8,6 +8,14 @@ or write stream (D2H), and a done thread per stream reports `TierDone` when the 
 no SMs, no wait on the compute stream: a write's blocks are final and pinned until it is done, a read's blocks are
 held by a request that computes only after all four `TierDone`s.
 
+Two hops (`TierConfig.hops`, default; TIERS.md §2.3: a copy engine writing host data straight into the other GPUs'
+HBM runs at 31.7 GB/s against 47.6 into its own): the host side of a slot is contiguous, so a read copies each slot
+whole into a ring of chunks in GPU q's own HBM (one copy per slot, its own PCIe link), then one `cuMemcpyBatchAsync`
+scatters the chunk's pieces from the ring to the stages' KV over NVLink. Writes gather into the ring, then copy each
+slot to host. Each direction has its ring and two streams (host side, NVLink side); chunk k+1's host copy overlaps
+chunk k's scatter, and a ring chunk is reused once the copy that read it is done (events). `hops: direct` puts the
+pieces straight between host and the stages' KV (one batch per op).
+
 DRAM: one pinned arena per worker on its GPU's NUMA node: libnuma, MADV_HUGEPAGE, first touch on a side thread
 while the model loads, then `cudaHostRegister` in chunks of whole slots (a piece never crosses a slot, so never a
 registration). Not torch's pinned allocator: it rounds 150 GB up to 256 GB.
@@ -42,6 +50,7 @@ from ppimpl.runtime.transport import Shutdown, TierBatch, TierDone, TierMove, Wo
 MADV_HUGEPAGE = 14
 REGISTER_CHUNK = 1 << 30      # cudaHostRegister per ~1 GiB of whole slots, from 4 threads
 TOUCH_THREADS = 4
+RING_CHUNKS = 4               # two hops: chunks per direction's device ring (TierConfig.ring_mb each)
 IO_THREADS = 8                # SSD preadv/pwritev pool per worker (fio: 8 psync threads, 53 GB/s on one file)
 FAKE_SLOT_BYTES = 12_857_344  # 8,576 x 1,499 B rounded up to 4 KiB: the real balanced slot (TIERS.md §3)
 
@@ -243,7 +252,20 @@ class TierEngine:
         self.q = {"read": queue.Queue(), "write": queue.Queue()}       # done threads: (op id, wait, start, bytes)
         self.ssd_q = {"read": queue.Queue(), "write": queue.Queue()}   # SSD threads: (op, start)
         self._due: dict[str, float] = {}           # fake engine: when each direction's last op is done
-        if tc.dram_gb and self.cuda and cfg.model != "fake":
+        self.ring = None
+        self._lock = threading.Lock()              # ring chunks and their order, across the submitting threads
+        if tc.hops not in ("two", "direct"):
+            raise ValueError(f"tiers.hops: {tc.hops!r} (two | direct)")
+        real = cfg.model != "fake"
+        if real and tc.hops == "two":              # before the model: the KV pool is sized from what is left
+            if self.cuda:
+                import torch
+                self.ring = torch.empty(2 * int(tc.ring_mb * 1e6), dtype=torch.uint8, device=device)
+                self.ring_ptr = self.ring.data_ptr()
+            else:
+                self.ring = np.zeros(2 * int(tc.ring_mb * 1e6) + 4096, dtype=np.uint8)
+                self.ring_ptr = self.ring.ctypes.data
+        if tc.dram_gb and self.cuda and real:
             from ppimpl.runtime.cpus import _gpu_node
             self.dram = HostArena(int(tc.dram_gb * 1e9), _gpu_node(device.index), True)
             self._touch = threading.Thread(target=self.dram.touch, name="tier-touch", daemon=True)
@@ -279,17 +301,28 @@ class TierEngine:
             self.ssd = SsdFile(os.path.join(d, f"tier_ssd_gpu{self.stage}_{os.getpid()}.bin"),
                                tier_num_slots(self.tc.ssd_gb, sb) * sb, sb)
             self.pool = ThreadPoolExecutor(IO_THREADS, thread_name_prefix="tier-io")
+        if self.ring is not None:                  # per direction: RING_CHUNKS chunks of `chunk` slots
+            self.chunk = int(self.tc.ring_mb * 1e6) // (RING_CHUNKS * sb)
+            if self.chunk < max(1, self.layout.state_slots):
+                raise ValueError(f"tiers.ring_mb {self.tc.ring_mb}: chunks of {self.chunk} slots of {sb} B hold "
+                                 f"less than a context's state ({self.layout.state_slots} slots)")
+            half = int(self.tc.ring_mb * 1e6)
+            self._ring_base = {"read": self.ring_ptr, "write": self.ring_ptr + half}
+            self._ring_next = {"read": 0, "write": 0}
+            self._ring_free = {"read": [None] * RING_CHUNKS, "write": [None] * RING_CHUNKS}
         if self.cuda:
             from vllm import _custom_ops
             self.swap = _custom_ops.swap_blocks_batch
-            self.streams = {"read": torch.cuda.Stream(self.device), "write": torch.cuda.Stream(self.device)}
+            self.streams = {k: torch.cuda.Stream(self.device) for k in ("read", "write", "read_nvl", "write_nvl")}
         print(f"stage {self.stage} tiers: slot {self.slot_bytes} B, state {self.layout.state_slots} slots, "
               f"{len(self.layout.kv_len)} kv + {len(self.layout.st_len)} state pieces per block/context, "
               + (f"dram {self.dram.nbytes / 1e9:.1f} GB (touch {self.dram.touch_s:.1f} s, register "
                  f"{self.dram.register_s:.1f} s), " if self.dram else "")
               + (f"ssd {self.ssd.path} (O_DIRECT {self.ssd.direct}), staging {self.staging.nbytes / 1e9:.1f} GB, "
                  if self.ssd else "")
-              + f"{len(self.opened)} peer allocations", flush=True)
+              + f"{len(self.opened)} peer allocations, "
+              + (f"two hops: ring {RING_CHUNKS} x {self.chunk} slots per direction" if self.ring is not None
+                 else "direct"), flush=True)
         return self.slot_bytes, self.layout.state_slots
 
     def start(self):
@@ -412,26 +445,71 @@ class TierEngine:
             return
         if op.tier != "dram" or op.host_tier is not None or op.op not in ("read", "write"):
             raise ValueError(f"tier op {op.op} {op.tier} via {op.host_tier}")
-        dev, host, lens = self.layout.pieces(op.kv_blocks, op.state_blocks, op.slots, op.state_slots, op.b_lo,
-                                             op.b_hi, op.block_start)
-        self.q[d].put((op.op_id, self._copy(d, self.dram.ptr, dev, host, lens), start_ns, int(lens.sum())))
+        ev, nbytes = self._move(d, self.dram.ptr, op.kv_blocks, op.state_blocks, op.slots, op.state_slots, op.b_lo,
+                                op.b_hi, op.block_start)
+        self.q[d].put((op.op_id, ev, start_ns, nbytes))
 
-    def _copy(self, d: str, base: int, dev, host, lens):
-        """HBM <-> host pieces (host offsets from `base`) on the direction's stream; the event to wait for (None on
-        CPU, where it is done)."""
-        host = host + base
-        src, dst = (host, dev) if d == "read" else (dev, host)
+    def _batch(self, stream: str, src, dst, lens, wait=()):
+        """One `cuMemcpyBatchAsync` on `stream` after the events `wait`; its end event (None on CPU, done)."""
         if not self.cuda:
-            for s, t, k in zip(src.tolist(), dst.tolist(), lens.tolist()):
+            for s, t, k in zip(np.asarray(src).tolist(), np.asarray(dst).tolist(), np.asarray(lens).tolist()):
                 ctypes.memmove(t, s, k)
             return None
         import torch
-        stream = self.streams[d]
-        with torch.cuda.stream(stream):
-            self.swap(torch.from_numpy(src), torch.from_numpy(dst), torch.from_numpy(lens))
+        st = self.streams[stream]
+        for ev in wait:
+            if ev is not None:
+                st.wait_event(ev)
+        with torch.cuda.stream(st):
+            self.swap(*(torch.from_numpy(np.ascontiguousarray(x, dtype=np.int64)) for x in (src, dst, lens)))
         ev = torch.cuda.Event(blocking=True)
-        ev.record(stream)
+        ev.record(st)
         return ev
+
+    def _move(self, d: str, base: int, kv, st, slots, sslots, b_lo: int, b_hi: int, block_start: int, ready=None):
+        """Blocks [b_lo, b_hi) and (if `sslots`) the state between HBM and host slots at `base` (block i in slot
+        slots[i - block_start]), "read" host -> HBM or "write" HBM -> host. `ready(i)`: called before the host side of
+        blocks below i (None: the state) is read (an SSD read waits for its file reads there). Returns (the last
+        copy's event, bytes of HBM pieces moved)."""
+        L = self.layout
+        if self.ring is None:                       # direct: one batch of the pieces, host side at `base`
+            if ready is not None:
+                ready(b_hi)
+                ready(None)
+            dev, host, lens = L.pieces(kv, st, slots, sslots, b_lo, b_hi, block_start)
+            host = host + base
+            src, dst = (host, dev) if d == "read" else (dev, host)
+            return self._batch(d, src, dst, lens), int(lens.sum())
+        sb, C = self.slot_bytes, self.chunk
+        chunks = [(i, min(i + C, b_hi)) for i in range(b_lo, b_hi, C)] + ([None] if sslots else [])
+        ev, nbytes = None, 0
+        for ch in chunks:
+            if ready is not None:
+                ready(None if ch is None else ch[1])
+            if ch is None:                          # the state: its pieces over len(sslots) ring slots
+                n = len(sslots)
+                dev, roff, lens = L.pieces(kv, st, [], list(range(n)), 0, 0, 0)
+                hosts, hlen = [base + h * sb for h in sslots], sb
+            else:
+                i0, i1 = ch
+                n = i1 - i0
+                dev, roff, lens = L.pieces(kv, st, list(range(n)), [], i0, i1, i0)
+                hosts, hlen = [base + h * sb for h in slots[i0 - block_start:i1 - block_start]], L.kv_slot_bytes
+            nbytes += int(lens.sum())
+            with self._lock:
+                pos = self._ring_next[d]
+                self._ring_next[d] = (pos + 1) % RING_CHUNKS
+                rbase = self._ring_base[d] + pos * C * sb
+                rings = [rbase + k * sb for k in range(n)]
+                hl = np.full(n, hlen, dtype=np.int64)
+                if d == "read":                     # host -> ring (PCIe), then ring -> the stages (NVLink)
+                    h = self._batch("read", hosts, rings, hl, (self._ring_free[d][pos],))
+                    ev = self._batch("read_nvl", roff + rbase, dev, lens, (h,))
+                else:                               # the stages -> ring, then ring -> host
+                    g = self._batch("write_nvl", dev, roff + rbase, lens, (self._ring_free[d][pos],))
+                    ev = self._batch("write", rings, hosts, hl, (g,))
+                self._ring_free[d][pos] = ev
+        return ev, nbytes
 
     def _ssd_op(self, op: TierMove, start_ns: int):
         """An SSD op, on this direction's SSD thread: its file I/O on the pool, its copies on the CUDA stream."""
@@ -440,22 +518,21 @@ class TierEngine:
         files = op.slots + op.state_slots
         hosts = op.host_slots + op.host_state
         assert len(files) == len(hosts), (op.op_id, len(files), len(hosts))
-        if op.op == "read":                 # file -> host slots (all blocks), H2D of [b_lo, b_hi) per landed slot
+        if op.op == "read":                 # file -> host slots (all blocks), to HBM [b_lo, b_hi) as slots land
             futs = [self.pool.submit(self.ssd.read, f, host.ptr + h * sb) for f, h in zip(files, hosts)]
-            ev, n = None, len(op.slots)
-            for i in range(n):
-                futs[i].result()
-                if op.b_lo <= i < op.b_hi:
-                    ev = self._copy("read", host.ptr, *L.pieces(op.kv_blocks, op.state_blocks, op.host_slots, [], i,
-                                                                 i + 1, 0))
-            for f in futs[n:]:
+            n = len(op.slots)
+
+            def ready(i):
+                for f in (futs[:i] if i is not None else futs[n:]):
+                    f.result()
+            ev, _ = self._move("read", host.ptr, op.kv_blocks, op.state_blocks, op.host_slots, op.host_state,
+                               op.b_lo, op.b_hi, 0, ready)
+            for f in futs:
                 f.result()
-            ev = self._copy("read", host.ptr, *L.pieces(op.kv_blocks, op.state_blocks, op.host_slots, op.host_state,
-                                                        0, 0, 0))
         else:
             if op.op == "write":            # HBM -> staging, then the file
-                ev = self._copy("write", host.ptr, *L.pieces(op.kv_blocks, op.state_blocks, op.host_slots,
-                                                             op.host_state, op.b_lo, op.b_hi, op.block_start))
+                ev, _ = self._move("write", host.ptr, op.kv_blocks, op.state_blocks, op.host_slots, op.host_state,
+                                   op.b_lo, op.b_hi, op.block_start)
                 if ev is not None:
                     ev.synchronize()
             elif op.op != "demote":

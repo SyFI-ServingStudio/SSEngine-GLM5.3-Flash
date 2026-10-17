@@ -66,6 +66,9 @@ class TierConfig(msgspec.Struct, forbid_unknown_fields=True):
     slot_bytes: int | None = None
     state_slots: int = 3
     staging_gb: float = 8.0               # host slots for SSD reads/writes without DRAM (none of them is a hit)
+    hops: str = "two"                     # "two": host <-> own HBM ring <-> the stages over NVLink; "direct": host <->
+                                          # the stages' KV (peer writes from host: 31.7 vs 47.6 GB/s, TIERS.md §2.3)
+    ring_mb: float = 206.0                # two hops: device ring per direction (4 chunks of 4 slots of 12.86 MB)
     ssd_dir: str | None = None            # the SSD files (one per GPU, deleted at stop); default $PPIMPL_SSD_DIR, else
                                           # <run dir>/ssd
 
