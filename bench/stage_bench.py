@@ -99,20 +99,6 @@ def main():
     for _ in range(5):
         fwd()
     torch.cuda.synchronize(dev)
-    import gc
-    import time
-    gc_ms = []
-    for gen in (0, 1, 2, 2):
-        t = time.perf_counter()
-        gc.collect(gen)
-        gc_ms.append([gen, round((time.perf_counter() - t) * 1e3, 1)])
-    gc.freeze()
-    t = time.perf_counter()
-    gc.collect()
-    gc_ms.append(["2 after freeze", round((time.perf_counter() - t) * 1e3, 1)])
-    gc.unfreeze()
-    res["gc"] = {"objects": len(gc.get_objects()), "threshold": gc.get_threshold(), "collect_ms": gc_ms}
-    print(f"[stage_bench] gc: {res['gc']}", flush=True)
     if a.mode == "time":
         times, clocks = [], []
         for _ in range(a.rounds):
