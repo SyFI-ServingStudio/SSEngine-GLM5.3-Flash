@@ -118,6 +118,7 @@ class Probe:
 
         def one(g):
             e = self.eng[g]
+            torch.cuda.set_device(g)                            # as the worker's tier threads: a current context
             barrier.wait()
             t = time.perf_counter()
             e.submit(TierMove(1_000_000 * g + self.op, op, "dram", None, 0, ctx, 0, kv, st, slots, sslots, [], []))
