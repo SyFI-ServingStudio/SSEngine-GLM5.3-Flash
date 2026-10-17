@@ -123,6 +123,7 @@ class TierStore:
         self.slot_bytes = slot_bytes
         self.state_slots = state_slots
         self.free: deque[int] = deque(range(int(capacity_bytes // slot_bytes))) if slot_bytes else deque()
+        self._ring = 0
         self.entries: OrderedDict[object, TierEntry] = OrderedDict()
         self.used = 0.0
         self.channel_free_ns = 0
@@ -191,10 +192,13 @@ class TierStore:
         return True, left
 
     def take(self, n: int) -> list[int]:
-        """n slots outside any entry (the staging area of an SSD op without DRAM)."""
-        if len(self.free) < n:
-            raise RuntimeError(f"{self.name}: {n} slots wanted, {len(self.free)} free; raise staging_gb")
-        return [self.free.popleft() for _ in range(n)]
+        """The staging area of an SSD op without DRAM: the next n slots of a ring. A slot an earlier op still uses is
+        taken anyway; the new op waits for that one (`SlotGuard` deps)."""
+        if n > self.num_slots:
+            raise RuntimeError(f"{self.name}: {n} slots wanted, {self.num_slots} in all; raise staging_gb")
+        out = [self.free[i % self.num_slots] for i in range(self._ring, self._ring + n)]
+        self._ring = (self._ring + n) % self.num_slots
+        return out
 
 
 class Tiers:
@@ -269,8 +273,6 @@ class Tiers:
         """Every worker reported the op done: free what it held, its dependents may go."""
         o = self.in_flight.pop(op_id)
         self.guard.done(op_id)
-        if o.host_tier == "staging":
-            self.staging.release(o.host_slots + o.host_state)
         return o
 
     # --- lookups ------------------------------------------------------------------------------------------------
