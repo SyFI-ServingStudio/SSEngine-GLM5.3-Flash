@@ -82,11 +82,12 @@ def hold_for(trace: Path) -> int:
 
 
 # A plan forms this long before its predicted host time ahead of its projected stage-0 start (ppimpl/runtime/
-# dispatch.py): the projection's error. Stage-0 time predicted per size bucket over measured (good N=400/500,
-# 7763/7764): p90 / p99 +3.9 / +10.7 ms and +5.6 / +13.3 ms. The host time itself (forming to the stage-0 start when stage 0 is
-# ready, p50 0.7 ms) is predicted separately; a forward's later launches overlap its GPU work. Recorded in each run's
+# dispatch.py). Longer: arrivals in the window miss the microbatch the targets would put them in (they form at the
+# start); shorter: stage 0 idles where its time was over-predicted by more (up to the report path's ~1.4 ms). From
+# 7763/7764's stage-0 prediction errors: 3 ms costs 0.23 / 0.24 s/min of stage-0 idle at N=400 / 500 and moves 138 / 84
+# arrivals a minute (of ~1,450) one microbatch later; 10 ms: 0.02 / 0.03 s/min and 398 / 242. Recorded in each run's
 # server_config.yaml.
-REAL_FORM_LEAD_MS = 10.0
+REAL_FORM_LEAD_MS = 3.0
 
 # One request of 64k or more is one microbatch, and its activations outgrow the contract's 13.6 GB reserve beside the
 # full KV pool (job 7117: one_64k needs ~37 GB, one_128k ran out of memory in warm-up). These runs need a few blocks of
