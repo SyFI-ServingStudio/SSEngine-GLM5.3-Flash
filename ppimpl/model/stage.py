@@ -260,6 +260,8 @@ class StageModel:
                 pp_patch.route_kda(layer.self_attn)
         pp_patch.install_topk_router()
         pp_patch.install_kpool_unaligned()
+        if pp_patch.FAST["kpool_expand"]:
+            pp_patch.install_kpool_expand()
         pp_patch.install_decode_topk_canon()
         pp_patch.install_sparse_mla_split()
         pp_patch.install_indexer_split()

@@ -85,3 +85,25 @@ def test_two_requests_and_short_chunks_bitwise_on_gpu():
     assert torch.equal(run(sched, lens), whole(lens))
     sched = [[(0, 0, 8001)], [(0, 8001, 8190)], [(0, 16191, 3)], [(0, 16194, 7806)]]
     assert torch.equal(run(sched, [24000]), whole([24000]))
+
+
+@pytest.mark.parametrize("rows,pools,start", [(4096, 512, 40_000), (1, 512, 3), (300, 512, 2_050), (77, 16, 61)])
+def test_expand_into_matches_the_fork_bitwise(rows, pools, start):
+    """`kpool_fast.expand_into` writes the top-k buffer rows the fork's casts + expand + copy write (pool ids with -1
+    padding, positions on and off pool boundaries); the columns past the expansion stay untouched."""
+    import torch
+    from vllm.models.glm5next.nvidia.ops import kpool_compress as kops
+
+    from ppimpl.model import kpool_fast
+
+    dev = torch.device("cuda")
+    gen = torch.Generator(device=dev).manual_seed(rows)
+    positions = torch.arange(start, start + rows, device=dev, dtype=torch.int64)
+    pool_topk = torch.randint(0, max(start // KPOOL, 1), (rows, pools), generator=gen, device=dev, dtype=torch.int32)
+    pool_topk[:, pools // 2:] = -1
+    want = torch.full((rows + 3, pools * KPOOL + KPOOL + 8), -7, dtype=torch.int32, device=dev)
+    got = want.clone()
+    expanded = kops.expand_pools_and_append_tail(pool_topk.to(torch.int64), positions.to(torch.int32) + 1, KPOOL)
+    want[1:rows + 1, :expanded.shape[-1]] = expanded
+    kpool_fast.expand_into(pool_topk, positions, KPOOL, got[1:rows + 1])
+    assert torch.equal(want, got)

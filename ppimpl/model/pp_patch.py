@@ -19,6 +19,7 @@ kernel a stage launches must be the manifest's for its position, with no fallbac
 | `install_topk_router` | `torch.ops._C.top_k_per_row_prefill` and `indexer.build_prefill_chunk_metadata` (vLLM), process-wide | per shape, DeepSelect or vLLM's kernel, whichever row is faster (configs 20/21); `topk_canon` makes the answer deterministic | manifest check (configs 20/21); `test_model_cpu.py::test_topk_choice_matches_the_faster_row_at_every_profiled_shape`; GPU test g |
 | `install_decode_topk_canon` | glm5next `sparse_indexer.get_indexer_topk` (vLLM), process-wide | the indexer's decode top-k (1-token chunks) returns its set in a varying order: `topk_canon` fixes set and order, as on the prefill path | `test_model_gpu.py::test_decode_topk_canonical`; `bench/margin.py --trace-topk` (issues.md, job 7522) |
 | `install_kpool_unaligned` | glm5next `sparse_indexer._kpool_compress_insert` and `kpool_compress.kpool_seed_tail_cache` (vLLM), process-wide | a chunk may start inside a 4-token indexer pool (prefix hits resume at the kept prompt's length); the fork's insert assumes pool-aligned starts. The straddling pool is written from the tail ring + batch rows with the same kernel | `test_kpool_cpu.py` (reference ops); `test_kpool_gpu.py` (fork ops, cache bytes bitwise vs unsplit) |
+| `install_kpool_expand` | glm5next `sparse_indexer.sparse_attn_indexer_kpool` (vLLM), process-wide: its source with three edits (`kpool_fast._EDITS`) | host and GPU time: the prefill pool-to-token expansion in one kernel written into the top-k buffer, in place of two casts, a 128-column expand and a copy (stage 2 at 4,096 rows: 0.21 ms per microbatch, job 7787); same values (index arithmetic) | `test_kpool_gpu.py::test_expand_into_matches_the_fork_bitwise`; `test_kpool_cpu.py::test_kpool_expand_installs` (a fork change to the edited lines fails at start-up) |
 | `install_indexer_split` | `DeepseekV32IndexerMetadataBuilder._split_indexer_prefill_chunks` (vLLM), process-wide | the indexer logits of one prefill go out in calls of at most 2 GiB, query rows in multiples of 512: DeepGEMM's `fp8_mqa_logits` costs the same per 512 query rows at long context, so the fork's greedy split (1,022 + 2 rows at 512k + 1k) paid a whole second call for 2 rows (issues.md, "Long context") | `test_indexer_split_cpu.py`; nsys at 512k |
 | `install_sparse_mla_split` | `flashinfer.decode.trtllm_batch_decode_with_kv_cache_mla`, process-wide | a launch over 32,768 rows returns without doing the work on B200; split as the target does (issues.md, "M2 results") | M2 `dsa_moe` at 64k/128k |
 | `install_moe_buckets` | `flashinfer.fused_moe.shared.tuning` bucket functions, process-wide | the MoE's tactic buckets are the serving shapes (every CUDA-graph bucket), not FlashInfer's hybrid ones, which served 4,097-8,191 tokens with 8,192's tactic (`moe_tuning.py`) | `test_moe_tuning_cpu.py`; `bench.tune_tactics verify` (0 misses) |
@@ -532,6 +533,18 @@ def kpool_seed_tail_cache(tail_kv_cache, key, gate_score, tslot, kpool, head_dim
                                            pool_size=kp, head_dim=hd, write_mask=None, round_scale=rs,
                                            write_cache=True, return_compressed=False)
     seed(tail_kv_cache, key, gate_score, tslot, kpool, head_dim)
+
+
+# Speed-only overrides that keep every value (bitwise): on in the engine; bench/stage_bench.py --off turns one off in
+# its process, before the model is built, for an A/B at the same clock.
+FAST = {"kpool_expand": True}
+
+
+def install_kpool_expand() -> None:
+    """`kpool_fast.install`: the fork's indexer with the one-launch expansion into the top-k buffer (process-wide)."""
+    from ppimpl.model import kpool_fast
+
+    kpool_fast.install()
 
 
 def install_kpool_unaligned() -> None:

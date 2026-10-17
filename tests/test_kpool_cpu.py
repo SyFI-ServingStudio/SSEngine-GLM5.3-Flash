@@ -148,3 +148,19 @@ def test_heads_suffix_equals_heads_of_the_prefill_slice():
             if want is not None:
                 for a, b in zip(want, got):
                     np.testing.assert_array_equal(a, b)
+
+
+def test_kpool_expand_installs():
+    """`install_kpool_expand` finds each edited line of the fork's indexer once and rebinds it in its module (a fork
+    change there fails here and at start-up, not silently)."""
+    import vllm.models.glm5next.nvidia.sparse_indexer as si
+
+    from ppimpl.model import kpool_fast
+
+    before = si.sparse_attn_indexer_kpool
+    pp_patch.install_kpool_expand()
+    assert si._pp_expand_into is kpool_fast.expand_into
+    assert kpool_fast._ORIG is not None
+    if before is not kpool_fast._ORIG:
+        return                                 # installed earlier in this process
+    assert si.sparse_attn_indexer_kpool is not before
