@@ -122,7 +122,7 @@ def main():
     g = torch.Generator(device=dev).manual_seed(0)
     w = (torch.randn(C, 4, generator=g, device=dev) * 0.5).to(torch.bfloat16)
     pool0 = paged(torch.randn(32, 3 * C + 256, generator=g, device=dev).to(torch.bfloat16), (32, 3, C))
-    configs = [(bt, bc, nw) for bt in (8, 16, 32, 64) for bc in (512, 1024, 2048) for nw in (4, 8)]
+    configs = [(bt, bc, nw) for bt in (8, 16, 32, 64) for bc in (256, 512, 1024) for nw in (2, 4, 8)]
     res = {"gpu": torch.cuda.get_device_name(dev), "cases": {}}
     for name, lens in CASES.items():
         T = sum(n for n, _ in lens)

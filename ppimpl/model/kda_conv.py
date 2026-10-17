@@ -87,13 +87,24 @@ def _conv_kernel(x_ptr, x_s0, w_ptr, st_ptr, st_s0, out_ptr, T, P, tab_ptr,
     h2 = _x_row(x_ptr, x_s0, st_ptr, st_s0, P, row0 - 1, cols, s, slot, init, cmask)
     j = cols // P                                  # q, k or v
     off = j.to(tl.int64) * T * P + (cols - j * P)
+    # rows load 4 ahead of the row being stored: a load placed after a store cannot move above it (out may alias x
+    # for all the compiler knows), so without the lookahead each row's load waits for the previous row's store
+    a0 = _ld(x_ptr, x_s0, row0, cols, cmask, e)
+    a1 = _ld(x_ptr, x_s0, row0 + 1, cols, cmask, e)
+    a2 = _ld(x_ptr, x_s0, row0 + 2, cols, cmask, e)
+    a3 = _ld(x_ptr, x_s0, row0 + 3, cols, cmask, e)
     for i in tl.static_range(BT):
         t = row0 + i
-        live = t < e
-        x3 = tl.load(x_ptr + t.to(tl.int64) * x_s0 + cols, mask=cmask & live, other=0.0).to(tl.float32)
-        y = _silu_conv4(h0, h1, h2, x3, w0, w1, w2, w3)
-        tl.store(out_ptr + t.to(tl.int64) * P + off, y.to(tl.bfloat16), mask=cmask & live)
-        h0, h1, h2 = h1, h2, x3
+        nxt = _ld(x_ptr, x_s0, t + 4, cols, cmask, tl.minimum(e, row0 + BT))
+        y = _silu_conv4(h0, h1, h2, a0, w0, w1, w2, w3)
+        tl.store(out_ptr + t.to(tl.int64) * P + off, y.to(tl.bfloat16), mask=cmask & (t < e))
+        h0, h1, h2 = h1, h2, a0
+        a0, a1, a2, a3 = a1, a2, a3, nxt
+
+
+@triton.jit
+def _ld(x_ptr, x_s0, t, cols, cmask, end):
+    return tl.load(x_ptr + t.to(tl.int64) * x_s0 + cols, mask=cmask & (t < end), other=0.0).to(tl.float32)
 
 
 @triton.jit
