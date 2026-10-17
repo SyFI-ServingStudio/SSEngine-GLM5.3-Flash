@@ -81,7 +81,7 @@ def main():
     plan, nblocks, total, ctx = build_plan(a.spec, B, a.stage == 0, CHECKPOINT)
     graphs = a.mode != "stacks"
     model = StageModel(bench_config(a.mb_tokens, cuda_graphs=graphs), a.stage, dev, num_blocks=max(nblocks + 1, 160),
-                       max_model_len=ctx + B)
+                       max_model_len=max(ctx, a.mb_tokens) + B)
     g = torch.Generator(device=dev).manual_seed(7)
     hidden = None if model.first else \
         (torch.randn(total, model.hidden_width, generator=g, device=dev) * 0.5).to(torch.bfloat16)
