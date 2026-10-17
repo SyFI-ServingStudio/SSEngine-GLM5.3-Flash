@@ -260,7 +260,7 @@ class TierEngine:
         self._lock = threading.Lock()              # ring chunks and their order, across the submitting threads
         if tc.hops not in ("two", "direct"):
             raise ValueError(f"tiers.hops: {tc.hops!r} (two | direct)")
-        if tc.ring_depth < 1 or (tc.ring_chunk_slots is not None and tc.ring_chunk_slots < 1):
+        if tc.ring_depth < 1 or tc.ring_chunk_slots < 1:
             raise ValueError(f"tiers.ring_depth {tc.ring_depth}, ring_chunk_slots {tc.ring_chunk_slots}: >= 1")
         real = cfg.model != "fake"
         if tc.dram_gb and self.cuda and real:
@@ -301,7 +301,7 @@ class TierEngine:
             self.pool = ThreadPoolExecutor(IO_THREADS, thread_name_prefix="tier-io")
         if self.tc.hops == "two":                  # per direction: `depth` chunks of `chunk` slots, after the KV pool
             self.depth = self.tc.ring_depth
-            self.chunk = self.tc.ring_chunk_slots or max(1, self.layout.state_slots)
+            self.chunk = self.tc.ring_chunk_slots
             half = self.depth * self.chunk * sb
             if self.cuda:
                 free = torch.cuda.mem_get_info(self.device)[0]

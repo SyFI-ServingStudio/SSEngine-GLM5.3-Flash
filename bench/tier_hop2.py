@@ -318,7 +318,7 @@ def main():
     ap.add_argument("--tests", default="pieces,sweep,gemm,edges")
     ap.add_argument("--hops", default="two")
     ap.add_argument("--depth", type=int, default=2)
-    ap.add_argument("--chunk", type=int, help="slots per ring chunk (default: the state's slots)")
+    ap.add_argument("--chunk", type=int, default=4, help="slots per ring chunk")
     a = ap.parse_args()
     global CTX
     CTX = a.ctx

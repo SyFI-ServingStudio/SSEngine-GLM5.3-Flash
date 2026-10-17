@@ -23,7 +23,7 @@ echo "== $(date -Is) gpus $G port $P: $WHAT $* (ssd dir $PPIMPL_SSD_DIR)"
 echo "== df before: $(df -h "$ROOT" | tail -1)"
 nvidia-smi --query-gpu=index,pci.bus_id,memory.used --format=csv,noheader
 if [ -n "${HOP2:-}" ]; then                # HOP2=1: the two-hop probe (bench/tier_hop2.py) first; stop if it fails
-  $PY -m bench.tier_hop2 --out "$R/tier_hop2/$JOB" || { echo "== tier_hop2 failed"; exit 1; }
+  $PY -m bench.tier_hop2 --out "$R/tier_hop2/$JOB" ${HOP2_TESTS:+--tests $HOP2_TESTS} || { echo "== tier_hop2 failed"; exit 1; }
 fi
 $PY -m bench.run "$WHAT" --inline --gpus "$G" --port "$P" --out-root "$R" "$@"; rc=$?
 uptime
