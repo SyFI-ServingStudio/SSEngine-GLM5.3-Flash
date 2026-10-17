@@ -61,3 +61,18 @@ def test_worker_stamps_writes_the_window(tmp_path, monkeypatch):
         ws.after()
     rows = [json.loads(x) for x in (tmp_path / "host_stamps_stage0.jsonl").read_text().splitlines()]
     assert [r["index"] for r in rows] == [1] and rows[0]["chunks"] == [[2048, 256]] and len(rows[0]["seg"]) == 3
+
+
+def test_worker_stamps_slow_mode_keeps_only_slow_forwards(tmp_path, monkeypatch):
+    monkeypatch.setenv("PPIMPL_HOST_STAMPS", "slow:20@0")
+    model = _model()
+    ws = host_stamps.WorkerStamps(0, str(tmp_path), model)
+    assert ws.on and ws.slow_ms == 20
+    for mb, pause in enumerate([0.0, 0.03, 0.0]):
+        ws.before(NS(mb_id=mb, chunks=[NS(start=0, num_tokens=128)]))
+        _run(model)
+        time.sleep(pause)
+        ws.after()
+    rows = [json.loads(x) for x in (tmp_path / "host_stamps_stage0.jsonl").read_text().splitlines()]
+    assert [r["index"] for r in rows] == [1]
+    assert rows[0]["host_ms"] > 20 and rows[0]["gc_long"] == [] and rows[0]["device_allocs"] == 0

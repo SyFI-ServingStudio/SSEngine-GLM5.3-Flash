@@ -35,6 +35,8 @@ FUNCTIONS = [
     "flashinfer.mla._core:trtllm_batch_decode_with_kv_cache_mla",
     "flashinfer.kda_kernels.persistent.forward:fwd", "flashinfer.kda_kernels.persistent.forward:_launch_forward",
     "vllm.utils.deep_gemm:fp8_fp4_mqa_logits", "triton.runtime.jit:JITFunction.run",
+    # compiles in a forward (in_run_jit sees only vLLM's registered JIT kernels)
+    "triton.compiler.compiler:compile", "torch._dynamo.convert_frame:_compile", "torch._inductor.compile_fx:compile_fx",
 ]
 
 
@@ -72,6 +74,7 @@ class HostStamps:
         self.calls: dict = {}
         self.segs: list = []
         self.gc_ns = 0
+        self.gc_long: list = []
         self._gc_t = 0
         self.t0 = 0
         self.active = False
@@ -104,10 +107,13 @@ class HostStamps:
         if phase == "start":
             self._gc_t = time.perf_counter_ns()
         else:
-            self.gc_ns += time.perf_counter_ns() - self._gc_t
+            t = time.perf_counter_ns() - self._gc_t
+            self.gc_ns += t
+            if t > 5_000_000:                                    # a pause worth naming: generation, collected
+                self.gc_long.append([info.get("generation"), round(t / 1e6, 2), info.get("collected")])
 
     def begin(self):
-        self.total, self.calls, self.segs, self.stack, self.gc_ns = {}, {}, [], {}, 0
+        self.total, self.calls, self.segs, self.stack, self.gc_ns, self.gc_long = {}, {}, [], {}, 0, []
         ev = self.mon.events
         for code in self.codes:
             self.mon.set_local_events(self.tool, code, ev.PY_START | ev.PY_RETURN)
@@ -121,35 +127,59 @@ class HostStamps:
         gc.callbacks.remove(self._gc)
         for code in self.codes:
             self.mon.set_local_events(self.tool, code, 0)
-        return {"host_ms": round(host / 1e6, 4), "gc_ms": round(self.gc_ns / 1e6, 4),
+        return {"host_ms": round(host / 1e6, 4), "gc_ms": round(self.gc_ns / 1e6, 4), "gc_long": self.gc_long,
                 "seg": [[i, k, round(t / 1e6, 4)] for i, k, t in self.segs],
                 "fn": {q: [round(v / 1e6, 4), self.calls[q]] for q, v in sorted(self.total.items(), key=lambda x: -x[1])}}
 
 
+COMPILES = ("compile", "_compile", "compile_fx")
+
+
 class WorkerStamps:
-    """The worker side: PPIMPL_HOST_STAMPS="a:b[@stages]" (stages default 0)."""
+    """The worker side: PPIMPL_HOST_STAMPS="a:b[@stages]" (stages default 0) stamps microbatches [a, b);
+    "slow:<ms>[@stages]" stamps every forward and keeps those whose host time passed <ms>, or with a compile or a GC
+    pause over 5 ms, plus the CUDA caching allocator's device allocations during it (a whole serving run: why a
+    forward's host time sometimes reaches 0.5 s, 7878 mb 6280)."""
 
     def __init__(self, stage: int, run_dir: str, model):
         spec = os.environ.get("PPIMPL_HOST_STAMPS", "")
         rng, _, stages = spec.partition("@")
         self.on = bool(rng) and stage in [int(x) for x in (stages or "0").split(",")]
         self.stage, self.cur = stage, None
-        if self.on:
+        self.slow_ms = None
+        self.device = getattr(model, "device", None)
+        if self.on and rng.startswith("slow:"):
+            self.slow_ms = float(rng.split(":")[1])
+            self.a, self.b = 0, 1 << 62
+        elif self.on:
             self.a, self.b = (int(x) for x in rng.split(":"))
+        if self.on:
             self.st = HostStamps(model)
             self.f = open(Path(run_dir) / f"host_stamps_stage{stage}.jsonl", "w")
             if self.st.missing:
                 print(f"stage {stage} host stamps: not found: {self.st.missing}", flush=True)
 
+    def _allocs(self) -> int:
+        if self.device is None or getattr(self.device, "type", "") != "cuda":
+            return 0
+        import torch
+        return torch.cuda.memory_stats(self.device).get("num_device_alloc", 0)
+
     def before(self, plan):
         if self.on and self.a <= plan.mb_id < self.b:
-            self.cur = (plan.mb_id, [(c.start, c.num_tokens) for c in plan.chunks])
+            self.cur = (plan.mb_id, [(c.start, c.num_tokens) for c in plan.chunks],
+                        self._allocs() if self.slow_ms is not None else 0)
             self.st.begin()
 
     def after(self):
         if self.cur is not None:
             rec = self.st.end()
-            mb, chunks = self.cur
+            mb, chunks, allocs = self.cur
+            self.cur = None
+            if self.slow_ms is not None:
+                rec["device_allocs"] = self._allocs() - allocs
+                if not (rec["host_ms"] > self.slow_ms or rec["gc_long"] or rec["device_allocs"]
+                        or any(q in rec["fn"] for q in COMPILES)):
+                    return
             self.f.write(json.dumps({"stage": self.stage, "index": mb, "chunks": chunks} | rec) + "\n")
             self.f.flush()
-            self.cur = None
