@@ -116,7 +116,7 @@ class Forced:
                 return orig(self, custom_op, runners, tuning_config, inputs, **kw)
             if cls.valid is None:
                 cls.valid = [t for t in runners[0].get_valid_tactics(inputs, None)]
-            return runners[0], (cls.tactic if cls.tactic is not None else cls.valid[0])
+            return runners[0], list(cls.tactic if cls.tactic is not None else cls.valid[0])
 
         AutoTuner.choose_one = choose_one
 
