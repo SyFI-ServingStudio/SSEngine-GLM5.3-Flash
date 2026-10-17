@@ -4,7 +4,8 @@
   python -m bench.run one_8k --fake --inline                                                 run here (no Slurm)
   ... --nsys [--nsys-mbs a:b|all]     the server under Nsight Systems -> trace.nsys-rep, trace.sqlite, trace.json
 
-Names: one_<L>, saturated_<L> (4_iteration.md), L in 1k..128k; prefix_bringup and prefix_n<N> (5_prefix_cache.md,
+Names: one_<L>, saturated_<L> (4_iteration.md), L in 1k..128k; tier_bringup (7_offloading.md, pool 1,234,944 tokens;
+tiers from --dram-gb/--ssd-gb); prefix_bringup and prefix_n<N> (5_prefix_cache.md,
 prefix cache on: `keep_sessions`); sched_check_<step>, force_check_<step> and sched_<step>_n<N> (6_scheduler.md, step
 one of ppimpl.config.SCHEDULER_STEPS: plain, srpt8k, budget, even, good; prefix_n<N> is sched_plain_n<N>).
 Session runs (prefix_n<N>, sched_<step>_n<N>) run the client under `timeout 22m`: 1_contract.md §2.2
@@ -45,7 +46,8 @@ PYTHON = sys.executable
 NSYS = shutil.which("nsys") or "/usr/local/cuda/bin/nsys"
 
 
-PREFIX_RUNS = ("prefix_bringup",)
+PREFIX_RUNS = ("prefix_bringup", "tier_bringup")
+TIER_BRINGUP_POOL = 1_234_944    # 7_offloading.md §1: HBM cannot keep a session through its round 1
 CLIENT_TIMEOUT_S = 1200
 SESSION_MINUTES = 20
 SESSION_CLIENT_LIMIT = "22m"     # 20 min from the first submit + the client's corpus tokenization (~45 s) + margin
@@ -71,6 +73,8 @@ def parse_name(name: str) -> tuple[str, int]:
 
 def sched_step(name: str) -> str:
     """The scheduler step of a run name (6_scheduler.md §2): plain unless the name gives one."""
+    if name == "tier_bringup":          # 7_offloading.md: the scheduler of 6_scheduler.md (its targets: "good")
+        return "good"
     m = re.fullmatch(r"(?:sched_check|force_check)_(\w+)|sched_(\w+)_n\d+", name)
     return (m.group(1) or m.group(2)) if m else "plain"
 
@@ -465,6 +469,8 @@ def run_named(name: str, fake: bool, port: int, out_root: Path, args) -> dict:
             hold = hold_for(trace)
     elif kind == "sessions":
         trace, ccfg = HANDOFF / "data/sessions_2ps.csv", {"max_concurrency": length}
+    elif kind == "tier_bringup":       # 7_offloading.md §1: 15 two-round sessions and 75 fillers
+        trace, ccfg = HANDOFF / "data/bringup/tier_sessions.csv", {}
     else:
         trace, ccfg = HANDOFF / "data/bringup/prefix_sessions.csv", {}   # no max_concurrency (5_prefix_cache.md §5)
         if args.gap_s:
@@ -483,8 +489,12 @@ def run_named(name: str, fake: bool, port: int, out_root: Path, args) -> dict:
         extra["fake"] = {**extra.get("fake", {}), "hidden_width": 64}
     if args.nsys and args.nsys_mbs and args.nsys_mbs != "all":
         extra["profile_mbs"] = [int(x) for x in args.nsys_mbs.split(":")]
-    if args.pool_tokens:
-        extra["pool_tokens"] = args.pool_tokens
+    if args.pool_tokens or kind == "tier_bringup":
+        extra["pool_tokens"] = args.pool_tokens or TIER_BRINGUP_POOL
+    if args.dram_gb is not None or args.ssd_gb is not None:   # lanes/m6 TIERS.md; SSD files in $PPIMPL_SSD_DIR
+        gb = {k: None if v in (None, "none") else float(v) for k, v in (("dram_gb", args.dram_gb),
+                                                                         ("ssd_gb", args.ssd_gb))}
+        extra["tiers"] = gb | ({"staging_gb": args.staging_gb} if args.staging_gb else {})
     scfg = {"model": "fake" if fake else "glm53", "device": "cpu" if args.cpu else "cuda", "run_dir": str(run_dir),
             **extra}
     if not fake:
@@ -590,6 +600,9 @@ def main():
     ap.add_argument("--client-limit", help="prefix/session runs: `timeout` for the client (default 22m for prefix_n<N>)")
     ap.add_argument("--pool-tokens", type=int, help="prefix/session runs: cap the KV pool (harness checks)")
     ap.add_argument("--token-pool-limit", type=int, help="req-frontend corpus.token_pool_limit (harness checks)")
+    ap.add_argument("--dram-gb", help="tiers: DRAM per GPU in GB, or none (with --ssd-gb: TierConfig)")
+    ap.add_argument("--ssd-gb", help="tiers: SSD per GPU in GB, or none")
+    ap.add_argument("--staging-gb", type=float, help="tiers: staging area per GPU (SSD without DRAM)")
     ap.add_argument("--dispatch", choices=["project", "queue_one"],
                     help="RunConfig.dispatch (default project); queue_one forms QUEUE_ONE_FORM_LEAD_MS ahead")
     args = ap.parse_args()
