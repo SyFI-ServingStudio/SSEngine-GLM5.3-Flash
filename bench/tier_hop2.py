@@ -123,8 +123,10 @@ class Probe:
             t = time.perf_counter()
             e.submit(TierMove(1_000_000 * g + self.op, op, "dram", None, 0, ctx, 0, kv, st, slots, sslots, [], []))
             ts = time.perf_counter() - t
-            _, ev, _, nb, _, _ = e.q["read" if op == "read" else "write"].get()
+            op_id, ev, start_ns, nb, _, mark = e.q["read" if op == "read" else "write"].get()
             ev.synchronize()
+            if (tr := e._traces.pop(op_id, None)) is not None:     # the engine's per-batch trace (run dir)
+                e._write_trace(op_id, start_ns, mark, *tr)
             out[g] = (ts, nb)
 
         self.op += 1

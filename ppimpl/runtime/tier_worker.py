@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import ctypes
 import errno
+import json
 import os
 import queue
 import threading
@@ -261,6 +262,11 @@ class TierEngine:
         tc = cfg.tiers
         self.cfg, self.tc, self.stage, self.n = cfg, tc, stage, cfg.num_stages
         self.device, self.cuda = device, device.type == "cuda"
+        # PPIMPL_TIER_TRACE=0 turns off the per-batch trace of DRAM ops (tier_trace_s<stage>.jsonl in the run dir: host
+        # time before / in each batch call, the calling thread's CPU time in it, each batch's GPU start / end)
+        self.trace = self.cuda and os.environ.get("PPIMPL_TIER_TRACE", "1") != "0"
+        self._traces: dict[int, tuple] = {}
+        self._trace_log = None
         self.ctx = zmq_ctx
         self.layout: Layout | None = None
         self.slot_bytes = tc.slot_bytes or 0
@@ -375,6 +381,8 @@ class TierEngine:
             from cuda.bindings import runtime as rt
             for p in self.opened:
                 rt.cudaIpcCloseMemHandle(p)
+        if self._trace_log is not None:
+            self._trace_log.close()
         if self.pool is not None:
             self.pool.shutdown()
         if self.ssd is not None:
@@ -450,8 +458,25 @@ class TierEngine:
                     if mark is not None:
                         gpu_ns = int(mark.elapsed_time(wait) * 1e6)
                 push.send(encode(TierDone(self.stage, op_id, start_ns, time.time_ns(), nbytes, submit_ns, gpu_ns)))
+                if (tr := self._traces.pop(op_id, None)) is not None:
+                    try:                        # instrumentation: a failure turns the trace off, not the run
+                        self._write_trace(op_id, start_ns, mark, *tr)
+                    except Exception:           # noqa: BLE001
+                        print(f"stage {self.stage} tier trace off:\n{traceback.format_exc()}", flush=True)
+                        self.trace = False
         finally:
             push.close()
+
+    def _write_trace(self, op_id: int, start_ns: int, mark, kind: str, t0: int, tr: list):
+        """One line per traced op (done thread, after its last copy completed): us from the op's submit start (host)
+        and from its mark (GPU)."""
+        if self._trace_log is None:
+            self._trace_log = open(os.path.join(self.cfg.run_dir, f"tier_trace_s{self.stage}.jsonl"), "a")
+        us = lambda ns: round(ns / 1e3, 1)
+        self._trace_log.write(json.dumps({"op": op_id, "kind": kind, "start_ns": start_ns, "batches": [
+            {"stream": s, "pieces": n, "bytes": b, "host_at_us": us(h0 - t0), "call_us": us(h1 - h0), "cpu_us": us(c),
+             "gpu_start_us": round(mark.elapsed_time(e0) * 1e3, 1), "gpu_end_us": round(mark.elapsed_time(e1) * 1e3, 1)}
+            for s, n, b, h0, h1, c, e0, e1 in tr]}) + "\n")
 
     # --- one op -----------------------------------------------------------------------------------------------------
 
@@ -475,17 +500,23 @@ class TierEngine:
             return
         if op.tier != "dram" or op.host_tier is not None or op.op not in ("read", "write"):
             raise ValueError(f"tier op {op.op} {op.tier} via {op.host_tier}")
-        mark = None
+        mark, tr = None, None
         if self.cuda:                   # GPU time of the op (TierDone.gpu_ns), from the stream its first copy is on
             import torch
             mark = torch.cuda.Event(enable_timing=True)
             mark.record(self.streams["write_nvl" if d == "write" and self.ring is not None else d])
+            tr = [] if self.trace else None
+        t0 = time.perf_counter_ns()
         ev, nbytes = self._move(d, self.dram.ptr, op.kv_blocks, op.state_blocks, op.slots, op.state_slots, op.b_lo,
-                                op.b_hi, op.block_start)
+                                op.b_hi, op.block_start, tr=tr)
+        if tr is not None:
+            self._traces[op.op_id] = (op.op, t0, tr)
         self.q[d].put((op.op_id, ev, start_ns, nbytes, time.time_ns(), mark))
 
-    def _batch(self, stream: str, src, dst, lens, wait=()):
-        """One `cuMemcpyBatchAsync` on `stream` after the events `wait`; its end event (None on CPU, done)."""
+    def _batch(self, stream: str, src, dst, lens, wait=(), tr: list | None = None):
+        """One `cuMemcpyBatchAsync` on `stream` after the events `wait`; its end event (None on CPU, done). `tr`: append
+        (stream, pieces, bytes, host ns before the call, host ns after it, thread CPU ns in it, GPU start event, end
+        event)."""
         if not self.cuda:
             for s, t, k in zip(np.asarray(src).tolist(), np.asarray(dst).tolist(), np.asarray(lens).tolist()):
                 ctypes.memmove(t, s, k)
@@ -495,13 +526,23 @@ class TierEngine:
         for ev in wait:
             if ev is not None:
                 st.wait_event(ev)
+        args = [torch.from_numpy(np.ascontiguousarray(x, dtype=np.int64)) for x in (src, dst, lens)]
+        if tr is not None:
+            ev0 = torch.cuda.Event(enable_timing=True)
+            ev0.record(st)
+            h0, c0 = time.perf_counter_ns(), time.thread_time_ns()
         with torch.cuda.stream(st):
-            self.swap(*(torch.from_numpy(np.ascontiguousarray(x, dtype=np.int64)) for x in (src, dst, lens)))
+            self.swap(*args)
+        if tr is not None:
+            h1, c1 = time.perf_counter_ns(), time.thread_time_ns()
         ev = torch.cuda.Event(blocking=True, enable_timing=True)   # timing: TierDone.gpu_ns
         ev.record(st)
+        if tr is not None:
+            tr.append((stream, len(args[2]), int(args[2].sum()), h0, h1, c1 - c0, ev0, ev))
         return ev
 
-    def _move(self, d: str, base: int, kv, st, slots, sslots, b_lo: int, b_hi: int, block_start: int, ready=None):
+    def _move(self, d: str, base: int, kv, st, slots, sslots, b_lo: int, b_hi: int, block_start: int, ready=None,
+              tr: list | None = None):
         """Blocks [b_lo, b_hi) and (if `sslots`) the state between HBM and host slots at `base` (block i in slot
         slots[i - block_start]), "read" host -> HBM or "write" HBM -> host. `ready(i)`: called before the host side of
         blocks below i (None: the state) is read (an SSD read waits for its file reads there). Returns (the last
@@ -514,7 +555,7 @@ class TierEngine:
             dev, host, lens = L.pieces(kv, st, slots, sslots, b_lo, b_hi, block_start)
             host = host + base
             src, dst = (host, dev) if d == "read" else (dev, host)
-            return self._batch(d, src, dst, lens), int(lens.sum())
+            return self._batch(d, src, dst, lens, tr=tr), int(lens.sum())
         sb, C = self.slot_bytes, self.chunk
         units = [("kv", i, min(i + C, b_hi)) for i in range(b_lo, b_hi, C)]
         if len(sslots):                             # the state: its pieces over len(sslots) slots, cut like the KV
@@ -543,11 +584,11 @@ class TierEngine:
                 rings = [rbase + k * sb for k in range(n)]
                 hl = np.full(n, hlen, dtype=np.int64)
                 if d == "read":                     # host -> ring (PCIe), then ring -> the stages (NVLink)
-                    h = self._batch("read", hosts, rings, hl, (self._ring_free[d][pos],))
-                    ev = self._batch("read_nvl", roff + rbase, dev, lens, (h,))
+                    h = self._batch("read", hosts, rings, hl, (self._ring_free[d][pos],), tr)
+                    ev = self._batch("read_nvl", roff + rbase, dev, lens, (h,), tr)
                 else:                               # the stages -> ring, then ring -> host
-                    g = self._batch("write_nvl", dev, roff + rbase, lens, (self._ring_free[d][pos],))
-                    ev = self._batch("write", rings, hosts, hl, (g,))
+                    g = self._batch("write_nvl", dev, roff + rbase, lens, (self._ring_free[d][pos],), tr)
+                    ev = self._batch("write", rings, hosts, hl, (g,), tr)
                 self._ring_free[d][pos] = ev
         return ev, nbytes
 
