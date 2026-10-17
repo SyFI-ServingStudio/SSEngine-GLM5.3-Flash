@@ -167,8 +167,17 @@ option for comparison (§13).
   their row sizes (read at start-up); the state = 34 recurrent quarters of 1 MiB + 34 conv quarters (36 KiB) + 11
   tails. A 512k read is 62 x 22 + 79 = 1,443 device pieces per GPU. Host side contiguous: with two hops (§2.3) the
   host <-> GPU q hop is one 12.86 MB copy per slot (line rate), and the 1,443 pieces are the D2D hop over NVLink.
-- **Device staging (two hops).** A ring of chunks in GPU q's HBM per direction, 4 chunks of 4 slots (206 MB) each,
-  ~0.4 GB per GPU allocated before the KV pool (Ready still reports 7,144 blocks, checked at the first GPU run).
+- **Device staging (two hops).** One ring per direction in GPU q's HBM: ring bytes = 2 directions x depth x chunk,
+  chunk = `ring_chunk_slots` x slot bytes. Defaults (to be set from the sweep in the first DRAM bring-up job,
+  `bench/tier_hop2.py`: depth 2/4 x chunk 1/3/4 slots, 32k/128k/512k): depth 2 (double buffering), chunk = a
+  context's state, 3 slots (38.6 MB), so 2 x 2 x 38.6 = 154 MB per GPU. Why 2 is enough: one slot's host hop takes
+  ~270 us (12.86 MB at 48 GB/s), its NVLink hop ~19 us (670 GB/s, job 7943), so with two chunks the host hop never
+  waits for the ring. A context's state is cut into chunks like its KV, so a chunk can be a single slot.
+- **Which HBM the ring uses.** Ready = 7,144 KV blocks per stage is the contract (`1_contract.md` §1) and is not
+  reduced: the controller stops the server if a stage reports fewer with tiers on. The KV pool is sized first
+  (`blocks_that_fit`: the HBM free after the weights minus the 13.6 GB activation/workspace reserve, capped at
+  7,144); the ring is allocated after the model, from what is left, and each worker prints that amount at start-up
+  (`stage s tiers: ... ring ... of X GB free HBM after the model and KV pool`).
 - **What it costs.** Block granularity: the last block is stored whole. Mean waste half a block per context per GPU
   (6.4 MB) plus 1.7 MB of state rounding: about 4% of the average session context (~100k tokens); a 32k read moves
   4 x 12.86 + 38.6 = 90 MB per GPU instead of 86 MB (+5%). Recorded as a difference (§7 "a context stored larger").
@@ -325,7 +334,7 @@ pool = BalancedKVPool(group, tiers=[HostTier(gb=150), SsdTier(gb=128, dir=...)],
 pool.register(stage_kv)              # once per process after the KV pool is allocated (collective)
 h = pool.store(key, views)           # collective: all n processes, same key
 h = pool.load(key, views)            # collective
-pool.lookup(key, prompt=None) -> Hit(tier, tokens) | None
+pool.lookup(key, prompt=None) -> Hit(tier, tokens, wait_ns) | None
 pool.close()
 ```
 
@@ -350,10 +359,9 @@ pool.close()
 
   Both forms build the same plan.
 - **Asynchronous.** `store` / `load` return a `Handle` at once and never block on I/O:
-  - `h.status`: pending, done, rejected or failed;
+  - `h.status`: pending, done or failed;
   - `h.done()` and `h.wait(timeout)`;
-  - `h.eta_ns`: for a load, the expected landing time from the tier's read channel; this is what the 1 s read-wait
-    bound uses;
+  - `h.eta_ns`: for a load, the expected landing time from the tier's read channel;
   - `h.tier`, `h.tokens`, and `h.t_start` / `h.t_land`.
 
   A load is done when all n GPUs have reported their share, so completion is host-side. A CUDA event can only cover
@@ -361,20 +369,29 @@ pool.close()
 - **`lookup(key, prompt)`.** Returns the fastest tier that holds the longest context of `key` the prompt can resume
   from. The KDA state exists only at an entry's end, so `tokens` is either the entry's whole length (the prompt
   starts with the entry's content) or no hit. A hit inside an entry is not possible with one KDA state per context
-  (`partial_hits` exists only so replay can reproduce the simulator). `lookup` is advisory: `load` checks again.
+  (`partial_hits` exists only so replay can reproduce the simulator). `wait_ns` is how long a load started now would
+  wait for the tier's read channel (reads of one tier run one after another). `lookup` is advisory: `load` checks
+  again.
+- **The read-wait bound is the scheduler's, not the pool's** (`7_offloading.md`, Read-wait bound). The pool only
+  reports `wait_ns`; the scheduler decides. A round whose read would wait more than 1 s is passed over: it stays in
+  the queue, holds nothing, later rounds go first, and it is tried again at the next microbatch (today's
+  `Scheduler._at_head` returning "passed"). `load` itself has no time limit.
 - **Partial transfer.** `load(key, views)` with `views.tokens = T` (the hit) and `views.hbm_tokens = H` (what the
   views already hold from an HBM prefix hit) moves:
   - KV blocks floor(H / B) to ceil(T / B);
   - the whole state.
 
-  `T` must equal the entry's length, otherwise the load is rejected. An SSD load reads the whole entry from the file
+  `T` must equal the entry's length, otherwise the load fails (that context is not stored). An SSD load reads the
+  whole entry from the file
   into DRAM (copy-up) and copies only [H, T) to HBM. `store(key, views)` with `views.tokens = T` replaces the key's
   entry. It writes only the blocks from floor(old / B) on plus the new state, where old is what the entry already
   holds and the new context still starts with. A context that does not extend the entry drops it and writes in full.
 - **Errors.**
-  - `load` of a key that is gone, or whose wait would exceed the read-wait bound: rejected at once, no bytes moved.
-    The caller computes the prefix instead; the scheduler passes the round over.
-  - `store` larger than a tier: goes to the next tier, or is rejected. It never waits for space.
+  - `load` of a key that no tier holds any more (evicted from every tier since the lookup): fails at once, no bytes
+    moved, and the caller computes the prefix (`7_offloading.md`: a session found nowhere is computed again). A key
+    that moved between tiers since the lookup (DRAM evicted it to SSD) is read from where it is now, with a new ETA.
+    This is the only way a load fails besides the faults below.
+  - `store` larger than a tier: goes to the next tier, or is not stored there. It never waits for space.
   - An SSD I/O error (`preadv` / `pwritev`) on any GPU: that op fails; the entry is dropped from that tier; a load's
     views hold garbage and the caller recomputes.
   - A CUDA error or a dead member: the group aborts, and every pending handle fails.
@@ -394,14 +411,14 @@ pool.close()
 | 1. `KVLayout` (model-agnostic) | `KVLayout.from_stage_kv(stage, ctx, kv) -> list[ViewRange]`; `ViewRange(stage, name, kind: kv/state, base, stride, nbytes, group)`. Only "which bytes a block / a state owns". | member, reads torch tensors once | `tier_copy.stage_ranges`, `ViewRange` | ranges of the real `StageKV` (GPU test), fake stages (CPU) |
 | 2. `Placement` (pure, numpy) | `BalancedPlacement(ranges_all_stages, n, q)`, `OwnStagePlacement(...)` for comparison: `slot_bytes`, `state_slots`, `pieces(views_by_stage, slots, state_slots, b_lo, b_hi) -> (dev, host_off, len)`. A slot = share q of one block of all stages, page_first. | member, no torch | `tier_copy.Layout` (one block-id list for all stages: becomes per stage) | `test_tier_copy.py` at n = 4 and 8 |
 | 3. Tier backends | `HostTier`: NUMA-local pinned arena, `capacity_slots`, `ptr(slot)`. `SsdTier`: O_DIRECT file, `capacity_slots`, `read(slots, host_ptrs) -> futures`, `write(slots, host_ptrs) -> futures`. A new medium (CXL, remote) implements the same interface. Slot ids are allocated by layer 5, not here: they must be the same on all n GPUs. | member, no torch | `HostArena`, `SsdFile` | arena, file round trip, unlink |
-| 4. `Mover` (one per GPU) | `Mover(device, hops="two" / "direct", ring_mb)`: `transfer_async(direction, host_ptrs, host_len, dev, ring_off, lens, ready=None) -> event`. Copy engines only, `cuMemcpyBatchAsync`. Two hops: host <-> own HBM ring (PCIe), ring <-> the stages (NVLink); the ring is allocated before the KV pool. Nothing above sees the ring. | member, torch / CUDA (CPU: memmove) | `TierEngine._batch` / `_move` | byte-equal through both hop modes (CPU), GPU byte test |
-| 5. `TierManager` (pure policy) | `lookup(key, prompt) -> Hit`, `prepare_load(key, views_by_stage, now) -> (ops, eta) / reject`, `prepare_store(key, views_by_stage, tokens, content) -> ops` (with demotes and drops from eviction), `ready_ops()`, `complete(op_id, ok)`. Per-tier LRU and slot tables, write-back to SSD on DRAM eviction, read channels and the read-wait bound. Byte mode (no slots) stays for replay. | leader, no torch | `engine/tiers.Tiers` | `test_tiers.py`, `test_tiers_slots.py` |
+| 4. `Mover` (one per GPU) | `Mover(device, hops="two" / "direct", ring_depth, ring_chunk_slots)`: `transfer_async(direction, host_ptrs, host_len, dev, ring_off, lens, ready=None) -> event`. Copy engines only, `cuMemcpyBatchAsync`. Two hops: host <-> own HBM ring (PCIe), ring <-> the stages (NVLink); the ring is allocated before the KV pool. Nothing above sees the ring. | member, torch / CUDA (CPU: memmove) | `TierEngine._batch` / `_move` | byte-equal through both hop modes (CPU), GPU byte test |
+| 5. `TierManager` (pure policy) | `lookup(key, prompt) -> Hit`, `prepare_load(key, views_by_stage, now) -> (ops, eta)` (None if no tier holds the key), `wait_ns(tier, now)`, `prepare_store(key, views_by_stage, tokens, content) -> ops` (with demotes and drops from eviction), `ready_ops()`, `complete(op_id, ok)`. Per-tier LRU and slot tables, write-back to SSD on DRAM eviction, read channels (the read-wait bound stays in the scheduler). Byte mode (no slots) stays for replay. | leader, no torch | `engine/tiers.Tiers` | `test_tiers.py`, `test_tiers_slots.py` |
 
 Glue: a `PoolMember` per process (today's `TierEngine` without the copy code) receives plans, maps slots to host
 addresses through the backends, asks `Placement` for pieces, runs `Mover` and the SSD I/O, and reports `TierDone`.
 The facade `BalancedKVPool` holds a `TierManager` on the leader and a `PoolMember` on each member. The scheduler
-sees only `lookup`, `load` -> `Handle` (with `eta_ns`), `store`, and the handle's completion. It never sees shares,
-slots or the ring.
+sees only `lookup` (with `wait_ns`), `load` -> `Handle` (with `eta_ns`), `store`, and the handle's completion. It
+never sees shares, slots or the ring.
 
 Proposed files: `ppimpl/kvpool/{__init__ (BalancedKVPool, KVViews, Hit, Handle), layout.py, placement.py,
 backends.py, mover.py, manager.py, member.py}`; `engine/tiers.py`, `runtime/tier_copy.py` and

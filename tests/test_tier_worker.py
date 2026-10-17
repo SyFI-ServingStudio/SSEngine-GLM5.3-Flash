@@ -9,6 +9,7 @@ import os
 import time
 from types import SimpleNamespace as NS
 
+import pytest
 import torch
 
 from ppimpl.config import BLOCK_TOKENS as B, TierConfig
@@ -22,16 +23,16 @@ from ppimpl.runtime.transport import TierBatch, decode_tier, encode
 from test_tier_copy import block_bytes, stages
 
 
-def engines(nslots: int | None = 40, ssd_slots: int | None = None, staging_slots: int = 0, ssd_dir=None):
+def engines(nslots: int | None = 40, ssd_slots: int | None = None, staging_slots: int = 0, ssd_dir=None, **ring):
     """Four engines over the fake stages, with DRAM arenas of `nslots` slots (SSD files of `ssd_slots`), and the
-    index's config."""
+    index's config. `ring`: TierConfig's hops / ring_depth / ring_chunk_slots."""
     views, ranges = stages()
     L = Layout(ranges, 0, 4)
 
     def gb(n):
         return None if n is None else (n + 0.5) * L.slot_bytes / 1e9
     tc = TierConfig(dram_gb=gb(nslots), ssd_gb=gb(ssd_slots), staging_gb=gb(staging_slots), slot_bytes=L.slot_bytes,
-                    state_slots=L.state_slots, ssd_dir=None if ssd_dir is None else str(ssd_dir))
+                    state_slots=L.state_slots, ssd_dir=None if ssd_dir is None else str(ssd_dir), **ring)
     cfg = NS(tiers=tc, num_stages=4, model="glm53", run_dir=str(ssd_dir))
     engs = []
     for q in range(4):
@@ -62,8 +63,14 @@ def scramble(views):
         v.view(torch.uint8).random_(0, 255) if v.dtype == torch.uint8 else v.normal_()
 
 
-def test_write_evict_read_back_is_byte_equal_and_growth_moves_only_new_blocks():
-    views, ranges, engs, tc = engines()
+RINGS = [dict(hops="direct"), dict(), dict(ring_depth=2, ring_chunk_slots=1), dict(ring_depth=1, ring_chunk_slots=2),
+         dict(ring_depth=4, ring_chunk_slots=1)]
+
+
+@pytest.mark.parametrize("ring", RINGS, ids=lambda r: "-".join(f"{k}={v}" for k, v in r.items()) or "default")
+def test_write_evict_read_back_is_byte_equal_and_growth_moves_only_new_blocks(ring):
+    views, ranges, engs, tc = engines(**ring)
+    assert (engs[0].ring is None) == (ring.get("hops") == "direct")
     t = Tiers(tc)
     assert t.tiers[0].num_slots == 40
     tokens = 2 * B + 77
@@ -123,7 +130,8 @@ def snapshot(views, ranges, kv, st):
     return block_bytes(views, ranges, kv, st)
 
 
-def test_ssd_demote_copy_up_and_staging_are_byte_equal(tmp_path):
+@pytest.mark.parametrize("ring", [dict(), dict(ring_depth=2, ring_chunk_slots=1)], ids=["default", "chunk1"])
+def test_ssd_demote_copy_up_and_staging_are_byte_equal(tmp_path, ring):
     """DRAM holds one 2-block context: Y's write demotes X to SSD (DRAM slots -> file); X's read copies it up
     through new DRAM slots (demoting Y) into other HBM blocks; Y then reads from SSD. SSD only: writes and reads
     through the staging arena. Every context byte-equal; the files are deleted at close."""
@@ -132,7 +140,7 @@ def test_ssd_demote_copy_up_and_staging_are_byte_equal(tmp_path):
     for dram in (None, "one"):
         d = tmp_path / str(dram)
         ss = Layout(stages()[1], 0, 4).state_slots
-        views, ranges, engs, tc = engines(None if dram is None else 2 + ss, 60, 30, d)   # DRAM: one context
+        views, ranges, engs, tc = engines(None if dram is None else 2 + ss, 60, 30, d, **ring)   # DRAM: one context
         t = Tiers(tc)
         want = {}
         for name, a in (("x", X), ("y", Y)):

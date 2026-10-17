@@ -13,8 +13,10 @@ Two hops (`TierConfig.hops`, default; TIERS.md §2.3: a copy engine writing host
 HBM runs at 31.7 GB/s against 47.6 into its own): the host side of a slot is contiguous, so a read copies each slot
 whole into a ring of chunks in GPU q's own HBM (one copy per slot, its own PCIe link), then one `cuMemcpyBatchAsync`
 scatters the chunk's pieces from the ring to the stages' KV over NVLink. Writes gather into the ring, then copy each
-slot to host. Each direction has its ring and two streams (host side, NVLink side); chunk k+1's host copy overlaps
-chunk k's scatter, and a ring chunk is reused once the copy that read it is done (events). `hops: direct` puts the
+slot to host. Each direction has its ring (`ring_depth` chunks of `ring_chunk_slots` slots; a context's state is cut
+into chunks like its KV) and two streams (host side, NVLink side); chunk k+1's host copy overlaps chunk k's scatter,
+and a ring chunk is reused once the copy that read it is done (events). The ring is allocated after the model, from
+the HBM the KV pool (the contract's 7,144 blocks) leaves; `attach` prints how much that is. `hops: direct` puts the
 pieces straight between host and the stages' KV (one batch per op).
 
 DRAM: one pinned arena per worker on its GPU's NUMA node: libnuma, MADV_HUGEPAGE, first touch on a side thread
@@ -51,7 +53,6 @@ from ppimpl.runtime.transport import Shutdown, TierBatch, TierDone, TierMove, Wo
 MADV_HUGEPAGE = 14
 REGISTER_CHUNK = 1 << 30      # cudaHostRegister per ~1 GiB of whole slots, from 4 threads
 TOUCH_THREADS = 4
-RING_CHUNKS = 4               # two hops: chunks per direction's device ring (TierConfig.ring_mb each)
 IO_THREADS = 8                # SSD preadv/pwritev pool per worker (fio: 8 psync threads, 53 GB/s on one file)
 FAKE_BLOCK_BYTES = 8576 * 5996  # one block over all stages (GLM-5.3 PP4: 4 x 1,499 B/token); a GPU's slot is 1/n of
                                 # it rounded up to 4 KiB (PP4: 12,857,344 B, the real balanced slot, TIERS.md §3)
@@ -255,18 +256,13 @@ class TierEngine:
         self.ssd_q = {"read": queue.Queue(), "write": queue.Queue()}   # SSD threads: (op, start)
         self._due: dict[str, float] = {}           # fake engine: when each direction's last op is done
         self.ring = None
+        self.ring_info = ""
         self._lock = threading.Lock()              # ring chunks and their order, across the submitting threads
         if tc.hops not in ("two", "direct"):
             raise ValueError(f"tiers.hops: {tc.hops!r} (two | direct)")
+        if tc.ring_depth < 1 or (tc.ring_chunk_slots is not None and tc.ring_chunk_slots < 1):
+            raise ValueError(f"tiers.ring_depth {tc.ring_depth}, ring_chunk_slots {tc.ring_chunk_slots}: >= 1")
         real = cfg.model != "fake"
-        if real and tc.hops == "two":              # before the model: the KV pool is sized from what is left
-            if self.cuda:
-                import torch
-                self.ring = torch.empty(2 * int(tc.ring_mb * 1e6), dtype=torch.uint8, device=device)
-                self.ring_ptr = self.ring.data_ptr()
-            else:
-                self.ring = np.zeros(2 * int(tc.ring_mb * 1e6) + 4096, dtype=np.uint8)
-                self.ring_ptr = self.ring.ctypes.data
         if tc.dram_gb and self.cuda and real:
             from ppimpl.runtime.cpus import _gpu_node
             self.dram = HostArena(int(tc.dram_gb * 1e9), _gpu_node(device.index), True)
@@ -303,15 +299,23 @@ class TierEngine:
             self.ssd = SsdFile(os.path.join(d, f"tier_ssd_gpu{self.stage}_{os.getpid()}.bin"),
                                tier_num_slots(self.tc.ssd_gb, sb) * sb, sb)
             self.pool = ThreadPoolExecutor(IO_THREADS, thread_name_prefix="tier-io")
-        if self.ring is not None:                  # per direction: RING_CHUNKS chunks of `chunk` slots
-            self.chunk = int(self.tc.ring_mb * 1e6) // (RING_CHUNKS * sb)
-            if self.chunk < max(1, self.layout.state_slots):
-                raise ValueError(f"tiers.ring_mb {self.tc.ring_mb}: chunks of {self.chunk} slots of {sb} B hold "
-                                 f"less than a context's state ({self.layout.state_slots} slots)")
-            half = int(self.tc.ring_mb * 1e6)
+        if self.tc.hops == "two":                  # per direction: `depth` chunks of `chunk` slots, after the KV pool
+            self.depth = self.tc.ring_depth
+            self.chunk = self.tc.ring_chunk_slots or max(1, self.layout.state_slots)
+            half = self.depth * self.chunk * sb
+            if self.cuda:
+                free = torch.cuda.mem_get_info(self.device)[0]
+                self.ring = torch.empty(2 * half, dtype=torch.uint8, device=self.device)
+                self.ring_ptr = self.ring.data_ptr()
+                self.ring_info = (f"two hops: ring 2 x {self.depth} x {self.chunk} slots = {2 * half / 1e9:.3f} GB "
+                                  f"of {free / 1e9:.2f} GB free HBM after the model and KV pool")
+            else:
+                self.ring = np.zeros(2 * half + 4096, dtype=np.uint8)
+                self.ring_ptr = self.ring.ctypes.data
+                self.ring_info = f"two hops: ring 2 x {self.depth} x {self.chunk} slots"
             self._ring_base = {"read": self.ring_ptr, "write": self.ring_ptr + half}
             self._ring_next = {"read": 0, "write": 0}
-            self._ring_free = {"read": [None] * RING_CHUNKS, "write": [None] * RING_CHUNKS}
+            self._ring_free = {"read": [None] * self.depth, "write": [None] * self.depth}
         if self.cuda:
             from vllm import _custom_ops
             self.swap = _custom_ops.swap_blocks_batch
@@ -323,8 +327,7 @@ class TierEngine:
               + (f"ssd {self.ssd.path} (O_DIRECT {self.ssd.direct}), staging {self.staging.nbytes / 1e9:.1f} GB, "
                  if self.ssd else "")
               + f"{len(self.opened)} peer allocations, "
-              + (f"two hops: ring {RING_CHUNKS} x {self.chunk} slots per direction" if self.ring is not None
-                 else "direct"), flush=True)
+              + (self.ring_info or "direct"), flush=True)
         return self.slot_bytes, self.layout.state_slots
 
     def start(self):
@@ -483,24 +486,29 @@ class TierEngine:
             src, dst = (host, dev) if d == "read" else (dev, host)
             return self._batch(d, src, dst, lens), int(lens.sum())
         sb, C = self.slot_bytes, self.chunk
-        chunks = [(i, min(i + C, b_hi)) for i in range(b_lo, b_hi, C)] + ([None] if sslots else [])
+        units = [("kv", i, min(i + C, b_hi)) for i in range(b_lo, b_hi, C)]
+        if len(sslots):                             # the state: its pieces over len(sslots) slots, cut like the KV
+            sdev, sroff, slen = L.pieces(kv, st, [], list(range(len(sslots))), 0, 0, 0)
+            sidx = sroff // sb                      # pieces never cross a slot (Layout splits them)
+            units += [("state", j, min(j + C, len(sslots))) for j in range(0, len(sslots), C)]
         ev, nbytes = None, 0
-        for ch in chunks:
-            if ready is not None:
-                ready(None if ch is None else ch[1])
-            if ch is None:                          # the state: its pieces over len(sslots) ring slots
-                n = len(sslots)
-                dev, roff, lens = L.pieces(kv, st, [], list(range(n)), 0, 0, 0)
-                hosts, hlen = [base + h * sb for h in sslots], sb
+        for kind, a, b in units:
+            n = b - a
+            if kind == "kv":
+                if ready is not None:
+                    ready(b)
+                dev, roff, lens = L.pieces(kv, st, list(range(n)), [], a, b, a)
+                hosts, hlen = [base + h * sb for h in slots[a - block_start:b - block_start]], L.kv_slot_bytes
             else:
-                i0, i1 = ch
-                n = i1 - i0
-                dev, roff, lens = L.pieces(kv, st, list(range(n)), [], i0, i1, i0)
-                hosts, hlen = [base + h * sb for h in slots[i0 - block_start:i1 - block_start]], L.kv_slot_bytes
+                if ready is not None:
+                    ready(None)
+                m = (sidx >= a) & (sidx < b)
+                dev, roff, lens = sdev[m], sroff[m] - a * sb, slen[m]
+                hosts, hlen = [base + h * sb for h in sslots[a:b]], sb
             nbytes += int(lens.sum())
             with self._lock:
                 pos = self._ring_next[d]
-                self._ring_next[d] = (pos + 1) % RING_CHUNKS
+                self._ring_next[d] = (pos + 1) % self.depth
                 rbase = self._ring_base[d] + pos * C * sb
                 rings = [rbase + k * sb for k in range(n)]
                 hl = np.full(n, hlen, dtype=np.int64)

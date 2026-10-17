@@ -4,6 +4,8 @@ One process drives the job's 4 GPUs with four `TierEngine`s (`ppimpl/runtime/tie
 its own GPU, over fake per-stage KV laid out like GLM-5.3 PP4 (DSA layers 3/2/3/3 at 545 B/token each, split 4:1
 between an MLA-like and an indexer-like view; KDA states 9/9/8/8 of 4 MiB + 144 KiB; a 2 KiB tail per DSA layer).
 Measured, every result one JSON line in OUT/tier_hop2.jsonl:
+- sweep: the ring's depth (2, 4) x chunk (1, 3 = the state, 4 slots) and direct, 32k / 128k / 512k contexts (4 / 16 /
+  62 blocks): read and write time (p50 of 10) and bytes equal;
 - write / read of a 512k context (62 blocks + state) on all 4 GPUs at once: GB/s per GPU (HBM bytes moved), and the
   bytes read back equal what was written;
 - GEMM 8192^3 BF16 on GPU 0 and GPU 1: alone, while all 4 GPUs read back to back, alone again;
@@ -70,22 +72,31 @@ def peer_access(n: int):
 
 
 class Probe:
-    def __init__(self, out: Path):
+    def __init__(self, out: Path, ring: dict):
         self.out, self.n = out, torch.cuda.device_count()
         assert self.n == 4, f"needs 4 GPUs, have {self.n}"
         self.f = open(out / "tier_hop2.jsonl", "a")
         peer_access(self.n)
         self.views, ranges = fake_kv(self.n)
+        self.ranges = ranges
         tier_worker.share_ranges = lambda stage, n, r: (ranges, [])     # one process: no IPC
-        tc = TierConfig(dram_gb=4.0, ssd_gb=None, hops="two")
+        self.eng = []
+        self.build(ring)
+        self.op = 0
+
+    def build(self, ring: dict):
+        """Four engines with TierConfig's ring settings `ring` (hops, ring_depth, ring_chunk_slots)."""
+        for e in self.eng:
+            e.close()
+        self.ring = ring
+        tc = TierConfig(dram_gb=4.0, ssd_gb=None, **ring)
         self.eng = []
         for g in range(self.n):
-            e = tier_worker.TierEngine(NS(tiers=tc, num_stages=self.n, model="glm53", run_dir=str(out)), g,
+            e = tier_worker.TierEngine(NS(tiers=tc, num_stages=self.n, model="glm53", run_dir=str(self.out)), g,
                                        torch.device("cuda", g), None)
-            e.attach(ranges)
+            e.attach(self.ranges)
             self.eng.append(e)
         self.state_slots = self.eng[0].layout.state_slots
-        self.op = 0
 
     def log(self, **rec):
         print(json.dumps(rec), flush=True)
@@ -93,14 +104,16 @@ class Probe:
         self.f.flush()
 
     def move(self, op: str, kv: list[int], st: list[int]) -> tuple[float, int]:
-        """One op of a CTX-block context on all GPUs at once (slots 0..CTX+state); (seconds, HBM bytes per GPU)."""
-        slots, sslots = list(range(CTX)), list(range(CTX, CTX + self.state_slots))
+        """One op of a len(kv)-block context on all GPUs at once (slots from 0, then the state); (seconds, HBM
+        bytes per GPU)."""
+        ctx = len(kv)
+        slots, sslots = list(range(ctx)), list(range(ctx, ctx + self.state_slots))
         for d in range(self.n):
             torch.cuda.synchronize(d)
         t0 = time.perf_counter()
         for e in self.eng:
             self.op += 1
-            e.submit(TierMove(self.op, op, "dram", None, 0, CTX, 0, kv, st, slots, sslots, [], []))
+            e.submit(TierMove(self.op, op, "dram", None, 0, ctx, 0, kv, st, slots, sslots, [], []))
         nbytes = 0
         for e in self.eng:
             _, ev, _, nb = e.q["read" if op == "read" else "write"].get()
@@ -108,22 +121,49 @@ class Probe:
             nbytes = nb
         return time.perf_counter() - t0, nbytes
 
-    def rw(self):
-        src_kv, src_st = list(range(1, 1 + CTX)), list(range(6))
-        dst_kv, dst_st = list(range(1 + CTX, 1 + 2 * CTX)), list(range(6, 12))
+    def rw(self, ctx: int | None = None, reps: int = 5, check: bool = True) -> dict:
+        ctx = ctx or CTX
+        src_kv, src_st = list(range(1, 1 + ctx)), list(range(6))
+        dst_kv, dst_st = list(range(1 + ctx, 1 + 2 * ctx)), list(range(6, 12))
         self.move("write", src_kv, src_st)                      # warm-up
         self.move("read", dst_kv, dst_st)
-        w = [self.move("write", src_kv, src_st) for _ in range(5)]
+        w = [self.move("write", src_kv, src_st) for _ in range(reps)]
         for v in self.views:                                    # destination scrambled, then read back
             v[dst_kv if v.shape[0] == NB else dst_st] = 0
-        r = [self.move("read", dst_kv, dst_st) for _ in range(5)]
-        equal = all(torch.equal(v[src_kv], v[dst_kv]) if v.shape[0] == NB else torch.equal(v[src_st], v[dst_st])
-                    for v in self.views)
+        r = [self.move("read", dst_kv, dst_st) for _ in range(reps)]
+        bad = []
+        for v, vr in zip(self.views, self.ranges):
+            if v.shape[0] == NB:
+                diff = (v[src_kv] != v[dst_kv]).any(dim=1).nonzero().flatten().tolist()
+            else:
+                diff = (v[src_st] != v[dst_st]).any(dim=1).nonzero().flatten().tolist()
+            if diff:
+                bad.append([vr.name, diff[:8], len(diff)])
+        equal = not bad
         best = lambda xs: max(nb / t for t, nb in xs) / 1e9
-        self.log(test="rw_512k", gpus=self.n, hbm_bytes_per_gpu=r[0][1], write_gbps_per_gpu=round(best(w), 1),
-                 read_gbps_per_gpu=round(best(r), 1), read_ms=[round(t * 1e3, 2) for t, _ in r],
-                 write_ms=[round(t * 1e3, 2) for t, _ in w], bytes_equal=equal)
-        assert equal, "two-hop round trip changed bytes"
+        med = lambda xs: sorted(t for t, _ in xs)[len(xs) // 2] * 1e3
+        rec = dict(test="rw", ring=self.ring, ctx_blocks=ctx, gpus=self.n, hbm_bytes_per_gpu=r[0][1],
+                   read_ms_p50=round(med(r), 3), write_ms_p50=round(med(w), 3),
+                   read_gbps_per_gpu=round(best(r), 1), write_gbps_per_gpu=round(best(w), 1),
+                   read_ms=[round(t * 1e3, 2) for t, _ in r], write_ms=[round(t * 1e3, 2) for t, _ in w],
+                   bytes_equal=equal, bad=bad[:40])
+        self.log(**rec)
+        if check:
+            assert equal, "two-hop round trip changed bytes"
+        return rec
+
+    def sweep(self):
+        """Ring depth x chunk (TIERS.md §3): 32k (4 blocks), 128k (16) and 512k (62) reads and writes, 10 each; the
+        default ring is rebuilt at the end. Byte equality is recorded per point, the probe stops after the sweep if
+        any point failed."""
+        default = self.ring
+        recs = []
+        for ring in [dict(hops="direct")] + [dict(ring_depth=d, ring_chunk_slots=c) for d in (2, 4) for c in (1, 3, 4)]:
+            self.build(ring)
+            for ctx in (4, 16, 62):
+                recs.append(self.rw(ctx, reps=10, check=False))
+        self.build(default)
+        assert all(r["bytes_equal"] for r in recs), "a ring setting changed bytes (see the rw lines)"
 
     def reads_loop(self, stop: threading.Event, done: list):
         dst_kv, dst_st = list(range(1 + CTX, 1 + 2 * CTX)), list(range(6, 12))
@@ -211,11 +251,19 @@ class Probe:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True)
+    ap.add_argument("--ctx", type=int, default=62, help="blocks per context (62: 512k)")
+    ap.add_argument("--tests", default="sweep,gemm,edges")
+    ap.add_argument("--hops", default="two")
+    ap.add_argument("--depth", type=int, default=2)
+    ap.add_argument("--chunk", type=int, help="slots per ring chunk (default: the state's slots)")
     a = ap.parse_args()
+    global CTX
+    CTX = a.ctx
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
-    p = Probe(out)
-    for t in ("rw", "gemm", "edges"):
+    ring = dict(hops=a.hops) if a.hops == "direct" else dict(ring_depth=a.depth, ring_chunk_slots=a.chunk)
+    p = Probe(out, ring)
+    for t in a.tests.split(","):
         t0 = time.time()
         getattr(p, t)()
         print(f"== {t} {time.time() - t0:.1f} s", flush=True)
