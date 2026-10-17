@@ -1,12 +1,13 @@
 """Worker side of the DRAM/SSD tiers (lanes/m6 TIERS.md §3-§6).
 
-Every worker moves its quarter of every tier op (balanced storage, `ppimpl/runtime/tier_copy.py`). The controller
-sends a `TierBatch` of ops whose dependencies are done to all four workers' tier sockets; a worker's tier thread
-builds the (device, host, length) pieces of its quarter over all four stages' KV (the other stages' KV opened by CUDA
-IPC at start-up), submits them as one `cuMemcpyBatchAsync` (vLLM `ops.swap_blocks_batch`) on its read stream (H2D)
-or write stream (D2H), and a done thread per stream reports `TierDone` when the copies completed. Copy engines only,
-no SMs, no wait on the compute stream: a write's blocks are final and pinned until it is done, a read's blocks are
-held by a request that computes only after all four `TierDone`s.
+Every worker moves its 1/n share (n = PP degree, `num_stages`) of every tier op (balanced storage,
+`ppimpl/runtime/tier_copy.py`). The controller sends a `TierBatch` of ops whose dependencies are done to all n
+workers' tier sockets; a worker's tier thread builds the (device, host, length) pieces of its share over all stages'
+KV (the other stages' KV opened by CUDA IPC at start-up), submits them as `cuMemcpyBatchAsync` calls (vLLM
+`ops.swap_blocks_batch`) on its read streams (host -> HBM) or write streams (HBM -> host), and a done thread per
+direction reports `TierDone` when the copies completed. Copy engines only, no SMs, no wait on the compute stream: a
+write's blocks are final and pinned until it is done, a read's blocks are held by a request that computes only after
+all n `TierDone`s.
 
 Two hops (`TierConfig.hops`, default; TIERS.md §2.3: a copy engine writing host data straight into the other GPUs'
 HBM runs at 31.7 GB/s against 47.6 into its own): the host side of a slot is contiguous, so a read copies each slot
@@ -52,7 +53,8 @@ REGISTER_CHUNK = 1 << 30      # cudaHostRegister per ~1 GiB of whole slots, from
 TOUCH_THREADS = 4
 RING_CHUNKS = 4               # two hops: chunks per direction's device ring (TierConfig.ring_mb each)
 IO_THREADS = 8                # SSD preadv/pwritev pool per worker (fio: 8 psync threads, 53 GB/s on one file)
-FAKE_SLOT_BYTES = 12_857_344  # 8,576 x 1,499 B rounded up to 4 KiB: the real balanced slot (TIERS.md §3)
+FAKE_BLOCK_BYTES = 8576 * 5996  # one block over all stages (GLM-5.3 PP4: 4 x 1,499 B/token); a GPU's slot is 1/n of
+                                # it rounded up to 4 KiB (PP4: 12,857,344 B, the real balanced slot, TIERS.md §3)
 
 
 def tier_num_slots(capacity_gb: float | None, slot_bytes: int) -> int:
@@ -274,7 +276,7 @@ class TierEngine:
     def attach(self, ranges: list[ViewRange] | None) -> tuple[int, int]:
         """`ranges`: this stage's KV ranges (`tier_copy.stage_ranges`), None for a model without KV (fake)."""
         if ranges is None:
-            self.slot_bytes = self.slot_bytes or FAKE_SLOT_BYTES
+            self.slot_bytes = self.slot_bytes or -(-FAKE_BLOCK_BYTES // self.n // 4096) * 4096
             return self.slot_bytes, self.tc.state_slots
         import torch
         self.real = True

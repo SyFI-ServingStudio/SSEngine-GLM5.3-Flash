@@ -1,15 +1,18 @@
-"""Which bytes a tier op moves on one GPU: balanced storage by quarters (lanes/m6 TIERS.md §3).
+"""Which bytes a tier op moves on one GPU: balanced storage, 1/n of every range per GPU (lanes/m6 TIERS.md §3).
+
+n is the PP degree (`parts` = `RunConfig.num_stages`), never fixed: PP4 has n = 4 (quarters), PP8 n = 8.
 
 Every byte range a context owns in HBM is one logical block's row of one cache view on one stage:
 - KV ranges: for each DSA layer, the MLA latent pages and the indexer K pages of one logical block (`kind="kv"`);
 - state ranges: for each KDA layer, its conv state and recurrent state rows of one state block, and for each DSA
   layer its kpool tail row (`kind="state"`, `group` = which of the request's 6 state blocks backs it).
-GPU q of `parts` moves quarter q of every range: bytes [q n / parts, (q + 1) n / parts). Its host side (a DRAM or
-staging slot, an SSD slot at the same offset in that GPU's file) packs its quarters of one block's KV ranges of all
+GPU q of `parts` moves share q of every range: bytes [q m / parts, (q + 1) m / parts) of a range of m bytes. Its host
+side (a DRAM or staging slot, an SSD slot at the same offset in that GPU's file) packs its shares of one block's KV
+ranges of all
 stages into one slot (page_first), and of the context's state ranges into `state_slots` slots. The slot ids come
 from the controller's index (`ppimpl/engine/tiers.py`) and are the same on every GPU.
 
-`Layout` is built once per worker from the four stages' ranges (device addresses valid in this worker's process:
+`Layout` is built once per worker from all stages' ranges (device addresses valid in this worker's process:
 its own and the other stages' KV, opened by CUDA IPC); `Layout.pieces` turns one op into (device address, host
 offset, length) arrays for one `cuMemcpyBatchAsync` (vLLM `ops.swap_blocks_batch`).
 """
@@ -42,7 +45,7 @@ def _round(n: int, a: int) -> int:
 class Layout:
     """GPU q's pieces of every range and where they sit in the host slots."""
 
-    def __init__(self, ranges: list[ViewRange], q: int, parts: int = 4, slot_bytes: int | None = None):
+    def __init__(self, ranges: list[ViewRange], q: int, parts: int, slot_bytes: int | None = None):
         self.q, self.parts = q, parts
         kv = sorted((r for r in ranges if r.kind == "kv"), key=lambda r: (r.stage, r.name))
         st = sorted((r for r in ranges if r.kind == "state"), key=lambda r: (r.stage, r.name))

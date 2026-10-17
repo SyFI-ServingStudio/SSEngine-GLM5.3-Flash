@@ -26,7 +26,7 @@ def engines(nslots: int | None = 40, ssd_slots: int | None = None, staging_slots
     """Four engines over the fake stages, with DRAM arenas of `nslots` slots (SSD files of `ssd_slots`), and the
     index's config."""
     views, ranges = stages()
-    L = Layout(ranges, 0)
+    L = Layout(ranges, 0, 4)
 
     def gb(n):
         return None if n is None else (n + 0.5) * L.slot_bytes / 1e9
@@ -131,7 +131,7 @@ def test_ssd_demote_copy_up_and_staging_are_byte_equal(tmp_path):
     X, Y = Allocation([1, 2], [3, 4, 5, 6, 7, 8]), Allocation([9, 10], [0, 9, 10, 11, 1, 2])
     for dram in (None, "one"):
         d = tmp_path / str(dram)
-        ss = Layout(stages()[1], 0).state_slots
+        ss = Layout(stages()[1], 0, 4).state_slots
         views, ranges, engs, tc = engines(None if dram is None else 2 + ss, 60, 30, d)   # DRAM: one context
         t = Tiers(tc)
         want = {}

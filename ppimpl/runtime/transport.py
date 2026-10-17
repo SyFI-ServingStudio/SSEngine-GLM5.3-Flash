@@ -41,7 +41,8 @@ class Shutdown(msgspec.Struct, tag=True):
 
 
 class TierMove(msgspec.Struct, array_like=True):
-    """One tier op as every worker runs it on its quarter (ppimpl/engine/tiers.py TierOp, lanes/m6 TIERS.md §3)."""
+    """One tier op as every worker runs it on its 1/n share, n = PP degree (ppimpl/engine/tiers.py TierOp,
+    lanes/m6 TIERS.md §3)."""
     op_id: int
     op: str                       # "write" HBM -> tier, "read" tier -> HBM, "demote" DRAM -> SSD
     tier: str                     # "dram" | "ssd": destination of write/demote, source of read
@@ -66,7 +67,7 @@ class TierBatch(msgspec.Struct, tag=True):
 class Ready(msgspec.Struct, tag=True):
     stage: int
     num_blocks: int               # blocks this stage can back with its KV tensors (incl. the null block)
-    slot_bytes: int = 0           # tiers: one tier slot (this GPU's quarter of one KV block of all stages)
+    slot_bytes: int = 0           # tiers: one tier slot (this GPU's 1/n of one KV block of all stages)
     state_slots: int = 0          # tiers: slots of one context's state
 
 

@@ -1,5 +1,5 @@
 """DRAM and SSD behind the HBM prefix cache (7_offloading.md §2). A pure index: the engine decides, the workers move
-the bytes. Every decision that moves bytes becomes a `TierOp` the controller sends to all four workers.
+the bytes. Every decision that moves bytes becomes a `TierOp` the controller sends to all n workers (n = PP degree).
 
 - **What a tier keeps.** One entry per session: its latest context, KV of the prompt's tokens plus the KDA state at
   the prompt's end. Each tier evicts on its own, least recently used first, a whole session at a time; a read
@@ -7,7 +7,7 @@ the bytes. Every decision that moves bytes becomes a `TierOp` the controller sen
 - **Accounting.** Bytes (`TierConfig.slot_bytes` None: replay, the target's own accounting, bytes per token plus one
   state per context) or slots (the server, lanes/m6 TIERS.md §3): a tier is a free list of fixed slots, one slot per
   KV block of the context plus `state_slots` for its state, the same slot ids on every GPU. Each GPU's slot holds its
-  quarter of that block on all four stages (balanced storage); own-stage storage is the same code with other sizes.
+  1/n of that block on all n stages (balanced storage); own-stage storage is the same code with other sizes.
 - **Writes.** When a round ends its context goes to the fastest tier (DRAM), only what the session's entry there does
   not already hold: the new tokens' KV and the new state. With `ssd_writes = "dram-evictions"` the SSD is written only
   with what DRAM evicts (or cannot hold), again only what SSD's entry lacks; a context SSD already holds whole is not

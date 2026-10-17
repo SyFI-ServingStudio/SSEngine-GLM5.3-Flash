@@ -1,6 +1,6 @@
-"""Balanced storage by quarters (ppimpl/runtime/tier_copy.py) on CPU: four fake stages' cache views in one process,
-four GPUs' host arenas. A context written out by all four quarters and read back into other blocks is byte-equal,
-every byte of every range is covered exactly once, and each GPU stores the same bytes per block."""
+"""Balanced storage, 1/n per GPU (ppimpl/runtime/tier_copy.py) on CPU: n fake stages' cache views in one process, n
+GPUs' host arenas, n = 4 (PP4) and 8 (PP8). A context written out by all n shares and read back into other blocks is
+byte-equal, every byte of every range is covered exactly once, and each GPU stores the same bytes per block."""
 
 import ctypes
 
@@ -35,8 +35,12 @@ def fake_stage(stage: int, dsa: int, kda: int, seed: int):
     return views, ranges
 
 
-def stages():
-    out = [fake_stage(s, d, k, s) for s, (d, k) in enumerate([(3, 9), (2, 9), (3, 8), (3, 8)])]
+SPLITS = {4: [(3, 9), (2, 9), (3, 8), (3, 8)],                      # (DSA, KDA) layers per stage, GLM-5.3-like
+          8: [(2, 4), (1, 5), (2, 4), (1, 5), (2, 4), (1, 4), (1, 4), (1, 4)]}
+
+
+def stages(n: int = 4):
+    out = [fake_stage(s, d, k, s) for s, (d, k) in enumerate(SPLITS[n])]
     return [v for vs, _ in out for v in vs], [r for _, rs in out for r in rs]
 
 
@@ -55,46 +59,48 @@ def copy(dev, host, lens, arena, to_host):
         ctypes.memmove(a, d, n) if to_host else ctypes.memmove(d, a, n)
 
 
-def test_layout_sizes_balanced_and_aligned():
-    _, ranges = stages()
-    lay = [Layout(ranges, q) for q in range(4)]
+@pytest.mark.parametrize("n", [4, 8])
+def test_layout_sizes_balanced_and_aligned(n):
+    _, ranges = stages(n)
+    lay = [Layout(ranges, q, n) for q in range(n)]
     kv_total = sum(r.nbytes for r in ranges if r.kind == "kv")
     st_total = sum(r.nbytes for r in ranges if r.kind == "state")
     assert all(x.slot_bytes == lay[0].slot_bytes for x in lay) and lay[0].slot_bytes % ALIGN == 0
-    assert sum(x.kv_len.sum() for x in lay) == kv_total                   # each byte once over the 4 GPUs
-    assert all(x.state_bytes * 4 == st_total for x in lay)
+    assert sum(x.kv_len.sum() for x in lay) == kv_total                   # each byte once over the n GPUs
+    assert all(x.state_bytes * n == st_total for x in lay)
     assert all(np.all(x.kv_dev % 16 == 0) and np.all(x.st_off % 16 == 0) for x in lay)
 
 
+@pytest.mark.parametrize("n", [4, 8])
 @pytest.mark.parametrize("slot_bytes", [None, 28672])           # state spans several slots, pieces split
-def test_write_then_read_into_other_blocks_is_byte_equal(slot_bytes):
-    views, ranges = stages()
-    lay = [Layout(ranges, q, slot_bytes=slot_bytes) for q in range(4)]
+def test_write_then_read_into_other_blocks_is_byte_equal(slot_bytes, n):
+    views, ranges = stages(n)
+    lay = [Layout(ranges, q, n, slot_bytes=slot_bytes) for q in range(n)]
     L = lay[0]
     tokens, BT = 3 * 100 + 37, 100                                     # 4 blocks of 100 tokens, last partial
     kv_src, st_src = [1, 5, 7, 2], [3, 4, 6, 8, 9, 10]
     want = block_bytes(views, ranges, kv_src, st_src)
-    n = -(-tokens // BT)
+    nb = -(-tokens // BT)
     slots, sslots = [4, 0, 2, 6], list(range(7, 7 + L.state_slots))
-    arenas = [np.zeros((7 + L.state_slots) * L.slot_bytes, dtype=np.uint8) for _ in range(4)]
+    arenas = [np.zeros((7 + L.state_slots) * L.slot_bytes, dtype=np.uint8) for _ in range(n)]
 
     class Op:
         token_start, token_end = 0, tokens
     b_lo, b_hi = op_blocks(Op, BT)
-    assert (b_lo, b_hi) == (0, n)
-    for q in range(4):
+    assert (b_lo, b_hi) == (0, nb)
+    for q in range(n):
         copy(*lay[q].pieces(kv_src, st_src, slots, sslots, b_lo, b_hi, 0), arenas[q], to_host=True)
     for v in views:                                                    # HBM scrambled
         v.view(torch.uint8).random_(0, 255) if v.dtype == torch.uint8 else v.normal_()
     kv_dst, st_dst = [9, 0 + 11, 3, 4], [1, 2, 5, 6, 7, 8]
-    for q in range(4):
+    for q in range(n):
         copy(*lay[q].pieces(kv_dst, st_dst, slots, sslots, b_lo, b_hi, 0), arenas[q], to_host=False)
     assert block_bytes(views, ranges, kv_dst, st_dst) == want
 
 
 def test_partial_range_moves_only_its_blocks():
     _, ranges = stages()
-    L = Layout(ranges, 1)
+    L = Layout(ranges, 1, 4)
     sslots = list(range(20, 20 + L.state_slots))
     dev, host, lens = L.pieces([1, 2, 3, 4], [1, 2, 3, 4, 5, 6], [10, 11], sslots, 2, 4, 2)
     nkv = len(L.kv_len)
