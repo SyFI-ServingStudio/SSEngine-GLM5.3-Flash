@@ -109,10 +109,13 @@ def report_socket(ctx: zmq.Context, report_addr: str) -> zmq.Socket:
 class GlooPipe:
     """CPU stages (tests, `device: cpu`): activations between neighbouring stages by gloo send/recv."""
 
-    def __init__(self, stage: int, num_stages: int, init_method: str):
-        self.stage, self.num_stages = stage, num_stages
+    EXIT_TAG = 1
+
+    def __init__(self, stage: int, num_stages: int, init_method: str, max_in_flight: int):
+        self.stage, self.num_stages, self.depth = stage, num_stages, max_in_flight
         dist.init_process_group("gloo", init_method=init_method, rank=stage, world_size=num_stages)
         self._sends: deque = deque()   # (work, tensor): keep sent tensors alive until the send completes
+        self.n_gate = 0                # stage 0: exits received
 
     def recv(self, num_tokens: int, width: int) -> torch.Tensor:
         buf = torch.empty(num_tokens, width, dtype=torch.bfloat16)
@@ -124,10 +127,30 @@ class GlooPipe:
             self._sends.popleft()
         self._sends.append((dist.isend(hidden, self.stage + 1), hidden))
 
+    def gate(self, n: int):
+        """Stage 0, before its n-th forward: block until the last stage has finished forward n - max_in_flight."""
+        while self.num_stages > 1 and self.n_gate < n - self.depth:
+            self._recv_exit()
+
+    def _recv_exit(self):
+        buf = torch.zeros(1, dtype=torch.int64)
+        dist.recv(buf, self.num_stages - 1, tag=self.EXIT_TAG)
+        self.n_gate += 1
+        assert int(buf) == self.n_gate, (int(buf), self.n_gate)
+
+    def exited(self, n: int):
+        if self.num_stages > 1:
+            t = torch.tensor([n], dtype=torch.int64)
+            self._sends.append((dist.isend(t, 0, tag=self.EXIT_TAG), t))
+
     def release(self):
         pass
 
-    def close(self):
+    def close(self, mbs: int = 0):
+        """`mbs`: microbatches this stage ran (stage 0 takes the exits it has not yet received)."""
+        if self.stage == 0:
+            while self.num_stages > 1 and self.n_gate < mbs:
+                self._recv_exit()
         for work, _ in self._sends:
             work.wait()
         self._sends.clear()
@@ -144,6 +167,10 @@ class CePipe:
     n counts microbatches from 1 on both sides, slot = (n-1) % K. ready[] lives on the receiver and free[] on the
     sender, so each side spins on its own memory and writes the other's over NVLink. Handles are exchanged once, at
     start-up, over gloo, which also serves the barriers.
+
+    The in-flight gate (ppimpl/runtime/dispatch.py) is one more flag word, on stage 0:
+      last stage, compute stream:  after forward n: write exits = n                              (exited())
+      stage 0, compute stream:     before forward n: wait exits >= n - max_in_flight              (gate())
     """
 
     RING_BYTES = 4 << 30   # K = max_in_flight + 1 slots of mb_tokens rows, fewer when that exceeds this (one-request
@@ -157,6 +184,7 @@ class CePipe:
         self.rows, self.width = max_rows, width
         self.slot_bytes = max_rows * width * 2
         self.K = max(1, min(max_in_flight + 1, self.RING_BYTES // self.slot_bytes))
+        self.depth = max_in_flight
         dist.init_process_group("gloo", init_method=init_method, rank=stage, world_size=num_stages)
         torch.cuda.set_device(device)
         torch.zeros(1, device=device)           # the primary context is current on this thread (driver calls)
@@ -173,6 +201,10 @@ class CePipe:
         if stage < num_stages - 1:              # sender: free[]
             self.free = self._alloc(256, zero=True)
             mine["free"] = self._export(self.free)
+        self.exits = self.peer_exits = None
+        if stage == 0 and num_stages > 1:       # the in-flight gate
+            self.exits = self._alloc(256, zero=True)
+            mine["exits"] = self._export(self.exits)
         torch.cuda.synchronize(device)
         allh = [None] * num_stages
         dist.all_gather_object(allh, mine)
@@ -181,6 +213,8 @@ class CePipe:
             self.peer_ready = self._open(allh[stage + 1]["ready"])
         if stage > 0:
             self.peer_free = self._open(allh[stage - 1]["free"])
+        if stage == num_stages - 1 and num_stages > 1:
+            self.peer_exits = self._open(allh[0]["exits"])
         dist.barrier()
         self.n_recv = self.n_send = 0
 
@@ -230,6 +264,17 @@ class CePipe:
         slot = (self.n_recv - 1) % self.K
         self._write(torch.cuda.current_stream(self.device), self.peer_free + 4 * slot, self.n_recv)
 
+    def gate(self, n: int):
+        """Stage 0, before its n-th forward (from 1): the stream waits until the last stage finished forward
+        n - max_in_flight."""
+        if self.exits is not None and n > self.depth:
+            self._wait(torch.cuda.current_stream(self.device), self.exits, n - self.depth)
+
+    def exited(self, n: int):
+        """Last stage, after its n-th forward is queued."""
+        if self.peer_exits is not None:
+            self._write(torch.cuda.current_stream(self.device), self.peer_exits, n)
+
     def send(self, hidden: torch.Tensor, after: "torch.cuda.Event | None"):
         assert hidden.is_contiguous() and hidden.dtype == torch.bfloat16 and hidden.shape[1] == self.width
         assert hidden.shape[0] <= self.rows, (hidden.shape, self.rows)
@@ -244,7 +289,7 @@ class CePipe:
         self._write(s, self.peer_ready + 4 * slot, self.n_send)
         hidden.record_stream(s)
 
-    def close(self):
+    def close(self, mbs: int = 0):
         torch.cuda.synchronize(self.device)
         dist.barrier()                          # peers are done with our ring and flags
         for ptr in self._remote:
@@ -266,4 +311,4 @@ def open_pipe(cfg, stage: int, device: torch.device, width: int):
     if device.type == "cuda":
         return CePipe(stage, cfg.num_stages, device, cfg.dist_init_method(), cfg.max_in_flight,
                       cfg.scheduler.mb_tokens, width)
-    return GlooPipe(stage, cfg.num_stages, cfg.dist_init_method())
+    return GlooPipe(stage, cfg.num_stages, cfg.dist_init_method(), cfg.max_in_flight)

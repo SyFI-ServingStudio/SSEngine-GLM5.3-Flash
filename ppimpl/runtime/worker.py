@@ -207,7 +207,7 @@ def run_worker(cfg: RunConfig, stage: int):   # makes inference tensors, which a
     plans = worker_sockets(ctx, cfg.plan_addr(stage))
     reporter = Reporter(ctx, cfg.report_addr(), device)
     reporter.start()
-    pipe, ok = None, False
+    pipe, ok, mbs = None, False, 0
     try:
         width = cfg.fake.hidden_width if cfg.model == "fake" else HIDDEN_WIDTH
         pipe = open_pipe(cfg, stage, device, width)   # before the model: its KV pool is sized from what is left
@@ -242,11 +242,14 @@ def run_worker(cfg: RunConfig, stage: int):   # makes inference tensors, which a
                 break
             plan: Plan = msg
             plan_ns = time.time_ns()
+            mbs += 1
             window.before(plan.mb_id)
             if cuda:
                 torch.cuda.nvtx.range_push(f"stage {stage} mb {plan.mb_id}")   # bench/nsys_trace.py attributes kernels
             clock.maybe_reanchor()
             hidden_in = pipe.recv(plan.num_tokens, model.hidden_width) if stage > 0 else None
+            if stage == 0:
+                pipe.gate(mbs)                        # at most max_in_flight in flight (ppimpl/runtime/dispatch.py)
             fwd_ns = time.time_ns()
             start = clock.mark()
             first_use.mb = plan.mb_id
@@ -256,6 +259,8 @@ def run_worker(cfg: RunConfig, stage: int):   # makes inference tensors, which a
             stamps.after()
             hostprof.after(plan.mb_id)
             end = clock.mark()
+            if last:
+                pipe.exited(mbs)
             host = (plan_ns, fwd_ns, time.time_ns())
             if hidden_in is not None:
                 pipe.release()                        # CePipe: the sender may reuse the slot once this forward ran
@@ -278,6 +283,6 @@ def run_worker(cfg: RunConfig, stage: int):   # makes inference tensors, which a
         reporter.q.put(None)
         reporter.join(timeout=10)
         if pipe is not None and ok:   # a failed stage exits without waiting on its peers
-            pipe.close()
+            pipe.close(mbs)
         plans.close(linger=0)
         ctx.term()
