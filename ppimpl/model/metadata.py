@@ -31,7 +31,7 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
-from ppimpl.model import kv_tensors
+from ppimpl.model import kda_conv, kv_tensors, pp_patch
 from ppimpl.model.pp_patch import (KPOOL_HEADS, TOPK_SEGMENTS, KdaPrefillMeta, KpoolHeads, kpool_heads_all,
                                    kpool_heads_suffix, make_kda_plan)
 
@@ -217,6 +217,11 @@ class StageMetadata:
         h_tail = cm_arrays(tail_table, np.full(T, PAD_SLOT_ID, dtype=np.int64))
         h_kda = [pk.add([chunks[i].state_blocks[g] for i in order], torch.int64)
                  for g in range(len(self.kv.kda_groups))]
+        kda_seqs = [[(int(qsl[r]), int(qsl[r + 1]), chunks[i].state_blocks[g], bool(starts[r] > 0))
+                     for r, i in enumerate(order)] for g in range(len(self.kv.kda_groups))]
+        h_conv = ([tuple(pk.add(a, torch.int32) for a in kda_conv.tables(sq)) for sq in kda_seqs]
+                  if pp_patch.FAST["kda_conv"] else None)
+        h_init = pk.add(starts > 0, torch.int32) if pp_patch.FAST["kda_state_copy"] else None
         tok = (np.concatenate([np.asarray(chunks[i].token_ids, dtype=np.int64) for i in order]) if with_tokens
                else None)
         h_tok = None if tok is None else pk.add(tok, torch.int64)
@@ -271,11 +276,10 @@ class StageMetadata:
         kda_plan = self._kda_plan(offsets)
         any_initial = bool((starts > 0).any())
         for g, names in enumerate(self.kv.kda_groups):
-            blocks = [chunks[i].state_blocks[g] for i in order]
             meta = KdaPrefillMeta(
-                num_tokens=T,
-                seqs=[(int(qsl[r]), int(qsl[r + 1]), blocks[r], bool(starts[r] > 0)) for r in range(R)],
-                slots=pk.dev(h_kda[g]), plan=kda_plan, any_initial=any_initial)
+                num_tokens=T, seqs=kda_seqs[g], slots=pk.dev(h_kda[g]), plan=kda_plan, any_initial=any_initial,
+                conv_tabs=None if h_conv is None else tuple(pk.dev(h) for h in h_conv[g]),
+                inits=None if h_init is None else pk.dev(h_init))
             for name in names:
                 attn[name] = meta
 

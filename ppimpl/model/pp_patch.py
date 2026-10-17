@@ -20,6 +20,8 @@ kernel a stage launches must be the manifest's for its position, with no fallbac
 | `install_decode_topk_canon` | glm5next `sparse_indexer.get_indexer_topk` (vLLM), process-wide | the indexer's decode top-k (1-token chunks) returns its set in a varying order: `topk_canon` fixes set and order, as on the prefill path | `test_model_gpu.py::test_decode_topk_canonical`; `bench/margin.py --trace-topk` (issues.md, job 7522) |
 | `install_kpool_unaligned` | glm5next `sparse_indexer._kpool_compress_insert` and `kpool_compress.kpool_seed_tail_cache` (vLLM), process-wide | a chunk may start inside a 4-token indexer pool (prefix hits resume at the kept prompt's length); the fork's insert assumes pool-aligned starts. The straddling pool is written from the tail ring + batch rows with the same kernel | `test_kpool_cpu.py` (reference ops); `test_kpool_gpu.py` (fork ops, cache bytes bitwise vs unsplit) |
 | `install_kda_split_heads` | `flashinfer.kda_kernels.persistent.forward._split_heads`, process-wide | host time: the KDA plan's head-split search (a Python LPT simulation over a 10 x 10 grid, 20-35 ms per multi-request microbatch, up to 110 ms; stage 0 waited for it, 1.1 s/min at good N=400, 7895) in C++ (`kda_schedule.py`); same schedule | `test_kda_schedule_cpu.py` (equal to the Python search on random microbatches, and the whole plan) |
+| `FAST["kda_conv"]` (`kda_conv`) | the per-sequence Dao causal-conv1d calls in `kda_prefill_forward` (ours) | one conv launch and one state launch per layer instead of 3 per sequence: ~111 us per layer at 4,096 rows vs Dao 111-226 by sequence count (job 7917) | `test_kda_conv_gpu.py::test_conv_qkv_bitwise` (q, k, v, conv states bitwise) |
+| `FAST["kda_state_copy"]` (`kda_state`) | torch `index_select` / `zero_` / `index_copy_` of the KDA recurrent states in `kda_prefill_forward` (ours) | wide-copy kernels: 5.1 + 4.4 us per layer vs 12.7 + 9.4 at 2 sequences (job 7918) | `test_kda_conv_gpu.py::test_kda_state_gather_scatter_bitwise` |
 | `install_kpool_expand` | glm5next `sparse_indexer.sparse_attn_indexer_kpool` (vLLM), process-wide: its source with three edits (`kpool_fast._EDITS`) | host and GPU time: the prefill pool-to-token expansion in one kernel written into the top-k buffer, in place of two casts, a 128-column expand and a copy (stage 2 at 4,096 rows: 0.21 ms per microbatch, job 7787); same values (index arithmetic) | `test_kpool_gpu.py::test_expand_into_matches_the_fork_bitwise`; `test_kpool_cpu.py::test_kpool_expand_installs` (a fork change to the edited lines fails at start-up) |
 | `install_indexer_split` | `DeepseekV32IndexerMetadataBuilder._split_indexer_prefill_chunks` (vLLM), process-wide | the indexer logits of one prefill go out in calls of at most 2 GiB, query rows in multiples of 512: DeepGEMM's `fp8_mqa_logits` costs the same per 512 query rows at long context, so the fork's greedy split (1,022 + 2 rows at 512k + 1k) paid a whole second call for 2 rows (issues.md, "Long context") | `test_indexer_split_cpu.py`; nsys at 512k |
 | `install_sparse_mla_split` | `flashinfer.decode.trtllm_batch_decode_with_kv_cache_mla`, process-wide | a launch over 32,768 rows returns without doing the work on B200; split as the target does (issues.md, "M2 results") | M2 `dsa_moe` at 64k/128k |
@@ -191,6 +193,8 @@ class KdaPrefillMeta:
     slots: torch.Tensor          # int64 [N] state blocks, on device
     plan: tuple                  # FlashInfer persistent KDA work plan for these sequence offsets
     any_initial: bool
+    conv_tabs: tuple | None = None   # kda_conv.tables on device (FAST["kda_conv"]), else the per-sequence Dao calls
+    inits: torch.Tensor | None = None  # int32 [N] has initial state, on device (FAST["kda_state_copy"]), else torch ops
 
 
 def make_kda_plan(offsets: list[int], num_heads: int, device: torch.device) -> tuple:
@@ -204,13 +208,16 @@ def kda_prefill_forward(self, qkv_proj_states, g1, beta, core_attn_out) -> None:
 
     Short conv: Dao causal-conv1d channel-last, one launch per sequence over its rows of the packed q|k|v, BF16
     merged weight, the request's conv state passed as initial state (continuation chunks) and its final state
-    written in place. Recurrence: FlashInfer persistent KDA (gate and beta sigmoid in kernel, lower bound -5) over
+    written in place; or, with FAST["kda_conv"], `kda_conv.conv_qkv` (two launches per layer, bitwise the same q, k,
+    v and states). Recurrence: FlashInfer persistent KDA (gate and beta sigmoid in kernel, lower bound -5) over
     an FP32 [N, H, 128, 128] state gathered from the requests' state blocks (zero for a fresh request) and
-    scattered back.
+    scattered back (with FAST["kda_state_copy"], by `kda_state`'s wide-copy kernels instead of torch's ops).
     """
     import causal_conv1d_cuda
     from flashinfer.kda_kernels.persistent.forward import fwd
     from vllm.forward_context import get_forward_context
+
+    from ppimpl.model import kda_conv, kda_state
 
     meta = get_forward_context().attn_metadata[self.prefix]
     assert isinstance(meta, KdaPrefillMeta)
@@ -221,20 +228,26 @@ def kda_prefill_forward(self, qkv_proj_states, g1, beta, core_attn_out) -> None:
     P = H * D
     # q, k, v convolved into three contiguous [T, H*D] buffers (FlashInfer takes contiguous q/k/v): one launch per
     # sequence and per q/k/v instead of one over the packed q|k|v plus three copies (M2: 3 x 0.3 ms at 16k)
-    q, k, v = (torch.empty(T, P, dtype=qkv.dtype, device=qkv.device) for _ in range(3))
     w = self._pp_conv_weight
-    for s, e, slot, has_init in meta.seqs:
-        state = conv_state[slot]                        # [W-1, 3P], SD layout
-        init_all = state.clone() if has_init else None
-        for j, out in enumerate((q, k, v)):
-            cols = slice(j * P, (j + 1) * P)
-            init = None if init_all is None else init_all[:, cols].t().unsqueeze(0)
-            causal_conv1d_cuda.causal_conv1d_fwd(qkv[s:e, cols].t().unsqueeze(0), w[cols], None, None, init,
-                                                 out[s:e].t().unsqueeze(0), state[:, cols].t().unsqueeze(0), True)
+    if meta.conv_tabs is not None:
+        q, k, v = kda_conv.conv_qkv(qkv, w, conv_state, meta.conv_tabs[0], meta.conv_tabs[1], P)
+    else:
+        q, k, v = (torch.empty(T, P, dtype=qkv.dtype, device=qkv.device) for _ in range(3))
+        for s, e, slot, has_init in meta.seqs:
+            state = conv_state[slot]                        # [W-1, 3P], SD layout
+            init_all = state.clone() if has_init else None
+            for j, out in enumerate((q, k, v)):
+                cols = slice(j * P, (j + 1) * P)
+                init = None if init_all is None else init_all[:, cols].t().unsqueeze(0)
+                causal_conv1d_cuda.causal_conv1d_fwd(qkv[s:e, cols].t().unsqueeze(0), w[cols], None, None, init,
+                                                     out[s:e].t().unsqueeze(0), state[:, cols].t().unsqueeze(0),
+                                                     True)
     q, k, v = (t.view(1, T, H, D) for t in (q, k, v))
     g = g1[:, :T]
     b = beta[:, :T].contiguous()
-    if meta.any_initial:
+    if meta.inits is not None:
+        state = kda_state.gather(rec_state, meta.slots, meta.inits)
+    elif meta.any_initial:
         state = rec_state.index_select(0, meta.slots)
         for i, (_, _, _, has_init) in enumerate(meta.seqs):
             if not has_init:
@@ -243,7 +256,10 @@ def kda_prefill_forward(self, qkv_proj_states, g1, beta, core_attn_out) -> None:
         state = torch.zeros(len(meta.seqs), H, D, D, dtype=torch.float32, device=qkv.device)
     fwd(q, k, v, g, b, D ** -0.5, core_attn_out[:, :T], self._pp_a_log, self.dt_bias, self.kda_lower_bound,
         initial_state=state, final_state=state, cu_seqlens=meta.plan[0], plan=meta.plan)
-    rec_state.index_copy_(0, meta.slots, state)
+    if meta.inits is not None:
+        kda_state.scatter(state, meta.slots, rec_state)
+    else:
+        rec_state.index_copy_(0, meta.slots, state)
 
 
 def route_kda(attn) -> None:
@@ -538,7 +554,7 @@ def kpool_seed_tail_cache(tail_kv_cache, key, gate_score, tslot, kpool, head_dim
 
 # Speed-only overrides that keep every value (bitwise): on in the engine; bench/stage_bench.py --off turns one off in
 # its process, before the model is built, for an A/B at the same clock.
-FAST = {"kpool_expand": True, "kda_split_heads": True}
+FAST = {"kpool_expand": True, "kda_split_heads": True, "kda_conv": False, "kda_state_copy": False}
 
 
 def install_kda_split_heads() -> None:
