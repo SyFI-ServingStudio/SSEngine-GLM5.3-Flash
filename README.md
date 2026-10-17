@@ -67,7 +67,7 @@ export HF_HOME=/path/to/hf          # default ~/.cache/huggingface
 | `PPIMPL_ENWIK9` | `third_party/enwik9` | the prompt corpus |
 | `PPIMPL_PYTHON` | `.venv/bin/python` | the interpreter the job scripts use |
 | `PPIMPL_TMP` | `$TMPDIR`, else `/tmp` | parent of each job's short `TMPDIR` |
-| `PPIMPL_REQ_FRONTEND_BIN` | `build/req-frontend/release/session_runner` (built on first use) | the client binary |
+| `PPIMPL_REQ_FRONTEND` | `third_party/req-frontend` | req-frontend's checkout at 8723d90 or later (the session slot release; a run fails on an older or modified checkout). Its `session_runner` is built into `build/req-frontend/release/` on first use and rebuilt when the checkout's commit changes; `run.json` records its source, commit and sha256 |
 | `PPIMPL_FI_TACTICS` | `ppimpl/data/flashinfer_tactics_b200.json` | the tuned FlashInfer tactics (`bench/tune_tactics.py`) |
 
 **Run one milestone check end to end**: M3 (`4_iteration.md`), one 1k-token request through the 4-stage server,

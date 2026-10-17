@@ -64,7 +64,8 @@ def test_graph_replay_matches_eager(stage):
                    check=True, cwd=LANE)
     r = json.loads(out.read_text())
     keys = ("replay_eq_eager_padded", "eager_repeat_eq", "pad_independent")
-    assert r["pass"], [c for c in r["cases"] if not all(c[k] for k in keys)]
+    bad = [(c["bucket"], c["kind"], [k for k in keys if not c[k]]) for c in r["cases"] if not all(c[k] for k in keys)]
+    assert r["pass"], f"(bucket, kind, failed keys): {bad}"
 
 
 @pytest.mark.parametrize("rows,width,two_requests", [(8192, 2048, False), (32768, 8192, False), (300, 700, True),

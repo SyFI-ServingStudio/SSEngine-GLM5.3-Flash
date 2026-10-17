@@ -87,7 +87,8 @@ def main() -> None:
             e.hidden[T:].normal_(generator=gen)
         with model._graph_context(b, e):
             e.capture.replay()
-        return tuple(None if t is None else t[:T].clone() for t in e.out)
+            out = e.out if model.last else (pp_patch.edge_send(model.layers[-1], *e.out),)   # as _run_graph
+        return tuple(None if t is None else t[:T].clone() for t in out)
 
     def head_tokens(b, out):
         return model.output_head(b, *out).tolist()

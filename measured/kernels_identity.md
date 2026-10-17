@@ -106,6 +106,8 @@ callable and arguments the fork uses.
    callable. The calls are listed in `ppimpl/kernels.py`; `kernels_patched/` is used only if a kernel itself must
    change.
    - 4: Dao `causal_conv1d_fn`, channel-last, one launch per sequence, BF16 weight, keeping the conv-state write.
+     Since M5, `ppimpl.model.kda_conv` computes the same q, k, v and conv states bitwise, in one launch per layer
+     (job 7927: ~78 us at 4,096 rows vs Dao 111-225; `tests/test_kda_conv_gpu.py`).
    - 5: FlashInfer `recurrent_kda(backend="cute-dsl-persistent")`. The venv now carries the rows' FlashInfer nightly
      0.7.2.dev20261008 (73b63f88) with cutlass-dsl 4.8.0 (`ENV.md`). MoE (30), `mm_fp4` (9, 11) and sparse MLA (25)
      run on that FlashInfer too, so they are checked against their rows in this env; 25 is no longer counted as

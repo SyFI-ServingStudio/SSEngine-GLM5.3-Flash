@@ -17,7 +17,6 @@ non-negative JSON ints below 2**31 and commas inside the brackets; the remainder
 from __future__ import annotations
 
 import concurrent.futures
-import os
 import warnings
 
 import msgspec
@@ -28,7 +27,6 @@ try:
 except ImportError:          # the old path only
     numba = None
 
-FAST = os.environ.get("PPIMPL_FAST_IDS", "1") != "0"   # 0: always the old path (A/B of the intake phases)
 KEY = b'"token_ids"'
 PARALLEL_FROM = 1 << 18      # bytes of array from which the parse is split over threads
 PARSE_THREADS = 6           # the event loop + a pool of 5 (512k over a socket: first byte -> parsed 3.0 ms; pool of 3: 4.0)
@@ -117,7 +115,7 @@ def _parse_array(raw: bytes, start: int) -> tuple[np.ndarray, int] | None:
 
 def parse_fast(raw: bytes, rest_decoder: msgspec.json.Decoder):
     """(request with token_ids == [], int32 ids) or None (use the old path)."""
-    if numba is None or not FAST:
+    if numba is None:
         return None
     i = raw.find(KEY)
     if i <= 0 or raw[i - 1] == 0x5C:
@@ -241,7 +239,7 @@ class StreamParser:
     def __init__(self, rest_decoder: msgspec.json.Decoder):
         self.rest_decoder = rest_decoder
         self.chunks: list[bytes] = []
-        self.ok = numba is not None and FAST
+        self.ok = numba is not None
         self.pre = b""             # before the array (state 0)
         self.head = None           # the body up to the array's `[`
         self.achunks: list[bytes] = []   # from just after the `[` on

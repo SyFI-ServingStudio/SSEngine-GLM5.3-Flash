@@ -63,7 +63,7 @@ class StageDone(msgspec.Struct):
     start_ns: int              # GPU start of the stage's first kernel for this mb (CUDA event, host-clock aligned)
     end_ns: int                # GPU end of its last kernel, before the send
     tokens: list[tuple[str, int]] | None   # stage 3 only: (req_id, greedy token) per is_last chunk
-    host_ns: tuple[int, int, int] | None   # host clock: plan received, prepare called, run returned
+    host_ns: tuple[int, int, int, int] | None   # host clock: plan received, prepare called, start mark, run returned
 ```
 
 Clock: each worker aligns its CUDA events to `time.time_ns()` once at startup (record an event, synchronize, read the
@@ -106,8 +106,12 @@ against it.
 ## Worker loop
 
 For each plan: `prepare` (while the GPU still runs earlier microbatches) → (stage > 0) receive `[T, hidden_width]`
-from stage s-1 / (stage 0) the gate → record start event → `run` → record end event → (stage < 3) send to stage s+1 on a separate stream so the next plan's compute is not blocked by the send →
-report `StageDone` once the end event has completed (a reporter thread, not a sync on the compute stream).
+from stage s-1 / (stage 0) the gate → record start event → `run` → record end event → (stage < 3) send to stage s+1
+on a separate stream so the next plan's compute is not blocked by the send → report `StageDone` once the end event
+has completed (a reporter thread, not a sync on the compute stream). `StageDone.host_ns` carries the host times of
+plan received, prepare called, ready (prepare done and the stream waits queued, before the start mark) and run
+returned; the controller writes them to `worker_host.jsonl` (`plan_ms`, `forward_ms`, `ready_ms`, `return_ms`), so
+a microbatch's start can be split into delivery, prepare and the wait for the GPU.
 
 Limit on how far ahead a stage host can launch: CUDA holds at most ~1,024 launched-but-unfinished kernels per
 context (measured, job 7091: every blocking launch had 1,025–1,030 kernels pending). After that the host blocks

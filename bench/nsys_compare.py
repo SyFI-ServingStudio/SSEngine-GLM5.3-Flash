@@ -25,7 +25,7 @@ CLASSES = [   # (class, substrings of the short name)
     ("moe_nvfp4", ("bmm_", "finalizeKernel", "routing", "act_and_mul", "cvt_fp16_to_fp4")),
     ("sparse_mla", ("fmha", "sparse_mla", "concat_and_cache_mla")),
     ("dsa_indexer", ("mqa_logits", "topK", "fwht", "_kpool", "_expand_pools", "indexer")),
-    ("kda", ("pkd", "causal_conv1d", "layer_norm_gated", "kda", "chunk_")),
+    ("kda", ("pkd", "causal_conv1d", "kda_conv_", "layer_norm_gated", "kda", "chunk_")),
     ("mhc", ("mhc", "hc_prenorm")),
     ("dense_gemm", ("nvjet", "cutlass3x", "gemm")),
     ("elementwise", ("elementwise", "copy", "gather", "index", "quant", "Fill", "norm", "reduce", "cat")),

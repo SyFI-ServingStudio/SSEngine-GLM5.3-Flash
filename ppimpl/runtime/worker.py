@@ -271,6 +271,7 @@ def run_worker(cfg: RunConfig, stage: int):   # makes inference tensors, which a
             hidden_in = pipe.recv(plan.num_tokens, model.hidden_width) if stage > 0 else None
             if stage == 0:
                 pipe.gate(mbs)                        # at most max_in_flight in flight (ppimpl/runtime/dispatch.py)
+            ready_ns = time.time_ns()                 # prepared, stream waits queued: the GPU may start from here
             start = clock.mark()
             out = model.run(batch, hidden_in)
             del batch
@@ -279,7 +280,7 @@ def run_worker(cfg: RunConfig, stage: int):   # makes inference tensors, which a
             end = clock.mark()
             if last:
                 pipe.exited(mbs)
-            host = (plan_ns, fwd_ns, time.time_ns())
+            host = (plan_ns, fwd_ns, ready_ns, time.time_ns())
             if hidden_in is not None:
                 pipe.release()                        # CePipe: the sender may reuse the slot once this forward ran
             del hidden_in

@@ -32,7 +32,8 @@ cited here are in git history at `7598487`. Tracked: the md tables and the hando
 
 ## Implementation choice: KDA metadata without vLLM's GDN builder (M2/M3)
 
-- `Glm5NextLinearAttention._forward` is replaced (Dao conv + FlashInfer persistent KDA, configs 4/5), so the GDN
+- `Glm5NextLinearAttention._forward` is replaced (the short conv, bitwise Dao's, and FlashInfer persistent KDA,
+  configs 4/5), so the GDN
   metadata builder that only that method reads is not run. Our `KdaPrefillMeta` carries the sequences, state blocks
   and the FlashInfer work plan (built once per distinct sequence offsets on a side stream: FlashInfer's
   `recurrent_kda` wrapper calls `cu_seqlens.tolist()`, a host sync, so pp-impl calls the persistent `fwd` directly).
@@ -615,3 +616,46 @@ rewrites it to -1, so no path reads or keeps it; valid input gives the same resu
 warm-up and 33-bucket capture with the smoke's server config passed one at a time (38-40 s per stage), and the topk
 GPU tests pass with a new out-of-row case. Served rows never carry NaN logits; the guard is a bound, not a fix of
 the data.
+
+## KDA short conv and state copies: one launch per layer (M5, jobs 7910-7934) — done
+- The prefill ran Dao causal-conv1d once per sequence and per q / k / v (3 launches per sequence and layer) and
+  torch `index_select` / `zero_` / `index_copy_` for the recurrent states. `ppimpl/model/kda_conv.py` does the conv
+  of the whole microbatch in one launch plus one for the conv states, with Dao's arithmetic in inline PTX so q, k, v
+  and the states are bitwise equal; `kda_state.py` gathers and scatters the states with wide copies, bitwise.
+- Per layer at 4,096 rows (B200, alone): conv ~78 us whatever the sequence count vs Dao 111 (1 sequence), 137 (2),
+  166 (4), 225 (7) (job 7927; earlier versions 171 us, 7910, and 111 us, 7917); state gather + scatter 5.1 + 4.4 us
+  vs 12.7 + 9.4 in the serving layout (7918).
+- In sessions (7933 N=400 and 7934 N=200 vs 7900 / 7902, conv v2 with the other overrides): 4,096-row microbatches
+  0.1-0.4 ms faster on every stage, 0.4-1.0 ms with 4 or more sequences. At N=400 the overload phase runs at the
+  power cap, so the saving goes to a lower clock and throughput does not move (`notes.md` 2026-10-17); N=200 TTFT
+  0.114 / 0.219 / 1.014 s vs 7902's 0.12 / 0.22 / 1.03.
+- Unconditional since the tidy (no switch); the Dao calls remain the reference in `bench/kda_conv_bench.py` and
+  `tests/test_kda_conv_gpu.py`.
+
+## Manifest trace check sent kernels to the wrong configs and never passed (M1-M5, jobs 7656, 7940) — fixed
+- `check_trace` gave each traced kernel name to the first config whose regex matched, and several regexes were broader
+  than the kernel they meant. The GPU test (`test_chain_token_matches_vllm_and_manifest`) failed in every recorded
+  run with the same summary on stages 0-2 (7656 on lane-m4, 7940 after the tidy), so no earlier result rests on the
+  check passing. What its per-config matches claimed:
+  - 20/21 (indexer top-k): config 20's `(?i)topk` matched the MoE routing kernel (`TopKExpertSelect` in its template
+    name) on every MoE stage, so 20 always showed as matched and 21 was then skipped. The check never showed which
+    top-k ran; `pp_patch`'s "manifest check (configs 20/21)" was not evidence.
+  - 5 (KDA chunk prefill): matched by the `kda_conv` kernels (`(?i)kda`) and by sparse MLA's `fmhaSm100...Persistent`
+    (`(?i)persistent`); the real kernel, FlashInfer's persistent `_pkd`, went to 9/11 (`(?i)cutlass`). The FlashKDA
+    fallback pattern was checked, so a switch to FlashKDA would still have shown as forbidden.
+  - 25 was always missing (its kernel went to 5), 33 too (`mhc_post_tilelang` went to 7 by `(?i)mhc`), 24 (the fork
+    renamed the kernel to `sparse_mla_index_remap_kernel`), 10 and 29 (the NVFP4 quant kernel went to 8; 29 runs
+    the linear-scale `cvt_fp16_to_fp4_sf_major`), 11 (`mm_fp4` went to 9), 13 (the Triton function is named
+    `kernel`).
+  - 4 (`kda_conv_*`) and 7 (`mega_mhc`) were matched by their own kernels: those claims hold.
+  - The unknowns were glue the targets price (`2_kernels.md` §6): `scaled_fp8_quant` (q_fp8_quant), the cub scan of
+    the index plumbing, and `index_select` of the last rows before the final hc_post / lm_head (stage 3).
+- Now (`ppimpl/kernels.py`): each regex names the kernel itself (read off the 7940 traces, the 7885 stage-2 trace at
+  45k + 10k tokens for 19 and 21, DeepSelect's symbol table for 20); a kernel that serves two positions counts for
+  both (8/10 swizzled quant, 9/11 `mm_fp4`); config 13 is `by_name=False`: its candidate `kernel` (also the name of
+  other Triton kernels in the fork, e.g. the indexer's chunk-metadata builder) is listed as "unverifiable by name"
+  and never matched, and 13 is missing when no candidate ran. The three glue kernels above are in `GLUE` by name.
+- Re-check of 7940's kernel lists with these rules: no unknown, forbidden or missing config on any stage; 13
+  listed unverifiable. 7885's stage 2: 19 and 21 matched (`sm100_mqa_logits`, `topKPerRowPrefill`). No trace has
+  shown DeepSelect yet: the chain test is 1,024 tokens, where the indexer does not run (19-21 optional).
+- Rerun 7950 (4 GPUs, chain test at 1,024 tokens): passed; `trace_check` ok on stages 0-3, config 13 listed unverifiable.

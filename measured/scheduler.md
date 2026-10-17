@@ -59,13 +59,50 @@ Stage time / fit by microbatch tokens 0–255 / 256–1023 / 1024–8191 / 8192 
 ## Notes
 
 ### Where things stand (newest first; details in the sections below)
-- Dispatch: 4 in flight + one queued plan + pacing 2 ms (1a5c8e7), with later stages using stage 0's rate for a size
-  they have not seen yet (37b4d74). Cap 4 (ead8d9a) was tried and reverted.
-- Session runs before 16:11 PDT 2026-10-16 ran with the old req-frontend, which held a session's slot through its last
-  tool wait ("slot held, old client" in the tables): about −2.3% of sessions at N=400, ≤0.6% at N=500.
+- Targets are now v2-realistic (`third_party/handoff_v2_realistic`); they cover the force-schedule ("good") step only,
+  so the generated tables above still show the v2 runs. The v2-realistic runs are in the next section.
+- Dispatch: the project rule (`DispatchRule`, a8b80bc): a plan forms 3 ms (`form_lead_ms`) before its predicted host
+  time ahead of its projected stage-0 start, and stage 0's GPU gate holds 4 in flight. The queue-one + pacing rule
+  below was removed after the 7900 A/B (52e4ad4).
+- Engine: the speed-only overrides validated in 7932-7934 are unconditional (`ppimpl/model/pp_patch.py` table):
+  `kda_conv`, `kda_state`, kpool expand, KDA head split in C++, the indexer cast, the stage-edge `hc_post` after the
+  graph replay.
+- Client: req-frontend 8723d90 pinned (`third_party/req-frontend`); it frees a session's slot at its last round.
 - Memory: expandable segments (848903a) + allocator regrow after graph capture (25f128a). JIT: own Triton kernels
   warmed (53d5563). Backlog counts new tokens only (c0a58f3).
-- Open: good N=400/500 on the current code (7763/7764), attributed against 7742/7744 by stage-0 idle.
+
+### v2-realistic: final dispatch and engine (7900-7934)
+| Run | Code | Rounds/s | New tokens/s | TTFT p50 / p90 / p99 (s) | Over 60 s | Target |
+|---|---|---|---|---|---|---|
+| sched_check_good 7932 | e7a2640 | pass: 58 / 58 microbatches chunk for chunk, worst TTFT deviation 7.6%, 0 JIT | | | | |
+| good N=500 7901 | a167593 | 25.06 | 89.9k | 0.41 / 5.28 / 61.87 | 1052 | 25.44, 91.5k, 0.39 / 5.43 / 61.73, 1008 |
+| good N=400 7933 | e7a2640 | 24.76 | 86.4k | 0.18 / 1.18 / 39.96 | 273 | 25.06, 87.3k, 0.16 / 1.07 / 25.54, 240 |
+| good N=400 7900 | 8079370 | 24.73 | 86.4k | 0.18 / 1.19 / 30.07 | 257 | same |
+| good N=400 7900, queue one | 8079370 | 24.67 | 85.9k | 0.17 / 1.31 / 46.91 | 284 | same |
+| good N=400 7907, GPUs reversed | a167593 | 24.72 | 86.3k | 0.18 / 1.32 / 40.00 | 272 | same |
+| good N=300 7902 | a167593 | 19.77 | 66.2k | 0.16 / 0.48 / 3.04 | 22 | 19.78, 66.2k, 0.15 / 0.49 / 3.30, 24 |
+| good N=200 7934 | e7a2640 | 12.12 | 45.0k | 0.11 / 0.22 / 1.01 | 0 | 12.13, 45.0k, 0.11 / 0.22 / 1.00, 0 |
+| good N=200 7902 | a167593 | 12.12 | 45.0k | 0.12 / 0.22 / 1.03 | 0 | same |
+
+e7a2640 = 8079370 + the overrides above (conv v2; v3 merged after). 8079370 and a167593 run the same engine code.
+- **Project vs queue one.** 7900's two arms: 257 vs 284 rounds over 60 s. That is weak evidence on its own: 7907 ran
+  the first arm's code (on other GPUs) and had 272, so one run's over-60 s count moves by ~6%. The reliable
+  difference is the overload phase's throughput: minutes 12-20, stage 3 computed 6,996k tokens a minute under the
+  project rule vs 6,937k under queue one (+0.9%).
+- **Overrides at the power cap.** 7933 vs 7900: the 4,096-row microbatches lose 1.2-1.4% of clock-scaled time on
+  every stage, but in minutes 12-20 the board sits at the power cap (SW power-cap reason in 100% of busy samples),
+  the clock drops 17-22 MHz on stage 2 at the same power and temperature, and the energy per microbatch does not
+  change. The overrides save time but not energy, so there is no overload gain; below the cap they still shorten
+  TTFT. Per item in `notes.md` (2026-10-17). Known, not pursued.
+- **GPU placement** is thermal: the upper two slots of each group of four run ~10 C hotter and 40-75 MHz slower
+  (7907; `notes.md`).
+- **Low load (N=200, 7934).** p45-55 TTFT 118.2 ms vs the sim's 115.4: wait +5.9 ms (admit 1.5, form lead 4.0),
+  traversal -4.2 ms. A request that arrives on an idle stage 0 waits 4.1 ms (p50) before its GPU start: admit 1.7,
+  form 0.03, deliver 0.5, prepare 1.9, to start 0.03 (`worker_host.jsonl` ready_ms). Prepare and admit are the
+  critical path there.
+- **Form lead stays 3 ms.** In 7900 (N=400, minutes 12-19), 19.5% of microbatches were ready after stage 0 could
+  start them (0.33 s/min of stage-0 idle); their plan-received-to-start time was p50 5.1 ms, p99 12.1 ms. A shorter
+  lead adds idle.
 
 ### Scheduling check
 - Every step forms the target's microbatches chunk for chunk (plain 28, srpt8k 28, budget 55, even 58, good 58).
@@ -249,6 +286,7 @@ Stage time / fit by microbatch tokens 0–255 / 256–1023 / 1024–8191 / 8192 
   (7728, cap 5); the target has 1429.
 
 ### Dispatch decision: 5 in flight + pacing 2 ms (1a5c8e7)
+- Superseded: a8b80bc's project rule replaced it, and the rule itself was removed after the 7900 A/B (52e4ad4).
 - Cap 4 left bubbles once saturated (stage-2 idle 5.2% in even N=500 7741 vs 2.9% at cap 5; force_check_even 1k p50
   x1.10). The default is back to 5 in flight (one plan queued behind stage 0's running one), and the queued plan
   forms only when it would reach every later stage no earlier than 2 ms before that stage frees (per-stage EWMAs,

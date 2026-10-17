@@ -60,7 +60,7 @@ from ppimpl.engine.kv import KvManager, kv_blocks_for, pool_size
 from ppimpl.engine.scheduler import ChunkSpec, Request, Scheduler
 from ppimpl.engine.tiers import TierOp, Tiers
 from ppimpl.runtime.cpus import CONTROLLER_CORES, cpu_list, pin_process, split_cores, threads
-from ppimpl.runtime.dispatch import NOW, WAIT, make_rule
+from ppimpl.runtime.dispatch import NOW, WAIT, DispatchRule
 from ppimpl.runtime.transport import (Chunk, Plan, Ready, Shutdown, StageDone, TierBatch, TierDone, TierMove,
                                       WorkerError, decode_to_controller, encode, for_stage)
 from ppimpl.serve.slab import SlabReader
@@ -68,11 +68,6 @@ from ppimpl.serve.slab import SlabReader
 READY_TIMEOUT_S = 1800   # a real stage loads its weights and captures graphs before Ready
 WAKE_ADDR = "inproc://ppimpl-control-wake"
 ADMIT_BATCH = 64   # requests the control thread takes in before it looks at the reports again
-# PPIMPL_CONTROL_SPIN_S=S (intakes only): the control thread busy-polls (zmq poll without a timeout) until S seconds
-# after the last message or open request. A blocked poll costs ~0.17 ms of wake-up per hop (64 B DEALER -> ROUTER over
-# tcp, idle host: 525 us blocked, 360 us spinning), but end to end it was noise (CPU mock, 512k arrival -> dispatch
-# 4.47 ms spinning, 4.50 blocked) and it holds a core on a contended host: off by default.
-CONTROL_SPIN_S = float(os.environ.get("PPIMPL_CONTROL_SPIN_S", "0"))
 
 
 class Remote(NamedTuple):
@@ -188,9 +183,9 @@ class Controller:
             raise RuntimeError(f"tiers on: Ready blocks {[r.num_blocks for r in ready]} below the contract's "
                                f"{CONTRACT_BLOCKS}")
         num_blocks = pool_size([r.num_blocks for r in ready], cfg.pool_tokens)
-        self.rule = make_rule(cfg, self.n)
+        self.rule = DispatchRule(cfg.max_in_flight, cfg.form_lead_ms, self.n)
         tiers = self._tiers(ready) if cfg.tiers is not None else None
-        # the scheduler's in-flight limits are the rule's (DispatchRule: net of `exiting`, 2 ahead; QueueOneRule: +1, 1)
+        # the scheduler's in-flight limits are the rule's (net of `exiting`, 2 ahead)
         self.sched = Scheduler(KvManager(num_blocks, keep_sessions=cfg.keep_sessions, content_keys=True),
                                cfg.scheduler, tiers, *self.rule.sched_limits)
         self.mb_log = open(self.run_dir / "microbatches.jsonl", "w")
@@ -369,18 +364,13 @@ class Controller:
             poller.register(self.intake, zmq.POLLIN)
         next_check = time.monotonic() + 1.0
         next_cache = time.monotonic() + 10.0
-        spin = self.intake is not None and CONTROL_SPIN_S > 0
-        busy_at = time.monotonic()     # the last message or open request
         try:
             more = False   # requests left in the inbox after this round's batch
             while True:
-                if spin and self.reqs:
-                    busy_at = time.monotonic()
-                timeout_ms = 0 if more or (spin and time.monotonic() - busy_at < CONTROL_SPIN_S) else 1000
+                timeout_ms = 0 if more else 1000
                 if self.timer_at is not None:
                     timeout_ms = min(timeout_ms, max(0, math.ceil((self.timer_at - time.time_ns()) / 1e6)))
-                if poller.poll(timeout_ms) and spin:
-                    busy_at = time.monotonic()
+                poller.poll(timeout_ms)
                 while self.reports.poll(0):          # reports first: they free in-flight slots and time stage 0
                     msg = decode_to_controller(self.reports.recv())
                     if isinstance(msg, WorkerError):
@@ -585,9 +575,9 @@ class Controller:
                                       "compute_ms": round((d.end_ns - d.start_ns) / 1e6, 4),
                                       "requests": reqs}) + "\n")
         if d.host_ns is not None:
-            plan, call, ret = (round(self._ms(t), 4) for t in d.host_ns)
+            plan, call, ready, ret = (round(self._ms(t), 4) for t in d.host_ns)
             self.host_log.write(json.dumps({"stage": d.stage, "index": d.mb_id, "plan_ms": plan, "forward_ms": call,
-                                            "return_ms": ret}) + "\n")
+                                            "ready_ms": ready, "return_ms": ret}) + "\n")
         if left == 1:
             del self.inflight_plans[d.mb_id]
         else:
