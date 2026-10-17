@@ -58,6 +58,15 @@ Stage time / fit by microbatch tokens 0–255 / 256–1023 / 1024–8191 / 8192 
 
 ## Notes
 
+### Where things stand (newest first; details in the sections below)
+- Dispatch: 4 in flight + one queued plan + pacing 2 ms (1a5c8e7), with later stages using stage 0's rate for a size
+  they have not seen yet (37b4d74). Cap 4 (ead8d9a) was tried and reverted.
+- Session runs before 16:11 PDT 2026-10-16 ran with the old req-frontend, which held a session's slot through its last
+  tool wait ("slot held, old client" in the tables): about −2.3% of sessions at N=400, ≤0.6% at N=500.
+- Memory: expandable segments (848903a) + allocator regrow after graph capture (25f128a). JIT: own Triton kernels
+  warmed (53d5563). Backlog counts new tokens only (c0a58f3).
+- Open: good N=400/500 on the current code (7763/7764), attributed against 7742/7744 by stage-0 idle.
+
 ### Scheduling check
 - Every step forms the target's microbatches chunk for chunk (plain 28, srpt8k 28, budget 55, even 58, good 58).
 - Until 82b801b, the first microbatch with several fresh prompts (4x1k, 8x1k) cost +16-25 ms of stage-0 host time,

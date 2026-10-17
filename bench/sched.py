@@ -129,11 +129,23 @@ def check(run_dir: Path) -> dict:
     kind, step = meta["kind"], meta.get("scheduler_step", "plain")
     out = check_sched(run_dir, step) if kind == "sched_check" else check_force(run_dir, step)
     out["run"] = run_dir.name
+    out["commit"] = _commit(meta)
     out["stage_fit"] = stage_fit(run_dir, BINS)
     out["in_run_jit"] = in_run_jit(run_dir)
     out["uptime"] = [meta.get("uptime"), meta.get("uptime_after")]
     (run_dir / "check.json").write_text(json.dumps(out, indent=1) + "\n")
     return out
+
+
+def _commit(meta: dict) -> str | None:
+    """The ppimpl commit a run recorded at its start (bench/run.py), short."""
+    c = meta.get("ppimpl_commit")
+    return None if not c else c[:7] + c[40:]
+
+
+def _run_cell(r: dict) -> str:
+    return (f"{r['run']}" + (f" ({r['commit']})" if r.get("commit") else "")
+            + (" (slot held, old client)" if r.get("old_client") else ""))
 
 
 def _fit_str(sf: dict) -> str:
@@ -169,7 +181,8 @@ def session_line(run_dir: Path, step: str, n: int) -> dict:
     mult = {(r["setting"], r["max_sessions"]): r for r in json.loads(mult_path.read_text())} \
         if mult_path.exists() else {}
     s.update(step=step, n=n, target=targets.get((f"{step}_hbm", n)), sim_x106=mult.get((f"{step}_hbm", n)),
-             old_client=json.loads((run_dir / "t0.json").read_text())["t0_unix_ns"] < SLOT_AT_LAST_TOKEN_FROM_NS)
+             old_client=json.loads((run_dir / "t0.json").read_text())["t0_unix_ns"] < SLOT_AT_LAST_TOKEN_FROM_NS,
+             run=run_dir.name, commit=_commit(json.loads((run_dir / "run.json").read_text())))
     return s
 
 
@@ -201,8 +214,9 @@ def summarize(root: Path, out: Path) -> Path:
             tt = " / ".join(f"{t.get(k, float('nan')):.0f} vs {w[k]:.0f}" for k in ("sched_0", "sched_1", "sched_26",
                                                                                     "sched_27"))
             chunk_ok = not any(x.startswith("mb ") or "microbatches !=" in x for x in c["diffs"])
-            parts.append(f"| {LABEL[c['step']]} | {c['run']} | {c['microbatch_count']} / {c['target_microbatches']} "
-                         f"| {'yes' if chunk_ok else 'no'} | {c['first_diff_mb'] if c['first_diff_mb'] is not None else '–'} "
+            first = c["first_diff_mb"] if c["first_diff_mb"] is not None else "–"
+            parts.append(f"| {LABEL[c['step']]} | {_run_cell(c)} | {c['microbatch_count']} / "
+                         f"{c['target_microbatches']} | {'yes' if chunk_ok else 'no'} | {first} "
                          f"| {tt} | {100 * c['max_ttft_dev']:.1f}% | {c['in_run_jit']['compiles']} |")
         parts.append("")
     # force check
@@ -223,7 +237,7 @@ def summarize(root: Path, out: Path) -> Path:
         for c in rows:
             w, s, ws = c["target"], c["short_ttft_s"], c["target"]["short_ttft_s"]
             parts.append(
-                f"| {LABEL[c['step']]} | {c['run']} | {c['long_ttft_s']} vs {w['long_ttft_s']} "
+                f"| {LABEL[c['step']]} | {_run_cell(c)} | {c['long_ttft_s']} vs {w['long_ttft_s']} "
                 f"(x{_r(c['long_ttft_s'], w['long_ttft_s'])}) | {s['p50']} / {s['p90']} / {s['p99']} / {s['max']} vs "
                 f"{ws['p50']} / {ws['p90']} / {ws['p99']} / {ws['max']} (x{_r(s['p50'], ws['p50'])} / "
                 f"x{_r(s['p90'], ws['p90'])} / x{_r(s['p99'], ws['p99'])}) | {c['last_token_s']} vs "
@@ -250,8 +264,9 @@ def summarize(root: Path, out: Path) -> Path:
             m, t = s["metrics"], s["target"] or {}
             tt, wt = m["ttft_s"], t.get("ttft_s", {})
             parts.append(
-                f"| {LABEL[s['step']]} | {s['n']} | {s['run']}{' (slot held, old client)' if s['old_client'] else ''} "
-                f"| {m['rounds_per_s']:.1f} vs {t.get('rounds_per_s', 0):.1f} (x{_r(m['rounds_per_s'], t.get('rounds_per_s'))}) "
+                f"| {LABEL[s['step']]} | {s['n']} | {_run_cell(s)} "
+                f"| {m['rounds_per_s']:.1f} vs {t.get('rounds_per_s', 0):.1f} "
+                f"(x{_r(m['rounds_per_s'], t.get('rounds_per_s'))}) "
                 f"| {m['new_tokens_per_s'] / 1e3:.1f}k vs {t.get('new_tokens_per_s', 0) / 1e3:.1f}k "
                 f"(x{_r(m['new_tokens_per_s'], t.get('new_tokens_per_s'))}) "
                 f"| {m['computed_tokens_per_s'] / 1e3:.1f}k vs {t.get('computed_tokens_per_s', 0) / 1e3:.1f}k "

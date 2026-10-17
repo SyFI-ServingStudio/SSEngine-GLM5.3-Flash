@@ -116,11 +116,16 @@ launches should not also be the one that services messages or sends, or it stall
 
 ## Controller
 
-- Scheduler (`engine/scheduler.py`, phase A: plain): fills a microbatch to 8,192 tokens in arrival order, cutting a
-  longer prompt into 8,192-token chunks; a run config may set the budget larger (one-request runs: the whole prompt
-  in one microbatch). At most 4 microbatches in flight (dispatched, stage 3 not done). The next microbatch forms when
-  stage 0 is free; the controller may form and send it ahead so stage 0 has no host gap, as long as the in-flight
-  limit holds.
+- Scheduler (`engine/scheduler.py`; its docstring has the rules): what goes into the next microbatch. The steps of
+  `6_scheduler.md` (`ppimpl/config.py` `SCHEDULER_STEPS`), each adding to the one before: plain (arrival order,
+  8,192-token budget), srpt8k (SRPT order), budget (up to 32,768 tokens, scaled by the backlog), even (at most the
+  backlog / 4), good (force-schedule after 60 s). A run config may set the budget larger (one-request runs: the
+  whole prompt in one microbatch).
+- Dispatch (`runtime/dispatch.py`; its docstring has the rule and why): when the next microbatch forms. At most 4 in
+  flight (dispatched, stage 3 not done) plus one plan queued behind stage 0's running one (`dispatch_ahead` 1),
+  formed `form_lead_ms` before stage 0's predicted end, so stage 0 has no host gap. Pacing (`pace_margin_ms`, 2 ms)
+  delays that plan until it would reach each later stage no earlier than the margin before the stage frees, so a
+  slower later stage does not collect a queue that every round in it pays in TTFT.
 - Admission: a request enters the scheduler once its blocks are allocated; otherwise it waits in arrival order.
 - A request completes when stage 3 reports its token: the HTTP response returns it, its blocks are freed.
 

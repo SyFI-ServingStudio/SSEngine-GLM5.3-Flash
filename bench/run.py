@@ -151,8 +151,8 @@ def ensure_client_bin():
 
 def git_rev(path: Path) -> str:
     r = subprocess.run(["git", "-C", str(path), "rev-parse", "HEAD"], capture_output=True, text=True)
-    dirty = subprocess.run(["git", "-C", str(path), "status", "--porcelain", "--", "."], capture_output=True,
-                           text=True).stdout.strip()
+    dirty = subprocess.run(["git", "-C", str(path), "status", "--porcelain", "--untracked-files=no", "--", "."],
+                           capture_output=True, text=True).stdout.strip()   # tracked files only (measured/ has runs)
     return r.stdout.strip() + ("+dirty" if dirty else "")
 
 

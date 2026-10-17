@@ -11,19 +11,21 @@ Predicted stage-0 end = the running plan's start (its dispatch, or the previous 
 predicted compute: a per-token EWMA of measured stage-0 times, one per power-of-two size bucket (the nearest bucket's
 rate when its own has no sample yet). Without any sample the queued plan forms at once.
 
-Pacing (`pace_margin_ms`; the server's default 2 ms, None: off). When a later stage is slower than stage 0 (stage balance differs per GPU and
-per stage from the fit), the extra in-flight plan does not wait at stage 0 but queues in front of that stage, and
-every round it carries pays the queue in its TTFT (budget N=500, 7730: 21 ms mean before stage 2). So a plan forms
-only when it would reach every later stage no earlier than `pace_margin_ms` before that stage frees: the in-flight
-plans' stage ends (reported, or predicted from per-stage EWMAs as above) give each stage's free time, and the next
-plan is assumed to have the last plan's tokens. A later stage with no sample in a size bucket yet uses stage 0's
-rate for it when stage 0 has one: stage 0 reports a new size first, and the nearest smaller bucket's rate carries
-the per-microbatch fixed cost (force_check_plain 7753: 1,024-token rates put the first 8,192-token chunk at 94 ms on
-stages 1-3, measured 50; stage 0 idled 40 ms twice and the 32k TTFT went from 0.41 to 0.48 s). It forms the predicted host time (dispatch to stage-0 start, an EWMA
-per size bucket over plans that found stage 0 idle; `lead_ms` before any sample) ahead of that start. When stage 0
-is the slowest, pacing never binds. Chosen over a cap of 4 in flight with the queued plan counted (ead8d9a, reverted):
-that cap forms on exit reports, which left the slowest stage idle 5.2% vs 2.9% (even N=500 7741 vs budget N=500 7730)
-and made force_check_even's 1k TTFT p50 x1.10 (larger microbatches); replay TTFT is the same for both.
+Pacing (`pace_margin_ms`; the server's default 2 ms, None: off). When a later stage is slower than stage 0 (stage
+balance differs per GPU and per stage under the power cap), the extra in-flight plan would not wait at stage 0 but
+queue in front of that stage, and every round it carries would pay the queue in its TTFT (budget N=500, 7730: 21 ms
+mean before stage 2). So a plan forms only when it would reach every later stage no earlier than `pace_margin_ms`
+before that stage frees:
+- each stage's free time comes from the in-flight plans' stage ends (reported, or predicted from per-stage EWMAs as
+  above);
+- the next plan is assumed to have the last plan's tokens;
+- a later stage with no sample in a size bucket uses stage 0's rate for it when stage 0 has one (stage 0 reports a
+  new size first; a smaller bucket's rate carries the per-microbatch fixed cost, force_check_plain 7753);
+- the plan forms the predicted host time ahead of that start (dispatch to stage-0 start, an EWMA per size bucket over
+  plans that found stage 0 idle; `lead_ms` before any sample).
+When stage 0 is the slowest stage, pacing never binds. Chosen over a cap of 4 in flight with the queued plan counted
+(ead8d9a, reverted): that cap forms on exit reports, which left the slowest stage idle 5.2% vs 2.9% (even N=500 7741
+vs budget N=500 7730) and made force_check_even's 1k TTFT p50 x1.10; replay TTFT is the same for both.
 """
 
 from collections import deque
