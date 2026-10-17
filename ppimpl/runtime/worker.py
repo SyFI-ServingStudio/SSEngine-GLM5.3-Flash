@@ -189,12 +189,16 @@ def build_model(cfg: RunConfig, stage: int, device: torch.device):
     from ppimpl.model.stage import StageModel
     return StageModel(cfg, stage, device, ipc_kv=cfg.tiers is not None)   # tiers: peers copy our KV (CUDA IPC)
 
+# The GIL switch interval with tiers on (Python's default is 5 ms). PPIMPL_TIER_SWITCH_S=0 keeps the default: the A/B
+# of the 32k read messaging vs stage compute (TIERS.md §9); drop the switch once it is decided.
+TIER_SWITCH_S = float(os.environ.get("PPIMPL_TIER_SWITCH_S", "0.0005"))
+
 
 @torch.inference_mode()   # all of it: model construction, warm-up, receive, forward, send (StageModel's warm-up
 def run_worker(cfg: RunConfig, stage: int):   # makes inference tensors, which autograd-tracked code may not use)
     signal.signal(signal.SIGINT, signal.SIG_IGN)   # the controller stops us (Shutdown), or we see it is gone
-    if cfg.tiers is not None:   # the tier threads (receive, done) get the GIL within 0.5 ms of the launch thread
-        sys.setswitchinterval(0.0005)
+    if cfg.tiers is not None and TIER_SWITCH_S > 0:   # the tier threads (receive, done) get the GIL within 0.5 ms
+        sys.setswitchinterval(TIER_SWITCH_S)          # of the launch thread
     parent = os.getppid()
     n = cfg.num_stages
     last = stage == n - 1
