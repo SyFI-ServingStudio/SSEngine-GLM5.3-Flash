@@ -103,7 +103,7 @@ class Probe:
         self.f.write(json.dumps(rec) + "\n")
         self.f.flush()
 
-    def move(self, op: str, kv: list[int], st: list[int]) -> tuple[float, int]:
+    def move(self, op: str, kv: list[int], st: list[int], sub: list | None = None) -> tuple[float, int]:
         """One op of a len(kv)-block context on all GPUs at once (slots from 0, then the state); (seconds, HBM
         bytes per GPU)."""
         ctx = len(kv)
@@ -114,6 +114,8 @@ class Probe:
         for e in self.eng:
             self.op += 1
             e.submit(TierMove(self.op, op, "dram", None, 0, ctx, 0, kv, st, slots, sslots, [], []))
+        if sub is not None:
+            sub.append(time.perf_counter() - t0)
         nbytes = 0
         for e in self.eng:
             _, ev, _, nb = e.q["read" if op == "read" else "write"].get()
@@ -131,12 +133,15 @@ class Probe:
         for v in self.views:                                    # destination scrambled, then read back
             v[dst_kv if v.shape[0] == NB else dst_st] = 0
         r = [self.move("read", dst_kv, dst_st) for _ in range(reps)]
+        sub = []                                                # host time to submit one op on all 4 engines
+        for _ in range(3):
+            self.move("read", dst_kv, dst_st, sub)
         bad = []
         for v, vr in zip(self.views, self.ranges):
             if v.shape[0] == NB:
                 diff = (v[src_kv] != v[dst_kv]).any(dim=1).nonzero().flatten().tolist()
-            else:
-                diff = (v[src_st] != v[dst_st]).any(dim=1).nonzero().flatten().tolist()
+            else:                                               # a state range moves its group's row only
+                diff = [] if torch.equal(v[src_st[vr.group]], v[dst_st[vr.group]]) else [vr.group]
             if diff:
                 bad.append([vr.name, diff[:8], len(diff)])
         equal = not bad
@@ -146,7 +151,7 @@ class Probe:
                    read_ms_p50=round(med(r), 3), write_ms_p50=round(med(w), 3),
                    read_gbps_per_gpu=round(best(r), 1), write_gbps_per_gpu=round(best(w), 1),
                    read_ms=[round(t * 1e3, 2) for t, _ in r], write_ms=[round(t * 1e3, 2) for t, _ in w],
-                   bytes_equal=equal, bad=bad[:40])
+                   submit_ms_4gpus=[round(t * 1e3, 2) for t in sub], bytes_equal=equal, bad=bad[:40])
         self.log(**rec)
         if check:
             assert equal, "two-hop round trip changed bytes"
@@ -164,6 +169,64 @@ class Probe:
                 recs.append(self.rw(ctx, reps=10, check=False))
         self.build(default)
         assert all(r["bytes_equal"] for r in recs), "a ring setting changed bytes (see the rw lines)"
+
+    def pieces(self):
+        """`cuMemcpyBatchAsync` of N pieces of S bytes (512 MB in all) on GPU 0's stream: local (0 -> 0), push (0 -> 1,
+        GPU 0's copy engine writes peer HBM), pull (1 -> 0, it reads peer HBM), host -> 0; then all 4 GPUs at once,
+        each pushing to the other 3 and itself (the read scatter's shape) and each pulling from all 4 (the write
+        gather's shape). GB/s and microseconds per piece."""
+        from vllm import _custom_ops
+        total = 512 << 20
+        buf = [torch.empty(total, dtype=torch.uint8, device=g) for g in range(self.n)]
+        dst = [torch.empty(total, dtype=torch.uint8, device=g) for g in range(self.n)]
+        host = self.eng[0].dram
+        streams = [torch.cuda.Stream(g) for g in range(self.n)]
+
+        def batch(g, srcs, dsts, size):
+            with torch.cuda.stream(streams[g]):
+                t = lambda x: torch.tensor(x, dtype=torch.int64)
+                _custom_ops.swap_blocks_batch(t(srcs), t(dsts), t([size] * len(srcs)))
+
+        def timed(jobs, reps=3):
+            for d in range(self.n):
+                torch.cuda.synchronize(d)
+            best = None
+            for _ in range(reps):
+                t0 = time.perf_counter()
+                for j in jobs:
+                    j()
+                for d in range(self.n):
+                    torch.cuda.synchronize(d)
+                dt = time.perf_counter() - t0
+                best = dt if best is None else min(best, dt)
+            return best
+
+        for size in (32 << 10, 128 << 10, 256 << 10, 1 << 20, 4 << 20, 12_857_344):
+            n = total // size
+            offs = [i * size for i in range(n)]
+            res = {}
+            cases = {"local": (buf[0].data_ptr(), dst[0].data_ptr()), "push": (buf[0].data_ptr(), dst[1].data_ptr()),
+                     "pull": (buf[1].data_ptr(), dst[0].data_ptr())}
+            if host is not None and host.nbytes >= total:
+                cases["h2d"] = (host.ptr, dst[0].data_ptr())
+            for name, (a, b) in cases.items():
+                dt = timed([lambda a=a, b=b: batch(0, [a + o for o in offs], [b + o for o in offs], size)])
+                res[name] = dict(gbps=round(total / dt / 1e9, 1), us_per_piece=round(dt / n * 1e6, 2))
+            q = n // self.n                                     # all GPUs: g sends q pieces to each GPU
+            push = [lambda g=g: batch(g, [buf[g].data_ptr() + i * size for i in range(q) for _ in range(self.n)],
+                                      [dst[h].data_ptr() + (g * q // self.n + i // self.n) * size
+                                       for i in range(q) for h in range(self.n)][:q * self.n], size)
+                    for g in range(self.n)]
+            dt = timed(push)
+            res["all_push"] = dict(gbps_per_gpu=round(q * self.n * size / dt / 1e9, 1))
+            pull = [lambda g=g: batch(g, [buf[h].data_ptr() + (g * q // self.n + i // self.n) * size
+                                          for i in range(q) for h in range(self.n)][:q * self.n],
+                                      [dst[g].data_ptr() + i * size for i in range(q) for _ in range(self.n)], size)
+                    for g in range(self.n)]
+            dt = timed(pull)
+            res["all_pull"] = dict(gbps_per_gpu=round(q * self.n * size / dt / 1e9, 1))
+            self.log(test="pieces", size=size, n=n, **res)
+        del buf, dst
 
     def reads_loop(self, stop: threading.Event, done: list):
         dst_kv, dst_st = list(range(1 + CTX, 1 + 2 * CTX)), list(range(6, 12))
@@ -252,7 +315,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True)
     ap.add_argument("--ctx", type=int, default=62, help="blocks per context (62: 512k)")
-    ap.add_argument("--tests", default="sweep,gemm,edges")
+    ap.add_argument("--tests", default="pieces,sweep,gemm,edges")
     ap.add_argument("--hops", default="two")
     ap.add_argument("--depth", type=int, default=2)
     ap.add_argument("--chunk", type=int, help="slots per ring chunk (default: the state's slots)")
