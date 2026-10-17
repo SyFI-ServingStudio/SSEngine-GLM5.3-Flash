@@ -268,7 +268,7 @@ class Probe:
             b = torch.randn(8192, 8192, dtype=torch.bfloat16, device=g)
             cs = torch.cuda.Stream(g)
 
-            def gemms(k=60):
+            def gemms(k=400):                                   # ~0.3 s: many reads overlap it
                 with torch.cuda.stream(cs):
                     s, e = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
                     s.record()
@@ -278,7 +278,7 @@ class Probe:
                 e.synchronize()
                 return s.elapsed_time(e) / k
 
-            gemms(10)
+            gemms(20)
             alone = gemms()
             stop, done = threading.Event(), []
             t = threading.Thread(target=self.reads_loop, args=(stop, done))
@@ -315,12 +315,12 @@ class Probe:
             return [round(a.elapsed_time(b) / k, 3) for a, b in evs]
 
         send(3)
-        alone = send()
+        alone = send(200)
         stop, done = threading.Event(), []
         t = threading.Thread(target=self.reads_loop, args=(stop, done))
         t.start()
         time.sleep(0.05)
-        busy = send()
+        busy = send(200)
         n_busy = len(done)
         stop.set()
         t.join()
