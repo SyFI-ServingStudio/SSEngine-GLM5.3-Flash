@@ -160,7 +160,8 @@ class KvManager:
         self.held: dict[str, Allocation] = {}          # running and held requests
         self._charge: dict[str, int] = {}
         self.stats = dict(admitted=0, hits=0, hit_tokens=0, evicted_sessions=0, evicted_tokens=0, dropped_stale=0,
-                          peak_hard=0, preemptions=0, repeats=0)    # no preemption: the count stays 0
+                          peak_hard=0, preemptions=0, repeats=0,    # no preemption: the count stays 0
+                          blocked_by_write=0)   # fits() checks a pinned kept context (tier write in flight) turned down
         self.evicted: dict[object, int] = {}           # key -> tokens of a kept context evicted and not replaced since
         self.pinned: Counter = Counter()               # kept contexts a tier write still copies from (not evictable)
 
@@ -185,7 +186,12 @@ class KvManager:
     def fits(self, req) -> bool:
         """Whether the request's whole footprint fits now, kept sessions evicted as needed (not the pinned ones)."""
         pinned = sum(self.kept_cost(self.kept[k].tokens) for k in self.pinned if k in self.kept)
-        return self.hard + pinned + self.footprint(req.num_tokens) <= self.capacity
+        need = self.hard + self.footprint(req.num_tokens)
+        if need + pinned <= self.capacity:
+            return True
+        if pinned and need <= self.capacity:      # only a tier write's pin keeps it out (write-before-evict)
+            self.stats["blocked_by_write"] += 1
+        return False
 
     # --- pins: a kept context a tier write copies from ------------------------------------------------------------
 

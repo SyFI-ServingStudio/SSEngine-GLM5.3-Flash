@@ -242,7 +242,11 @@ option for comparison (§13).
   last chunk passed every stage before stage 3 reported the token).
 - **Safety.** Until all 4 `TierDone`s: the KvManager does not evict that kept session, and the session's next round
   does not take over its blocks (it waits in the queue, passed over like a read-bound round). Expected rare: a
-  37 MB + new-KV write takes ~1-3 ms.
+  37 MB + new-KV write takes ~1-3 ms. The handoff (§2) requires the write to finish before HBM evicts, so every run
+  counts both waits in `cache.json`: `busy_waits` (a round waited to take over its session's blocks) and
+  `blocked_by_write` (an admission check turned down only because a written session is still pinned). Writes
+  gather by pulling over NVLink (§2.3, ~15 GB/s per GPU at 512k); if either count is non-zero in the bring-up or the
+  sessions, writes change to push (each stage's copy engine pushes its pieces into the owner's ring).
 - **SSD write-back.** DRAM eviction emits `demote` (DRAM slots -> SSD slots). A worker I/O thread pool (8 threads)
   `pwritev`s the slots (O_DIRECT, 4 KiB aligned). The DRAM slots return to the free list on all-4 `TierDone`. DRAM
   evicts ahead to keep 2% free, so a write never waits for a write-back. SSD write load at N = 400: 1.12 GB/s per GPU
