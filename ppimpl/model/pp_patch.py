@@ -554,7 +554,35 @@ def kpool_seed_tail_cache(tail_kv_cache, key, gate_score, tslot, kpool, head_dim
 
 # Speed-only overrides that keep every value (bitwise): on in the engine; bench/stage_bench.py --off turns one off in
 # its process, before the model is built, for an A/B at the same clock.
-FAST = {"kpool_expand": True, "kda_split_heads": True, "kda_conv": False, "kda_state_copy": False}
+FAST = {"kpool_expand": True, "kda_split_heads": True}
+# lane m5-perf, off until a session A/B: KDA short conv in one launch per layer (kda_conv) and the KDA state
+# gather / scatter as wide copies (kda_state); both bitwise (tests/test_kda_conv_gpu.py).
+FAST.update({"kda_conv": False, "kda_state_copy": False})
+# lane m5-glue, off until a session A/B: the stage edge's hc_post run after the graph replay into a fresh tensor
+# instead of copying the graph's output buffer (stage._run_graph); the indexer's BF16 -> FP32 cast by one Triton
+# kernel (glue_fast; 49.2 -> 20.5 us at 4,096 rows, job 7914).
+FAST.update({"edge_send_eager": False, "indexer_float": False})
+
+
+def fast_from_env(env: str | None = None) -> dict:
+    """`PPIMPL_FAST=name=1,name=0,...` sets FAST switches (each name must exist); returns FAST."""
+    import os
+
+    for item in filter(None, (os.environ.get("PPIMPL_FAST", "") if env is None else env).split(",")):
+        name, _, val = item.partition("=")
+        assert name in FAST and val in ("0", "1"), (item, sorted(FAST))
+        FAST[name] = val == "1"
+    return FAST
+
+
+fast_from_env()   # every process that imports pp_patch (workers, benches) sees the run's PPIMPL_FAST
+
+
+def install_indexer_float() -> None:
+    """`glue_fast.install_indexer_float`: glm5next `Indexer.forward` with the Triton BF16 -> FP32 cast (process-wide)."""
+    from ppimpl.model import glue_fast
+
+    glue_fast.install_indexer_float()
 
 
 def install_kda_split_heads() -> None:
