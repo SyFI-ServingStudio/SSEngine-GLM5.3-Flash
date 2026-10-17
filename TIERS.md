@@ -7,7 +7,7 @@ Status: draft for review, nothing implemented. Branch lane-m6 from m5-done (a167
 | Item | Choice |
 |---|---|
 | What is already there | `ppimpl/engine/tiers.py` (the per-tier LRU index, write-through/victim policy, read channels, read-wait bound) and the scheduler's read path (`_at_head`, `read_landed`, landed rounds first) are written and CPU-tested in replay. Nothing moves bytes yet: no worker executes a `TierOp`, the controller never sends them. M6 adds the byte path and the completion reports, and fixes the index to the real slot sizes. |
-| Balanced storage | Every HBM byte range a context owns (each KV page of each DSA layer of each stage, each KDA state of each stage) is cut into 4 equal contiguous quarters; GPU q stores and moves quarter q of every range. Each GPU then holds and reads exactly 1/4 of every context (1,499 B/token + 36.9 MB on average, `7_offloading.md` §2), 3/4 of it to or from the other stages' HBM over NVLink, by GPU q's own copy engine. |
+| Balanced storage | Every HBM byte range a context owns (each KV page of each DSA layer of each stage, each KDA state of each stage) is cut into 4 equal contiguous quarters; GPU q stores and moves quarter q of every range. Each GPU then holds and reads exactly 1/4 of every context (1,499 B/token + 36.9 MB on average, `7_offloading.md` §2), 3/4 of it to or from the other stages' HBM over NVLink in a second hop through a staging ring in GPU q's HBM (direct peer writes from host run at 2/3 of the rate, §2.3). |
 | Copy mechanism | Copy engine only (no SMs): one `cuMemcpyBatchAsync` per tier op per GPU (vLLM `ops.swap_blocks_batch`), source and destination lists built from a per-GPU pointer table of all 4 stages' KV views (CUDA IPC, opened once at start-up). |
 | DRAM | Pinned host memory per GPU on that GPU's NUMA node (libnuma + `cudaHostRegister`, not torch's power-of-2 pinned allocator), cut into fixed slots of one KV block's quarter; same slot ids on all 4 GPUs, owned by the controller's index. |
 | SSD | One preallocated file per GPU under `PPIMPL_SSD_DIR` on /raid (md RAID0 of 8 NVMe), same slot layout; O_DIRECT `preadv`/`pwritev` from a small thread pool per worker into/out of DRAM slots; written only when DRAM evicts (write-back, wt-pp-ssd-writeback 3247309c), read SSD -> DRAM slot (copy-up) -> HBM, pipelined per slot. No GDS (nvidia-fs is not loaded on this node). |
@@ -76,11 +76,39 @@ these sums; a view whose block dimension is not dim 0 or whose row is not divisi
 
 ### 2.3 Host <-> GPU on this node (job 7916)
 
-Pending: job 7916 (bench/tier_bw.py, 4 GPUs, 10 min) is queued behind other users' 8-GPU jobs. It measures, per
-GPU and with 4 GPUs at once, NUMA local and remote: one cudaMemcpyAsync per transfer from 64 KiB to 1 GiB (H2D, D2H,
-both directions together); `cuMemcpyBatchAsync` of scattered 64 KiB-8 MiB device pages (our read/write shape); the
-vLLM Triton UVA kernel by CTA count (4-148); GPU g's copy engine writing into the other GPUs' HBM (the balanced
-path), single copies and batched; a BF16 GEMM's slowdown while copies run; the time to pin 16 GiB.
+Job 7916 (`bench/tier_bw.py`, 2026-10-17 03:30, load 10.3; the job's GPUs 0-3 were physical GPUs 4-7, NUMA node 1;
+`measured/tier_bw/7916/tier_bw.jsonl`). GB/s per GPU; "4 GPUs" = all four copying at once, each from its own buffer.
+
+| Path | 1 GPU | 4 GPUs |
+|---|---|---|
+| H2D, one copy, 64 KiB / 1 MiB / 16 MiB / 1 GiB, local node | 13.1 / 46.4 / 54.9 / 55.7 | - / 31.1 / 48.7 / 48.4 |
+| D2H, same sizes | 13.7 / 46.1 / 54.9 / 55.6 | - / 31.1 / 40.3 / 38.5 |
+| H2D + D2H at once (sum of both directions) | - | 1 MiB 37.2, 16 MiB 47.3, 1 GiB 47.8 |
+| H2D / D2H, host buffer on the other node, 1 GiB | 55.6 / 55.6 | 27.2 / 19.4 |
+| `cuMemcpyBatchAsync` H2D, pages of 64 KiB / 512 KiB / 2 MiB / 8 MiB | 41.5 / 52.7 / 54.3 / 54.7 | 29.1 / 44.2 / 47.6 / 47.2 |
+| `cuMemcpyBatchAsync` D2H, same pages | 43.8 / 52.3 / 54.1 / 54.8 | 28.5 / 36.1 / 38.3 / 38.2 |
+| SM kernel (vLLM UVA copy) H2D, 4 / 8 / 16 / 148 CTAs | 20.8 / 40.3 / 50.8 / 50.7 | 16 CTAs 46.9 |
+| SM kernel D2H, 4 / 8 / 16 / 148 CTAs | 42.4 / 49.2 / 50.9 / 51.9 | 16 CTAs 39.2 |
+| GPU g's copy engine, host -> all 4 GPUs' HBM (3/4 over NVLink), one copy of 2 / 64 MiB | - | H2D 19.1 / 20.1, D2H 16.5 / 24.6 |
+| the same, batched 2 MiB pages | - | H2D 31.7, D2H 28.3 |
+
+- **Line rate.** One GPU reaches 55.6 GB/s both ways from 16 MiB copies or 2 MiB batched pages; the 50 GB/s target
+  holds for one GPU. Four GPUs on one NUMA node share the socket's host side: H2D 48.4 GB/s per GPU (193.8 in all,
+  -13%), D2H 38.5 (154.1, -31%); reads are H2D, so the read target holds within 3%; writes run at ~38.
+- **Both directions at once** sum to 47.8 GB/s per GPU, not 2 x 48: a write-through running during a read slows the
+  read. Writes are 1.1-1.7 GB/s per GPU on average (§5), so the overlap is short; recorded per read in `tier_ops.jsonl`.
+- **NUMA.** One GPU does not see the node (55.6 either way); four GPUs reading from the other node get 27.2 (H2D) and
+  19.4 (D2H): host memory must be on the GPU's own node (§4 does this).
+- **Piece size.** Batched pages of 512 KiB lose 7% at 4 GPUs (44.2 vs 47.6), 64 KiB pages 39%.
+- **Copy engine vs SMs.** A BF16 GEMM 8192^3 on GPU 0 takes 0.682 ms alone, 0.677 ms while all four GPUs' copy
+  engines run H2D, 0.717 ms (+5%) beside a 16-CTA copy kernel: copy engines it is.
+- **Peer writes are slow.** GPU g's copy engine writing host data straight into the other GPUs' HBM reaches 19-20
+  GB/s per GPU (single copies) and 31.7 (batched), against 47.6 into its own HBM. **Direct peer writes are out;
+  balanced storage goes in two hops** (§2.4): host <-> GPU q's own HBM over its own PCIe link, then GPU q's HBM <->
+  the stages' KV over NVLink (D2D, NV18, hundreds of GB/s), pipelined in chunks of slots.
+- **Pinning.** 16 GiB on one node: first touch 6.45 s (one thread), `cudaHostRegister` 1.58 s; 150 GB per GPU:
+  ~60 s of touch on one thread (4 threads in the worker, overlapping the model load) and ~15 s of registering.
+- **GDS:** `gdscheck -p` reports no nvidia-fs (`measured/tier_bw/7916/gdscheck.txt`), as expected.
 
 ### 2.4 Choices
 
@@ -88,11 +116,11 @@ Taken now, each with the 7916 number that confirms it or switches to the fallbac
 
 | Choice | Why | Confirmed by (7916) | Fallback |
 |---|---|---|---|
-| Copy engine, one `cuMemcpyBatchAsync` per op per GPU (vLLM `ops.swap_blocks_batch`), 0 SMs | every system that reaches Gen5 line rate without SMs does this; our stages keep all SMs busy | batch H2D >= 45 GB/s per GPU at 512 KiB-2 MiB pieces, 1 and 4 GPUs; GEMM slowdown < 1% | pieces too small: diagonal assignment of whole pages (§3) instead of quarters |
-| Balanced by quarters, GPU q's CE writes peer HBM over NVLink | exact 1/4 per link (1,499 B/token, 36.9 MB) | peer / peer_batch H2D per GPU within 5% of own-GPU H2D, 4 GPUs at once | two hops: H2D into a staging ring on GPU q, then a D2D peer copy (CePipe-style) |
+| Copy engine, one `cuMemcpyBatchAsync` per op per GPU (vLLM `ops.swap_blocks_batch`), 0 SMs | every system that reaches Gen5 line rate without SMs does this; our stages keep all SMs busy | **confirmed**: batch H2D 47.6 GB/s per GPU at 2 MiB pages with 4 GPUs (44.2 at 512 KiB); GEMM 0.677 vs 0.682 ms | - |
+| Balanced by quarters, ~~GPU q's CE writes peer HBM over NVLink~~ **two hops** | exact 1/4 per link (1,499 B/token, 36.9 MB) | **switched**: peer_batch H2D 31.7 GB/s per GPU vs 47.6 into own HBM (-33%) | in use: per chunk of slots, one contiguous H2D per slot into a device staging ring on GPU q, then one D2D batch from the ring to the stages' pieces (writes: D2D gather, then D2H per slot); two streams, chunk i+1's H2D overlaps chunk i's D2D |
 | page_first host layout (a slot = one block's quarter of all layers and stages, contiguous) | one host run per slot; host side never the small piece | - | - |
 | No layer-wise load pipelining | the round computes only after the whole prefix landed (target model); DRAM reads 1.7-16 ms | - | - |
-| Host memory on the GPU's NUMA node, registered by `cudaHostRegister` (not torch pin_memory) | torch rounds pins to powers of 2; remote NUMA caps lower | local vs remote H2D | preferred-local allocation, remote spill logged |
+| Host memory on the GPU's NUMA node, registered by `cudaHostRegister` (not torch pin_memory) | torch rounds pins to powers of 2; remote NUMA caps lower | **confirmed**: 4 GPUs from the other node 27.2 / 19.4 GB/s vs 48.4 / 38.5 | preferred-local allocation, remote spill logged |
 | SSD: O_DIRECT `preadv`/`pwritev`, 8 threads per GPU, one preallocated file per GPU | fio: 8 psync threads give 53 GB/s on one file; no GDS on this node (nvidia-fs not loaded; it would also need DRAM copy-up anyway) | per-read latency measured at step 2 | io_uring via liburing if threads miss 10 GB/s per GPU |
 
 Note: with pipeline-parallel stages, own-stage storage already sends about a quarter of a context through each link
@@ -112,7 +140,10 @@ handoff makes it the design (§2), so step 1 builds it, and the own-stage varian
 - **Pieces per op.** One KV slot = 22 device ranges (MLA + indexer page of each of the 11 DSA layers, over the 4
   stages), each a quarter page: 8,576 x 545 B / 4 = 1.17 MB per layer in total, split between MLA and indexer by
   their row sizes (read at start-up); the state = 34 recurrent quarters of 1 MiB + 34 conv quarters (36 KiB) + 11
-  tails. A 512k read is 62 x 22 + 79 = 1,443 pieces in one `cuMemcpyBatchAsync` per GPU. Host side contiguous.
+  tails. A 512k read is 62 x 22 + 79 = 1,443 device pieces per GPU. Host side contiguous: with two hops (§2.3) the
+  host <-> GPU q hop is one 12.86 MB copy per slot (line rate), and the 1,443 pieces are the D2D hop over NVLink.
+- **Device staging (two hops).** A ring of chunks in GPU q's HBM per direction, 4 chunks of 4 slots (206 MB) each,
+  ~0.4 GB per GPU allocated before the KV pool (Ready still reports 7,144 blocks, checked at the first GPU run).
 - **What it costs.** Block granularity: the last block is stored whole. Mean waste half a block per context per GPU
   (6.4 MB) plus 1.7 MB of state rounding: about 4% of the average session context (~100k tokens); a 32k read moves
   4 x 12.86 + 38.6 = 90 MB per GPU instead of 86 MB (+5%). Recorded as a difference (§7 "a context stored larger").
