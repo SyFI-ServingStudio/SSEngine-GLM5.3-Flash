@@ -441,6 +441,23 @@ prefix_tiers_w0.csv, prefix_cache_event):
   receive thread submits every op in order (1.8-3.6 ms of submit per read under load) and a read's copy rate is
   ~27 GB/s by its GPU span: split by the per-batch trace from job 7976 on (`tier_trace_s*.jsonl`).
 
+**Step 2a SSD bring-up, victim chain and io_uring (job 8073, lane-m6-ssd ceff3dc; GPUs 4-7, DRAM off, SSD 128 GB
+shard set0, staging 8 GB; bring-up pool 1,234,944 tokens).** Per P, mean of 5 sessions, ms (`bench.tiers --target
+ssd`):
+
+| P | Round-1 TTFT (target) | SSD read, start -> landed (target) | Arrival -> read start |
+|---|---|---|---|
+| 32k | 61.6 (61.3) | 7.5 (8.6) | 2.5 |
+| 128k | 79.8 (77.1) | 23.1 (23.3) | 2.2 |
+| 512k | 189.9 (139.8) | 79.0 (82.3) | 52 |
+
+- The SSD reads meet their targets at every P (io_uring, staging, H2D per slot as it lands).
+- 512k misses by +50 ms, all before the read starts: its admission has to evict one kept context that is not yet
+  written (`blocked_by_write` 313, HBM `evict_waits` 313, `ahead_writes` 44, `evict_writes` 60). The HBM
+  watermark (0.9) keeps ~10% of this small pool clean, and a 512k round needs ~45% of it; in the session settings
+  (pool 7.6-61M tokens) a 512k round is under 7% of the pool. Not changed: the sessions decide whether the
+  watermark needs to move.
+
 ## 10. Targets (v2-realistic, replace the handoff's numbers)
 
 Computed by the coordinator with the realistic-input profile (ServingStudioSim wt-pp-hitrule
