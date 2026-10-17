@@ -264,6 +264,8 @@ class StageModel:
             pp_patch.install_kpool_expand()
         if pp_patch.FAST["kda_split_heads"]:
             pp_patch.install_kda_split_heads()
+        # the stage edge's hc_post outside the graphs (`_run_graph`); fixed here, before any capture
+        self.edge_send_eager = bool(pp_patch.FAST["edge_send_eager"]) and not self.last
         pp_patch.install_decode_topk_canon()
         pp_patch.install_sparse_mla_split()
         pp_patch.install_indexer_split()
@@ -590,7 +592,7 @@ class StageModel:
         residual = post = comb = None
         for layer in self.layers:
             x, residual, post, comb = layer(e.rows[0], x, residual, post, comb)
-        if not self.last:
+        if not self.last and not self.edge_send_eager:
             return (pp_patch.edge_send(self.layers[-1], x, residual, post, comb),)
         return (x, residual, post, comb)
 
@@ -610,6 +612,11 @@ class StageModel:
                 out = e.out
             else:
                 out = self._graph_body(e)
+            if self.edge_send_eager:
+                # the last layer's hc_post on the bucket's rows, eagerly into a new tensor: what the graph would
+                # have computed (same kernel, same inputs), without the copy out of the graph's output buffer
+                sent = pp_patch.edge_send(self.layers[-1], *out)
+                return (sent[:T].clone(),) if raw else sent[:T]
         if raw:
             return tuple(None if t is None else t[:T].clone() for t in out)
         if not self.last:

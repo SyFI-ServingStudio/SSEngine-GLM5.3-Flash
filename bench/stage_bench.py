@@ -1,7 +1,7 @@
 """One stage's forward of a served-like microbatch on one GPU: its GPU time, per-kernel breakdown and launch sites.
 
   python -m bench.stage_bench [--stage 0] [--spec 45000:3000,10000:1096] [--mode time|kernels|stacks] [--reps 40]
-                              [--off kpool_expand,...] [--out x.json]
+                              [--off kpool_expand,...] [--on edge_send_eager,...] [--out x.json]
 
 The microbatch: one chunk per `prefix:append` pair (a request continuing `prefix` cached tokens, on its own KV
 blocks; the KV contents are whatever the pool holds), token ids from enwik9 on stage 0 (served-like MoE routing),
@@ -69,12 +69,16 @@ def main():
     ap.add_argument("--rounds", type=int, default=5, help="time: rounds of --reps forwards")
     ap.add_argument("--mb-tokens", type=int, default=8192, help="the run's largest microbatch (good: 32768)")
     ap.add_argument("--off", default="", help="comma list of pp_patch.FAST switches to turn off (A/B)")
+    ap.add_argument("--on", default="", help="comma list of pp_patch.FAST switches to turn on (A/B)")
     ap.add_argument("--out", default="")
     a = ap.parse_args()
     from ppimpl.model import pp_patch
     for name in filter(None, a.off.split(",")):
         assert name in pp_patch.FAST, (name, sorted(pp_patch.FAST))
         pp_patch.FAST[name] = False
+    for name in filter(None, a.on.split(",")):
+        assert name in pp_patch.FAST, (name, sorted(pp_patch.FAST))
+        pp_patch.FAST[name] = True
     dev = torch.device("cuda", 0)
     torch.cuda.set_device(dev)
     B = 8576   # blocks: the plan's, and at least the graph warm-up's (16 requests x 7 blocks + a long prefix)
