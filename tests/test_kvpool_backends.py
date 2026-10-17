@@ -1,4 +1,4 @@
-"""The host media (ppimpl/kvpool/backends.py) on CPU: the arena, the SSD file's slot round trip and its unlink, and
+"""The host media (ppimpl/kvpool/backends.py) on CPU: the arena, the SSD file's slot round trip, lock and reuse, and
 the OOM guards of TIERS.md §14.1 (preferred NUMA placement, oom_score_adj, residency per node, cgroup peak)."""
 
 import ctypes
@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 
 from ppimpl.kvpool import backends as bk
+from ppimpl.kvpool import shards
 
 
 def test_arena_is_plain_memory_on_cpu():
@@ -18,13 +19,18 @@ def test_arena_is_plain_memory_on_cpu():
     assert a.ptr(3) == a.base + (3 << 20)
 
 
-def test_ssd_slots_round_trip_and_file_is_unlinked(tmp_path):
+def test_ssd_slots_round_trip_and_file_is_kept(tmp_path):
     sb = 8192
     src = np.random.default_rng(1).integers(0, 255, 3 * sb + 4096, dtype=np.uint8)
     dst = np.zeros_like(src)
     p0, p1 = (x.ctypes.data + (-x.ctypes.data) % 4096 for x in (src, dst))
-    f = bk.SsdTier(str(tmp_path / "d" / "ssd.bin"), 6 * sb, sb, [(p0, 3 * sb), (p1, 3 * sb)])
-    assert os.path.getsize(f.path) == 6 * sb
+    path = str(tmp_path / "shard0.bin")
+    with pytest.raises(RuntimeError, match="missing"):
+        bk.SsdTier(path, 6 * sb, sb, [(p0, 3 * sb)])
+    shards.create_shard(path, 6 * sb)
+    with pytest.raises(RuntimeError, match="the run needs"):                  # never resized by a run
+        bk.SsdTier(path, 8 * sb, sb, [(p0, 3 * sb)])
+    f = bk.SsdTier(path, 6 * sb, sb, [(p0, 3 * sb), (p1, 3 * sb)])
     for fut in f.write([5, 0, 2], [p0 + k * sb for k in range(3)]):
         fut.result()
     for fut in f.read([2, 5, 0], [p1 + k * sb for k in (2, 0, 1)]):
@@ -32,7 +38,34 @@ def test_ssd_slots_round_trip_and_file_is_unlinked(tmp_path):
     a, b = (np.frombuffer((ctypes.c_char * (3 * sb)).from_address(p), dtype=np.uint8) for p in (p0, p1))
     assert np.array_equal(a, b)
     f.close()
-    assert not os.path.exists(f.path)
+    assert os.path.getsize(path) == 6 * sb and not os.path.exists(path + ".tmp")
+
+
+def test_shard_sets_are_taken_whole_one_run_each(tmp_path):
+    """Runs take the first free set (flock on set<k>/lock); a set with a missing or wrong-sized shard fails; create
+    makes only what is missing and refuses another size without --force."""
+    nb = shards.shard_bytes(0.0001)
+    assert nb % 4096 == 0
+    with pytest.raises(RuntimeError, match="no SSD shard set"):
+        shards.ShardSet(str(tmp_path), 4, nb)
+    assert len(shards.create(str(tmp_path), 2, 4, 0.0001)) == 8
+    assert shards.create(str(tmp_path), 2, 4, 0.0001) == []                # kept, not rewritten
+    a = shards.ShardSet(str(tmp_path), 4, nb)
+    b = shards.ShardSet(str(tmp_path), 4, nb)
+    assert (a.k, b.k) == (0, 1)
+    with pytest.raises(RuntimeError, match="in use by another run"):
+        shards.ShardSet(str(tmp_path), 4, nb)
+    with pytest.raises(RuntimeError, match="in use by a run"):
+        shards.create(str(tmp_path), 1, 4, 0.0002, force=True)
+    a.close()
+    with pytest.raises(RuntimeError, match="the run needs 4 shards"):
+        shards.ShardSet(str(tmp_path), 4, shards.shard_bytes(0.0002))
+    with pytest.raises(RuntimeError, match="--force"):
+        shards.create(str(tmp_path), 1, 4, 0.0002)
+    os.unlink(shards.shard_path(str(tmp_path / "set0"), 2))
+    with pytest.raises(RuntimeError, match="2 \\(missing\\)"):
+        shards.ShardSet(str(tmp_path), 4, nb)
+    b.close()
 
 
 def test_numa_resident_gb(tmp_path):

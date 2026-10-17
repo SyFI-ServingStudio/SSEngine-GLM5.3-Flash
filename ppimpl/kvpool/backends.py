@@ -15,8 +15,8 @@ kernel reclaim the node's page cache for the piece; a preferred fault does not (
 other node once the node's free pages reach the low watermark (8039: 365 of 600 GB landed on node 0 while node 1 held
 662 GB of page cache).
 
-SSD (`SsdTier`): one preallocated file per member, O_DIRECT reads and writes of whole slots through one io_uring
-(`uring.py`), the host arenas registered as its fixed buffers, reads ahead of writes. The file is deleted at close.
+SSD (`SsdTier`): the member's shard file of a shard set (`shards.py`), kept across runs, O_DIRECT reads and writes of
+whole slots through one io_uring (`uring.py`), the host arenas registered as its fixed buffers, reads ahead of writes.
 """
 
 from __future__ import annotations
@@ -306,35 +306,32 @@ class HostTier:
 
 
 class SsdTier:
-    """One member's SSD tier: a preallocated file of whole slots, read and written with O_DIRECT (buffered where the
-    file system has no O_DIRECT, as tmpfs) through one io_uring (`uring.UringFile`) into and out of host slots of the
-    arenas in `buffers`, which the ring registers as fixed buffers. One request per slot; reads go before writes
-    (`SSD_READ_DEPTH` / `SSD_WRITE_DEPTH` in the kernel at once). The file is deleted at close."""
+    """One member's SSD tier: its shard file of a shard set (`shards.py`: shard q holds member q's quarter of every
+    slot, whichever GPU the member runs on), read and written with O_DIRECT (buffered where the file system has no
+    O_DIRECT, as tmpfs) through one io_uring (`uring.UringFile`) into and out of host slots of the arenas in
+    `buffers`, which the ring registers as fixed buffers. One request per slot; reads go before writes
+    (`SSD_READ_DEPTH` / `SSD_WRITE_DEPTH` in the kernel at once).
+
+    The file must exist with `nbytes` (written in full once by `shards.py create`); it is kept at close. Its contents
+    are never trusted: the slot index (`TierManager`) starts empty every run, so only slots this run wrote are read."""
 
     def __init__(self, path: str, nbytes: int, slot_bytes: int, buffers: list[tuple[int, int]]):
-        self.path, self.slot_bytes = path, slot_bytes
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        flags = os.O_RDWR | os.O_CREAT
+        self.path, self.slot_bytes, self.fd = path, slot_bytes, None
+        if not os.path.exists(path) or os.path.getsize(path) != nbytes:
+            raise RuntimeError(f"SSD shard {path}: " + (f"{os.path.getsize(path)} B" if os.path.exists(path) else
+                               "missing") + f", the run needs {nbytes} B; create the set with "
+                               "`python -m ppimpl.kvpool.shards create` (TIERS.md §5)")
+        self.fd, self.direct = open_direct(path)
         try:
-            self.fd = os.open(path, flags | os.O_DIRECT, 0o600)
-            self.direct = True
-        except OSError as e:
-            if e.errno != errno.EINVAL:
-                raise
-            self.fd = os.open(path, flags, 0o600)
-            self.direct = False
-        try:
-            os.posix_fallocate(self.fd, 0, nbytes)
             piece = -(-slot_bytes // 4096) * 4096              # a whole slot (cut only at a fixed buffer's end)
             self.io = UringFile(self.fd, buffers, piece, SSD_READ_DEPTH, SSD_WRITE_DEPTH, "tier-uring")
         except BaseException:
             os.close(self.fd)
-            os.unlink(path)
             raise
 
     @property
     def info(self) -> str:
-        return (f"ssd {self.path} (O_DIRECT {self.direct}, io_uring {self.io.registered_bytes / 1e9:.1f} GB "
+        return (f"ssd shard {self.path} (O_DIRECT {self.direct}, io_uring {self.io.registered_bytes / 1e9:.1f} GB "
                 f"registered in {self.io.register_s:.1f} s, depth read {SSD_READ_DEPTH} / write {SSD_WRITE_DEPTH})")
 
     def read(self, slots: list[int], host_ptrs: list[int]) -> list[Future]:
@@ -346,8 +343,19 @@ class SsdTier:
         return [self.io.submit("w", s * self.slot_bytes, p, self.slot_bytes) for s, p in zip(slots, host_ptrs)]
 
     def close(self):
+        """Stop the ring and close the file (kept for the next run)."""
+        if self.fd is None:
+            return
         self.io.close()
-        if self.fd is not None:
-            os.close(self.fd)
-            self.fd = None
-            os.unlink(self.path)
+        os.close(self.fd)
+        self.fd = None
+
+
+def open_direct(path: str, extra: int = 0) -> tuple[int, bool]:
+    """(fd, O_DIRECT?): O_DIRECT, or buffered where the file system has none (tmpfs)."""
+    try:
+        return os.open(path, os.O_RDWR | os.O_DIRECT | os.O_CLOEXEC | extra, 0o600), True
+    except OSError as e:
+        if e.errno != errno.EINVAL:
+            raise
+        return os.open(path, os.O_RDWR | os.O_CLOEXEC | extra, 0o600), False

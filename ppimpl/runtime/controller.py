@@ -99,6 +99,7 @@ class Controller:
         self.run_dir = Path(cfg.run_dir)
         self.run_dir.mkdir(parents=True, exist_ok=True)
         self.procs: list[subprocess.Popen] = []
+        self.shard_set = None                    # tiers: the SSD shard set this run holds (kvpool/shards.py)
         self.sched: Scheduler | None = None
         self.t0_ns: int | None = None
         self.ready = False
@@ -138,6 +139,16 @@ class Controller:
     # --- lifecycle ------------------------------------------------------------------------------------------------
 
     async def start(self):
+        tc = self.cfg.tiers
+        if tc is not None and tc.ssd_gb and self.cfg.model != "fake":
+            # the SSD tier: take a free shard set for the run (kvpool/shards.py); the workers open its shards
+            from ppimpl.kvpool.shards import ShardSet, shard_bytes
+            base = tc.ssd_dir or os.environ.get("PPIMPL_SSD_DIR")
+            if not base:
+                raise ValueError("SSD tier: set tiers.ssd_dir or PPIMPL_SSD_DIR (the shard sets, TIERS.md §5)")
+            self.shard_set = ShardSet(base, self.n, shard_bytes(tc.ssd_gb))
+            print(f"tiers: SSD shard set {self.shard_set.dir}", flush=True)
+            self.cfg = msgspec.structs.replace(self.cfg, tiers=msgspec.structs.replace(tc, ssd_dir=self.shard_set.dir))
         cfg = self.cfg
         cfg_path = self.run_dir / "server_config.yaml"
         cfg_path.write_text(dump_config(cfg))
@@ -297,6 +308,8 @@ class Controller:
         for sock in (*self.plans, *self.tier_socks, self.reports, self.wake_rx, self.wake_tx, self.intake):
             if sock is not None:
                 sock.close(linger=0)
+        if self.shard_set is not None:
+            self.shard_set.close()                     # after the workers exited: the set is free for another run
         for f in ("mb_log", "host_log", "req_log", "plan_log", "tier_log"):
             if getattr(self, f, None) is not None:
                 getattr(self, f).close()

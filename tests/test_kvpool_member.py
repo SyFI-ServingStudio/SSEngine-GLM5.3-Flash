@@ -7,12 +7,13 @@ import os
 import time
 from types import SimpleNamespace as NS
 
+import msgspec
 import pytest
 import torch
 
 from ppimpl.config import BLOCK_TOKENS as B, TierConfig
 from ppimpl.engine.scheduler import Request
-from ppimpl.kvpool import BalancedKVPool, KVViews
+from ppimpl.kvpool import BalancedKVPool, KVViews, shards
 from ppimpl.kvpool.member import PoolMember, tier_move
 from ppimpl.kvpool.placement import BalancedPlacement
 from ppimpl.runtime.transport import TierBatch, decode_tier, encode
@@ -30,6 +31,10 @@ def members(nslots: int | None = 40, ssd_slots: int | None = None, staging_slots
     tc = TierConfig(dram_gb=gb(nslots), ssd_gb=gb(ssd_slots), staging_gb=gb(staging_slots), slot_bytes=L.slot_bytes,
                     state_slots=L.state_slots, ssd_dir=None if ssd_dir is None else str(ssd_dir), **ring)
     cfg = NS(tiers=tc, num_stages=4, model="glm53", run_dir=str(ssd_dir))
+    if ssd_slots is not None:                   # the shard set (kept across runs: made once)
+        shards.create(str(ssd_dir), 1, 4, ssd_slots and gb(ssd_slots))
+        tc = msgspec.structs.replace(tc, ssd_dir=os.path.join(ssd_dir, "set0"))
+        cfg = NS(tiers=tc, num_stages=4, model="glm53", run_dir=str(ssd_dir))
     mems = []
     for q in range(4):
         e = PoolMember(cfg, q, torch.device("cpu"), None)
@@ -157,7 +162,34 @@ def test_ssd_demote_and_staging_are_byte_equal(tmp_path, ring):
         paths = [e.ssd.path for e in mems]
         for e in mems:
             e.close()
-        assert not any(os.path.exists(x) for x in paths)
+        assert all(os.path.exists(x) for x in paths)                 # kept for the next run
+
+
+def test_kept_ssd_file_is_never_served_stale(tmp_path):
+    """A second run over the first run's shard set (same files, x's bytes still in them) starts with an empty index:
+    x is found nowhere (computed again), and what it reads back is only what it wrote itself."""
+    T = 2 * B - 5
+    X, Y = KVViews([1, 2], [3, 4, 5, 6, 7, 8], T), KVViews([9, 10], [0, 9, 10, 11, 1, 2], T)
+    views, ranges, mems, tc = members(None, 60, 30, tmp_path)
+    pool = BalancedKVPool(tc)
+    pool.write_back("x", T, None, X)
+    drive(pool, mems)
+    for e in mems:
+        e.close()
+    views, ranges, mems, tc = members(None, 60, 30, tmp_path)         # the next run: same files
+    pool = BalancedKVPool(tc)
+    assert pool.lookup("x", Request("x1", T + 9, session="x", prefix_tokens=T)) is None
+    want = block_bytes(views, ranges, Y.kv_blocks, Y.state_blocks)
+    pool.write_back("y", T, None, Y)                                 # takes the slots x had
+    drive(pool, mems)
+    scramble(views)
+    a = KVViews([5, 6], [0, 1, 2, 3, 4, 5], T)
+    r = Request("y1", T + 9, session="y", prefix_tokens=T)
+    pool.load("y", pool.lookup("y", r), a, 0)
+    drive(pool, mems)
+    assert block_bytes(views, ranges, a.kv_blocks, a.state_blocks) == want
+    for e in mems:
+        e.close()
 
 
 def test_fake_member_reports_after_bandwidth_time():

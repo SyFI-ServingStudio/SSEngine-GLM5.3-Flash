@@ -93,7 +93,7 @@ def _worker(rank: int, port: int, out_dir: str):
     dev = torch.device("cuda", rank)
     torch.cuda.set_device(dev)
     pipe = open_pipe(RunConfig(port=port, scheduler=SchedulerConfig(mb_tokens=CHUNK)), rank, dev, HIDDEN_WIDTH)
-    tc = TierConfig(dram_gb=2.0, ssd_gb=1.0, staging_gb=0.5, ssd_dir=out_dir)
+    tc = TierConfig(dram_gb=2.0, ssd_gb=1.0, staging_gb=0.5, ssd_dir=f"{out_dir}/set0")   # the shard set, made below
     eng = PoolMember(NS(tiers=tc, num_stages=4, model="glm53", run_dir=out_dir), rank, dev, zmq.Context())
     m = StageModel(bench_config(CHUNK), rank, dev, num_blocks=1 + 4 * (N_KV + N_ST), max_model_len=P + A + B,
                    cuda_graphs=False, ipc_kv=True)
@@ -165,6 +165,9 @@ def test_tier_round_trip_is_bitwise(tmp_path):
     if torch.cuda.device_count() < 4:
         pytest.skip("needs 4 GPUs")
     import torch.multiprocessing as mp
+
+    from ppimpl.kvpool.shards import create
+    create(str(tmp_path), 1, 4, 1.0)
     mp.start_processes(_worker, args=(free_port_block(), str(tmp_path)), nprocs=4, start_method="spawn")
     res = [json.loads((tmp_path / f"rank{r}.json").read_text()) for r in range(4)]
     print(json.dumps(res))

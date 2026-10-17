@@ -610,7 +610,7 @@ def main():
     ap.add_argument("--token-pool-limit", type=int, help="req-frontend corpus.token_pool_limit (harness checks)")
     ap.add_argument("--dram-gb", help="tiers: DRAM per GPU in GB, or none (with --ssd-gb: TierConfig)")
     ap.add_argument("--ssd-gb", help="tiers: SSD per GPU in GB, or none")
-    ap.add_argument("--staging-gb", type=float, help="tiers: staging area per GPU (SSD without DRAM)")
+    ap.add_argument("--staging-gb", type=float, help="tiers: staging area per GPU (every SSD read)")
     args = ap.parse_args()
     for n in args.names:
         parse_name(n)

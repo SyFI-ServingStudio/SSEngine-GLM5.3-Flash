@@ -11,7 +11,8 @@ is done, a read's blocks are held by a request that computes only after all n `T
 SSD ops run on two threads (reads; writes and demotes), one op at a time each, their file I/O on `SsdTier`'s io_uring,
 into and out of host slots: DRAM's (a demote) or a staging arena's (every SSD read; a write-back to SSD without
 DRAM, or of a context larger than DRAM). An SSD read lands slot by slot and each KV block's H2D is enqueued as soon as its slot is
-in, the state after its slots: read time ~ SSD time + one block. The file is deleted when the member stops.
+in, the state after its slots: read time ~ SSD time + one block. The file is shard q (this member's quarter of every
+slot) of the set the leader took (`shards.py`), kept for the next run; its contents are never trusted.
 
 The fake model has no KV: its member moves nothing and reports each op after the time the configured bandwidth
 gives its bytes, one op after another per direction (CPU tests, fake runs).
@@ -28,6 +29,7 @@ import time
 import traceback
 
 from ppimpl.kvpool.backends import HostTier, SsdTier, _ok, cgroup_peak_gb, node_cpus, num_slots
+from ppimpl.kvpool.shards import shard_bytes, shard_path
 from ppimpl.kvpool.layout import ViewRange
 from ppimpl.kvpool.manager import TierOp
 from ppimpl.kvpool.mover import Mover, Segment
@@ -160,9 +162,10 @@ class PoolMember:
             if self.staging.touch_error is not None:
                 raise self.staging.touch_error
             self.staging.register(sb)
-            d = self.tc.ssd_dir or os.environ.get("PPIMPL_SSD_DIR") or os.path.join(self.cfg.run_dir, "ssd")
-            self.ssd = SsdTier(os.path.join(d, f"tier_ssd_gpu{self.stage}_{os.getpid()}.bin"),
-                               num_slots(self.tc.ssd_gb, sb) * sb, sb,
+            if not self.tc.ssd_dir:
+                raise ValueError("SSD tier: tiers.ssd_dir is the shard set the leader took (shards.ShardSet)")
+            assert num_slots(self.tc.ssd_gb, sb) * sb <= shard_bytes(self.tc.ssd_gb)
+            self.ssd = SsdTier(shard_path(self.tc.ssd_dir, self.stage), shard_bytes(self.tc.ssd_gb), sb,
                                [(a.base, a.nbytes) for a in (self.dram, self.staging) if a is not None])
         self.mover = Mover(self.device, sb, self.tc.hops, self.tc.ring_depth, self.tc.ring_chunk_slots)
         print(f"stage {self.stage} tiers: slot {self.slot_bytes} B, state {P.state_slots} slots, "

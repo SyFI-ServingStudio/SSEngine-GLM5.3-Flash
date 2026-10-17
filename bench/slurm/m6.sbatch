@@ -4,8 +4,10 @@
 #   mkdir -p measured/runs_m6/slurm
 #   sbatch -p priority -J ppm6 --time=00:20:00 --mem=300G -o measured/runs_m6/slurm/%j.out bench/slurm/m6.sbatch \
 #     tier_bringup --dram-gb 48 --ssd-gb none --run-name tier_bringup_dram
-# SSD files (one per GPU, TierConfig.ssd_dir) go to PPIMPL_SSD_DIR, default <repo>/tmp/ssd_<job>; the directory is
-# deleted when the job ends, and df of the repo's file system is printed before and after.
+# SSD shard sets (ppimpl/kvpool/shards.py: set<k>/shard<q>.bin, 128 GB per shard) live in PPIMPL_SSD_DIR, default
+# <main tree>/tmp/ssd_tier, kept across runs; the run takes the first free set. Create a set once, before the first
+# SSD run: $PY -m ppimpl.kvpool.shards create --sets 1 --shards 4 --gb 128. df of the repo's file system is printed
+# before and after.
 # Memory guards: bench/slurm/memguard.py (start only with MemAvailable > pinned + 100 GB and memory PSI < 5%; a timed
 # part that thrashes is stopped and marked INVALID.txt).
 # HOP2=1 runs bench/tier_hop2.py (two-hop rates, GEMM and stage-edge interference) before the run.
@@ -18,9 +20,9 @@ mkdir -p "$R/slurm"
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
 G=${CUDA_VISIBLE_DEVICES:-0,1,2,3}
 P=$((20000 + ${SLURM_JOB_ID:-0} % 120 * 100))
-export PPIMPL_SSD_DIR=${PPIMPL_SSD_DIR:-$ROOT/tmp/ssd_$JOB}
+export PPIMPL_SSD_DIR=${PPIMPL_SSD_DIR:-$MAIN/tmp/ssd_tier}
 export PPIMPL_HANDOFF=${PPIMPL_HANDOFF:-$MAIN/third_party/handoff_v2_realistic}   # v2-realistic targets
-trap 'rm -rf "$PPIMPL_SSD_DIR" "$TMPDIR"; echo "== df after: $(df -h "$ROOT" | tail -1)"' EXIT
+trap 'rm -rf "$TMPDIR"; echo "== df after: $(df -h "$ROOT" | tail -1)"' EXIT
 WHAT=${1:?run name (bench/run.py)}; shift
 echo "== $(date -Is) gpus $G port $P: $WHAT $* (ssd dir $PPIMPL_SSD_DIR)"
 echo "== df before: $(df -h "$ROOT" | tail -1)"
