@@ -32,7 +32,8 @@ cited here are in git history at `7598487`. Tracked: the md tables and the hando
 
 ## Implementation choice: KDA metadata without vLLM's GDN builder (M2/M3)
 
-- `Glm5NextLinearAttention._forward` is replaced (Dao conv + FlashInfer persistent KDA, configs 4/5), so the GDN
+- `Glm5NextLinearAttention._forward` is replaced (the short conv, bitwise Dao's, and FlashInfer persistent KDA,
+  configs 4/5), so the GDN
   metadata builder that only that method reads is not run. Our `KdaPrefillMeta` carries the sequences, state blocks
   and the FlashInfer work plan (built once per distinct sequence offsets on a side stream: FlashInfer's
   `recurrent_kda` wrapper calls `cu_seqlens.tolist()`, a host sync, so pp-impl calls the persistent `fwd` directly).
@@ -615,3 +616,18 @@ rewrites it to -1, so no path reads or keeps it; valid input gives the same resu
 warm-up and 33-bucket capture with the smoke's server config passed one at a time (38-40 s per stage), and the topk
 GPU tests pass with a new out-of-row case. Served rows never carry NaN logits; the guard is a bound, not a fix of
 the data.
+
+## KDA short conv and state copies: one launch per layer (M5, jobs 7910-7934) — done
+- The prefill ran Dao causal-conv1d once per sequence and per q / k / v (3 launches per sequence and layer) and
+  torch `index_select` / `zero_` / `index_copy_` for the recurrent states. `ppimpl/model/kda_conv.py` does the conv
+  of the whole microbatch in one launch plus one for the conv states, with Dao's arithmetic in inline PTX so q, k, v
+  and the states are bitwise equal; `kda_state.py` gathers and scatters the states with wide copies, bitwise.
+- Per layer at 4,096 rows (B200, alone): conv ~78 us whatever the sequence count vs Dao 111 (1 sequence), 137 (2),
+  166 (4), 225 (7) (job 7927; earlier versions 171 us, 7910, and 111 us, 7917); state gather + scatter 5.1 + 4.4 us
+  vs 12.7 + 9.4 in the serving layout (7918).
+- In sessions (7933 N=400 and 7934 N=200 vs 7900 / 7902, conv v2 with the other overrides): 4,096-row microbatches
+  0.1-0.4 ms faster on every stage, 0.4-1.0 ms with 4 or more sequences. At N=400 the overload phase runs at the
+  power cap, so the saving goes to a lower clock and throughput does not move (`notes.md` 2026-10-17); N=200 TTFT
+  0.114 / 0.219 / 1.014 s vs 7902's 0.12 / 0.22 / 1.03.
+- Unconditional since the tidy (no switch); the Dao calls remain the reference in `bench/kda_conv_bench.py` and
+  `tests/test_kda_conv_gpu.py`.
