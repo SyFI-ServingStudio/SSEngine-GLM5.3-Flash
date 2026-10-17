@@ -489,7 +489,7 @@ def run_named(name: str, fake: bool, port: int, out_root: Path, args) -> dict:
         extra["fake"] = {**extra.get("fake", {}), "hidden_width": 64}
     if args.nsys and args.nsys_mbs and args.nsys_mbs != "all":
         extra["profile_mbs"] = [int(x) for x in args.nsys_mbs.split(":")]
-    if args.pool_tokens or kind == "tier_bringup":
+    if args.pool_tokens or (kind == "tier_bringup" and args.pool_tokens is None):   # 0: the full pool
         extra["pool_tokens"] = args.pool_tokens or TIER_BRINGUP_POOL
     if args.dram_gb is not None or args.ssd_gb is not None:   # lanes/m6 TIERS.md; SSD files in $PPIMPL_SSD_DIR
         gb = {k: None if v in (None, "none") else float(v) for k, v in (("dram_gb", args.dram_gb),
@@ -552,7 +552,7 @@ def submit(args) -> None:
     if args.client_timeout != CLIENT_TIMEOUT_S:
         inner += ["--client-timeout", str(args.client_timeout)]
     for opt in ("trace", "client_limit", "pool_tokens", "token_pool_limit", "gap_s", "sessions", "run_name"):
-        if getattr(args, opt):
+        if getattr(args, opt) or (opt == "pool_tokens" and args.pool_tokens == 0):
             inner += [f"--{opt.replace('_', '-')}", str(getattr(args, opt))]
     if args.out_root:
         inner += ["--out-root", str(Path(args.out_root).resolve())]
@@ -598,7 +598,8 @@ def main():
     ap.add_argument("--sessions", help="prefix_bringup with --gap-s: only these session ids (comma-separated)")
     ap.add_argument("--run-name", help="run directory name (default: the run name)")
     ap.add_argument("--client-limit", help="prefix/session runs: `timeout` for the client (default 22m for prefix_n<N>)")
-    ap.add_argument("--pool-tokens", type=int, help="prefix/session runs: cap the KV pool (harness checks)")
+    ap.add_argument("--pool-tokens", type=int, help="prefix/session runs: cap the KV pool (harness checks); "
+                    "tier_bringup: 0 = the full pool (an HBM-hit reference), default 1,234,944")
     ap.add_argument("--token-pool-limit", type=int, help="req-frontend corpus.token_pool_limit (harness checks)")
     ap.add_argument("--dram-gb", help="tiers: DRAM per GPU in GB, or none (with --ssd-gb: TierConfig)")
     ap.add_argument("--ssd-gb", help="tiers: SSD per GPU in GB, or none")
