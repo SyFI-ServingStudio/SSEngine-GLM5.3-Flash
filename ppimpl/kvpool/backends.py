@@ -15,8 +15,8 @@ kernel reclaim the node's page cache for the piece; a preferred fault does not (
 other node once the node's free pages reach the low watermark (8039: 365 of 600 GB landed on node 0 while node 1 held
 662 GB of page cache).
 
-SSD (`SsdTier`): one preallocated file per member, O_DIRECT `preadv`/`pwritev` of whole slots from a pool of
-IO_THREADS threads (GIL released), into and out of host slots. The file is deleted at close.
+SSD (`SsdTier`): one preallocated file per member, O_DIRECT reads and writes of whole slots through one io_uring
+(`uring.py`), the host arenas registered as its fixed buffers, reads ahead of writes. The file is deleted at close.
 """
 
 from __future__ import annotations
@@ -27,9 +27,11 @@ import mmap
 import os
 import threading
 import time
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future
 
 import numpy as np
+
+from ppimpl.kvpool.uring import UringFile
 
 MADV_HUGEPAGE = 14
 MPOL_PREFERRED = 1
@@ -41,7 +43,8 @@ REGISTER_CHUNK = 1 << 30      # cudaHostRegister per ~1 GiB of whole slots, from
 TOUCH_THREADS = 16           # first-touch threads per arena, on the job's CPUs of the arena's node (page-cache reclaim
                              # runs in the touching threads: 4 threads on the worker's 2 cores were the limit)
 HUGEPAGE = os.environ.get("PPIMPL_TIER_HUGEPAGE", "0") == "1"
-IO_THREADS = 8                # SSD preadv/pwritev pool per member (fio: 8 psync threads, 53 GB/s on one file)
+SSD_READ_DEPTH = 8            # SSD I/O, one io_uring request per slot (TIERS.md §2.5): reads in the kernel at once
+SSD_WRITE_DEPTH = 4           # writes: fewer, so a write-back never fills the device's queues in front of a read
 
 
 def num_slots(capacity_gb: float | None, slot_bytes: int) -> int:
@@ -304,9 +307,11 @@ class HostTier:
 
 class SsdTier:
     """One member's SSD tier: a preallocated file of whole slots, read and written with O_DIRECT (buffered where the
-    file system has no O_DIRECT, as tmpfs in CPU tests) from IO_THREADS threads."""
+    file system has no O_DIRECT, as tmpfs) through one io_uring (`uring.UringFile`) into and out of host slots of the
+    arenas in `buffers`, which the ring registers as fixed buffers. One request per slot; reads go before writes
+    (`SSD_READ_DEPTH` / `SSD_WRITE_DEPTH` in the kernel at once). The file is deleted at close."""
 
-    def __init__(self, path: str, nbytes: int, slot_bytes: int):
+    def __init__(self, path: str, nbytes: int, slot_bytes: int, buffers: list[tuple[int, int]]):
         self.path, self.slot_bytes = path, slot_bytes
         os.makedirs(os.path.dirname(path), exist_ok=True)
         flags = os.O_RDWR | os.O_CREAT
@@ -318,31 +323,30 @@ class SsdTier:
                 raise
             self.fd = os.open(path, flags, 0o600)
             self.direct = False
-        os.posix_fallocate(self.fd, 0, nbytes)
-        self.pool = ThreadPoolExecutor(IO_THREADS, thread_name_prefix="tier-io")
+        try:
+            os.posix_fallocate(self.fd, 0, nbytes)
+            piece = -(-slot_bytes // 4096) * 4096              # a whole slot (cut only at a fixed buffer's end)
+            self.io = UringFile(self.fd, buffers, piece, SSD_READ_DEPTH, SSD_WRITE_DEPTH, "tier-uring")
+        except BaseException:
+            os.close(self.fd)
+            os.unlink(path)
+            raise
+
+    @property
+    def info(self) -> str:
+        return (f"ssd {self.path} (O_DIRECT {self.direct}, io_uring {self.io.registered_bytes / 1e9:.1f} GB "
+                f"registered in {self.io.register_s:.1f} s, depth read {SSD_READ_DEPTH} / write {SSD_WRITE_DEPTH})")
 
     def read(self, slots: list[int], host_ptrs: list[int]) -> list[Future]:
-        """File slots -> host addresses, one future per slot, submitted in order."""
-        return [self.pool.submit(self._read, s, p) for s, p in zip(slots, host_ptrs)]
+        """File slots -> host addresses, one future per slot, queued in order."""
+        return [self.io.submit("r", s * self.slot_bytes, p, self.slot_bytes) for s, p in zip(slots, host_ptrs)]
 
     def write(self, slots: list[int], host_ptrs: list[int]) -> list[Future]:
-        """Host addresses -> file slots, one future per slot, submitted in order."""
-        return [self.pool.submit(self._write, s, p) for s, p in zip(slots, host_ptrs)]
-
-    def _read(self, slot: int, ptr: int):
-        buf = (ctypes.c_char * self.slot_bytes).from_address(ptr)
-        n = os.preadv(self.fd, [buf], slot * self.slot_bytes)
-        if n != self.slot_bytes:
-            raise OSError(f"{self.path}: slot {slot}: read {n} of {self.slot_bytes} B")
-
-    def _write(self, slot: int, ptr: int):
-        buf = (ctypes.c_char * self.slot_bytes).from_address(ptr)
-        n = os.pwritev(self.fd, [buf], slot * self.slot_bytes)
-        if n != self.slot_bytes:
-            raise OSError(f"{self.path}: slot {slot}: wrote {n} of {self.slot_bytes} B")
+        """Host addresses -> file slots, one future per slot, queued in order."""
+        return [self.io.submit("w", s * self.slot_bytes, p, self.slot_bytes) for s, p in zip(slots, host_ptrs)]
 
     def close(self):
-        self.pool.shutdown()
+        self.io.close()
         if self.fd is not None:
             os.close(self.fd)
             self.fd = None

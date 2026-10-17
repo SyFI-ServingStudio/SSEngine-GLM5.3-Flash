@@ -37,6 +37,7 @@ From `env/check_env.py`, which fails on any other version:
 | DeepGEMM | 2.8.0, vendored in the fork (`vllm/third_party/deep_gemm`) | the fork's native build |
 | DeepSelect | the fork's `vllm._deepselect_C` (`torch.ops.deep_select.topk`) | the fork's native build |
 | FlashKDA | the fork's `vllm._flashkda_C` (`torch.ops._flashkda_C.fwd`) | the fork's native build |
+| liburing | 2.5, `liburing-ffi.so.2` (the SSD tier's io_uring, through ctypes) | Ubuntu package `liburing2` |
 | causal-conv1d (Dao) | 1.7.0, built from the source tag against torch 2.13. The released cu13 wheel is built for torch 2.10 and fails to load with 2.13 (`undefined symbol c10::impl::cow::materialize_cow_storage`). | https://github.com/Dao-AILab/causal-conv1d, tag `v1.7.0` |
 
 Two kernels follow the design rather than the fork (`measured/kernels_identity.md`, Decisions):

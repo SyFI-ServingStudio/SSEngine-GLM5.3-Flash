@@ -20,11 +20,11 @@ def test_arena_is_plain_memory_on_cpu():
 
 def test_ssd_slots_round_trip_and_file_is_unlinked(tmp_path):
     sb = 8192
-    f = bk.SsdTier(str(tmp_path / "d" / "ssd.bin"), 6 * sb, sb)
-    assert os.path.getsize(f.path) == 6 * sb
     src = np.random.default_rng(1).integers(0, 255, 3 * sb + 4096, dtype=np.uint8)
     dst = np.zeros_like(src)
     p0, p1 = (x.ctypes.data + (-x.ctypes.data) % 4096 for x in (src, dst))
+    f = bk.SsdTier(str(tmp_path / "d" / "ssd.bin"), 6 * sb, sb, [(p0, 3 * sb), (p1, 3 * sb)])
+    assert os.path.getsize(f.path) == 6 * sb
     for fut in f.write([5, 0, 2], [p0 + k * sb for k in range(3)]):
         fut.result()
     for fut in f.read([2, 5, 0], [p1 + k * sb for k in (2, 0, 1)]):

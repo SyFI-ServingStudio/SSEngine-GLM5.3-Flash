@@ -162,14 +162,15 @@ class PoolMember:
             self.staging.register(sb)
             d = self.tc.ssd_dir or os.environ.get("PPIMPL_SSD_DIR") or os.path.join(self.cfg.run_dir, "ssd")
             self.ssd = SsdTier(os.path.join(d, f"tier_ssd_gpu{self.stage}_{os.getpid()}.bin"),
-                               num_slots(self.tc.ssd_gb, sb) * sb, sb)
+                               num_slots(self.tc.ssd_gb, sb) * sb, sb,
+                               [(a.base, a.nbytes) for a in (self.dram, self.staging) if a is not None])
         self.mover = Mover(self.device, sb, self.tc.hops, self.tc.ring_depth, self.tc.ring_chunk_slots)
         print(f"stage {self.stage} tiers: slot {self.slot_bytes} B, state {P.state_slots} slots, "
               f"{len(P.kv_len)} kv + {len(P.st_len)} state pieces per block/context, "
               + (f"dram {self.dram.nbytes / 1e9:.1f} GB on node {self.dram.node} (touch {self.dram.touch_s:.1f} s, "
                  f"of it after the model {self.touch_wait_s:.1f} s, register {self.dram.register_s:.1f} s, {self.dram.placement()}), "
                  if self.dram else "")
-              + (f"ssd {self.ssd.path} (O_DIRECT {self.ssd.direct}), staging {self.staging.nbytes / 1e9:.1f} GB "
+              + (f"{self.ssd.info}, staging {self.staging.nbytes / 1e9:.1f} GB "
                  f"({self.staging.placement()}), " if self.ssd else "")
               + f"{len(self.opened)} peer allocations, "
               + self.mover.info

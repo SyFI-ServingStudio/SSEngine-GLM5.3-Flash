@@ -96,11 +96,20 @@ def rows() -> list[tuple[str, str, bool]]:
         check("causal-conv1d (Dao; KDA short conv)", causal_conv1d, "1.7.0"),
         check("FlashInfer KDA cute-dsl-persistent", kda_persistent),
         check("ninja (FlashInfer JIT)", ninja),
+        check("liburing (SSD tier io_uring)", liburing, "liburing-ffi.so.2"),
     ]
     return out
 
 
 NINJA = "/usr/bin/ninja"
+
+
+def liburing() -> str:
+    """The SSD tier's io_uring (ppimpl/kvpool/uring.py) loads liburing-ffi.so.2 (Ubuntu package liburing2)."""
+    import ctypes
+
+    ctypes.CDLL("liburing-ffi.so.2")
+    return "liburing-ffi.so.2"
 
 
 def ninja() -> str:
