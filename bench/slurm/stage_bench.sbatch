@@ -3,8 +3,8 @@
 # the repo root:
 #   sbatch -p main --gres=gpu:1 -c 28 --mem=200G --time=00:10:00 -o measured/logs/%j_stage_bench.out \
 #     bench/slurm/stage_bench.sbatch "0:time 0:kernels 0:stacks"
-# Each item is stage:mode[:spec[:off]] (off: pp_patch.FAST switches turned off, comma list, for A/B; spec "" keeps the
-# default); STAGE_BENCH_ARGS adds options to every run.
+# Each item is stage:mode[:spec][@off] (spec: prefix:append,...; off: pp_patch.FAST switches turned off, comma list,
+# for A/B); STAGE_BENCH_ARGS adds options to every run.
 #SBATCH --gres=gpu:1
 #SBATCH -J ppm-stagebench
 set -uo pipefail
@@ -14,7 +14,8 @@ mkdir -p "$O"
 nvidia-smi --query-gpu=index,clocks.sm,power.draw,temperature.gpu --format=csv,noheader
 rc=0; i=0
 for item in ${1:-0:time}; do
-  IFS=: read -r s m spec off <<< "$item"
+  off=; [[ $item == *@* ]] && { off=${item##*@}; item=${item%@*}; }
+  s=${item%%:*}; rest=${item#*:}; m=${rest%%:*}; spec=; [[ $rest == *:* ]] && spec=${rest#*:}
   extra=(); [ -n "${spec:-}" ] && extra=(--spec "$spec")
   i=$((i + 1)); tag=${i}_s${s}_${m}${off:+_off-${off//,/-}}
   echo "== $(date -Is) stage $s $m ${spec:-} off=${off:-}"
