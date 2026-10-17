@@ -2,6 +2,7 @@
 
     python -m bench.tune_tactics tune   [--out PATH] --routing RUN_DIR [--routing ...] | --routing-json PATH  # 1 GPU
     python -m bench.tune_tactics verify [--lengths 1024,8192,131072]  # fresh process: load, Ready time, cache misses
+    python -m bench.tune_tactics merge --base FILE --ab A.json [--ab ...] --routing-name real --out PATH  # CPU
 
 `tune` builds stage 0 with the output head (every FlashInfer op the four stages use: KDA-dense and MoE layers'
 NVFP4 GEMMs, the trtllm NVFP4 MoE, the TRTLLM sparse MLA), budget 131,072 tokens (the largest microbatch any run
@@ -81,6 +82,50 @@ def tune(out: Path, profile: dict[int, list[int]], sources: list[str]) -> None:
         raise SystemExit("tune: the MoE was not tuned on the given routing (initializer never called)")
 
 
+OP_MOE = "flashinfer::trtllm_fp4_block_scale_moe"
+
+
+def _moe_key_tokens(key: str) -> int:
+    return int(key.split("((")[1].split(",")[0])
+
+
+def merge(base: Path, abs_: list[Path], routing: str, out: Path) -> dict:
+    """`base` with an MoE entry at every serving bucket (`moe_tuning.serving_buckets`): a bucket the base lacks gets
+    the tactic the base served it with (FlashInfer's hybrid bucket at or above it), then every bucket timed in the
+    bench.moe_tactics reports `abs_` at routing `routing` takes the sustained-best tactic where it is faster than that
+    one. Every other key is kept as is. Returns what changed."""
+    from flashinfer.fused_moe.utils import map_to_hybrid_bucket
+    from ppimpl.model import moe_tuning
+
+    data = json.loads(base.read_text())
+    moe = {_moe_key_tokens(k): k for k in data if OP_MOE in k}
+    top = max(moe)
+    template = moe[top]
+    key_for = lambda t: template.replace(f"({top}, ", f"({t}, ")       # noqa: E731
+    added, changed = {}, {}
+    for b in moe_tuning.serving_buckets(top):
+        if b not in moe:
+            src = moe.get(map_to_hybrid_bucket(b, top)) or moe[min(x for x in moe if x >= b)]
+            data[key_for(b)] = json.loads(json.dumps(data[src]))
+            moe[b] = key_for(b)
+            added[b] = data[src][1]
+    for p in abs_:
+        for c in json.loads(Path(p).read_text())["cases"]:
+            if c["routing"] != routing or c["tokens"] not in moe:
+                continue
+            times = {tuple(t[0]): t[1] for t in c["tactics"]}
+            cur = tuple(data[moe[c["tokens"]]][1])
+            best = min(times, key=times.get)
+            if cur in times and times[best] < times[cur]:
+                data[moe[c["tokens"]]][1] = list(best)
+                changed[c["tokens"]] = {"from": list(cur), "to": list(best), "from_ms": round(times[cur], 4),
+                                        "to_ms": round(times[best], 4)}
+    out.write_text(json.dumps(data, indent=1))
+    res = {"base": str(base), "out": str(out), "added": added, "changed": changed}
+    print(f"[merge] {json.dumps(res)}", flush=True)
+    return res
+
+
 def verify(lengths: list[int]) -> None:
     import torch
     from flashinfer.autotuner import AutoTuner
@@ -121,13 +166,18 @@ def main() -> None:
     from ppimpl.model.stage import TACTICS
 
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("mode", choices=["tune", "verify"])
+    ap.add_argument("mode", choices=["tune", "verify", "merge"])
+    ap.add_argument("--base", type=Path)
+    ap.add_argument("--ab", type=Path, action="append", default=[])
+    ap.add_argument("--routing-name", default="real")
     ap.add_argument("--out", type=Path, default=TACTICS)
     ap.add_argument("--lengths", default="1024,2048,4096,4352,6144,8192,131072")
     ap.add_argument("--routing", type=Path, action="append", default=[], help="run dir with experts_stage*.jsonl")
     ap.add_argument("--routing-json", type=Path)
     a = ap.parse_args()
-    if a.mode == "tune":
+    if a.mode == "merge":
+        merge(a.base, a.ab, a.routing_name, a.out)
+    elif a.mode == "tune":
         tune(a.out, load_profile(a.routing, a.routing_json), [str(p) for p in a.routing or [a.routing_json]])
     else:
         verify([int(x) for x in a.lengths.split(",")])

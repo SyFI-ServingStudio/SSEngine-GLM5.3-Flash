@@ -90,3 +90,25 @@ def test_real_routing_swaps_the_logit_initializer_while_tuning_only():
         assert x.shape == (256, 288)
         assert torch.bincount(x.topk(8, dim=1).indices.flatten(), minlength=288).tolist() == used[256]
     assert t.autotuner_initializer_rand is orig
+
+
+def test_merge_fills_the_serving_buckets_from_the_base_and_takes_only_faster_ab_tactics(tmp_path):
+    from bench.tune_tactics import merge
+
+    op = "flashinfer::trtllm_fp4_block_scale_moe"
+    key = lambda t: f"('{op}', 'MoERunner', (({t}, 4096), ({t}, 288)), ('Module', 8))"     # noqa: E731
+    base = {"_metadata": {"v": 1}, "('fp4_gemm', 'X', ((8, 2),))": ["X", [1], []]}
+    base.update({key(t): ["MoERunner", [t // 64, 1], []] for t in (128, 2560, 4096, 8192, 131072)})
+    (tmp_path / "base.json").write_text(json.dumps(base))
+    ab = {"cases": [
+        {"tokens": 6144, "routing": "real", "tactics": [[[128, 41], 1.0], [[128, 1], 1.2]]},   # base 8192's [128, 1]
+        {"tokens": 4352, "routing": "real", "tactics": [[[128, 1], 1.0], [[68, 1], 1.1]]},     # base already best
+        {"tokens": 4608, "routing": "synth3", "tactics": [[[1, 1], 0.1], [[128, 1], 1.0]]}]}   # other routing
+    (tmp_path / "ab.json").write_text(json.dumps(ab))
+    res = merge(tmp_path / "base.json", [tmp_path / "ab.json"], "real", tmp_path / "out.json")
+    out = json.loads((tmp_path / "out.json").read_text())
+    assert out[key(6144)][1] == [128, 41] and out[key(4352)][1] == [128, 1] and out[key(4608)][1] == [128, 1]
+    assert out[key(2304)][1] == [40, 1]                      # hybrid 2560's tactic
+    assert set(res["changed"]) == {6144}
+    assert all(out[k] == v for k, v in base.items())     # every base key unchanged
+    assert {k for k in out if op in k} == {key(t) for t in mt.serving_buckets(131072)}
