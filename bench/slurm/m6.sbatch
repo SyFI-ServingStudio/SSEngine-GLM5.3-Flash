@@ -11,6 +11,7 @@
 # HOP2=1 runs bench/tier_hop2.py (two-hop rates, GEMM and stage-edge interference) before the run.
 #SBATCH --gres=gpu:4
 set -uo pipefail
+{   # one brace group: bash parses it whole before running, so editing this file mid-job cannot break the job
 source "${SLURM_SUBMIT_DIR:-$(dirname "$0")/../..}/bench/slurm/env.sh"
 R=$ROOT/${OUT:-measured/runs_m6}
 mkdir -p "$R/slurm"
@@ -41,3 +42,4 @@ kill $WD 2>/dev/null; wait $WD 2>/dev/null
 uptime
 echo "== done $(date -Is) rc=$rc"
 exit $rc
+}
