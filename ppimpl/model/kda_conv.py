@@ -63,7 +63,7 @@ def _x_row(x_ptr, x_s0, st_ptr, st_s0, P, t, cols, s, slot, init, cmask):
     return tl.where(t >= s, xv, sv).to(tl.float32)
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["T"])   # one compile for every microbatch size (the warm-up's; no in-run JIT)
 def _conv_kernel(x_ptr, x_s0, w_ptr, st_ptr, st_s0, out_ptr, T, P, tab_ptr,
                  BT: tl.constexpr, BC: tl.constexpr):
     """One program: BT rows of one sequence x BC channels. The 3 rows before the block are loaded once and slide in
