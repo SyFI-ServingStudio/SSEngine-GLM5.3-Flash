@@ -72,6 +72,23 @@ def _ok(ret):
 
 # --- host memory ----------------------------------------------------------------------------------------------------
 
+def numa_resident_gb(ptr: int, nbytes: int, maps: str = "/proc/self/numa_maps") -> dict[int, float]:
+    """GB resident per NUMA node of the mappings starting in [ptr, ptr + nbytes) (`N<node>=<pages>` of each line, in
+    its kernelpagesize_kB)."""
+    out: dict[int, float] = {}
+    with open(maps) as f:
+        for line in f:
+            parts = line.split()
+            if not parts or not ptr <= int(parts[0], 16) < ptr + nbytes:
+                continue
+            kb = next((int(x.split("=")[1]) for x in parts if x.startswith("kernelpagesize_kB=")), 4)
+            for x in parts:
+                if x.startswith("N") and "=" in x and x[1:x.index("=")].isdigit():
+                    node = int(x[1:x.index("=")])
+                    out[node] = out.get(node, 0.0) + int(x.split("=")[1]) * kb * 1024 / 1e9
+    return {k: round(v, 2) for k, v in sorted(out.items())}
+
+
 class HostArena:
     """`nbytes` of host memory on NUMA node `node` (CUDA: pinned once `register` ran; CPU: a plain numpy buffer)."""
 
@@ -139,6 +156,10 @@ class HostArena:
             raise errs[0]
         self._chunks = spans
         self.register_s = time.perf_counter() - t0
+
+    def node_gb(self) -> dict[int, float]:
+        """GB of the arena resident on each NUMA node (/proc/self/numa_maps, the mappings inside the arena)."""
+        return numa_resident_gb(self.ptr, self.nbytes)
 
     def close(self):
         if not self.cuda or not self.ptr:
@@ -322,10 +343,11 @@ class TierEngine:
             self.streams = {k: torch.cuda.Stream(self.device) for k in ("read", "write", "read_nvl", "write_nvl")}
         print(f"stage {self.stage} tiers: slot {self.slot_bytes} B, state {self.layout.state_slots} slots, "
               f"{len(self.layout.kv_len)} kv + {len(self.layout.st_len)} state pieces per block/context, "
-              + (f"dram {self.dram.nbytes / 1e9:.1f} GB (touch {self.dram.touch_s:.1f} s, register "
-                 f"{self.dram.register_s:.1f} s), " if self.dram else "")
-              + (f"ssd {self.ssd.path} (O_DIRECT {self.ssd.direct}), staging {self.staging.nbytes / 1e9:.1f} GB, "
-                 if self.ssd else "")
+              + (f"dram {self.dram.nbytes / 1e9:.1f} GB on node {self.dram.node} (touch {self.dram.touch_s:.1f} s, "
+                 f"register {self.dram.register_s:.1f} s, resident GB by node {self.dram.node_gb()}), "
+                 if self.dram else "")
+              + (f"ssd {self.ssd.path} (O_DIRECT {self.ssd.direct}), staging {self.staging.nbytes / 1e9:.1f} GB "
+                 f"(resident GB by node {self.staging.node_gb()}), " if self.ssd else "")
               + f"{len(self.opened)} peer allocations, "
               + (self.ring_info or "direct"), flush=True)
         return self.slot_bytes, self.layout.state_slots

@@ -204,3 +204,16 @@ def test_arena_is_plain_memory_on_cpu():
     a = HostArena(3 << 20, None, False)
     assert a.nbytes == 4 << 20
     ctypes.memset(a.ptr + a.nbytes - 1, 7, 1)
+
+
+def test_numa_resident_gb(tmp_path):
+    """The arena's residency per node from numa_maps: only mappings starting inside the arena, in their page size."""
+    from ppimpl.runtime.tier_worker import numa_resident_gb
+
+    maps = tmp_path / "numa_maps"
+    maps.write_text("7f0000000000 bind:1 anon=100 dirty=100 N1=100 kernelpagesize_kB=4\n"
+                    "7f1000000000 bind:1 anon=262144 dirty=262144 N0=6 N1=262138 kernelpagesize_kB=4\n"
+                    "7f1040000000 bind:1 anon=10 N1=10 kernelpagesize_kB=2048\n"
+                    "7f2000000000 default file=/x N0=5 kernelpagesize_kB=4\n")
+    got = numa_resident_gb(0x7f1000000000, 0x1000000000, str(maps))
+    assert got == {0: round(6 * 4096 / 1e9, 2), 1: round((262138 * 4096 + 10 * (2 << 20)) / 1e9, 2)}
