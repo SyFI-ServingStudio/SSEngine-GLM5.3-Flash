@@ -127,44 +127,46 @@ Job 7916 (`bench/tier_bw.py`, 2026-10-17 03:30, load 10.3; the job's GPUs 0-3 we
 - The second hop runs on copy engines. Its HBM traffic slows a GEMM by 5-7% at full D2D rate (HBM contention, not SMs);
   at the rate it actually runs (paced by the host hop, <= 55 GB/s) the slowdown is ~4%, against ~3% between the two
   "alone" runs of the same GPU: near noise.
-**The engine's two-hop path in one process (job 7951, `bench/tier_hop2.py`, 4 GPUs on NUMA node 0, load 10).** Fake KV
-laid out like GLM-5.3 PP4, four `TierEngine`s driven from one Python thread (their submissions run one after
-another; in the server each worker submits its own share in parallel). Bytes equal for every setting below. Per op
-on all 4 GPUs, p50 of 10, ms; "submit" is the host time to submit the op on all 4 engines:
+**The engine's two-hop path in one process (job 7961, `bench/tier_hop2.py`, 4 GPUs on NUMA node 0, load 14.7).** Fake
+KV laid out like GLM-5.3 PP4, four `TierEngine`s, each submitted from its own thread (as in the server, where each
+worker submits its own share). Bytes equal for every setting. Per op on all 4 GPUs, p50 of 10, ms; "solo" is one
+GPU's read alone, with its host submit time in parentheses. (Job 7951 drove the 4 engines from one thread, so its
+numbers were mostly serialized submission; superseded by this table.)
 
-| Ring | 32k read / write | 128k read / write | 512k read / write | 512k submit |
+| Ring | 32k read / write | 128k read / write | 512k read / write | solo read (submit) 32k / 128k / 512k |
 |---|---|---|---|---|
-| direct (pieces host <-> peers) | 7.43 / 7.27 | 20.6 / 20.6 | 71.0 / 71.5 | 70.0 |
-| depth 2, chunk 1 | 4.36 / 5.88 | 10.9 / 17.3 | 38.1 / 61.1 | 28.2 |
-| depth 2, chunk 3 | 3.69 / 6.15 | 8.77 / 17.4 | 27.7 / 59.6 | 16.2 |
-| depth 2, chunk 4 | 3.37 / 5.06 | 8.25 / 15.6 | 25.6 / 59.9 | 11.7 |
-| depth 4, chunk 1 | 4.85 / 5.00 | 12.0 / 15.8 | 35.3 / 59.7 | 24.8 |
-| depth 4, chunk 3 | 3.81 / 4.86 | 8.61 / 13.3 | 27.2 / 55.5 | 15.8 |
-| depth 4, chunk 4 | 3.53 / 5.19 | 8.18 / 13.0 | 26.1 / 54.5 | 13.5 |
+| direct (pieces host <-> peers) | 6.58 / 7.45 | 12.85 / 12.71 | 33.9 / 31.7 | 2.69 (1.55) / 6.09 (4.84) / 18.6 (17.4) |
+| depth 2, chunk 1 | 5.51 / 7.02 | 13.0 / 13.8 | 43.8 / 42.7 | 2.47 (0.82) / 5.20 (1.82) / 16.3 (5.67) |
+| depth 2, chunk 3 | 3.15 / 3.95 | 7.15 / 12.7 | 18.9 / 38.6 | 2.57 (0.60) / 5.32 (1.16) / 16.1 (3.25) |
+| **depth 2, chunk 4** | **2.85 / 4.00** | **5.55 / 11.5** | **16.9 / 38.7** | 2.07 (0.63) / 5.01 (1.16) / 15.7 (3.42) |
+| depth 4, chunk 1 | 5.65 / 5.78 | 14.7 / 14.9 | 41.5 / 42.4 | 2.33 (0.83) / 5.27 (1.82) / 16.3 (5.64) |
+| depth 4, chunk 3 | 3.26 / 3.95 | 6.10 / 12.0 | 18.1 / 38.8 | 2.19 (0.60) / 5.34 (1.17) / 16.0 (3.23) |
+| depth 4, chunk 4 | 2.81 / 4.25 | 5.60 / 12.4 | 17.0 / 38.8 | 2.65 (0.52) / 5.43 (1.03) / 16.1 (2.94) |
 
 `cuMemcpyBatchAsync` by piece size, GPU 0's stream, 512 MB in all (GB/s; host submit included):
 
-| Piece | local | push 0 -> 1 | pull 1 -> 0 | host -> 0 | 4 GPUs push to all 4 / pull from all 4 (per GPU, submitted one after another) |
+| Piece | local | push 0 -> 1 | pull 1 -> 0 | host -> 0 | 4 GPUs push to all 4 / pull from all 4 (per GPU) |
 |---|---|---|---|---|---|
-| 128 KiB | 30.5 | 125 | 127 | 42.8 | 9.4 / 3.8 |
-| 1 MiB | 240 | 457 | 455 | 53.5 | 84 / 25 |
-| 4 MiB | 903 | 639 | 634 | 54.9 | 249 / 80 |
+| 128 KiB | 30.5 | 128 | 128 | 43.0 | 9.4 / 3.8 |
+| 1 MiB | 240 | 461 | 456 | 53.5 | 84 / 25 |
+| 4 MiB | 903 | 639 | 636 | 54.9 | 246 / 80 |
 | 12.86 MB | 1,396 | 708 | 708 | 56.3 | 419 / 144 |
 
-- **Host submission is the read's main cost.** Direct mode is all submission (70.0 of 71.0 ms: ~12 us per peer
-  piece on the host). Two hops with chunk 4: 11.7 ms of the 25.6 ms 512k read is the host submitting 4 engines one
-  after another, ~2.9 ms per engine. Fewer, larger chunks submit faster, hence chunk 4. The server's DRAM bring-up
-  measures the real per-worker read time (each worker submits in parallel).
-- **Writes gather by pulling over NVLink, which is slow with 4 GPUs at once** (pull 144 vs push 419 GB/s per GPU at
-  12.86 MB, 25 vs 84 at 1 MiB): 512k writes take 55-60 ms (~15 GB/s per GPU). Writes are background (1.1-1.7 GB/s
-  needed per GPU on average, §5), so this is not a target miss by itself; it lengthens how long a written session's
-  blocks stay pinned. The fix, if needed: each stage's copy engine pushes its pieces into the owner's ring.
-- **Target gap.** 32k read 3.37 ms in the probe against 1.72 (balanced DRAM target), 512k 25.6 against 16.46. Both
-  include the serialized submission above; the bring-up decides.
-
-- Still to measure, in the first DRAM bring-up job (no separate job): the GEMM slowdown with the real
-  `cuMemcpyBatchAsync` pipeline at the real rate, and the second hop beside the stage edges' `CePipe` sends (both on
-  NVLink: does either slow the other).
+- **Defaults confirmed: depth 2, chunk 4 (206 MB per GPU).** Best or tied at every size; depth 4 adds nothing.
+  512k reads run at 50.5 GB/s per GPU with all 4 GPUs reading (target 48.4 shared-socket, §2.3 table 1).
+- **Host submission overlaps the transfer.** Solo 512k: 3.42 ms of submit inside a 15.7 ms read (53 GB/s). The
+  submit is ~0.25 ms of Python (34 batch calls, 1,510 descriptors, pointers computed once per op) and the rest is
+  the driver (~2.3 us per D2D descriptor, ~12 us per host <-> peer descriptor in direct mode), with the GIL
+  released inside the call. Going below ~1 ms of submit would need fewer descriptors (2D/3D batched copies).
+- **Writes gather by pulling over NVLink**, slow with 4 GPUs at once (pull 144 vs push 419 GB/s per GPU at 12.86
+  MB): 512k writes 38.7 ms (~22 GB/s per GPU). Writes are background (1.1-1.7 GB/s needed per GPU, §5); they stay
+  on pull while the bring-up counters (§5) show no delay.
+- **GEMM 8192^3 beside two-hop reads at 39-42 GB/s per GPU:** GPU 0 0.767 alone / 0.795 with reads / 0.792 alone
+  again ms; GPU 1 0.772 / 0.779 / 0.800. Within the alone-to-alone spread: no measurable slowdown.
+- **Stage edges (`CePipe`, 256 MiB) beside reads:** alone 0.36-0.41 ms (654-740 GB/s), with reads 0.365-0.370 ms
+  (725-735 GB/s); reads during the edges 46.9 GB/s per GPU. Neither slows the other.
+- **Target gap.** Solo 32k read 2.07 ms (copy floor 1.73 ms: 90 MB at 52 GB/s) against 1.72; the server's 32k read
+  is 3.58 ms (job 7955, §9): the rest is messaging, below.
 
 ### 2.4 Choices
 
@@ -203,7 +205,7 @@ option for comparison (§13).
   tails. A 512k read is 62 x 22 + 79 = 1,443 device pieces per GPU. Host side contiguous: with two hops (§2.3) the
   host <-> GPU q hop is one 12.86 MB copy per slot (line rate), and the 1,443 pieces are the D2D hop over NVLink.
 - **Device staging (two hops).** One ring per direction in GPU q's HBM: ring bytes = 2 directions x depth x chunk,
-  chunk = `ring_chunk_slots` x slot bytes. Defaults from the job 7951 sweep (§2.3): depth 2 (double buffering),
+  chunk = `ring_chunk_slots` x slot bytes. Defaults from the job 7961 sweep (§2.3): depth 2 (double buffering),
   chunk 4 slots (51.4 MB), so 2 x 2 x 51.4 = 206 MB per GPU. Why depth 2 is enough: one slot's host hop takes
   ~270 us (12.86 MB at 48 GB/s), its NVLink hop ~19 us (670 GB/s, job 7943), so with two chunks the host hop never
   waits for the ring; depth 4 measured no faster for reads. A context's state is cut into chunks like its KV, so a
