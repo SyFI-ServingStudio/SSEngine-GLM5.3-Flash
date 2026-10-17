@@ -120,7 +120,7 @@ def merge(base: Path, abs_: list[Path], routing: str, out: Path) -> dict:
                 data[moe[c["tokens"]]][1] = list(best)
                 changed[c["tokens"]] = {"from": list(cur), "to": list(best), "from_ms": round(times[cur], 4),
                                         "to_ms": round(times[best], 4)}
-    out.write_text(json.dumps(data, indent=1))
+    out.write_text(json.dumps(data, indent=2))
     res = {"base": str(base), "out": str(out), "added": added, "changed": changed}
     print(f"[merge] {json.dumps(res)}", flush=True)
     return res
