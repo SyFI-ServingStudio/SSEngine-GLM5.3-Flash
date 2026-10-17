@@ -631,3 +631,30 @@ the data.
   0.114 / 0.219 / 1.014 s vs 7902's 0.12 / 0.22 / 1.03.
 - Unconditional since the tidy (no switch); the Dao calls remain the reference in `bench/kda_conv_bench.py` and
   `tests/test_kda_conv_gpu.py`.
+
+## Manifest trace check sent kernels to the wrong configs and never passed (M1-M5, jobs 7656, 7940) — fixed
+- `check_trace` gave each traced kernel name to the first config whose regex matched, and several regexes were broader
+  than the kernel they meant. The GPU test (`test_chain_token_matches_vllm_and_manifest`) failed in every recorded
+  run with the same summary on stages 0-2 (7656 on lane-m4, 7940 after the tidy), so no earlier result rests on the
+  check passing. What its per-config matches claimed:
+  - 20/21 (indexer top-k): config 20's `(?i)topk` matched the MoE routing kernel (`TopKExpertSelect` in its template
+    name) on every MoE stage, so 20 always showed as matched and 21 was then skipped. The check never showed which
+    top-k ran; `pp_patch`'s "manifest check (configs 20/21)" was not evidence.
+  - 5 (KDA chunk prefill): matched by the `kda_conv` kernels (`(?i)kda`) and by sparse MLA's `fmhaSm100...Persistent`
+    (`(?i)persistent`); the real kernel, FlashInfer's persistent `_pkd`, went to 9/11 (`(?i)cutlass`). The FlashKDA
+    fallback pattern was checked, so a switch to FlashKDA would still have shown as forbidden.
+  - 25 was always missing (its kernel went to 5), 33 too (`mhc_post_tilelang` went to 7 by `(?i)mhc`), 24 (the fork
+    renamed the kernel to `sparse_mla_index_remap_kernel`), 10 and 29 (the NVFP4 quant kernel went to 8; 29 runs
+    the linear-scale `cvt_fp16_to_fp4_sf_major`), 11 (`mm_fp4` went to 9), 13 (the Triton function is named
+    `kernel`).
+  - 4 (`kda_conv_*`) and 7 (`mega_mhc`) were matched by their own kernels: those claims hold.
+  - The unknowns were glue the targets price (`2_kernels.md` §6): `scaled_fp8_quant` (q_fp8_quant), the cub scan of
+    the index plumbing, and `index_select` of the last rows before the final hc_post / lm_head (stage 3).
+- Now (`ppimpl/kernels.py`): each regex names the kernel itself (read off the 7940 traces, the 7885 stage-2 trace at
+  45k + 10k tokens for 19 and 21, DeepSelect's symbol table for 20); a kernel that serves two positions counts for
+  both (8/10 swizzled quant, 9/11 `mm_fp4`); config 13 is `by_name=False`: its candidate `kernel` (also the name of
+  other Triton kernels in the fork, e.g. the indexer's chunk-metadata builder) is listed as "unverifiable by name"
+  and never matched, and 13 is missing when no candidate ran. The three glue kernels above are in `GLUE` by name.
+- Re-check of 7940's kernel lists with these rules: no unknown, forbidden or missing config on any stage; 13
+  listed unverifiable. 7885's stage 2: 19 and 21 matched (`sm100_mqa_logits`, `topKPerRowPrefill`). No trace has
+  shown DeepSelect yet: the chain test is 1,024 tokens, where the indexer does not run (19-21 optional).

@@ -45,6 +45,38 @@ def test_check_trace_flags_fallbacks_and_unknowns():
     assert not r.ok
 
 
+def test_check_trace_assigns_each_kernel_to_its_own_config():
+    """Real kernel names from a traced stage 0 (7940): each goes to the config that launches it, a kernel shared by two
+    positions counts for both, and the Triton `kernel` of config 13 is listed as unverifiable, never matched."""
+    names = [
+        "fmhaSm100fKernel_QkvE4m3OBfloat16H512PagedKvDenseDynamicTokenSparseP1VarSeqQ64Kv128PersistentKeepsAbForGen",
+        "kernel_cutlass__pkd_TiledMMA_ThrLayoutVMNK11110000",
+        "kda_conv_qkv_kernel",
+        "mhc_post_tilelang_kernel",
+        "void deep_gemm::sm100_mega_mhc_impl<4096u, 16u, 148u, false, true, false, 0u>(CUtensorMap_st)",
+        "void moe::dev::routing::routingIndicesCoopKernel<moe::dev::routing::routingCustom::KernelParams<float, "
+        "__nv_bfloat16, 384, 8, moe::dev::routing::TopKExpertSelect<moe::dev::routing::Foo> > >(Params)",
+        "void vllm::cvt_fp16_to_fp4<__nv_bfloat16, false, false>(int, int, int, int)",
+        "void vllm::cvt_fp16_to_fp4_sf_major<__nv_bfloat16, false>(int, int, int, int, int)",
+        "kernel_cutlass_kernel_flashinfergemmkernelsdense_blockscaled_gemm_sm100"
+        "Sm100BlockScaledPersistentDenseGemmKernel",
+        "sparse_mla_index_remap_kernel",
+        "kernel",
+        "void vllm::scaled_fp8_quant_kernel_strided_group_shape<c10::BFloat16, c10::Float8_e4m3fn, true, true>(int)",
+    ]
+    r = K.check_trace(names, 0)
+    m = {c: set(v) for c, v in r.matched.items()}
+    assert m[25] == {names[0]} and m[5] == {names[1]} and m[4] == {names[2]}
+    assert m[33] == {names[3]} and m[7] == {names[4]} and names[5] in m[30]
+    assert 20 not in m and 21 not in m                       # MoE TopKExpertSelect is not the indexer top-k
+    assert m[8] == m[10] == {names[6]} and m[29] == {names[7]}
+    assert m[9] == m[11] == {names[8]} and m[24] == {names[9]}
+    assert 13 not in m and r.unverifiable == {13: ["kernel"]} and 13 not in r.missing
+    assert "unverifiable by name: config 13" in r.summary()
+    assert names[10] not in r.glue and names[11] in r.glue and not r.unknown
+    assert 13 in K.check_trace(names[:10], 0).missing        # no candidate kernel at all: missing
+
+
 @pytest.mark.skipif(not CKPT.exists(), reason="checkpoint not on this host")
 def test_stage_weights_partition_the_text_model():
     from ppimpl.model.pp_patch import stage_weight_names

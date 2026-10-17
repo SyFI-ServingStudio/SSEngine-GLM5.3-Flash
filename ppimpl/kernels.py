@@ -14,9 +14,9 @@ Indexer top-k picks DeepSelect or vLLM `topKPerRowPrefill` per shape, whichever 
 (`2_kernels.md` §3): `topk_backend(num_queries, num_keys)`, from `data/topk_rows.json` (the 412 shapes that have
 both rows in `kernel_specs.jsonl`).
 
-Kernel-name patterns marked `names_verified=False` are taken from the profiler runners and library sources; the
-manifest check (`check_trace`, GPU test
-`tests/test_model_gpu.py::test_chain_token_matches_vllm_and_manifest`) confirms them on a traced stage.
+Kernel-name patterns marked `names_verified=True` were read off traced stages (`_NAMES_TRACED`); the others come
+from library sources or symbol tables. The manifest check (`check_trace`, GPU test
+`tests/test_model_gpu.py::test_chain_token_matches_vllm_and_manifest`) applies them to a traced stage.
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ import functools
 import json
 import math
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 ROW_IMAGE_CU130 = "vibesim-profiler-vllm:cu130 (vLLM 0.23.0, torch 2.11.0, cuBLAS 13.1.0.3, FlashInfer 0.6.12, TileLang 0.1.9)"
@@ -53,6 +53,7 @@ class KernelConfig:
     names: tuple[str, ...]           # regexes of the GPU kernels it launches
     forbidden: tuple[str, ...] = ()  # regexes of fallbacks that must not appear in a stage that runs this config
     names_verified: bool = False
+    by_name: bool = True             # False: the kernel name is shared with other kernels; a trace cannot prove it ran
 
 
 KDA = ("first_kda_dense", "kda_dense", "kda_moe")
@@ -63,6 +64,10 @@ LAYERS = ("first_kda_dense", "kda_dense", "kda_moe", "dsa_moe")
 
 # cuBLAS / CUTLASS GEMM kernel names on B200 (cuBLAS 13.1): nvjet, cutlass, sm100 xmma.
 _CUBLAS = (r"^nvjet_", r"cutlass", r"sm100_xmma", r"^gemv", r"gemmk1_kernel", r"splitKreduce_kernel")
+
+# Kernels that serve two configs (the same kernel at two positions): a trace counts them for both.
+_NVFP4_SWIZZLED = (r"cvt_fp16_to_fp4<", r"15cvt_fp16_to_fp4I")         # configs 8, 10 (linear scales: config 29)
+_MM_FP4 = (r"BlockScaledPersistentDenseGemmKernel",)                 # configs 9, 11: flashinfer mm_fp4 (cute-dsl)
 
 CONFIGS: tuple[KernelConfig, ...] = (
     KernelConfig(1, "mhc_pre_rms_norm", "vllm_tilelang", "hidden 4096, 4 streams, BF16",
@@ -90,33 +95,33 @@ CONFIGS: tuple[KernelConfig, ...] = (
                  "flashinfer.kda.recurrent_kda(backend='cute-dsl-persistent')",
                  "recurrent_kda(backend='cute-dsl-persistent')", "FlashInfer 0.7.2.dev20261008 + cutlass-dsl 4.8.0",
                  "DIFF in the fork (FlashKDA); ours follows the row", False, "pp_patch.kda_prefill",
-                 (r"(?i)kda", r"(?i)persistent"), (r"(?i)flashkda", r"(?i)flash_kda")),
+                 (r"^kernel_cutlass__pkd_",), (r"(?i)flashkda", r"(?i)flash_kda")),   # FlashInfer persistent `_pkd`
     KernelConfig(6, "single_gemm", "torch_linear_vllm", "k 8192, n 4096", ("kda.o_proj",), KDA,
                  "torch.nn.functional.linear", "F.linear", ROW_IMAGE_3F667D7, "SAME", True, "fork", _CUBLAS),
     KernelConfig(7, "mhc_fused_post_pre_rms_norm", "deepgemm_mega_nonshifted", "hidden 4096, 4 streams",
                  ("attn_mhc_post_pre", "ffn_mhc_post_pre"), LAYERS,
                  "deep_gemm.mega_mhc (non-shifted, one persistent launch)", "DeepGEMM mega_mhc", ROW_FORK,
                  "DIFF in the fork (TileLang 3-launch fused); ours follows the row", False, "pp_patch.mhc_boundary",
-                 (r"(?i)mega_mhc", r"(?i)mhc"), (r"(?i)mhc_fused_post_pre",)),
+                 (r"mega_mhc",), (r"(?i)mhc_fused_post_pre",)),
     KernelConfig(8, "nvfp4_quant", "vllm_cuda", "swizzled, hidden 4096", ("dense_ffn.gate_up_input_quant",), DENSE,
                  "vllm._custom_ops.scaled_fp4_quant (swizzled)", "same", ROW_IMAGE_3F667D7, "SAME", True, "fork",
-                 (r"cvt_fp16_to_fp4", r"15cvt_fp16_to_fp4I")),
+                 _NVFP4_SWIZZLED),
     KernelConfig(9, "single_gemm", "flashinfer_cutedsl", "k 4096, n 24576", ("dense_ffn.gate_up",), DENSE,
                  "flashinfer.mm_fp4(backend='cute-dsl') via FlashInferCuteDslNvFp4LinearKernel", "same",
                  "FlashInfer 0.6.18 / cutlass-dsl 4.6.2", "SAME (version)", False, "fork",
-                 (r"(?i)cutlass", r"(?i)kernel_cutlass", r"(?i)gemm")),
+                 _MM_FP4),
     KernelConfig(10, "nvfp4_quant", "vllm_cuda", "swizzled, hidden 12288", ("dense_ffn.down_input_quant",), DENSE,
                  "vllm._custom_ops.scaled_fp4_quant (swizzled)", "same", ROW_IMAGE_3F667D7, "SAME", True, "fork",
-                 (r"cvt_fp16_to_fp4",)),
+                 _NVFP4_SWIZZLED),
     KernelConfig(11, "single_gemm", "flashinfer_cutedsl", "k 12288, n 4096", ("dense_ffn.down",), DENSE,
                  "flashinfer.mm_fp4(backend='cute-dsl')", "same", "FlashInfer 0.6.18 / cutlass-dsl 4.6.2",
-                 "SAME (version)", False, "fork", (r"(?i)cutlass", r"(?i)gemm")),
+                 "SAME (version)", False, "fork", _MM_FP4),
     KernelConfig(12, "single_gemm", "torch_linear_vllm", "k 4096, n 2048", ("dsa.fused_qkv_a",), DSA,
                  "torch.nn.functional.linear", "F.linear", ROW_IMAGE_CU130, "SAME (cuBLAS version)", False, "fork",
                  _CUBLAS),
     KernelConfig(13, "q_kv_rms_norm", "vllm_triton", "q 1536, kv 512", ("dsa.q_kv_a_norm",), DSA,
                  "vllm fused_q_kv_rmsnorm (Triton)", "same", ROW_IMAGE_3F667D7, "SAME", True, "fork",
-                 (r"(?i)q_kv_rms|rmsnorm",)),
+                 (r"^kernel$",), by_name=False),   # VllmTritonJitKernel's Triton function is `kernel`, as are others
     KernelConfig(14, "single_gemm", "torch_linear_vllm", "k 1536, n 16384", ("dsa.q_b_proj",), DSA,
                  "torch.nn.functional.linear", "F.linear", ROW_IMAGE_3F667D7, "SAME", True, "fork", _CUBLAS),
     KernelConfig(15, "single_gemm", "torch_linear_vllm", "k 1536, n 4096", ("dsa.indexer.wq_b",), DSA,
@@ -139,7 +144,7 @@ CONFIGS: tuple[KernelConfig, ...] = (
     KernelConfig(20, "dsa_topk_prefill", "deep_select", "top 512 pools, causal with tail",
                  ("dsa.indexer.topk_prefill",), DSA, "torch.ops.deep_select.topk (per request, row start 0)",
                  "torch.ops.deep_select.topk", ROW_FORK, "DIFF in the fork (never called); routed per shape",
-                 False, "pp_patch.indexer_topk", (r"(?i)deep_?select|radix|topk",)),
+                 False, "pp_patch.indexer_topk", (r"topk_select_\w+::topk_kernel",)),
     KernelConfig(21, "dsa_topk_prefill", "vllm_cuda", "top 512 pools, causal with tail",
                  ("dsa.indexer.topk_prefill",), DSA, "torch.ops._C.top_k_per_row_prefill",
                  "_C.top_k_per_row_prefill, k 512", ROW_IMAGE_3F667D7, "SAME", True, "pp_patch.indexer_topk",
@@ -154,7 +159,7 @@ CONFIGS: tuple[KernelConfig, ...] = (
                  ("dsa.sparse_mla.index_remap",), DSA, "triton_convert_req_index_to_global_index",
                  "same, HAS_PREFILL_WORKSPACE=True on 275 of 325 rows", ROW_IMAGE_3F667D7,
                  "ARGS (HAS_PREFILL_WORKSPACE=False, one 4096 tile)", False, "fork",
-                 (r"convert_req_index_to_global_index",)),
+                 (r"sparse_mla_index_remap_kernel",)),   # ConvertReqIndexToGlobalIndexKernel's Triton function
     KernelConfig(25, "dsa_sparse_mla_attention", "flashinfer_trtllm_fp8",
                  "64 heads, latent 512, 2176 selected, FP8 q and cache", ("dsa.sparse_mla.prefill",), DSA,
                  "flashinfer.mla.trtllm_batch_decode_with_kv_cache_mla(sparse_mla_top_k=2176)", "same",
@@ -170,14 +175,13 @@ CONFIGS: tuple[KernelConfig, ...] = (
                  "ARGS (one GEMM, not two; m <= 16 path)", False, "fork", _CUBLAS + (r"(?i)ll_bf16_gemm",)),
     KernelConfig(29, "nvfp4_quant", "vllm_cuda", "linear scales, hidden 4096", ("moe.routed_rank0.input_quant",), MOE,
                  "vllm._custom_ops.scaled_fp4_quant (linear)", "same", ROW_IMAGE_3F667D7, "SAME", True, "fork",
-                 (r"cvt_fp16_to_fp4",)),
+                 (r"cvt_fp16_to_fp4_sf_major", r"24cvt_fp16_to_fp4_sf_majorI")),
     KernelConfig(30, "nvfp4_fused_moe", "flashinfer_trtllm_sm100",
                  "288 experts, top 8, intermediate 2048, DeepSeek-V3 routing, scale 5/2",
                  ("moe.routed_rank0.fused_moe",), MOE, "flashinfer.fused_moe.trtllm_fp4_block_scale_moe",
                  "same, gemm1_clamp_limit=None", "FlashInfer 0.6.18",
                  "ARGS (clamp tensor 10/g1_alphas, deferred finalize)", False, "fork",
-                 (r"(?i)routingDeepSeek|routing", r"(?i)bmm_|batchedGemm|BatchedGemm", r"finalizeMoeRoutingKernel",
-                  r"(?i)permute|activation")),
+                 (r"moe::dev::", r"^bmm_", r"(?i)batchedGemm")),
     KernelConfig(31, "single_gemm", "torch_linear_vllm", "k 4096, n 4096", ("moe.shared_expert.gate_up",), MOE,
                  "torch.nn.functional.linear", "F.linear", ROW_IMAGE_CU130, "SAME (cuBLAS version)", False, "fork",
                  _CUBLAS),
@@ -189,7 +193,7 @@ CONFIGS: tuple[KernelConfig, ...] = (
                  "vllm.model_executor.layers.mhc.mhc_post_tilelang + mean over streams (fork; kept if not slower "
                  "than the row, measured at M2)", "mhc_fused_post_pre_tilelang (post + prenorm GEMM + big-fuse)",
                  ROW_IMAGE_CU130, "DIFF (1 launch + mean instead of 3 launches)", False, "pp_patch.final_post",
-                 (r"(?i)mhc_post", r"(?i)tilelang|main_kernel")),
+                 (r"mhc_post_tilelang",)),
     KernelConfig(34, "rms_norm", "vllm_cuda", "hidden 4096", ("final_norm",), ("output_head",),
                  "vllm._custom_ops.rms_norm", "_C.rms_norm", ROW_IMAGE_CU130, "SAME (layernorm_kernels.cu changed)",
                  False, "fork", (r"rms_norm_kernel",)),
@@ -198,12 +202,22 @@ CONFIGS: tuple[KernelConfig, ...] = (
                  "pp_patch / stage.py (rows gathered before lm_head)", _CUBLAS),
 )
 
+# Name patterns seen on traced stages: 7940 (chain test, 1,024 tokens, stages 0-3) and 7885 (stage 2 at 45k + 10k
+# tokens: indexer logits and vLLM top-k). Config 20 (DeepSelect) is from the library's symbol table; config 13's name
+# is not its own (`by_name=False`); the cuBLAS-only configs count as one shared group.
+_NAMES_TRACED = frozenset({1, 4, 5, 7, 8, 9, 10, 11, 19, 21, 23, 24, 25, 29, 30, 33, 34})
+CONFIGS = tuple(replace(c, names_verified=c.config in _NAMES_TRACED) for c in CONFIGS)
+
 # Glue the targets price as `elementwise / triton` (2_kernels.md §6): embedding, hc_expand, state gather/scatter,
 # gated norm, act_and_mul, indexer k_norm / q_fwht_quant / weight_scale / kpool writes, expand_pools, DSA glue,
-# MoE input/combine glue, hc_contract mean. Any Triton kernel, PyTorch elementwise/reduce/copy kernel, or memset.
+# MoE input/combine glue, hc_contract mean, q_fp8_quant. Any Triton kernel, PyTorch elementwise/reduce/copy/
+# index_select kernel, scan, or memset.
 GLUE = (r"^triton_", r"_kernel$", r"elementwise_kernel", r"reduce_kernel", r"(?i)memcpy|memset", r"CatArrayBatchedCopy",
         r"index_elementwise", r"(?i)fill", r"(?i)gather|scatter", r"(?i)embedding", r"(?i)act_and_mul|silu|swiglu",
-        r"(?i)norm", r"(?i)expand_pools|kpool|fwht", r"(?i)copy")
+        r"(?i)norm", r"(?i)expand_pools|kpool|fwht", r"(?i)copy",
+        r"scaled_fp8_quant_kernel",        # q_fp8_quant: MLA query to FP8 before sparse MLA
+        r"cub::detail::scan::DeviceScan",  # cumsum in the DSA index plumbing (`glue`, `prefill_glue`)
+        r"indexSelect(Small|Large)Index")  # index_select: last rows before final hc_post / lm_head; prefill_gather
 
 # Stage composition (3_layers.md): layer types per stage, split [12, 11, 11, 11].
 SPLIT = (12, 11, 11, 11)
@@ -286,6 +300,7 @@ class TraceCheck:
     glue: list[str] = field(default_factory=list)
     unknown: list[str] = field(default_factory=list)                # not in the manifest and not glue
     forbidden: list[tuple[int, str]] = field(default_factory=list)  # (config whose fallback it is, kernel name)
+    unverifiable: dict[int, list[str]] = field(default_factory=dict)  # by_name=False configs -> candidate names
     missing: list[int] = field(default_factory=list)                # configs of this stage with no kernel
 
     @property
@@ -297,6 +312,8 @@ class TraceCheck:
         lines += [f"  forbidden (config {c}): {n}" for c, n in self.forbidden]
         lines += [f"  unknown: {n}" for n in sorted(set(self.unknown))]
         lines += [f"  missing: config {c} {by_config(c).kind}/{by_config(c).backend}" for c in self.missing]
+        lines += [f"  unverifiable by name: config {c} {by_config(c).kind}/{by_config(c).backend} "
+                  f"(candidate kernels: {', '.join(sorted(set(n)))})" for c, n in sorted(self.unverifiable.items())]
         return "\n".join(lines)
 
 
@@ -316,17 +333,20 @@ def _distinct(c: KernelConfig) -> tuple[str, ...]:
 def check_trace(kernel_names: list[str], stage: int, split=SPLIT, optional: frozenset[int] = frozenset()) -> TraceCheck:
     """Classify a stage's traced GPU kernel names against the manifest.
 
-    A name goes to the first non-GEMM config whose `names` match, else to a GEMM config, else glue, else unknown.
-    `forbidden` lists fallbacks of configs this stage runs. `missing` lists this stage's configs with no kernel
-    (`optional`: configs that may legitimately not run, e.g. the indexer on a microbatch of short prefills, or one
-    of the two top-k backends).
+    A name goes to every non-GEMM config whose `names` match (one kernel can serve two positions, e.g. configs 8 and
+    10), else to the GEMM configs, else glue, else unknown. A config whose kernel name is not its own (`by_name=False`,
+    config 13's Triton `kernel`) is never matched: its candidate names go to `unverifiable`, listed in the summary,
+    and it is missing when no candidate ran. `forbidden` lists fallbacks of configs this stage runs. `missing` lists
+    this stage's configs with no kernel (`optional`: configs that may legitimately not run, e.g. the indexer on a
+    microbatch of short prefills, or one of the two top-k backends).
     """
     types = stage_layer_types(stage, split)
     active = [c for c in CONFIGS if set(c.layer_types) & types]
     out = TraceCheck()
     for name in kernel_names:
-        hit = next((c for c in active if _any(_distinct(c), name)), None)
-        if hit is None and _any(_CUBLAS, name):
+        hits = [c for c in active if c.by_name and _any(_distinct(c), name)]
+        weak = [c for c in active if not c.by_name and _any(_distinct(c), name)]
+        if not hits and _any(_CUBLAS, name):
             for c in active:
                 if c.config in _SHARED_NAMES:
                     out.matched.setdefault(c.config, []).append(name)
@@ -334,15 +354,19 @@ def check_trace(kernel_names: list[str], stage: int, split=SPLIT, optional: froz
         bad = next((c for c in active if _any(c.forbidden, name)), None)
         if bad is not None:
             out.forbidden.append((bad.config, name))
-        elif hit is not None:
-            out.matched.setdefault(hit.config, []).append(name)
+        elif hits:
+            for c in hits:
+                out.matched.setdefault(c.config, []).append(name)
+        elif weak:
+            for c in weak:
+                out.unverifiable.setdefault(c.config, []).append(name)
         elif _any(GLUE, name):
             out.glue.append(name)
         else:
             out.unknown.append(name)
     topk = {20, 21}
     for c in active:
-        if c.config in out.matched or c.config in optional:
+        if c.config in out.matched or c.config in out.unverifiable or c.config in optional:
             continue
         if c.config in topk and topk & set(out.matched):
             continue  # per shape: one of the two
