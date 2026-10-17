@@ -6,10 +6,10 @@
 precheck: MemAvailable must exceed the run's pinned host memory (4 GPUs x (DRAM + staging with SSD)) plus 100 GB;
 on each NUMA node of the job's GPUs, MemFree plus the node's clean file LRU pages (the arenas' touch binds each piece to
 the node, so the kernel reclaims page cache there; other users' shmem, mlocked and dirty memory are not counted) must
-exceed the arenas that node takes (its GPUs x the per-GPU pinned GB) plus 50 GB; and the
-memory PSI's `full avg10` must be under 5%. A run started on a thrashing host measures the host, and a node without
-room for its arenas spills them to the other socket (7996: a strict bind there ran node 0 out and the kernel's OOM
-killer took other users' processes).
+exceed the arenas that node takes (its GPUs x the per-GPU pinned GB) plus 115 GB (the touch's reserve after its last
+piece); and the memory PSI's `full avg10` must be under 5%. A run started on a thrashing host measures the host, and a
+node without room for its arenas would fail their touch (TIERS.md §14.4; 7996: a blind strict bind ran node 0 out and
+the kernel's OOM killer took other users' processes).
 
 watch: from the start, any of those nodes with under 50 GB of MemFree + file pages stops the run; from the run's
 t0.json on (the timed part), memory PSI `full avg10` over 20% for 30 s in a row, or a process of the run (PID and its
