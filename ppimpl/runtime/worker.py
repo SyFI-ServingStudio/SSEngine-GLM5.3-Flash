@@ -12,6 +12,7 @@ import os
 import pstats
 import queue
 import signal
+import sys
 import threading
 import time
 import traceback
@@ -188,10 +189,16 @@ def build_model(cfg: RunConfig, stage: int, device: torch.device):
     from ppimpl.model.stage import StageModel
     return StageModel(cfg, stage, device, ipc_kv=cfg.tiers is not None)   # tiers: peers copy our KV (CUDA IPC)
 
+# PPIMPL_TIER_SWITCH_S=S: the GIL switch interval with tiers on (default 0: Python's 5 ms). For the A/B under session
+# load (job 7966, idle: no effect; in session runs a tier op's submit waits for the GIL behind the launch thread).
+TIER_SWITCH_S = float(os.environ.get("PPIMPL_TIER_SWITCH_S", "0"))
+
 
 @torch.inference_mode()   # all of it: model construction, warm-up, receive, forward, send (StageModel's warm-up
 def run_worker(cfg: RunConfig, stage: int):   # makes inference tensors, which autograd-tracked code may not use)
     signal.signal(signal.SIGINT, signal.SIG_IGN)   # the controller stops us (Shutdown), or we see it is gone
+    if cfg.tiers is not None and TIER_SWITCH_S > 0:   # the tier threads get the GIL within S of the launch thread
+        sys.setswitchinterval(TIER_SWITCH_S)
     parent = os.getppid()
     n = cfg.num_stages
     last = stage == n - 1
