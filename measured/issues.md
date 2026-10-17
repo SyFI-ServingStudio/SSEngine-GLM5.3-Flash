@@ -658,3 +658,4 @@ the data.
 - Re-check of 7940's kernel lists with these rules: no unknown, forbidden or missing config on any stage; 13
   listed unverifiable. 7885's stage 2: 19 and 21 matched (`sm100_mqa_logits`, `topKPerRowPrefill`). No trace has
   shown DeepSelect yet: the chain test is 1,024 tokens, where the indexer does not run (19-21 optional).
+- Rerun 7950 (4 GPUs, chain test at 1,024 tokens): passed; `trace_check` ok on stages 0-3, config 13 listed unverifiable.
