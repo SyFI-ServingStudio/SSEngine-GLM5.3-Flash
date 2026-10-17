@@ -187,6 +187,11 @@ class Probe:
             assert equal, "two-hop round trip changed bytes"
         return rec
 
+    def rwdef(self):
+        """Reads and writes of 32k / 128k / 512k on all 4 GPUs at the current ring setting, 10 each, bytes checked."""
+        recs = [self.rw(ctx, reps=10, check=True) for ctx in (4, 16, 62)]
+        assert all(r["bytes_equal"] for r in recs), "bytes differ (see the rw lines)"
+
     def sweep(self):
         """Ring depth x chunk (TIERS.md §3): 32k (4 blocks), 128k (16) and 512k (62) reads and writes, 10 each; the
         default ring is rebuilt at the end. Byte equality is recorded per point, the probe stops after the sweep if
