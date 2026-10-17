@@ -5,6 +5,7 @@ with GPU times on the host clock, so the controller and all stages share one tim
 """
 
 import cProfile
+import gc
 import io
 import json
 import os
@@ -225,6 +226,11 @@ def run_worker(cfg: RunConfig, stage: int):   # makes inference tensors, which a
         first_use = FirstUse(stage, cfg.run_dir)
         if cuda:
             first_use.install()
+        # warm-up left ~1.15M objects on the heap: each automatic gen-2 collection walked them all, 0.2-0.4 s on the
+        # host inside a forward (7895: 421 ms; bench 7897: 297/194 ms, 0.0 ms frozen). Frozen, collections only
+        # walk what serving allocates.
+        gc.collect()
+        gc.freeze()
         reporter.q.put(Ready(stage, model.num_blocks))
         while True:
             while not plans.poll(1000):
@@ -247,15 +253,20 @@ def run_worker(cfg: RunConfig, stage: int):   # makes inference tensors, which a
             if cuda:
                 torch.cuda.nvtx.range_push(f"stage {stage} mb {plan.mb_id}")   # bench/nsys_trace.py attributes kernels
             clock.maybe_reanchor()
-            hidden_in = pipe.recv(plan.num_tokens, model.hidden_width) if stage > 0 else None
-            if stage == 0:
-                pipe.gate(mbs)                        # at most max_in_flight in flight (ppimpl/runtime/dispatch.py)
-            fwd_ns = time.time_ns()
-            start = clock.mark()
             first_use.mb = plan.mb_id
             hostprof.before(plan.mb_id)
             stamps.before(plan)
-            out = model.forward(plan, hidden_in)
+            fwd_ns = time.time_ns()
+            # the host side (metadata, KDA plan, their copies) before the stream waits and the start mark: it runs
+            # while the GPU still runs earlier microbatches, instead of inside this one's compute window (7895:
+            # stage 0's compute exceeded stage 2's by the KDA plan's host time, 15-110 ms at 1.1 s/min)
+            batch = model.prepare(plan)
+            hidden_in = pipe.recv(plan.num_tokens, model.hidden_width) if stage > 0 else None
+            if stage == 0:
+                pipe.gate(mbs)                        # at most max_in_flight in flight (ppimpl/runtime/dispatch.py)
+            start = clock.mark()
+            out = model.run(batch, hidden_in)
+            del batch
             stamps.after()
             hostprof.after(plan.mb_id)
             end = clock.mark()

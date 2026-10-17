@@ -63,7 +63,7 @@ class StageDone(msgspec.Struct):
     start_ns: int              # GPU start of the stage's first kernel for this mb (CUDA event, host-clock aligned)
     end_ns: int                # GPU end of its last kernel, before the send
     tokens: list[tuple[str, int]] | None   # stage 3 only: (req_id, greedy token) per is_last chunk
-    host_ns: tuple[int, int, int] | None   # host clock: plan received, forward called, forward returned
+    host_ns: tuple[int, int, int] | None   # host clock: plan received, prepare called, run returned
 ```
 
 Clock: each worker aligns its CUDA events to `time.time_ns()` once at startup (record an event, synchronize, read the
@@ -78,7 +78,8 @@ class StageModel:
         # allocates KV tensors, captures CUDA graphs if used
     num_blocks: int                       # for Ready
     hidden_width: int                     # 4 * 4096: elements per token sent between stages (BF16)
-    def forward(self, plan: Plan, hidden_in: torch.Tensor | None) -> torch.Tensor:
+    def prepare(self, plan: Plan): ...    # host side: metadata, KDA plan, one H2D copy (no wait on queued compute)
+    def run(self, batch, hidden_in: torch.Tensor | None) -> torch.Tensor:   # forward = run(prepare(plan), hidden_in)
         # stage 0: hidden_in is None, embeds plan's token_ids.
         # stages 0-2: returns [T, hidden_width] BF16 on device, T = sum(num_tokens).
         # stage 3: returns int64 [number of is_last chunks]: greedy tokens, in chunk order.
@@ -104,8 +105,8 @@ against it.
 
 ## Worker loop
 
-For each plan: (stage > 0) receive `[T, hidden_width]` from stage s-1 → record start event → `forward` → record end
-event → (stage < 3) send to stage s+1 on a separate stream so the next plan's compute is not blocked by the send →
+For each plan: `prepare` (while the GPU still runs earlier microbatches) → (stage > 0) receive `[T, hidden_width]`
+from stage s-1 / (stage 0) the gate → record start event → `run` → record end event → (stage < 3) send to stage s+1 on a separate stream so the next plan's compute is not blocked by the send →
 report `StageDone` once the end event has completed (a reporter thread, not a sync on the compute stream).
 
 Limit on how far ahead a stage host can launch: CUDA holds at most ~1,024 launched-but-unfinished kernels per

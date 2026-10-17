@@ -59,6 +59,12 @@ class FakeStageModel:
     def stage_ms(self, num_tokens: int) -> float:
         return self.cfg.fake.us_per_token * num_tokens / 1e3
 
+    def prepare(self, plan):
+        return plan
+
+    def run(self, plan, hidden_in: torch.Tensor | None) -> torch.Tensor:
+        return self.forward(plan, hidden_in)
+
     def forward(self, plan, hidden_in: torch.Tensor | None) -> torch.Tensor:
         T = sum(c.num_tokens for c in plan.chunks)
         self._inference_tensor * self._param   # raises "Inference tensors cannot be saved for backward" otherwise
