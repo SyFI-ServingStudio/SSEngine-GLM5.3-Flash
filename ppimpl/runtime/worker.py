@@ -205,6 +205,7 @@ def run_worker(cfg: RunConfig, stage: int):   # makes inference tensors, which a
     cuda = cfg.device == "cuda"
     device = torch.device("cuda", stage) if cuda else torch.device("cpu")
     cpus = None
+    job_cpus = os.sched_getaffinity(0)   # before the pinning below: the tier arena's first touch uses the job's CPUs
     if cuda:
         torch.cuda.set_device(device)
         cpus = worker_cpus(stage, n)   # whole cores on the GPU's NUMA node, before our threads start (ppimpl/runtime/cpus.py)
@@ -219,14 +220,18 @@ def run_worker(cfg: RunConfig, stage: int):   # makes inference tensors, which a
     try:
         if cfg.tiers is not None:   # DRAM arena first-touched while the model loads (ppimpl/runtime/tier_worker.py)
             from ppimpl.runtime.tier_worker import TierEngine
-            tiers = TierEngine(cfg, stage, device, ctx)
+            tiers = TierEngine(cfg, stage, device, ctx, touch_cpus=job_cpus)
         width = cfg.fake.hidden_width if cfg.model == "fake" else HIDDEN_WIDTH
         pipe = open_pipe(cfg, stage, device, width)   # before the model: its KV pool is sized from what is left
+        t_model = time.monotonic()
         model = build_model(cfg, stage, device)
         slots = (0, 0)
         if tiers is not None:       # collective over the workers (CUDA IPC of every stage's KV)
+            t_attach = time.monotonic()
             slots = tiers.attach(model.tier_ranges() if hasattr(model, "tier_ranges") else None)
             tiers.start()
+            print(f"stage {stage} start-up: model (load, warm-up, graphs) {t_attach - t_model:.1f} s, tier attach "
+                  f"{time.monotonic() - t_attach:.1f} s (first-touch wait {tiers.touch_wait_s:.1f} s)", flush=True)
         # which FlashInfer tactics the stage runs with (StageModel.tactics: source file|tuned_in_process, file, sha256)
         info = {"stage": stage, "tactics": getattr(model, "tactics", None),
                 "cuda_graphs": getattr(model, "graph_info", None)}

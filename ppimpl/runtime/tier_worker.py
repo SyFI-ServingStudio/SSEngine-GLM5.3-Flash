@@ -19,8 +19,10 @@ and a ring chunk is reused once the copy that read it is done (events). The ring
 the HBM the KV pool (the contract's 7,144 blocks) leaves; `attach` prints how much that is. `hops: direct` puts the
 pieces straight between host and the stages' KV (one batch per op).
 
-DRAM: one pinned arena per worker on its GPU's NUMA node: libnuma, MADV_HUGEPAGE, first touch on a side thread
-while the model loads, then `cudaHostRegister` in chunks of whole slots (a piece never crosses a slot, so never a
+DRAM: one pinned arena per worker on its GPU's NUMA node: libnuma, 4 KiB pages (MADV_HUGEPAGE made the first touch
+compact memory synchronously: 150 GB took ~500 s on a host whose page cache filled the node; PPIMPL_TIER_HUGEPAGE=1
+turns it back on), first touch from TOUCH_THREADS threads on the node's CPUs of the job, on a side thread while the
+model loads, then `cudaHostRegister` in chunks of whole slots (a piece never crosses a slot, so never a
 registration). Not torch's pinned allocator: it rounds 150 GB up to 256 GB.
 
 SSD: one preallocated file per worker in `TierConfig.ssd_dir` (default $PPIMPL_SSD_DIR, else the run dir), slot i
@@ -53,7 +55,9 @@ from ppimpl.runtime.transport import Shutdown, TierBatch, TierDone, TierMove, Wo
 
 MADV_HUGEPAGE = 14
 REGISTER_CHUNK = 1 << 30      # cudaHostRegister per ~1 GiB of whole slots, from 4 threads
-TOUCH_THREADS = 4
+TOUCH_THREADS = 16           # first-touch threads per arena, on the job's CPUs of the arena's node (page-cache reclaim
+                             # runs in the touching threads: 4 threads on the worker's 2 cores were the limit)
+HUGEPAGE = os.environ.get("PPIMPL_TIER_HUGEPAGE", "0") == "1"
 IO_THREADS = 8                # SSD preadv/pwritev pool per worker (fio: 8 psync threads, 53 GB/s on one file)
 FAKE_BLOCK_BYTES = 8576 * 5996  # one block over all stages (GLM-5.3 PP4: 4 x 1,499 B/token); a GPU's slot is 1/n of
                                 # it rounded up to 4 KiB (PP4: 12,857,344 B, the real balanced slot, TIERS.md §3)
@@ -72,6 +76,25 @@ def _ok(ret):
 
 
 # --- host memory ----------------------------------------------------------------------------------------------------
+
+def node_cpus(cpus: set[int] | None, node: int | None) -> set[int] | None:
+    """The CPUs of `cpus` on NUMA node `node`, or all of `cpus` when the node has fewer than 8 of them."""
+    if not cpus or node is None:
+        return cpus
+    try:
+        mine = cpus & set(_cpulist(open(f"/sys/devices/system/node/node{node}/cpulist").read()))
+    except OSError:
+        return cpus
+    return mine if len(mine) >= 8 else cpus
+
+
+def _cpulist(lst: str) -> list[int]:
+    out = []
+    for part in lst.strip().split(","):
+        a, _, b = part.partition("-")
+        out += range(int(a), int(b or a) + 1)
+    return out
+
 
 def numa_resident_gb(ptr: int, nbytes: int, maps: str = "/proc/self/numa_maps") -> dict[int, float]:
     """GB resident per NUMA node of the mappings starting in [ptr, ptr + nbytes) (`N<node>=<pages>` of each line, in
@@ -109,17 +132,26 @@ class HostArena:
         self.ptr = self._numa.numa_alloc_onnode(self.nbytes, node)
         if not self.ptr:
             raise MemoryError(f"numa_alloc_onnode({self.nbytes}, {node})")
-        libc = ctypes.CDLL(None, use_errno=True)
-        libc.madvise.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
-        libc.madvise(self.ptr, self.nbytes, MADV_HUGEPAGE)   # advisory: no THP is not an error
+        if HUGEPAGE:
+            libc = ctypes.CDLL(None, use_errno=True)
+            libc.madvise.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
+            libc.madvise(self.ptr, self.nbytes, MADV_HUGEPAGE)   # advisory: no THP is not an error
 
-    def touch(self):
-        """First touch from a few threads (pages land on the arena's node; ctypes.memset releases the GIL)."""
+    def touch(self, cpus: set[int] | None = None):
+        """First touch from TOUCH_THREADS threads, each on `cpus` (pages land on the arena's node whatever CPU touches
+        them; ctypes.memset releases the GIL)."""
         if not self.cuda:
             return
         t0 = time.perf_counter()
+
+        def run(a, n):
+            if cpus:
+                os.sched_setaffinity(0, cpus)       # this thread only
+            ctypes.memset(self.ptr + a, 0, n)
+
         step = -(-self.nbytes // TOUCH_THREADS)
-        ts = [threading.Thread(target=ctypes.memset, args=(self.ptr + a, 0, min(step, self.nbytes - a)))
+        step = -(-step // (2 << 20)) * (2 << 20)
+        ts = [threading.Thread(target=run, args=(a, min(step, self.nbytes - a)), name="tier-touch")
               for a in range(0, self.nbytes, step)]
         for t in ts:
             t.start()
@@ -258,9 +290,11 @@ class TierEngine:
     touching; `attach(ranges)` (after the model, collective over the workers) opens the peers' KV, builds the layout,
     registers the arena and returns (slot_bytes, state_slots) for `Ready`; `start()` begins serving ops."""
 
-    def __init__(self, cfg, stage: int, device, zmq_ctx):
+    def __init__(self, cfg, stage: int, device, zmq_ctx, touch_cpus: set[int] | None = None):
         tc = cfg.tiers
         self.cfg, self.tc, self.stage, self.n = cfg, tc, stage, cfg.num_stages
+        self._touch_cpus = touch_cpus
+        self.touch_wait_s = 0.0
         self.device, self.cuda = device, device.type == "cuda"
         # PPIMPL_TIER_TRACE=0 turns off the per-batch trace of DRAM ops (tier_trace_s<stage>.jsonl in the run dir: host
         # time before / in each batch call, the calling thread's CPU time in it, each batch's GPU start / end)
@@ -292,8 +326,10 @@ class TierEngine:
         real = cfg.model != "fake"
         if tc.dram_gb and self.cuda and real:
             from ppimpl.runtime.cpus import _gpu_node
-            self.dram = HostArena(int(tc.dram_gb * 1e9), _gpu_node(device.index), True)
-            self._touch = threading.Thread(target=self.dram.touch, name="tier-touch", daemon=True)
+            node = _gpu_node(device.index)
+            self.dram = HostArena(int(tc.dram_gb * 1e9), node, True)
+            self._touch = threading.Thread(target=self.dram.touch, args=(node_cpus(touch_cpus, node),),
+                                           name="tier-touch", daemon=True)
             self._touch.start()
 
     def attach(self, ranges: list[ViewRange] | None) -> tuple[int, int]:
@@ -312,15 +348,17 @@ class TierEngine:
             node = _gpu_node(self.device.index)
         if self.dram is None and self.tc.dram_gb:
             self.dram = HostArena(tier_num_slots(self.tc.dram_gb, sb) * sb, node, self.cuda)
-            self.dram.touch()
+            self.dram.touch(node_cpus(self._touch_cpus, node))
+        t = time.perf_counter()
         if self._touch is not None:
             self._touch.join()
+        self.touch_wait_s = time.perf_counter() - t      # attach (after the model) waiting for the first touch
         if self.dram is not None:
             self.dram.register(sb)
             assert tier_num_slots(self.tc.dram_gb, sb) * sb <= self.dram.nbytes
         if self.tc.ssd_gb:
             self.staging = HostArena(tier_num_slots(self.tc.staging_gb, sb) * sb, node, self.cuda)
-            self.staging.touch()
+            self.staging.touch(node_cpus(self._touch_cpus, node))
             self.staging.register(sb)
             d = self.tc.ssd_dir or os.environ.get("PPIMPL_SSD_DIR") or os.path.join(self.cfg.run_dir, "ssd")
             self.ssd = SsdFile(os.path.join(d, f"tier_ssd_gpu{self.stage}_{os.getpid()}.bin"),
@@ -350,7 +388,7 @@ class TierEngine:
         print(f"stage {self.stage} tiers: slot {self.slot_bytes} B, state {self.layout.state_slots} slots, "
               f"{len(self.layout.kv_len)} kv + {len(self.layout.st_len)} state pieces per block/context, "
               + (f"dram {self.dram.nbytes / 1e9:.1f} GB on node {self.dram.node} (touch {self.dram.touch_s:.1f} s, "
-                 f"register {self.dram.register_s:.1f} s, resident GB by node {self.dram.node_gb()}), "
+                 f"of it after the model {self.touch_wait_s:.1f} s, register {self.dram.register_s:.1f} s, resident GB by node {self.dram.node_gb()}), "
                  if self.dram else "")
               + (f"ssd {self.ssd.path} (O_DIRECT {self.ssd.direct}), staging {self.staging.nbytes / 1e9:.1f} GB "
                  f"(resident GB by node {self.staging.node_gb()}), " if self.ssd else "")

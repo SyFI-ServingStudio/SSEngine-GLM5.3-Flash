@@ -217,3 +217,15 @@ def test_numa_resident_gb(tmp_path):
                     "7f2000000000 default file=/x N0=5 kernelpagesize_kB=4\n")
     got = numa_resident_gb(0x7f1000000000, 0x1000000000, str(maps))
     assert got == {0: round(6 * 4096 / 1e9, 2), 1: round((262138 * 4096 + 10 * (2 << 20)) / 1e9, 2)}
+
+
+def test_node_cpus():
+    """The touch threads' CPUs: the job's CPUs on the arena's node, or all of the job's when the node has few."""
+    from ppimpl.runtime.tier_worker import _cpulist, node_cpus
+
+    node0 = set(_cpulist(open("/sys/devices/system/node/node0/cpulist").read()))
+    assert node_cpus(None, 0) is None and node_cpus({1, 2}, None) == {1, 2}
+    few = set(sorted(node0)[:3]) | {10_000}
+    assert node_cpus(few, 0) == few                     # fewer than 8 on the node: all of them
+    many = set(sorted(node0)[:12]) | {10_000}
+    assert node_cpus(many, 0) == set(sorted(node0)[:12])

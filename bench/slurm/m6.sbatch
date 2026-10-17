@@ -6,6 +6,8 @@
 #     tier_bringup --dram-gb 48 --ssd-gb none --run-name tier_bringup_dram
 # SSD files (one per GPU, TierConfig.ssd_dir) go to PPIMPL_SSD_DIR, default <repo>/tmp/ssd_<job>; the directory is
 # deleted when the job ends, and df of the repo's file system is printed before and after.
+# Memory guards: bench/slurm/memguard.py (start only with MemAvailable > pinned + 100 GB and memory PSI < 5%; a timed
+# part that thrashes is stopped and marked INVALID.txt).
 # HOP2=1 runs bench/tier_hop2.py (two-hop rates, GEMM and stage-edge interference) before the run.
 #SBATCH --gres=gpu:4
 set -uo pipefail
@@ -25,7 +27,17 @@ nvidia-smi --query-gpu=index,pci.bus_id,memory.used --format=csv,noheader
 if [ -n "${HOP2:-}" ]; then                # HOP2=1: the two-hop probe (bench/tier_hop2.py) first; stop if it fails
   $PY -m bench.tier_hop2 --out "$R/tier_hop2/$JOB" ${HOP2_TESTS:+--tests $HOP2_TESTS} || { echo "== tier_hop2 failed"; exit 1; }
 fi
-$PY -m bench.run "$WHAT" --inline --gpus "$G" --port "$P" --out-root "$R" "$@"; rc=$?
+# memory guards (bench/slurm/memguard.py): do not start on a host short of memory or thrashing; stop the timed part
+# (marked INVALID.txt) if it starts thrashing
+$PY bench/slurm/memguard.py precheck -- "$@" || { echo "== not started: host memory (see memguard line)"; exit 0; }
+RUN=$WHAT; for ((i = 1; i <= $#; i++)); do [ "${!i}" = --run-name ] && { j=$((i + 1)); RUN=${!j}; }; done
+setsid $PY -m bench.run "$WHAT" --inline --gpus "$G" --port "$P" --out-root "$R" "$@" &
+RUNPID=$!
+$PY bench/slurm/memguard.py watch --pid $RUNPID --run-dir "$R/$RUN" &
+WD=$!
+wait $RUNPID; rc=$?
+kill $WD 2>/dev/null; wait $WD 2>/dev/null
+[ -f "$R/$RUN/INVALID.txt" ] && { echo "== run invalid: $(cat "$R/$RUN/INVALID.txt")"; rc=4; }
 uptime
 echo "== done $(date -Is) rc=$rc"
 exit $rc
