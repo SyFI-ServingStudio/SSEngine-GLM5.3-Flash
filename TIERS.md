@@ -167,6 +167,11 @@ numbers were mostly serialized submission; superseded by this table.)
   (725-735 GB/s); reads during the edges 46.9 GB/s per GPU. Neither slows the other.
 - **Target gap.** Solo 32k read 2.07 ms (copy floor 1.73 ms: 90 MB at 52 GB/s) against 1.72; the server's 32k read
   is 3.58 ms (job 7955, §9): the rest is messaging, below.
+- **4 KiB pages cost nothing (job 7991, 4 KiB / 2 MiB alternated twice, `PPIMPL_TIER_HUGEPAGE=0/1`; THP is
+  `madvise` on this host, so 0 really is 4 KiB).** Solo 62-block reads 50.5 / 50.8 GB/s (4 KiB) against 50.7 / 50.2
+  (2 MiB); 16 blocks 45.4 / 44.9 against 44.9 / 44.1; four GPUs reading and writing (rwdef, bytes checked) 44.0-44.9
+  read / 21.3-21.6 write GB/s per GPU at 62 blocks in every variant. 4 KiB stays the default: MADV_HUGEPAGE made
+  the first touch compact memory synchronously (~500 s for 150 GB on a node full of page cache, 7976).
 
 ### 2.4 Choices
 
@@ -222,9 +227,10 @@ option for comparison (§13).
 
 ## 4. DRAM
 
-- Per worker at start-up, on a side thread while the weights load: `numa_alloc_onnode(dram_bytes, gpu_node)`,
-  `madvise(MADV_HUGEPAGE)`, first touch, `cudaHostRegister(portable | mapped)` (7916 times pinning 16 GiB; 150 GB is pinned once per server start, in
-  parallel with the weight load). torch's pinned
+- Per worker at start-up, on a side thread while the weights load: anonymous `mmap` (no page faulted),
+  `mbind(MPOL_PREFERRED, gpu_node)`, first touch from 16 threads on the node's CPUs (4 KiB pages), then after the
+  model `cudaHostRegister(portable | mapped)` in ~1 GiB chunks of whole slots (§14.1; 7995: touch 5.5-11.8 s hidden
+  under the 65 s model load, register 12-13 s). torch's pinned
   allocator rounds to a power of 2 (150 GB -> 256 GB), so it is not used.
 - Sizes per GPU: 150 GB (full), 37.5 GB (Tiers), 18.75 GB (SSD-heavy); plus a 2 GiB staging area for SSD-only runs
   (DRAM tier off): SSD reads and writes pass through it, it serves no hits.
@@ -561,3 +567,94 @@ backends.py, mover.py, manager.py, member.py}`; `engine/tiers.py`, `runtime/tier
   2. as each chunk of slots lands, `Mover` copies its blocks in [b_lo, b_hi) to HBM;
   3. the state goes last;
   4. done.
+
+## 14. Hand-off (2026-10-17)
+
+### 14.1 Host-memory OOM prevention (commit 0e5bc04)
+
+**What happened (7996, full_dram N=500).** Three stages bound 150 GB arenas each to node 0 with
+`numa_alloc_onnode` (strict MPOL_BIND). Another user's job held ~394 GB of shmem on node 0, so the node could not
+hold 450 GB more; a strict bind does not fall back, and the kernel ran a global OOM
+(`constraint=CONSTRAINT_MEMORY_POLICY, nodemask=0`). It killed that job's vLLM worker (job 7999), then other users'
+dbus/systemd/bash processes, then our workers. Host MemAvailable was 1,331 GB at precheck: the check was host-wide,
+not per node. Not a cgroup OOM (MaxRSS 482 GB of 800G).
+
+**Changes.**
+- **Preferred, not bound.** `HostArena` (DRAM tier and SSD staging) and `bench/tier_bw.py` map anonymous memory
+  with no page faulted in (`anon_map`), then `mbind(MPOL_PREFERRED, gpu_node)` (`prefer_node`), then touch.
+  libnuma's `numa_alloc` faults every page under the current policy, so a policy set after it never applies
+  (checked: `prefer:0` with every page on node 1). A short node now spills to the other node instead of OOM.
+- **Remote spill is flagged.** The start-up line's `resident GB by node {..}` adds `REMOTE SPILL x GB off node n`
+  above 1 GB.
+- **OOM-first.** Every process that makes an arena sets `oom_score_adj` 1000 (no privilege needed), so an OOM takes
+  our process before anyone else's.
+- **Per-node precheck** (`bench/slurm/memguard.py precheck`, run by m6.sbatch). For each NUMA node of the job's GPUs
+  (nvidia-smi bus id to sysfs `numa_node`), MemFree + file LRU pages (Active(file) + Inactive(file)) must exceed
+  that node's arenas + 50 GB. Other users' shmem and mlocked memory are not counted as available. This is on top of
+  host MemAvailable > pinned + 100 GB and PSI full avg10 < 5%. A failed check exits 0 with the reason.
+- **Per-node watchdog** (`memguard watch`). From start-up on (not only the timed part), any of those nodes under
+  50 GB of MemFree + file pages marks the run INVALID and kills it. The PSI > 20% for 30 s and D-state > 10 s rules
+  still apply from t0.
+- **cgroup memory.peak** is printed on the start-up line.
+
+**Call sites audited.**
+
+| Call site | Result |
+| --- | --- |
+| `HostArena` (DRAM) | Changed. |
+| `HostArena` (SSD staging) | Changed: same class, same path. |
+| `bench/tier_bw.py host_buffer` and `register` | Changed: the two strict binds. |
+| Ring | HBM (`torch.empty` on the GPU); not host memory. |
+| `cudaHostRegister` | Only `HostArena.register` and `tier_bw`; both now register preferred memory. |
+| torch `pin_memory=True` (`model/metadata.py`, `model/fake.py`, `bench/nodecheck/h2d_bw.py`) | Small buffers with the default (local, unbound) policy. |
+
+No `numa_alloc_onnode`, `MPOL_BIND` or `membind` is left in the lane.
+
+**Verified.**
+- CPU suite at 0e5bc04: 236 passed, 1 xfailed. New tests:
+  - preferred placement follows the policy on each node, not the touching CPU;
+  - `oom_score_adj` reads 1000;
+  - cgroup peak is readable;
+  - per-node precheck refuses 3 x 150 GB on a node with 400 GB and accepts 520 GB;
+  - the watchdog stops a run on a short node before t0, even before the run dir exists.
+- Outside the lane (scratch script, own process):
+  - 10 GB arenas preferred to node 0 and to node 1 landed fully on each;
+  - a 150 GB arena on node 0 touched in 4.9 s, all on node 0, PSI 0;
+  - the real precheck for N=500 on GPUs (0,0,0,1) at 12:5x: node 0 738 GB (needs > 500), node 1 932 GB (needs > 200), start.
+
+**Not verified yet.**
+- The small-job test the user asked for has not run (8035 was submitted and cancelled at hand-off). It covers:
+  - precheck refusing with a raised node threshold, inside a job;
+  - a preferred 10 GB arena on a node whose MemFree we filled with our own preferred filler, landing on the other
+    node without an OOM, then `cudaHostRegister` on it.
+
+  The script is ready in the scratchpad (`oomcheck.py` and `oomcheck.sbatch`, 1 GPU, priority, 10 min, 300G). It
+  fills the node with less MemFree, refuses to run unless the other node has > filler + 200 GB, and aborts on
+  PSI > 5% or the other node under 150 GB. Copy it into the lane before use. Caveat: with
+  `zone_reclaim_mode` 0 the spill happens at the node's low watermark, but kswapd also reclaims that node's page
+  cache, so part of the arena may still land locally; record the split.
+- The spill path at full scale (150 GB arenas on a short node) and the per-node watchdog in a real job.
+
+### 14.2 Next, in order
+
+1. Coordinator reviews 0e5bc04 (and runs the small-job check of 14.1).
+2. Pre-submit check, posted to the coordinator before submitting:
+   - per node, MemFree + file pages;
+   - other users' shmem and mlock holders per node (cgroup `memory.stat`, read only);
+   - PSI;
+   - the precheck verdict.
+
+   Then rerun full_dram N=500: `--mem=800G`, main with nice -500, `PPIMPL_TIER_TRACE=0`. Watch start-up and the
+   resident-by-node split; stop and report at once if the watchdog fires. (N=400 passed as 7995.)
+3. §13 refactor (user-approved): implement under `ppimpl/kvpool/`, delete the three old files, migrate every test,
+   no compatibility shim.
+4. CPU suite, DRAM bring-up, full_dram N=400 recheck.
+5. SSD bring-up and the *_ssd128 sessions (delete SSD files, record df, exercise eviction).
+
+### 14.3 Recorded only, not to implement
+
+- **Round-1 long-context host overhead.**
+- **C++ Mover:** one GIL-free call per op. Estimated read p50 -1.5 to 2 ms (§9, 7979/7980); notify is unaffected.
+- **Read notify path:** done-thread wake, GIL and send, 4.0-4.9 ms p50 under load against 0.41 ms idle. Options
+  (a) spin event and (b) IPC-event dependency are in §9; a separate tier process per GPU would also remove it.
+
