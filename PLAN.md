@@ -87,7 +87,8 @@ pp-impl/
       kv.py              block pool accounting (8,576-token blocks, 6 state blocks per request), admission,
                          exact prefix cache, LRU eviction of whole sessions
       scheduler.py       plain scheduler, then steps 1–4: shortest first, load budget, even split, force-schedule
-      tiers.py           DRAM/SSD index, per-tier read channel, read-wait bound, copy-up, SSD written on DRAM eviction
+    kvpool/              DRAM/SSD tiers (lanes/m6 TIERS.md §13): manager.py the index (per-tier read channel, copy-up,
+                         SSD written on DRAM eviction); layout, placement, backends, mover, member the byte path
   bench/
     common.py            paths (PPIMPL_SIM, PPIMPL_ENWIK9) and helpers shared by the harnesses
     slurm/               job scripts; env.sh holds their path variables and defaults

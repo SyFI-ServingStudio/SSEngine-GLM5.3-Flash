@@ -29,7 +29,7 @@ Goal: small codebase, maximum reuse.
 
 | Path | Content |
 |---|---|
-| `ppimpl/` | the engine: `config.py`, `model/` (one stage on the vLLM fork), `runtime/` (controller, workers, transport), `engine/` (scheduler, KV, tiers), `serve/` (HTTP) |
+| `ppimpl/` | the engine: `config.py`, `model/` (one stage on the vLLM fork), `runtime/` (controller, workers, transport), `engine/` (scheduler, KV), `kvpool/` (DRAM/SSD tiers behind HBM, TIERS.md §13), `serve/` (HTTP) |
 | `bench/` | harnesses that run the handoff's milestones and write `measured/` (`python -m bench.<name>`); `bench/slurm/` the job scripts |
 | `env/` | `make_env.sh` builds the environment, `check_env.py` checks it; versions in `ENV.md` |
 | `tests/` | `pytest -q` runs the CPU tests; `-m gpu` the GPU tests |

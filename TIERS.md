@@ -281,13 +281,15 @@ into nothing (its slots are reused). HBM eviction waits for the session's write 
 
 ## 8. Correctness
 
-- `tests/test_tier_bytes_gpu.py` (GPU, 4 stages, real `StageModel`): prefill P = 40,000 (partial last block, chunk
+- `tests/test_kvpool_bytes_gpu.py` (GPU, 4 stages, real `StageModel`): prefill P = 40,000 (partial last block, chunk
   starts off KDA's grid) in session s, snapshot every KV page and state row of s on every stage, write to DRAM,
   evict s from HBM, fill its blocks with garbage, read back into different block ids: every byte equal. The same
   through SSD (DRAM off). Then round 1 of s (A = 1k) after the tier read vs after an HBM hit: logits bitwise equal
   (same microbatch shapes), token equal.
-- `tests/test_tiers.py` (CPU): slot accounting, write-before-evict, takeover wait, demote frees DRAM only when done,
-  SSD LRU eviction at a small SSD (slots reused, the evicted session found nowhere and computed again), landing order; the quarter rule's pointer lists (every byte of every range covered exactly once over the 4 GPUs).
+- `tests/test_kvpool_slots.py`, `test_kvpool_manager.py` (CPU): slot accounting, write-before-evict, takeover wait,
+  demote frees DRAM only when done, SSD LRU eviction at a small SSD (slots reused, the evicted session found nowhere
+  and computed again), landing order; `test_kvpool_placement.py`: the quarter rule's pointer lists (every byte of
+  every range covered exactly once over the 4 GPUs).
 - Bring-up: round-1 tokens against the no-cache reference as in M4 (`bench/prefix_check.py`).
 
 ## 9. Steps and runs
@@ -302,7 +304,8 @@ into nothing (its slots are reused). HBM eviction waits for the session's write 
 Status (2026-10-17): the code of 1a and 2a is in and passes on CPU (`tests/test_tiers_slots.py`: index, op order,
 pins; `tests/test_tier_copy.py`: quarters; `tests/test_tier_worker.py`: four engines' DRAM and SSD round trips,
 demote, copy-up, staging; `tests/test_tiers_e2e_cpu.py`: the server with the fake model through DRAM and SSD).
-`tests/test_tier_bytes_gpu.py` (§8, DRAM and SSD) passed on GPU: job 7937 (direct) and job 7944 (two hops).
+`tests/test_tier_bytes_gpu.py` (§8, DRAM and SSD) passed on GPU: job 7937 (direct) and job 7944 (two hops). Since
+the §13 refactor these are `tests/test_kvpool_*.py` (§13.4).
 
 **Step 1a DRAM bring-up (job 7955, 2026-10-17 04:24, load 8.4 at start; two hops, ring depth 2 x chunk 4; DRAM 48
 GB per GPU; the bring-up pool of 1,234,944 tokens, so Ready = 145 blocks and every round 1 reads from DRAM).**
@@ -431,7 +434,7 @@ or SGLang's scheduler; wiring them to balanced striping and our scheduler would 
 | Host layout | page_first: a slot holds one block of all layers (and all stages, quartered) contiguously | the idea of HiCache `page_first_direct` `(2, pages, L, page, H, D)` and vLLM 0.12's cross-layer block | HiCache's `layer_first` and per-token `page_first` give small copies (10.8 GB/s sustained in Strata's measurement); the HBM side stays vLLM's per-layer layout (changing it would touch every attention kernel), so pieces are per (layer, block) quarters there |
 | O_DIRECT probe | `probe_o_direct` | vLLM fork `kv_offload/tiering/fs/io.py` | - |
 | SSD file I/O | own: one preallocated file per GPU, slot-addressed `os.preadv` / `os.pwritev` with O_DIRECT from 8 threads (GIL released) | pattern of Dynamo KVBM's single fallocated O_DIRECT file per worker | vLLM fs tier and LMCache/HiCache file backends write one file per block or chunk (temp file + rename, or buffered I/O): 10k+ files per GPU and an open/close per 12.9 MB; `fs_io_C` loops serially in C, so it needs the same thread pool anyway. GDS (LMCache cuFile, NIXL) is not available (nvidia-fs not loaded) and would skip the DRAM copy-up the design requires |
-| Index, LRU, read-wait bound, scheduler | own (`ppimpl/engine/tiers.py`, `scheduler.py`, already written for M5 replay) | - | the handoff's rules (whole-session LRU per tier, write-back to SSD, read-wait bound, landed rounds first) are not any of these systems' policies |
+| Index, LRU, read-wait bound, scheduler | own (`ppimpl/kvpool/manager.py`, was `engine/tiers.py`; `scheduler.py`, already written for M5 replay) | - | the handoff's rules (whole-session LRU per tier, write-back to SSD, read-wait bound, landed rounds first) are not any of these systems' policies |
 
 ## 12. Differences from the target to record
 
@@ -440,7 +443,7 @@ reads vs write-back); host time to start and land a read (measured per read in `
 context is 90 MB per GPU; fio's one-shot reads of that size were dominated by fio's own start-up, so measured in
 step 2 inside the engine).
 
-## 13. Interfaces (proposal for review, 2026-10-17; the refactor waits for approval)
+## 13. Interfaces (proposal 2026-10-17, approved; implemented in `ppimpl/kvpool/`, branch lane-m6-kvpool, §13.4)
 
 One public object, `BalancedKVPool`, with five internal layers. Every layer has a small interface and runs on CPU in
 tests. Names follow vLLM's offloading API where the concept is the same (`OffloadingManager.lookup` /
@@ -568,6 +571,48 @@ backends.py, mover.py, manager.py, member.py}`; `engine/tiers.py`, `runtime/tier
   3. the state goes last;
   4. done.
 
+### 13.4 As implemented (lane-m6-kvpool)
+
+Files: `ppimpl/kvpool/__init__.py` (`BalancedKVPool`, `Handle`, `Hit`, `KVViews`), `layout.py` (`ViewRange`,
+`from_stage_kv`; was `runtime/tier_copy.stage_ranges`), `placement.py` (`BalancedPlacement`; was `tier_copy.Layout`),
+`backends.py` (`HostTier`, `SsdTier`, the NUMA/OOM helpers; was `runtime/tier_worker.HostArena`, `SsdFile`),
+`mover.py` (`Mover`, `Segment`; was `TierEngine._batch` / `_move`), `manager.py` (`TierManager`, `TierStore`,
+`SlotGuard`, `TierOp`; was `engine/tiers.Tiers`), `member.py` (`PoolMember`, `share_ranges`, `tier_move`; was
+`TierEngine` and `controller.tier_move`). Tests: `tests/test_kvpool_{layout,placement,backends,mover,member,manager,
+slots,e2e_cpu,bytes_gpu}.py`.
+
+Behavior is unchanged: the slot-mode op stream (every emitted op with its slots, deps, blocks and landing time, the
+ready order and the summaries) is identical to the old index's over 16 random runs of 400 steps (12,855 ops), and
+`bench.replay` (sessions N = 400, 3 min, `--tiers` full / tiers / ssd_heavy / ssd_heavy with partial hits and
+every-context writes, and `bringup tier`) writes byte-identical outputs. Log files and fields, the worker start-up
+line (`resident GB by node`, `REMOTE SPILL`) and the OOM guards are the same code.
+
+Where it differs from §13.1-§13.2, and why:
+- **Leader form only.** `BalancedKVPool(cfg, partial_hits)` lives on the controller (in the scheduler). No member
+  form (a process calling `store` / `load` with its own views), no `group` / `register` / `close` on the facade: the
+  workers build a `PoolMember` directly and `PoolMember.attach` is `register` (CUDA IPC exchange). This engine has
+  no use for the rest.
+- **Calls.** `lookup(key, prompt, now_ns)` takes the caller's clock (the scheduler is a pure state machine);
+  `load(key, hit, views, now_ns, req_id)` takes the `Hit` and checks only that its tier still holds the key, instead
+  of comparing the prompt's content again on the control thread; `store(key, prompt, views)`
+  takes the request for its tokens, content and declared prefix (replay). `Handle`: `status` pending / done,
+  `done()`, `eta_ns`, `tier`, `tokens`, `t_start`, `t_land`; no `wait` and no `failed` (a member's error still fails
+  the run, `WorkerError`), so `TierManager.complete(op_id, now_ns)` has no `ok`. It moves a read's channel to the
+  real landing time (was `Tiers.landed_late`). A store's handle covers its writes from HBM; the scheduler pins the
+  kept context once per pending store (was once per write op: the same pinned / not pinned at every point).
+- **Layer 1** is a function, `layout.from_stage_kv`; no class around it.
+- **Layer 2.** `pieces` takes one block list for every stage or one per stage; the wire (`TierMove.kv_blocks`,
+  `state_blocks`) carries one list for all stages, as this engine has one allocation for all.
+  `OwnStagePlacement` is not built: it needs per-GPU slot sizes in the index.
+- **Layer 3.** `HostTier.ptr(slot)` once `register(slot_bytes)` fixed the slot size; slot counts stay
+  `backends.num_slots(gb, slot_bytes)` (no `capacity_slots` attribute). `SsdTier` owns the 8-thread pool.
+- **Layer 4.** `Mover(device, slot_bytes, hops, ring_depth, ring_chunk_slots)`, `transfer_async(direction,
+  segments, ready, tr) -> (event, bytes)`. A segment is host slot pointers plus the pieces in them; the mover cuts
+  each segment into ring chunks (KV and state never share a chunk, as before) or, direct, puts all pieces in one
+  batch. The ring is allocated after the KV pool, as §3 says (the §13.2 table's "before" was wrong).
+- **Byte mode** (replay): no members; a store's handle is done at once, a load's lands at `eta_ns` on the caller's
+  clock (replay pushes its landing at `Request.read_land_ns`).
+
 ## 14. Hand-off (2026-10-17)
 
 ### 14.1 Host-memory OOM prevention (commit 0e5bc04)
@@ -657,7 +702,8 @@ No `numa_alloc_onnode`, `MPOL_BIND` or `membind` is left in the lane.
    Then rerun full_dram N=500: `--mem=800G`, main with nice -500, `PPIMPL_TIER_TRACE=0`. Watch start-up and the
    resident-by-node split; stop and report at once if the watchdog fires. (N=400 passed as 7995.)
 3. §13 refactor (user-approved): implement under `ppimpl/kvpool/`, delete the three old files, migrate every test,
-   no compatibility shim.
+   no compatibility shim. Done on lane-m6-kvpool (§13.4); GPU byte test, DRAM bring-up and full_dram N=400 not
+   rerun yet.
 4. CPU suite, DRAM bring-up, full_dram N=400 recheck.
 5. SSD bring-up and the *_ssd128 sessions (delete SSD files, record df, exercise eviction).
 
