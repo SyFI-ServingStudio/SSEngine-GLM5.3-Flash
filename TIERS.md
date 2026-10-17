@@ -185,7 +185,7 @@ into nothing (its slots are reused). HBM eviction waits for the session's write 
 | 1a | pointer table, quarter rule, DRAM arena, write/read ops, TierDone, scheduler wiring | GPU test §8; tier bring-up DRAM (150 GB, pool 1,234,944 tokens): per-P round-1 TTFT and read time vs §3 |
 | 1b | | sessions full N = 400/500 and h25d37/h12d19 (DRAM only, step 1) against the v2-realistic tier targets |
 | 2a | SSD file, I/O pool, demote, copy-up, staging | GPU test through SSD; bring-up SSD only (128 GB) |
-| 2b | | sessions full / h25d37 / h12d19 at N = 400/500 with SSD 128 GB (`*_ssd128`); once h25d37 N = 400 at 256 GB |
+| 2b | | sessions full / h25d37 / h12d19 at N = 400/500 with SSD 128 GB (`*_ssd128`) |
 
 ## 10. Targets (v2-realistic, replace the handoff's numbers)
 
@@ -217,15 +217,32 @@ since at full memory an SSD no larger than DRAM holds nothing DRAM does not.
 **SSD size differs from the handoff.** The user set 128 GB of SSD per GPU; `7_offloading.md` has 256 GB. At 128 GB the
 SSD tier evicts (LRU, finished sessions first: the active set is ~73-87 GB per GPU, notes.md 2026-10-16), so the
 runs compare against `*_ssd128`, and the SSD eviction path (slots freed, an evicted session computed again) is part
-of every h25d37/h12d19 run and of the CPU tests (§8). The 256 GB design is run once at the end (h25d37, N = 400,
-target full_design / h25d37_design).
+of every h25d37/h12d19 run and of the CPU tests (§8). Every run uses 128 GB (`TierConfig.ssd_gb` default; user,
+2026-10-17); no 256 GB run.
 
-**Memory for full-memory runs.** 600 GB pinned (`--mem=800G`) waits for the user's approval; bring-up (the handoff gives DRAM
-150 GB, but the run writes only ~38 GB per GPU: 75 fillers of 256k at 430 MB plus 15 sessions at 5.7 GB; a 48 GB
-arena per GPU holds all of it, so nothing is evicted, as at 150 GB; `--mem=300G`) and h25d37/h12d19 (37.5 /
-18.75 GB per GPU) do not need it.
+**Memory per run (user, 2026-10-17: reserve, then release).** Only full-memory session runs ask for `--mem=800G` and
+pin 600 GB (150 GB per GPU); the job ends, the memory is free. Bring-up: the handoff gives DRAM 150 GB, but the run
+writes only ~38 GB per GPU (75 fillers of 256k at 430 MB plus 15 sessions at 5.7 GB), so a 48 GB arena per GPU holds
+all of it and nothing is evicted, as at 150 GB: `--mem=300G`. h25d37 / h12d19: 37.5 / 18.75 GB per GPU,
+`--mem=350G` / `300G`.
 
-## 11. Differences from the target to record
+## 11. What is reused, from where, and why not the others
+
+Decision (coordinator, user's rule "reuse what fits, change or write what does not"): reuse primitives, not whole
+connectors. LMCache's and HiCache's connectors load each GPU's slice through its own link and are built around vLLM's
+or SGLang's scheduler; wiring them to balanced striping and our scheduler would take more code than the parts below.
+
+| Part | Reused | From | Why not the alternatives |
+|---|---|---|---|
+| Batched H2D/D2H copy, 0 SMs | `ops.swap_blocks_batch` (`cuMemcpyBatchAsync`, one driver call per op) | vLLM fork `vllm/_custom_ops.py`, `csrc/.../cache_kernels.cu`; used by `kv_offload/cpu/gpu_worker.py` | LMCache in-process and HiCache `kernel` use SM copy kernels (2-4 CTAs, or a grid over tokens x layers); our stages keep the SMs busy. LMCache MP and HiCache `direct` use the same CUDA call, so nothing to gain from taking their wrappers |
+| Peer pointers to the other stages' KV | CUDA IPC export/open as `CePipe` already does | `ppimpl/runtime/transport.py` | LMCache MP shares GPU KV over CUDA IPC the same way; no new mechanism |
+| Pinned host memory | libnuma first-touch on the GPU's node + `cudaHostRegister` (portable, mapped), chunked | the pattern of LMCache `csrc/cuda/mem_alloc.cpp` (mmap + mbind + register) and vLLM `kv_offload/cpu/shared_offload_region.py` (mmap + register in <= 64 GB chunks) | torch `pin_memory` rounds to a power of 2 (150 -> 256 GB); vLLM's region is one `/dev/shm` file with per-worker rows and no mbind (NUMA by first touch only): we need each GPU's slice bound to its node and need no shared file (each worker maps only its own slice; peer bytes go over NVLink, not through another worker's host memory) |
+| Host layout | page_first: a slot holds one block of all layers (and all stages, quartered) contiguously | the idea of HiCache `page_first_direct` `(2, pages, L, page, H, D)` and vLLM 0.12's cross-layer block | HiCache's `layer_first` and per-token `page_first` give small copies (10.8 GB/s sustained in Strata's measurement); the HBM side stays vLLM's per-layer layout (changing it would touch every attention kernel), so pieces are per (layer, block) quarters there |
+| O_DIRECT probe | `probe_o_direct` | vLLM fork `kv_offload/tiering/fs/io.py` | - |
+| SSD file I/O | own: one preallocated file per GPU, slot-addressed `os.preadv` / `os.pwritev` with O_DIRECT from 8 threads (GIL released) | pattern of Dynamo KVBM's single fallocated O_DIRECT file per worker | vLLM fs tier and LMCache/HiCache file backends write one file per block or chunk (temp file + rename, or buffered I/O): 10k+ files per GPU and an open/close per 12.9 MB; `fs_io_C` loops serially in C, so it needs the same thread pool anyway. GDS (LMCache cuFile, NIXL) is not available (nvidia-fs not loaded) and would skip the DRAM copy-up the design requires |
+| Index, LRU, read-wait bound, scheduler | own (`ppimpl/engine/tiers.py`, `scheduler.py`, already written for M5 replay) | - | the handoff's rules (whole-session LRU per tier, write-back to SSD, read-wait bound, landed rounds first) are not any of these systems' policies |
+
+## 12. Differences from the target to record
 
 Block-granular slots (§3: +4% space, +5% on a 32k read); real write traffic on the same links (D2H vs H2D, and SSD
 reads vs write-back); host time to start and land a read (measured per read in `reads.jsonl`); SSD latency of small reads (a 32k

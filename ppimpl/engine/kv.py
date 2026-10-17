@@ -162,6 +162,7 @@ class KvManager:
         self.stats = dict(admitted=0, hits=0, hit_tokens=0, evicted_sessions=0, evicted_tokens=0, dropped_stale=0,
                           peak_hard=0, preemptions=0, repeats=0)    # no preemption: the count stays 0
         self.evicted: dict[object, int] = {}           # key -> tokens of a kept context evicted and not replaced since
+        self.pinned: Counter = Counter()               # kept contexts a tier write still copies from (not evictable)
 
     @property
     def num_blocks(self) -> int:
@@ -182,8 +183,28 @@ class KvManager:
         return self.footprint(prompt_tokens) <= self.capacity
 
     def fits(self, req) -> bool:
-        """Whether the request's whole footprint fits now, kept sessions evicted as needed."""
-        return self.hard + self.footprint(req.num_tokens) <= self.capacity
+        """Whether the request's whole footprint fits now, kept sessions evicted as needed (not the pinned ones)."""
+        pinned = sum(self.kept_cost(self.kept[k].tokens) for k in self.pinned if k in self.kept)
+        return self.hard + pinned + self.footprint(req.num_tokens) <= self.capacity
+
+    # --- pins: a kept context a tier write copies from ------------------------------------------------------------
+
+    def kept_key(self, req):
+        """The key `release` keeps the request's context under."""
+        return session_key(req.token_ids) if self.content_keys else req.session
+
+    def pin(self, key):
+        self.pinned[key] += 1
+
+    def unpin(self, key):
+        self.pinned[key] -= 1
+        if self.pinned[key] <= 0:
+            del self.pinned[key]
+
+    def busy(self, req) -> bool:
+        """The request would take over (or give back) its session's kept context while a tier write still copies
+        from it: it waits."""
+        return req.session is not None and req.session in self.pinned and req.session in self.kept
 
     @property
     def used_tokens(self) -> int:
@@ -315,7 +336,10 @@ class KvManager:
         free."""
         while self.kept and (self.hard + self.kept_charge > self.capacity
                              or (not self.pool.virtual and self.pool.num_free < blocks_needed)):
-            key, k = self.kept.popitem(last=False)
+            key = next((x for x in self.kept if x not in self.pinned), None)
+            if key is None:
+                break
+            k = self.kept.pop(key)
             self._unkeep(k)
             self.evicted[key] = k.tokens
             self.pool.give(k.alloc.kv_blocks + k.alloc.state_blocks)
@@ -325,13 +349,13 @@ class KvManager:
 
     def release(self, req):
         """The request is done (its token is out). With `keep_sessions`, its prompt's KV and final KDA state stay as
-        its session's kept context; otherwise its blocks are freed."""
+        its session's kept context (returns its key); otherwise its blocks are freed."""
         alloc = self.held.pop(req.req_id)
         self.hard -= self._charge.pop(req.req_id)
         if not (self.keep_sessions and req.session is not None):
             self.pool.give(alloc.kv_blocks + alloc.state_blocks)
-            return
-        key = session_key(req.token_ids) if self.content_keys else req.session
+            return None
+        key = self.kept_key(req)
         old = self.kept.pop(key, None)               # the session's entry went to this request; a stray one goes
         if old is not None:
             self._unkeep(old)
@@ -343,6 +367,7 @@ class KvManager:
         if self.content_keys and req.num_tokens < SESSION_KEY_TOKENS:
             self._short[req.num_tokens] += 1
         self._make_room(0)
+        return key
 
     def drop(self, req):
         """Give back a held allocation without keeping anything (a cancelled request)."""

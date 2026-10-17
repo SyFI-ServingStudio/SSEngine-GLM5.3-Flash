@@ -54,12 +54,17 @@ class TierConfig(msgspec.Struct, forbid_unknown_fields=True):
     own stage's bytes, so the stage with the most bytes (stage 0) sets the size and the read time."""
     dram_gb: float | None = 150.0         # None: no DRAM tier
     dram_read_gb_s: float = 50.0
-    ssd_gb: float | None = 256.0          # None: no SSD tier
+    ssd_gb: float | None = 128.0          # None: no SSD tier. 128 GB per GPU (user, 2026-10-16); the handoff has 256
     ssd_read_gb_s: float = 10.0
     ssd_writes: str = "dram-evictions"    # "dram-evictions": SSD is written only with what DRAM evicts; "every-context"
     bytes_per_token: int = 1635           # own stage (stage 0); balanced storage: 1,499
     state_bytes: int = 39_100_000         # one KDA state per context, own stage (stage 0); balanced: 36.9 MB
     max_read_wait_ms: float | None = 1000.0   # a read that would wait longer for its tier is passed over
+    # Slot accounting (the server, lanes/m6 TIERS.md §3): None = bytes as above (replay). A slot is one GPU's share of
+    # one KV block on all stages (balanced: 8,576 x 1,499 B, 4 KiB-aligned); a context's state takes state_slots.
+    slot_bytes: int | None = None
+    state_slots: int = 3
+    staging_gb: float = 8.0               # host slots for SSD reads/writes without DRAM (none of them is a hit)
 
 
 class FakeConfig(msgspec.Struct, forbid_unknown_fields=True):

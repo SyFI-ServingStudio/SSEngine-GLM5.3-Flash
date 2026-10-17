@@ -220,7 +220,8 @@ class Scheduler:
         self._mb_tokens: deque[int] = deque()
         self._seq = 0
         self._chunks: list[ChunkSpec] = []
-        self.stats = dict(microbatches=0, passed_over=0, reads=0, blocked_reads=0)
+        self.stats = dict(microbatches=0, passed_over=0, reads=0, blocked_reads=0, busy_waits=0)
+        self.hbm_writes: dict[int, object] = {}  # tier write op -> the kept context it copies from (pinned)
 
     # --- events ---------------------------------------------------------------------------------------------------
 
@@ -252,10 +253,26 @@ class Scheduler:
 
     def finish(self, req: Request):
         """The request's token is out: its context goes to the tiers (if any) and stays kept in HBM, or its blocks
-        are freed."""
+        are freed. With slot tiers, the kept context is pinned in HBM until its write is done (`op_done`)."""
+        first = len(self.tiers.ops) if self.tiers is not None else 0
         if self.tiers is not None and req.session is not None:
-            self.tiers.store(req, req.alloc)
-        self.kv.release(req)
+            self.tiers.store(req, req.alloc, self.kv.kept_key(req) if self.kv.keep_sessions else req.session)
+        key = self.kv.release(req)
+        if key is not None and self.tiers is not None and self.tiers.slot_mode:
+            for o in self.tiers.ops[first:]:
+                if o.op == "write":
+                    self.hbm_writes[o.op_id] = key
+                    self.kv.pin(key)
+
+    def op_done(self, op_id: int, now_ns: int):
+        """Every worker reported the tier op done (slot tiers): unpin the kept context it copied from, land a read."""
+        o = self.tiers.op_done(op_id)
+        key = self.hbm_writes.pop(op_id, None)
+        if key is not None:
+            self.kv.unpin(key)
+        if o.op == "read":
+            self.tiers.landed_late(o.tier, now_ns)
+            self.read_landed(o.req_id, now_ns)
 
     def read_landed(self, req_id: str, now_ns: int):
         """Every worker reported the read done: the round is admitted before every queued request."""
@@ -394,6 +411,11 @@ class Scheduler:
             src, r = self._peek(overdue_only)
             if r is None:
                 break
+            if src != LANDED and self.kv.busy(r):    # its kept context is still being written to a tier
+                self.stats["busy_waits"] += 1
+                self._take(src)
+                passed.append((src, r))
+                continue
             if src != LANDED and self.tiers is not None:
                 outcome = self._at_head(r, now_ns)
                 if outcome == "read":
