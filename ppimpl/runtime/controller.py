@@ -54,7 +54,7 @@ from ppimpl.config import BLOCK_TOKENS, RunConfig, dump_config
 from ppimpl.engine.kv import KvManager, kv_blocks_for, pool_size
 from ppimpl.engine.scheduler import ChunkSpec, Request, Scheduler
 from ppimpl.runtime.cpus import CONTROLLER_CORES, cpu_list, pin_process, split_cores, threads
-from ppimpl.runtime.dispatch import NOW, WAIT, DispatchRule
+from ppimpl.runtime.dispatch import NOW, WAIT, make_rule
 from ppimpl.runtime.transport import (Chunk, Plan, Ready, Shutdown, StageDone, WorkerError, decode_to_controller,
                                       encode, for_stage)
 from ppimpl.serve.slab import SlabReader
@@ -173,10 +173,10 @@ class Controller:
             raise
         self._pin()
         num_blocks = pool_size([r.num_blocks for r in ready], cfg.pool_tokens)
-        self.rule = DispatchRule(cfg.max_in_flight, cfg.form_lead_ms, self.n)
-        # forming ahead: up to 2 other plans not reported done on stage 0; in flight net of the `exiting` ones
+        self.rule = make_rule(cfg, self.n)
+        # the scheduler's in-flight limits are the rule's (DispatchRule: net of `exiting`, 2 ahead; QueueOneRule: +1, 1)
         self.sched = Scheduler(KvManager(num_blocks, keep_sessions=cfg.keep_sessions, content_keys=True),
-                               cfg.scheduler, None, cfg.max_in_flight, 2)
+                               cfg.scheduler, None, *self.rule.sched_limits)
         self.mb_log = open(self.run_dir / "microbatches.jsonl", "w")
         self.host_log = open(self.run_dir / "worker_host.jsonl", "w")
         self.plan_log = open(self.run_dir / "plans.jsonl", "w")

@@ -82,6 +82,10 @@ class RunConfig(msgspec.Struct, forbid_unknown_fields=True):
     max_in_flight: int = MAX_IN_FLIGHT
     form_lead_ms: float = 3.0         # a plan forms this long before its predicted host time ahead of its projected
                                       # stage-0 start (ppimpl/runtime/dispatch.py)
+    dispatch: str = "project"         # "project": DispatchRule (form ahead of the projected start, GPU gate at
+                                      # max_in_flight); "queue_one": QueueOneRule, the rule before a8b80bc (one plan
+                                      # queued on stage 0 as the max_in_flight+1-th, pacing; gate at max_in_flight+1)
+    pace_margin_ms: float | None = 2.0    # queue_one only: pace forming to the later stages (None: off)
     pool_tokens: int | None = None    # cap on the KV pool, in tokens (1_contract.md §2.3)
     cuda_graphs: bool = True          # glm53: microbatches up to 8192 tokens replay a CUDA graph per power-of-2 bucket
                                       # (padded to it); larger ones run eagerly (ppimpl/model/stage.py)
@@ -112,6 +116,14 @@ class RunConfig(msgspec.Struct, forbid_unknown_fields=True):
 
     def plan_addr(self, stage: int) -> str:
         return f"tcp://127.0.0.1:{self.base_port + 1 + stage}"
+
+    def __post_init__(self):
+        if self.dispatch not in ("project", "queue_one"):
+            raise ValueError(f"dispatch: {self.dispatch!r} (project | queue_one)")
+
+    def gate_depth(self) -> int:
+        """Microbatches stage 0 may run ahead of the last stage's exits (the GPU gate)."""
+        return self.max_in_flight + (1 if self.dispatch == "queue_one" else 0)
 
     def dist_init_method(self) -> str:
         return f"tcp://127.0.0.1:{self.base_port + 1 + self.num_stages}"
