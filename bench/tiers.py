@@ -115,7 +115,15 @@ def session_vs_target(run_dir: Path, setting: str, n: int) -> dict:
         w = tgt["prefix_read_share"]
         want = {k: w[k] / max(sum(w.values()), 1e-12) for k in w}
     cache = json.loads((run_dir / "cache.json").read_text())
-    return {"run": run_dir.name, "setting": setting, "n": n, "metrics": s["metrics"], "stage_busy": s["stage_busy"],
+    reads = [o for o in read_jsonl(run_dir / "tier_ops.jsonl") if o["kind"] == "read"] \
+        if (run_dir / "tier_ops.jsonl").exists() else []
+    by_tier = {}
+    for o in reads:
+        by_tier.setdefault(o["tier"], []).append(o)
+    read_stats = {t: {"reads": len(os_), "read_ms": {f"p{q}": round(float(np.percentile(
+                      [o["landed_ms"] - o["sent_ms"] for o in os_], q)), 3) for q in (50, 90, 99)},
+                      "parts_ms": mean_parts([read_parts(o) for o in os_])} for t, os_ in by_tier.items()}
+    return {"run": run_dir.name, "reads": read_stats, "setting": setting, "n": n, "metrics": s["metrics"], "stage_busy": s["stage_busy"],
             "server_ttft_s": s["server_ttft_s"], "hit_share_by_tier": share, "target_hit_share_by_tier": want,
             "scheduler": cache.get("scheduler"), "blocked_by_write": cache.get("blocked_by_write"),
             "tiers": cache.get("tiers"), "target": tgt, "rounds_failed": s["rounds_failed"],
@@ -136,6 +144,9 @@ def print_session(x: dict):
     w = x["target_hit_share_by_tier"] or {}
     print("  hit tokens by tier " + ", ".join(f"{k} {100 * v:.2f}% vs {100 * w.get(k, float('nan')):.2f}%"
                                               for k, v in x["hit_share_by_tier"].items()))
+    for t, r in x["reads"].items():
+        print(f"  {t} reads {r['reads']}: sent -> landed ms p50/p90/p99 " + " / ".join(str(v) for v in r["read_ms"].values())
+              + (", parts " + ", ".join(f"{k} {v}" for k, v in r["parts_ms"].items()) if r["parts_ms"] else ""))
     print(f"  scheduler {x['scheduler']}, blocked_by_write {x['blocked_by_write']}, failed {x['rounds_failed']}")
 
 

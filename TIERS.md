@@ -330,6 +330,13 @@ Per P, mean of 5 sessions, ms; targets from `tier_targets.json` (`bench/tiers.py
   3.44 ms) and the same stage compute (32k 19.37 / 18.31 / 18.14 / 18.59 ms vs 19.36 / 18.31 / 18.14 / 18.60), so
   the switch was not kept. Each hop is a thread waking on a blocked wait (zmq poll, blocking CUDA event) on the
   worker's 4 logical CPUs (48 threads). `busy_waits`, `blocked_by_write`, `passed_over` 0 in both runs.
+- **Not done (32k read is +1.8 ms over its target, 3.3% of round-1 TTFT, under the 10% bar); options if wanted:**
+  (a) the done thread waits on a spinning (non-blocking-sync) event: est. -0.4 ms per read (notify), costs one of the
+  worker's 4 logical CPUs while an op is in flight; (b) a GPU-side dependency: the stage workers wait on the read's
+  completion through CUDA IPC events before the forward, so the plan goes out without waiting for every TierDone to
+  reach the controller: est. -0.9 to -1.2 ms per read (notify + land + the plan's dispatch), a medium change (an IPC
+  event pool per engine, exchanged at start-up, the plan naming the events). (c) 2D/3D batched copies (fewer
+  descriptors, less submit time): kept as an alternative.
 - **Attribution (job 7960: the same bring-up on the full pool, tiers on, every round 1 an HBM hit).** Ready = 7,144
   blocks on every stage with tiers on. Round-1 TTFT p50 on HBM hits: 54.99 / 57.53 / 65.79 ms at 32k / 128k / 512k
   (targets 52.7 / 53.7 / 57.5). Per-stage compute of round 1 is the same with and without the DRAM read (512k:
