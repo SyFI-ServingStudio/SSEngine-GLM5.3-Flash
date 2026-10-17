@@ -123,7 +123,7 @@ def session_vs_target(run_dir: Path, setting: str, n: int) -> dict:
     read_stats = {t: {"reads": len(os_), "read_ms": {f"p{q}": round(float(np.percentile(
                       [o["landed_ms"] - o["sent_ms"] for o in os_], q)), 3) for q in (50, 90, 99)},
                       "parts_ms": mean_parts([read_parts(o) for o in os_])} for t, os_ in by_tier.items()}
-    return {"run": run_dir.name, "reads": read_stats, "setting": setting, "n": n, "metrics": s["metrics"], "stage_busy": s["stage_busy"],
+    return {"run": run_dir.name, "reads": read_stats, "trace": trace_summary(run_dir), "setting": setting, "n": n, "metrics": s["metrics"], "stage_busy": s["stage_busy"],
             "server_ttft_s": s["server_ttft_s"], "hit_share_by_tier": share, "target_hit_share_by_tier": want,
             "scheduler": cache.get("scheduler"), "blocked_by_write": cache.get("blocked_by_write"),
             "tiers": cache.get("tiers"), "target": tgt, "rounds_failed": s["rounds_failed"],
@@ -147,7 +147,51 @@ def print_session(x: dict):
     for t, r in x["reads"].items():
         print(f"  {t} reads {r['reads']}: sent -> landed ms p50/p90/p99 " + " / ".join(str(v) for v in r["read_ms"].values())
               + (", parts " + ", ".join(f"{k} {v}" for k, v in r["parts_ms"].items()) if r["parts_ms"] else ""))
+    for k, t in (x.get("trace") or {}).items():
+        print(f"  {k} trace ({t['ops']} ops x GPUs), p50 / mean: " + ", ".join(
+            f"{f} {v['p50']} / {v['mean']}" for f, v in t.items() if f != "ops"))
     print(f"  scheduler {x['scheduler']}, blocked_by_write {x['blocked_by_write']}, failed {x['rounds_failed']}")
+
+
+def trace_parts(op: dict) -> dict:
+    """One traced op (tier_trace_s<stage>.jsonl) on one GPU, us: host-to-device (or device-to-host) copy time and
+    GB/s, the NVLink hop's time, host time outside the batch calls (Python, and waiting for the GIL before a call),
+    inside the calls on the CPU (driver) and blocked in them (the GIL back after the call, or the driver blocking), the
+    time the PCIe stream sat idle between its batches (ring waits or late submission) and how much of that idle was
+    waiting for the host (the batch started within 30 us of its call returning), and the GPU span."""
+    b = op["batches"]
+    pcie = "read" if op["kind"] == "read" else "write"
+    hb = [x for x in b if x["stream"] == pcie]
+    nb = [x for x in b if x["stream"] != pcie]
+    host_end = max(x["host_at_us"] + x["call_us"] for x in b)
+    idle = host_wait = 0.0
+    for prev, x in zip(hb, hb[1:]):
+        gap = x["gpu_start_us"] - prev["gpu_end_us"]
+        if gap > 0:
+            idle += gap
+            if x["gpu_start_us"] - (x["host_at_us"] + x["call_us"]) < 30:
+                host_wait += min(gap, x["host_at_us"] + x["call_us"] - prev["gpu_end_us"])
+    pcie_us = sum(x["gpu_end_us"] - x["gpu_start_us"] for x in hb)
+    return {"pcie_us": round(pcie_us, 1), "pcie_gb_s": round(sum(x["bytes"] for x in hb) / max(pcie_us, 1e-3) / 1e3, 1),
+            "nvl_us": round(sum(x["gpu_end_us"] - x["gpu_start_us"] for x in nb), 1),
+            "host_outside_calls_us": round(host_end - sum(x["call_us"] for x in b), 1),
+            "call_cpu_us": round(sum(x["cpu_us"] for x in b), 1),
+            "call_blocked_us": round(sum(x["call_us"] - x["cpu_us"] for x in b), 1),
+            "pcie_idle_us": round(idle, 1), "pcie_idle_waiting_host_us": round(host_wait, 1),
+            "span_us": round(max(x["gpu_end_us"] for x in b) - min(x["gpu_start_us"] for x in b), 1)}
+
+
+def trace_summary(run_dir: Path) -> dict | None:
+    """Per kind (read / write), p50 and mean of trace_parts over every traced op on every GPU."""
+    rows: dict[str, list] = {}
+    for f in sorted(run_dir.glob("tier_trace_s*.jsonl")):
+        for op in read_jsonl(f):
+            rows.setdefault(op["kind"], []).append(trace_parts(op))
+    if not rows:
+        return None
+    return {k: {"ops": len(v), **{f: {"p50": round(float(np.median([r[f] for r in v])), 1),
+                                      "mean": round(float(np.mean([r[f] for r in v])), 1)} for f in v[0]}}
+            for k, v in rows.items()}
 
 
 def mean_parts(parts: list) -> dict | None:
