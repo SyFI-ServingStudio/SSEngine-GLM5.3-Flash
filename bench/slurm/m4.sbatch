@@ -36,7 +36,11 @@ set -uo pipefail
 source "${SLURM_SUBMIT_DIR:-$(dirname "$0")/../..}/bench/slurm/env.sh"
 R=$ROOT/${OUT:-measured/runs_m4}
 mkdir -p "$R/slurm"
+export CUDA_DEVICE_ORDER=PCI_BUS_ID   # CUDA device i = the i-th GPU listed, as nvidia-smi numbers them
 G=${CUDA_VISIBLE_DEVICES:-0,1,2,3}
+# GPU_ORDER=reverse: stage s on the job's GPU 3-s (stage/GPU A/B: is a stage slow for its GPU or its work); the run
+# name gets _gpurev. Workers take CUDA device = stage, CPUs on that GPU's NUMA node (ppimpl/runtime/cpus.py).
+[ "${GPU_ORDER:-}" = reverse ] && G=$(tr , '\n' <<< "$G" | tac | paste -sd, -)
 P=$((20000 + ${SLURM_JOB_ID:-0} % 120 * 100))
 WHAT=${1:?check, preflight, margin, resume_nsys, bringup, prefix_n<N>, sched_check_<step>, force_check_<step> or sched_<step>_n<N>}
 if (( $# > 1 )); then   # several runs in one GPU window, one after another, stopping at the first failure
@@ -103,7 +107,7 @@ case $WHAT in
   bringup) $PY -m bench.run prefix_bringup --inline --nsys --nsys-mbs "${NSYS_MBS:-564:631}" --gpus "$G" --port "$P" \
              --out-root "$R" ${BRINGUP_ARGS:-}; rc=$? ;;
   prefix_n*|sched_check_*|force_check_*|sched_*_n*)   # BY_JOB=1: into <name>_<job>/ with the job's GPU samples
-    N=$WHAT${DISPATCH:+_$DISPATCH}; [ -n "${BY_JOB:-}" ] && N=${N}_$JOB
+    N=$WHAT${DISPATCH:+_$DISPATCH}; [ "${GPU_ORDER:-}" = reverse ] && N=${N}_gpurev; [ -n "${BY_JOB:-}" ] && N=${N}_$JOB
     $PY -m bench.run "$WHAT" --inline --gpus "$G" --port "$P" --out-root "$R" --run-name "$N" \
       ${DISPATCH:+--dispatch "$DISPATCH"}; rc=$?
     [ -n "${SAMPLE:-}" ] && [ -d "$R/$N" ] && cp "$R/slurm/gpu_samples_$JOB.csv" "$R/$N/gpu_samples.csv" ;;
