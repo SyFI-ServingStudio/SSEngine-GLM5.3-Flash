@@ -12,6 +12,13 @@ DRAM: one pinned arena per worker on its GPU's NUMA node: libnuma, MADV_HUGEPAGE
 while the model loads, then `cudaHostRegister` in chunks of whole slots (a piece never crosses a slot, so never a
 registration). Not torch's pinned allocator: it rounds 150 GB up to 256 GB.
 
+SSD: one preallocated file per worker in `TierConfig.ssd_dir` (default $PPIMPL_SSD_DIR, else the run dir), slot i
+at offset i x slot_bytes, O_DIRECT `preadv`/`pwritev` of whole slots from a pool of 8 threads (GIL released), into
+and out of host slots: DRAM's (a demote; an SSD read's copy-up) or a staging arena's (SSD without DRAM, or a context
+larger than DRAM). An SSD read lands slot by slot and each KV block's H2D is enqueued as soon as its slot is in, the
+state after its slots: read time ~ SSD time + one block. SSD ops run on two threads (reads; writes and demotes), one
+op at a time each. The file is deleted when the worker stops.
+
 The fake model has no KV: its engine moves nothing and reports each op after the time the configured bandwidth
 gives its bytes, one op after another per direction (CPU tests, fake runs).
 """
@@ -19,10 +26,13 @@ gives its bytes, one op after another per direction (CPU tests, fake runs).
 from __future__ import annotations
 
 import ctypes
+import errno
+import os
 import queue
 import threading
 import time
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
@@ -32,6 +42,7 @@ from ppimpl.runtime.transport import Shutdown, TierBatch, TierDone, TierMove, Wo
 MADV_HUGEPAGE = 14
 REGISTER_CHUNK = 1 << 30      # cudaHostRegister per ~1 GiB of whole slots, from 4 threads
 TOUCH_THREADS = 4
+IO_THREADS = 8                # SSD preadv/pwritev pool per worker (fio: 8 psync threads, 53 GB/s on one file)
 FAKE_SLOT_BYTES = 12_857_344  # 8,576 x 1,499 B rounded up to 4 KiB: the real balanced slot (TIERS.md §3)
 
 
@@ -57,9 +68,9 @@ class HostArena:
         self.cuda, self.node = cuda, node
         self._chunks: list[tuple[int, int]] = []
         self.touch_s = self.register_s = 0.0
-        if not cuda:
-            self._buf = np.zeros(self.nbytes, dtype=np.uint8)
-            self.ptr = self._buf.ctypes.data
+        if not cuda:                       # 4 KiB-aligned (O_DIRECT)
+            self._buf = np.zeros(self.nbytes + 4096, dtype=np.uint8)
+            self.ptr = self._buf.ctypes.data + (-self._buf.ctypes.data) % 4096
             return
         self._numa = ctypes.CDLL("libnuma.so.1")
         self._numa.numa_alloc_onnode.restype = ctypes.c_void_p
@@ -128,6 +139,43 @@ class HostArena:
         self.ptr = 0
 
 
+class SsdFile:
+    """One worker's SSD tier: a preallocated file of whole slots, read and written with O_DIRECT (buffered where the
+    file system has no O_DIRECT, as tmpfs in CPU tests)."""
+
+    def __init__(self, path: str, nbytes: int, slot_bytes: int):
+        self.path, self.slot_bytes = path, slot_bytes
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        flags = os.O_RDWR | os.O_CREAT
+        try:
+            self.fd = os.open(path, flags | os.O_DIRECT, 0o600)
+            self.direct = True
+        except OSError as e:
+            if e.errno != errno.EINVAL:
+                raise
+            self.fd = os.open(path, flags, 0o600)
+            self.direct = False
+        os.posix_fallocate(self.fd, 0, nbytes)
+
+    def read(self, slot: int, ptr: int):
+        buf = (ctypes.c_char * self.slot_bytes).from_address(ptr)
+        n = os.preadv(self.fd, [buf], slot * self.slot_bytes)
+        if n != self.slot_bytes:
+            raise OSError(f"{self.path}: slot {slot}: read {n} of {self.slot_bytes} B")
+
+    def write(self, slot: int, ptr: int):
+        buf = (ctypes.c_char * self.slot_bytes).from_address(ptr)
+        n = os.pwritev(self.fd, [buf], slot * self.slot_bytes)
+        if n != self.slot_bytes:
+            raise OSError(f"{self.path}: slot {slot}: wrote {n} of {self.slot_bytes} B")
+
+    def close(self):
+        if self.fd is not None:
+            os.close(self.fd)
+            self.fd = None
+            os.unlink(self.path)
+
+
 # --- the other stages' KV -------------------------------------------------------------------------------------------
 
 def share_ranges(stage: int, n: int, ranges: list[ViewRange]) -> tuple[list[ViewRange], list[int]]:
@@ -185,11 +233,15 @@ class TierEngine:
         self.slot_bytes = tc.slot_bytes or 0
         self.opened: list[int] = []
         self.dram: HostArena | None = None
+        self.staging: HostArena | None = None
+        self.ssd: SsdFile | None = None
+        self.pool: ThreadPoolExecutor | None = None
         self._touch: threading.Thread | None = None
         self.real = False
         self.threads: list[threading.Thread] = []
         self.stop = threading.Event()
-        self.q = {"read": queue.Queue(), "write": queue.Queue()}
+        self.q = {"read": queue.Queue(), "write": queue.Queue()}       # done threads: (op id, wait, start, bytes)
+        self.ssd_q = {"read": queue.Queue(), "write": queue.Queue()}   # SSD threads: (op, start)
         self._due: dict[str, float] = {}           # fake engine: when each direction's last op is done
         if tc.dram_gb and self.cuda and cfg.model != "fake":
             from ppimpl.runtime.cpus import _gpu_node
@@ -202,27 +254,42 @@ class TierEngine:
         if ranges is None:
             self.slot_bytes = self.slot_bytes or FAKE_SLOT_BYTES
             return self.slot_bytes, self.tc.state_slots
-        if self.tc.ssd_gb or not self.tc.dram_gb:
-            raise NotImplementedError("SSD tier: lanes/m6 step 2")
         import torch
         self.real = True
         allr, self.opened = share_ranges(self.stage, self.n, ranges) if self.cuda else (ranges, [])
         self.layout = Layout(allr, self.stage, self.n, slot_bytes=self.tc.slot_bytes)
-        self.slot_bytes = self.layout.slot_bytes
-        if self.dram is None:
-            self.dram = HostArena(tier_num_slots(self.tc.dram_gb, self.slot_bytes) * self.slot_bytes, None, self.cuda)
+        sb = self.slot_bytes = self.layout.slot_bytes
+        node = None
+        if self.cuda:
+            from ppimpl.runtime.cpus import _gpu_node
+            node = _gpu_node(self.device.index)
+        if self.dram is None and self.tc.dram_gb:
+            self.dram = HostArena(tier_num_slots(self.tc.dram_gb, sb) * sb, node, self.cuda)
+            self.dram.touch()
         if self._touch is not None:
             self._touch.join()
-        self.dram.register(self.slot_bytes)
-        assert tier_num_slots(self.tc.dram_gb, self.slot_bytes) * self.slot_bytes <= self.dram.nbytes
+        if self.dram is not None:
+            self.dram.register(sb)
+            assert tier_num_slots(self.tc.dram_gb, sb) * sb <= self.dram.nbytes
+        if self.tc.ssd_gb:
+            self.staging = HostArena(tier_num_slots(self.tc.staging_gb, sb) * sb, node, self.cuda)
+            self.staging.touch()
+            self.staging.register(sb)
+            d = self.tc.ssd_dir or os.environ.get("PPIMPL_SSD_DIR") or os.path.join(self.cfg.run_dir, "ssd")
+            self.ssd = SsdFile(os.path.join(d, f"tier_ssd_gpu{self.stage}_{os.getpid()}.bin"),
+                               tier_num_slots(self.tc.ssd_gb, sb) * sb, sb)
+            self.pool = ThreadPoolExecutor(IO_THREADS, thread_name_prefix="tier-io")
         if self.cuda:
             from vllm import _custom_ops
             self.swap = _custom_ops.swap_blocks_batch
             self.streams = {"read": torch.cuda.Stream(self.device), "write": torch.cuda.Stream(self.device)}
         print(f"stage {self.stage} tiers: slot {self.slot_bytes} B, state {self.layout.state_slots} slots, "
-              f"{len(self.layout.kv_len)} kv + {len(self.layout.st_len)} state pieces per block/context, dram "
-              f"{self.dram.nbytes / 1e9:.1f} GB (touch {self.dram.touch_s:.1f} s, register "
-              f"{self.dram.register_s:.1f} s), {len(self.opened)} peer allocations", flush=True)
+              f"{len(self.layout.kv_len)} kv + {len(self.layout.st_len)} state pieces per block/context, "
+              + (f"dram {self.dram.nbytes / 1e9:.1f} GB (touch {self.dram.touch_s:.1f} s, register "
+                 f"{self.dram.register_s:.1f} s), " if self.dram else "")
+              + (f"ssd {self.ssd.path} (O_DIRECT {self.ssd.direct}), staging {self.staging.nbytes / 1e9:.1f} GB, "
+                 if self.ssd else "")
+              + f"{len(self.opened)} peer allocations", flush=True)
         return self.slot_bytes, self.layout.state_slots
 
     def start(self):
@@ -230,6 +297,10 @@ class TierEngine:
             t = threading.Thread(target=self._done_loop, args=(name,), name=f"tier-{name}", daemon=True)
             t.start()
             self.threads.append(t)
+            if self.ssd is not None:
+                t = threading.Thread(target=self._ssd_loop, args=(name,), name=f"tier-ssd-{name}", daemon=True)
+                t.start()
+                self.threads.append(t)
         t = threading.Thread(target=self._recv_loop, name="tier-recv", daemon=True)
         t.start()
         self.threads.append(t)
@@ -244,8 +315,13 @@ class TierEngine:
             from cuda.bindings import runtime as rt
             for p in self.opened:
                 rt.cudaIpcCloseMemHandle(p)
-        if self.dram is not None:
-            self.dram.close()
+        if self.pool is not None:
+            self.pool.shutdown()
+        if self.ssd is not None:
+            self.ssd.close()
+        for a in (self.dram, self.staging):
+            if a is not None:
+                a.close()
 
     # --- threads ----------------------------------------------------------------------------------------------------
 
@@ -270,9 +346,28 @@ class TierEngine:
             err = WorkerError(self.stage, "tier thread:\n" + traceback.format_exc())
         finally:
             sock.close(linger=0)
-            for q in self.q.values():
-                q.put(err)
+            for d in ("read", "write"):
+                if self.ssd is not None:     # the SSD thread passes the end on to the done thread
+                    self.ssd_q[d].put(err)
+                else:
+                    self.q[d].put(err)
                 err = None
+
+    def _ssd_loop(self, direction: str):
+        err = None
+        try:
+            if self.cuda:
+                import torch
+                torch.cuda.set_device(self.device)
+            while (item := self.ssd_q[direction].get()) is not None:
+                if isinstance(item, WorkerError):
+                    err = item
+                    break
+                self._ssd_op(*item)
+        except BaseException:   # noqa: BLE001 - reported to the controller, which fails the run
+            err = WorkerError(self.stage, "tier SSD thread:\n" + traceback.format_exc())
+        finally:
+            self.q[direction].put(err)
 
     def _done_loop(self, direction: str):
         import zmq
@@ -312,23 +407,61 @@ class TierEngine:
             self._due[d] = max(self._due.get(d, 0.0), time.monotonic()) + nbytes / bw
             self.q[d].put((op.op_id, self._due[d], start_ns, nbytes))
             return
+        if op.tier == "ssd":
+            self.ssd_q[d].put((op, start_ns))
+            return
         if op.tier != "dram" or op.host_tier is not None or op.op not in ("read", "write"):
-            raise NotImplementedError(f"tier op {op.op} {op.tier} via {op.host_tier}: lanes/m6 step 2")
+            raise ValueError(f"tier op {op.op} {op.tier} via {op.host_tier}")
         dev, host, lens = self.layout.pieces(op.kv_blocks, op.state_blocks, op.slots, op.state_slots, op.b_lo,
                                              op.b_hi, op.block_start)
-        host = host + self.dram.ptr
+        self.q[d].put((op.op_id, self._copy(d, self.dram.ptr, dev, host, lens), start_ns, int(lens.sum())))
+
+    def _copy(self, d: str, base: int, dev, host, lens):
+        """HBM <-> host pieces (host offsets from `base`) on the direction's stream; the event to wait for (None on
+        CPU, where it is done)."""
+        host = host + base
         src, dst = (host, dev) if d == "read" else (dev, host)
-        nbytes = int(lens.sum())
         if not self.cuda:
             for s, t, k in zip(src.tolist(), dst.tolist(), lens.tolist()):
                 ctypes.memmove(t, s, k)
-            self.q[d].put((op.op_id, None, start_ns, nbytes))
-            return
+            return None
         import torch
         stream = self.streams[d]
         with torch.cuda.stream(stream):
             self.swap(torch.from_numpy(src), torch.from_numpy(dst), torch.from_numpy(lens))
         ev = torch.cuda.Event(blocking=True)
         ev.record(stream)
-        self.q[d].put((op.op_id, ev, start_ns, nbytes))
+        return ev
+
+    def _ssd_op(self, op: TierMove, start_ns: int):
+        """An SSD op, on this direction's SSD thread: its file I/O on the pool, its copies on the CUDA stream."""
+        sb, L = self.slot_bytes, self.layout
+        host = self.dram if op.host_tier == "dram" else self.staging
+        files = op.slots + op.state_slots
+        hosts = op.host_slots + op.host_state
+        assert len(files) == len(hosts), (op.op_id, len(files), len(hosts))
+        if op.op == "read":                 # file -> host slots (all blocks), H2D of [b_lo, b_hi) per landed slot
+            futs = [self.pool.submit(self.ssd.read, f, host.ptr + h * sb) for f, h in zip(files, hosts)]
+            ev, n = None, len(op.slots)
+            for i in range(n):
+                futs[i].result()
+                if op.b_lo <= i < op.b_hi:
+                    ev = self._copy("read", host.ptr, *L.pieces(op.kv_blocks, op.state_blocks, op.host_slots, [], i,
+                                                                 i + 1, 0))
+            for f in futs[n:]:
+                f.result()
+            ev = self._copy("read", host.ptr, *L.pieces(op.kv_blocks, op.state_blocks, op.host_slots, op.host_state,
+                                                        0, 0, 0))
+        else:
+            if op.op == "write":            # HBM -> staging, then the file
+                ev = self._copy("write", host.ptr, *L.pieces(op.kv_blocks, op.state_blocks, op.host_slots,
+                                                             op.host_state, op.b_lo, op.b_hi, op.block_start))
+                if ev is not None:
+                    ev.synchronize()
+            elif op.op != "demote":
+                raise ValueError(f"SSD op {op.op}")
+            for f in [self.pool.submit(self.ssd.write, f, host.ptr + h * sb) for f, h in zip(files, hosts)]:
+                f.result()
+            ev = None
+        self.q[self.direction(op)].put((op.op_id, ev, start_ns, len(files) * sb))
 

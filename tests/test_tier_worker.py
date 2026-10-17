@@ -5,6 +5,7 @@ back into other blocks is byte-equal; growth rewrites only the new blocks; the f
 bandwidth time."""
 
 import ctypes
+import os
 import time
 from types import SimpleNamespace as NS
 
@@ -21,18 +22,22 @@ from ppimpl.runtime.transport import TierBatch, decode_tier, encode
 from test_tier_copy import block_bytes, stages
 
 
-def engines(nslots: int = 40):
-    """Four engines over the fake stages, with DRAM arenas of `nslots` slots, and the index's config."""
+def engines(nslots: int | None = 40, ssd_slots: int | None = None, staging_slots: int = 0, ssd_dir=None):
+    """Four engines over the fake stages, with DRAM arenas of `nslots` slots (SSD files of `ssd_slots`), and the
+    index's config."""
     views, ranges = stages()
     L = Layout(ranges, 0)
-    tc = TierConfig(dram_gb=(nslots + 0.5) * L.slot_bytes / 1e9, ssd_gb=None, slot_bytes=L.slot_bytes,
-                    state_slots=L.state_slots)
-    cfg = NS(tiers=tc, num_stages=4, model="glm53")
+
+    def gb(n):
+        return None if n is None else (n + 0.5) * L.slot_bytes / 1e9
+    tc = TierConfig(dram_gb=gb(nslots), ssd_gb=gb(ssd_slots), staging_gb=gb(staging_slots), slot_bytes=L.slot_bytes,
+                    state_slots=L.state_slots, ssd_dir=None if ssd_dir is None else str(ssd_dir))
+    cfg = NS(tiers=tc, num_stages=4, model="glm53", run_dir=str(ssd_dir))
     engs = []
     for q in range(4):
         e = TierEngine(cfg, q, torch.device("cpu"), None)
         assert e.attach(ranges) == (L.slot_bytes, L.state_slots)
-        assert e.dram.nbytes >= nslots * L.slot_bytes
+        assert nslots is None or e.dram.nbytes >= nslots * L.slot_bytes
         engs.append(e)
     return views, ranges, engs, tc
 
@@ -44,6 +49,8 @@ def run(engs, ops):
     for e in engs:
         for m in msg.ops:
             e.submit(m)
+            if m.tier == "ssd":                      # the SSD thread's work, here
+                e._ssd_op(*e.ssd_q[e.direction(m)].get_nowait())
             op_id, wait, _, nbytes = e.q[e.direction(m)].get_nowait()
             assert op_id == m.op_id and wait is None
             moved.setdefault(op_id, []).append(nbytes)
@@ -98,6 +105,54 @@ def test_write_evict_read_back_is_byte_equal_and_growth_moves_only_new_blocks():
     run(engs, t.ready_ops())
     t.op_done(rd.op_id)
     assert block_bytes(views, ranges, a2.kv_blocks, a2.state_blocks) == want
+
+
+def drive(t, engs):
+    """Run every op in dependency order; returns them."""
+    done = []
+    while ops := t.ready_ops():
+        run(engs, ops)
+        for o in ops:
+            t.op_done(o.op_id)
+        done += ops
+    assert not t.waiting
+    return done
+
+
+def snapshot(views, ranges, kv, st):
+    return block_bytes(views, ranges, kv, st)
+
+
+def test_ssd_demote_copy_up_and_staging_are_byte_equal(tmp_path):
+    """DRAM holds one 2-block context: Y's write demotes X to SSD (DRAM slots -> file); X's read copies it up
+    through new DRAM slots (demoting Y) into other HBM blocks; Y then reads from SSD. SSD only: writes and reads
+    through the staging arena. Every context byte-equal; the files are deleted at close."""
+    T = 2 * B - 5
+    X, Y = Allocation([1, 2], [3, 4, 5, 6, 7, 8]), Allocation([9, 10], [0, 9, 10, 11, 1, 2])
+    for dram in (None, "one"):
+        d = tmp_path / str(dram)
+        ss = Layout(stages()[1], 0).state_slots
+        views, ranges, engs, tc = engines(None if dram is None else 2 + ss, 60, 30, d)   # DRAM: one context
+        t = Tiers(tc)
+        want = {}
+        for name, a in (("x", X), ("y", Y)):
+            want[name] = snapshot(views, ranges, a.kv_blocks, a.state_blocks)
+            t.store(Request(f"{name}0", T, session=name), a)
+            kinds = [o.op for o in drive(t, engs)]
+            assert kinds == (["write"] if dram is None or name == "x" else ["demote", "write"]), kinds
+        scramble(views)
+        for name, a in (("x", Allocation([5, 6], [0, 1, 2, 3, 4, 5])), ("y", Allocation([7, 8], [6, 7, 8, 9, 10, 11]))):
+            r = Request(f"{name}1", T + 9, session=name, prefix_tokens=T)
+            assert t.lookup(r) == (len(t.tiers) - 1, T)                # in SSD
+            rd = t.read(r, len(t.tiers) - 1, T, 0, a, 0)
+            ops = drive(t, engs)
+            assert rd in ops and rd.host_tier == ("staging" if dram is None else "dram")
+            assert [o.op for o in ops] == (["read"] if dram is None or name == "y" else ["demote", "read"])
+            assert snapshot(views, ranges, a.kv_blocks, a.state_blocks) == want[name]
+        paths = [e.ssd.path for e in engs]
+        for e in engs:
+            e.close()
+        assert not any(os.path.exists(x) for x in paths)
 
 
 def test_fake_engine_reports_after_bandwidth_time():

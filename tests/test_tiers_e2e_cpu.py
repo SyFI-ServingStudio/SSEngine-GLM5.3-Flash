@@ -57,3 +57,31 @@ def test_hbm_evicted_session_resumes_from_dram(server):
     assert tiers["state_slots"] == 3 and tiers["slots"]["dram"] == int(0.5e9 // tiers["slot_bytes"])
     cache = json.loads((srv.run_dir / "cache.json").read_text())
     assert cache["tiers"][0]["reads"] == 2 and cache["tier_ops_in_flight"] == 0
+
+
+def test_dram_evictions_go_to_ssd_and_resume_from_there(tmp_path):
+    """DRAM holds one context (4 slots of 7): each write demotes the previous one to SSD. B, evicted from HBM and
+    DRAM, resumes from SSD (copied up into DRAM)."""
+    port = free_port_block()
+    cfg = {**CPU, "tiers": {"dram_gb": 0.1, "ssd_gb": 1.0, "dram_read_gb_s": 5.0, "ssd_read_gb_s": 2.0,
+                            "staging_gb": 0.1}}
+    srv = Server(tmp_path / "run", port, intake_procs=0, **cfg)
+    try:
+        srv.wait_ready()
+        c = Client(port)
+        n = 5000
+        r0 = {s: c.new_tokens(n) for s in "ABCDE"}
+        tok = {s: c.send(f"{s}_r0", r0[s])[0] for s in "ABCD"}
+        assert c.send("A_r1", r0["A"] + [tok["A"]] + c.new_tokens(99))[1] == n
+        assert c.send("E_r0", r0["E"])[1] == 0
+        assert c.send("B_r1", r0["B"] + [tok["B"]] + c.new_tokens(99))[1] == n
+    finally:
+        assert srv.stop() == 0, (tmp_path / "run/server.log").read_text()
+    sr = sreq_of(srv.run_dir)
+    assert sr["B_r1"]["tier"] == "ssd" and sr["B_r1"]["tier_tokens"] == n
+    assert chunks_of(srv.run_dir)["B_r1"] == [(n, 100)]
+    ops = [json.loads(x) for x in (srv.run_dir / "tier_ops.jsonl").read_text().splitlines()]
+    kinds = [o["kind"] for o in ops]
+    assert kinds.count("demote") >= 4 and kinds.count("read") == 1
+    rd = next(o for o in ops if o["kind"] == "read")
+    assert rd["tier"] == "ssd" and rd["host_tier"] == "dram"

@@ -187,6 +187,11 @@ into nothing (its slots are reused). HBM eviction waits for the session's write 
 | 2a | SSD file, I/O pool, demote, copy-up, staging | GPU test through SSD; bring-up SSD only (128 GB) |
 | 2b | | sessions full / h25d37 / h12d19 at N = 400/500 with SSD 128 GB (`*_ssd128`) |
 
+Status (2026-10-17): the code of 1a and 2a is in and passes on CPU (`tests/test_tiers_slots.py`: index, op order,
+pins; `tests/test_tier_copy.py`: quarters; `tests/test_tier_worker.py`: four engines' DRAM and SSD round trips,
+demote, copy-up, staging; `tests/test_tiers_e2e_cpu.py`: the server with the fake model through DRAM and SSD).
+`tests/test_tier_bytes_gpu.py` (§8, DRAM and SSD) has not run yet; no GPU run before the design is confirmed.
+
 ## 10. Targets (v2-realistic, replace the handoff's numbers)
 
 Computed by the coordinator with the realistic-input profile (ServingStudioSim wt-pp-hitrule

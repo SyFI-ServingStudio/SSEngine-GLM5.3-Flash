@@ -3,7 +3,8 @@
 Round 0 (P = 40,000 tokens: a partial last block, chunk starts off KDA's 64-token grid) on blocks K0. Every worker
 writes its quarter of all four stages' KV and state to its DRAM arena (peer stages' KV over NVLink). Fresh blocks
 K1 are filled with garbage and the context is read back into them: every byte of every stage equals K0's. A partial
-read (blocks 2.. and the state, as when HBM holds the first blocks) into K2 likewise. Then round 1 (A = 1,000) on K0
+read (blocks 2.. and the state, as when HBM holds the first blocks) into K2 likewise. Through SSD: the DRAM copy
+is demoted to the SSD file (O_DIRECT) and read back through the staging arena into K3. Then round 1 (A = 1,000) on K0
 (an HBM hit) and on K1 (after the tier read): the logits are bitwise equal. The workers run with expandable segments,
 as the server's do (the KV is allocated IPC-shareable regardless). Run through Slurm:
 
@@ -91,16 +92,16 @@ def _worker(rank: int, port: int, out_dir: str):
     dev = torch.device("cuda", rank)
     torch.cuda.set_device(dev)
     pipe = open_pipe(RunConfig(port=port, scheduler=SchedulerConfig(mb_tokens=CHUNK)), rank, dev, HIDDEN_WIDTH)
-    tc = TierConfig(dram_gb=2.0, ssd_gb=None)
-    eng = TierEngine(NS(tiers=tc, num_stages=4, model="glm53"), rank, dev, zmq.Context())
-    m = StageModel(bench_config(CHUNK), rank, dev, num_blocks=1 + 3 * (N_KV + N_ST), max_model_len=P + A + B,
+    tc = TierConfig(dram_gb=2.0, ssd_gb=1.0, staging_gb=0.5, ssd_dir=out_dir)
+    eng = TierEngine(NS(tiers=tc, num_stages=4, model="glm53", run_dir=out_dir), rank, dev, zmq.Context())
+    m = StageModel(bench_config(CHUNK), rank, dev, num_blocks=1 + 4 * (N_KV + N_ST), max_model_len=P + A + B,
                    cuda_graphs=False, ipc_kv=True)
     mine = m.tier_ranges()
     slot_bytes, state_slots = eng.attach(mine)
     res = {"rank": rank, "slot_bytes": slot_bytes, "state_slots": state_slots,
            "register_s": eng.dram.register_s, "touch_s": eng.dram.touch_s}
     blocks = iter(range(1, m.num_blocks))
-    K0, S0, K1, S1, K2, S2 = ([next(blocks) for _ in range(k)] for k in (N_KV, N_ST) * 3)
+    K0, S0, K1, S1, K2, S2, K3, S3 = ([next(blocks) for _ in range(k)] for k in (N_KV, N_ST) * 4)
     g = torch.Generator().manual_seed(7)
     toks = torch.randint(1, 150_000, (P + A,), generator=g).tolist()
     sizes = [CHUNK] * (P // CHUNK) + [P % CHUNK]
@@ -112,18 +113,24 @@ def _worker(rank: int, port: int, out_dir: str):
         n0 = -(-P // B)
         slots, sslots = list(range(n0)), list(range(n0, n0 + state_slots))
 
-        def move(op_id, op, kv, st, b_lo):
-            mv = TierMove(op_id, op, "dram", None, b_lo, n0, 0, kv, st, slots, sslots, [], [])
+        def move(op_id, op, kv, st, b_lo, tier="dram", host=None):
+            if host is None:
+                mv = TierMove(op_id, op, tier, None, b_lo, n0, 0, kv, st, slots, sslots, [], [])
+            else:                           # SSD: file slots = the DRAM ones' ids; host side DRAM or staging
+                mv = TierMove(op_id, op, tier, host, b_lo, n0, 0, kv, st, slots, sslots, slots, sslots)
             eng.submit(mv)
+            if tier == "ssd":
+                eng._ssd_op(*eng.ssd_q[eng.direction(mv)].get())
             _, ev, _, nbytes = eng.q[eng.direction(mv)].get()
-            ev.synchronize()
+            if ev is not None:
+                ev.synchronize()
             torch.cuda.synchronize()
             dist.barrier()
             return nbytes
 
         res["write_bytes"] = move(0, "write", K0, S0, 0)
         want = [v.clone() for v in _views(mine, dev, K0[:n0], S0)]
-        for kv, st in ((K1, S1), (K2, S2)):
+        for kv, st in ((K1, S1), (K2, S2), (K3, S3)):
             for v in _views(mine, dev, kv[:n0], st):
                 v.random_(0, 256)
         torch.cuda.synchronize()
@@ -136,6 +143,10 @@ def _worker(rank: int, port: int, out_dir: str):
         want2 = _views(mine, dev, K0[:n0], S0, b_lo=2)
         res["partial_read_equal"] = all(torch.equal(a, b) for a, b in zip(want2, part))
         res["partial_left_garbage"] = not torch.equal(_views(mine, dev, K2[:1], S2)[0], want[0])
+        res["ssd_direct"] = eng.ssd.direct
+        res["demote_bytes"] = move(3, "demote", [], [], 0, "ssd", "dram")
+        res["ssd_read_bytes"] = move(4, "read", K3, S3, 0, "ssd", "staging")
+        res["ssd_read_equal"] = all(torch.equal(a, b) for a, b in zip(want, _views(mine, dev, K3[:n0], S3)))
         la = _run(m, pipe, rank, _plans("r1_hbm", toks, P, [A], K0, S0, 100))
         lb = _run(m, pipe, rank, _plans("r1_tier", toks, P, [A], K1, S1, 200))
     if rank == 3:
@@ -160,4 +171,5 @@ def test_tier_round_trip_is_bitwise(tmp_path):
     for r in res:
         assert r["full_read_equal"] and r["partial_read_equal"] and r["partial_left_garbage"], r
         assert r["write_bytes"] == r["read_bytes"] > r["partial_read_bytes"] > 0
+        assert r["ssd_read_equal"] and r["ssd_direct"] and r["demote_bytes"] == r["ssd_read_bytes"] > 0, r
     assert res[3]["round1_logits_equal"], res[3]

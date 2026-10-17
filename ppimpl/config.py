@@ -65,6 +65,8 @@ class TierConfig(msgspec.Struct, forbid_unknown_fields=True):
     slot_bytes: int | None = None
     state_slots: int = 3
     staging_gb: float = 8.0               # host slots for SSD reads/writes without DRAM (none of them is a hit)
+    ssd_dir: str | None = None            # the SSD files (one per GPU, deleted at stop); default $PPIMPL_SSD_DIR, else
+                                          # <run dir>/ssd
 
 
 class FakeConfig(msgspec.Struct, forbid_unknown_fields=True):
