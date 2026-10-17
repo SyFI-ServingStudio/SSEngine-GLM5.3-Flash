@@ -26,7 +26,8 @@
 # 34, P 512k A 1k, and all of session 35, P 512k A 8k; microbatch 0 is req-frontend's preflight). prefix_n<N>: the
 # 20-minute session run at N. M5 (6_scheduler.md, OUT=measured/runs_m5): sched_check_<step>, force_check_<step> and
 # sched_<step>_n<N> (step plain, srpt8k, budget, even or good; bench/run.py), then `python -m bench.sched summarize`;
-# one job per run, e.g. OUT=measured/runs_m5 BY_JOB=1 SAMPLE=1 sbatch -p priority -J ppimpl-m5 --dependency=singleton
+# one job per run (or several: m4.sbatch a b@queue_one runs them one after another; name@queue_one sets
+# RunConfig.dispatch and adds _queue_one to the run name), e.g. OUT=measured/runs_m5 BY_JOB=1 SAMPLE=1 sbatch -p priority -J ppimpl-m5 --dependency=singleton
 # --time=00:07:00 -o measured/runs_m5/slurm/%j_force_check_even.out bench/slurm/m4.sbatch force_check_even. BRINGUP_ARGS adds bench/run.py options to bringup, e.g. "--gap-s 17 --sessions 30,31
 # --run-name prefix_bringup_rest" (sessions 17 s apart: the cluster stops GPU jobs idle for 10 min). Then `python -m bench.prefix summarize measured/runs_m4 --out measured`.
 #SBATCH -J ppimpl
@@ -38,6 +39,11 @@ mkdir -p "$R/slurm"
 G=${CUDA_VISIBLE_DEVICES:-0,1,2,3}
 P=$((20000 + ${SLURM_JOB_ID:-0} % 120 * 100))
 WHAT=${1:?check, preflight, margin, resume_nsys, bringup, prefix_n<N>, sched_check_<step>, force_check_<step> or sched_<step>_n<N>}
+if (( $# > 1 )); then   # several runs in one GPU window, one after another, stopping at the first failure
+  rc=0; for w in "$@"; do bash "$0" "$w" || { rc=$?; break; }; done
+  echo "== all done $(date -Is) rc=$rc"; exit $rc
+fi
+DISPATCH=; [[ $WHAT == *@* ]] && { DISPATCH=${WHAT#*@}; WHAT=${WHAT%@*}; }   # run@queue_one: RunConfig.dispatch
 echo "== $(date -Is) gpus $G port $P: $WHAT"
 nvidia-smi --query-gpu=index,pci.bus_id,memory.used --format=csv,noheader
 if [ -n "${SAMPLE:-}" ]; then   # GPU clocks, power, temperature and throttle reasons every 200 ms, for the whole job
@@ -97,8 +103,9 @@ case $WHAT in
   bringup) $PY -m bench.run prefix_bringup --inline --nsys --nsys-mbs "${NSYS_MBS:-564:631}" --gpus "$G" --port "$P" \
              --out-root "$R" ${BRINGUP_ARGS:-}; rc=$? ;;
   prefix_n*|sched_check_*|force_check_*|sched_*_n*)   # BY_JOB=1: into <name>_<job>/ with the job's GPU samples
-    N=$WHAT; [ -n "${BY_JOB:-}" ] && N=${WHAT}_$JOB
-    $PY -m bench.run "$WHAT" --inline --gpus "$G" --port "$P" --out-root "$R" --run-name "$N"; rc=$?
+    N=$WHAT${DISPATCH:+_$DISPATCH}; [ -n "${BY_JOB:-}" ] && N=${N}_$JOB
+    $PY -m bench.run "$WHAT" --inline --gpus "$G" --port "$P" --out-root "$R" --run-name "$N" \
+      ${DISPATCH:+--dispatch "$DISPATCH"}; rc=$?
     [ -n "${SAMPLE:-}" ] && [ -d "$R/$N" ] && cp "$R/slurm/gpu_samples_$JOB.csv" "$R/$N/gpu_samples.csv" ;;
   *) echo "unknown: $WHAT"; exit 2 ;;
 esac

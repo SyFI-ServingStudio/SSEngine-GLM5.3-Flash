@@ -20,7 +20,13 @@ SIM = Path(os.environ.get("PPIMPL_SIM") or MAIN / "third_party" / "ServingStudio
 # The frozen handoff in use (read-only: data/ traces, targets and the microbatch fit): glm53_flash_pp4_b200_v2 at
 # ServingStudioSim 5153041a, linked at third_party/handoff (PPIMPL_HANDOFF overrides it).
 HANDOFF = Path(os.environ.get("PPIMPL_HANDOFF") or MAIN / "third_party" / "handoff")
-REQ_FRONTEND = SIM / "alignment" / "load_generator" / "req-frontend"
+# The client, req-frontend (request-factory), its own checkout at REQ_FRONTEND_COMMIT or later (env/make_env.sh): the
+# session slot is freed when a session's last round completes, as the sim's CapacityLimit::on_completion does
+# (REQ_FRONTEND_SLOT_RELEASE; before it the client slept the last round's tool wait holding the slot: N=400 offered
+# ~2.5% fewer rounds, 7733 / 7895).
+REQ_FRONTEND = Path(os.environ.get("PPIMPL_REQ_FRONTEND") or MAIN / "third_party" / "req-frontend")
+REQ_FRONTEND_COMMIT = "8723d90d4dcfcc526f49cce9fa7b50925f8635e0"
+REQ_FRONTEND_SLOT_RELEASE = "8723d90d4dcfcc526f49cce9fa7b50925f8635e0"
 # The prompt corpus (http://mattmahoney.net/dc/enwik9.zip, unzipped; env/make_env.sh fetches it).
 ENWIK9 = Path(os.environ.get("PPIMPL_ENWIK9") or MAIN / "third_party" / "enwik9")
 # The ServingStudioSim profiler package (`profiling`) at the handoff's frozen commit 7bb224a6 (env/make_env.sh).

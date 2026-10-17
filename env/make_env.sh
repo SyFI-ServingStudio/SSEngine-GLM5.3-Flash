@@ -71,6 +71,13 @@ if [ ! -d "$TP/sim_7bb224a6/profiling" ]; then
   git -C "$SIM" archive 7bb224a699b88535bd71c6ead6db72a6967290e3 profiling | tar -x -C "$TP/sim_7bb224a6"
 fi
 
+# 4b. The client: req-frontend (request-factory) at 8723d90d (bench.common REQ_FRONTEND_COMMIT: a session's slot is
+#     freed when its last round completes, as in the sim). That commit is on a local branch (preserialize-body) until it
+#     is pushed: REQ_FRONTEND_FROM names a checkout that has it (default: the GitHub repository).
+RF=$TP/req-frontend
+[ -d "$RF/.git" ] || git clone --no-checkout "${REQ_FRONTEND_FROM:-https://github.com/uw-syfi/request-factory.git}" "$RF"
+git -C "$RF" -c advice.detachedHead=false checkout 8723d90d4dcfcc526f49cce9fa7b50925f8635e0
+
 # 5. The prompt corpus: enwik9.
 if [ ! -f "$TP/enwik9" ]; then
   fetch http://mattmahoney.net/dc/enwik9.zip \

@@ -18,6 +18,7 @@ server logs (microbatches.jsonl, server_requests.jsonl, worker*.log), requests.j
 """
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -34,11 +35,11 @@ from pathlib import Path
 import msgspec
 import yaml
 
-from bench.common import ENWIK9, HANDOFF, REQ_FRONTEND, ROOT, free_port_block
+from bench.common import ENWIK9, HANDOFF, REQ_FRONTEND, REQ_FRONTEND_SLOT_RELEASE, ROOT, free_port_block
 from ppimpl.config import CHECKPOINT, SCHEDULER_STEPS
 from ppimpl.runtime.cpus import cpu_list
 
-CLIENT_BIN = Path(os.environ.get("PPIMPL_REQ_FRONTEND_BIN", ROOT / "build/req-frontend/release/session_runner"))
+CLIENT_BIN = ROOT / "build/req-frontend/release/session_runner"   # built from REQ_FRONTEND (ensure_client_bin)
 CHECKPOINT = Path(CHECKPOINT)
 PYTHON = sys.executable
 NSYS = shutil.which("nsys") or "/usr/local/cuda/bin/nsys"
@@ -88,6 +89,9 @@ def hold_for(trace: Path) -> int:
 # arrivals a minute (of ~1,450) one microbatch later; 10 ms: 0.02 / 0.03 s/min and 398 / 242. Recorded in each run's
 # server_config.yaml.
 REAL_FORM_LEAD_MS = 3.0
+# RunConfig.dispatch = "queue_one" (the rule before a8b80bc, for A/B): the queued plan forms this long before stage 0
+# frees (its value then: stage 0's host time from forming to its forward returning, p99 41.5 ms, smoke 7658).
+QUEUE_ONE_FORM_LEAD_MS = 45.0
 
 # One request of 64k or more is one microbatch, and its activations outgrow the contract's 13.6 GB reserve beside the
 # full KV pool (job 7117: one_64k needs ~37 GB, one_128k ran out of memory in warm-up). These runs need a few blocks of
@@ -143,12 +147,48 @@ def client_argv(client_yaml: Path) -> list[str]:
     return [str(CLIENT_BIN), *spec.arguments]
 
 
-def ensure_client_bin():
-    if CLIENT_BIN.exists():
-        return
-    target = CLIENT_BIN.parents[1]
-    subprocess.run(["cargo", "build", "--release", "--features", "runtime", "--bin", "session_runner"],
-                   cwd=REQ_FRONTEND, env={**os.environ, "CARGO_TARGET_DIR": str(target)}, check=True)
+def _git(path: Path, *args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", "-C", str(path), *args], capture_output=True, text=True)
+
+
+def client_source() -> dict:
+    """REQ_FRONTEND's commit; fails unless it holds the slot release (bench.common) and its tracked files are clean."""
+    commit = _git(REQ_FRONTEND, "rev-parse", "HEAD").stdout.strip()
+    if not commit:
+        raise RuntimeError(f"req-frontend: not a git checkout: {REQ_FRONTEND} (env/make_env.sh)")
+    if _git(REQ_FRONTEND, "merge-base", "--is-ancestor", REQ_FRONTEND_SLOT_RELEASE, "HEAD").returncode != 0:
+        raise RuntimeError(f"req-frontend {REQ_FRONTEND} at {commit[:10]} lacks the session slot release "
+                           f"{REQ_FRONTEND_SLOT_RELEASE[:10]}: sessions would hold their slot through the last tool wait")
+    if _git(REQ_FRONTEND, "status", "--porcelain", "--untracked-files=no").stdout.strip():
+        raise RuntimeError(f"req-frontend {REQ_FRONTEND}: tracked files modified; the binary would not match a commit")
+    return {"source": str(REQ_FRONTEND), "commit": commit}
+
+
+def _stamp_path() -> Path:
+    return CLIENT_BIN.with_name(CLIENT_BIN.name + ".source.json")
+
+
+def ensure_client_bin() -> dict:
+    """Build CLIENT_BIN from REQ_FRONTEND unless its stamp (the commit it was built from) is REQ_FRONTEND's commit;
+    returns the client's provenance (source, commit, binary, sha256) for run.json."""
+    src = client_source()
+    stamp = json.loads(_stamp_path().read_text()) if _stamp_path().exists() else {}
+    if not CLIENT_BIN.exists() or stamp.get("commit") != src["commit"]:
+        print(f"building req-frontend {src['commit'][:10]} (binary: {stamp.get('commit', 'unstamped')[:10]})", flush=True)
+        subprocess.run(["cargo", "build", "--release", "--features", "runtime", "--bin", "session_runner"],
+                       cwd=REQ_FRONTEND, env={**os.environ, "CARGO_TARGET_DIR": str(CLIENT_BIN.parents[1])}, check=True)
+        _stamp_path().write_text(json.dumps(src) + "\n")
+    return client_info()
+
+
+def client_info() -> dict:
+    """The client's provenance; fails if the binary is not stamped with REQ_FRONTEND's current commit."""
+    src = client_source()
+    stamp = json.loads(_stamp_path().read_text()) if _stamp_path().exists() else {}
+    if stamp.get("commit") != src["commit"]:
+        raise RuntimeError(f"{CLIENT_BIN} was built from {stamp.get('commit', 'an unknown commit')}, not "
+                           f"{src['commit']} (bench.run ensure_client_bin rebuilds it)")
+    return {**src, "binary": str(CLIENT_BIN), "sha256": hashlib.sha256(CLIENT_BIN.read_bytes()).hexdigest()}
 
 
 def git_rev(path: Path) -> str:
@@ -245,7 +285,8 @@ def execute(run_dir: Path, server_cfg: dict, client_cfg: dict, *, port: int, met
     meta = {**meta, "port": port, "job_id": os.environ.get("SLURM_JOB_ID"), "host": os.uname().nodename,
             "gpus": os.environ.get("CUDA_VISIBLE_DEVICES"),
             "run_cpus": cpu_list(os.sched_getaffinity(0)),
-            "ppimpl_commit": git_rev(ROOT), "req_frontend_commit": git_rev(REQ_FRONTEND)}
+            "ppimpl_commit": git_rev(ROOT), "req_frontend_commit": git_rev(REQ_FRONTEND),
+            "client": client_info()}   # fails before the server starts if the binary is not REQ_FRONTEND's build
     uptime = subprocess.run(["uptime"], capture_output=True, text=True).stdout.strip()
     (run_dir / "uptime.txt").write_text(uptime + "\n")
     meta["uptime"] = uptime
@@ -449,6 +490,10 @@ def run_named(name: str, fake: bool, port: int, out_root: Path, args) -> dict:
     if not fake:
         scfg["checkpoint"] = str(CHECKPOINT)
         scfg["form_lead_ms"] = REAL_FORM_LEAD_MS
+    if args.dispatch:
+        scfg["dispatch"] = args.dispatch
+        if args.dispatch == "queue_one" and not fake:
+            scfg["form_lead_ms"] = QUEUE_ONE_FORM_LEAD_MS
     limit = SESSION_CLIENT_LIMIT if kind == "sessions" else None
     return execute(run_dir, scfg, client_config(trace, port, run_dir, fmt=fmt, **ccfg,
                                                 token_pool_limit=args.token_pool_limit),
@@ -545,6 +590,8 @@ def main():
     ap.add_argument("--client-limit", help="prefix/session runs: `timeout` for the client (default 22m for prefix_n<N>)")
     ap.add_argument("--pool-tokens", type=int, help="prefix/session runs: cap the KV pool (harness checks)")
     ap.add_argument("--token-pool-limit", type=int, help="req-frontend corpus.token_pool_limit (harness checks)")
+    ap.add_argument("--dispatch", choices=["project", "queue_one"],
+                    help="RunConfig.dispatch (default project); queue_one forms QUEUE_ONE_FORM_LEAD_MS ahead")
     args = ap.parse_args()
     for n in args.names:
         parse_name(n)
