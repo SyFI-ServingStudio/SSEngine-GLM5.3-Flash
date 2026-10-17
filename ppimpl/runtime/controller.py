@@ -310,7 +310,8 @@ class Controller:
         info = {"keep_sessions": kv.keep_sessions, "num_blocks": kv.num_blocks,
                 "pool_tokens": kv.num_blocks * BLOCK_TOKENS, **kv.stats, "kept_sessions": len(kv.kept),
                 "kept_tokens": sum(k.tokens for k in kv.kept.values()), "used_tokens": kv.used_tokens,
-                "free_blocks": kv.pool.num_free, "time_ms": self._ms(time.time_ns()) if self.t0_ns else None}
+                "free_blocks": kv.pool.num_free, "time_ms": self._ms(time.time_ns()) if self.t0_ns else None,
+                "scheduler": dict(self.sched.stats)}    # busy_waits: rounds that waited for a tier write (TIERS.md §5)
         if self.sched.tiers is not None:
             info["tiers"] = self.sched.tiers.summary()
             info["tier_ops_in_flight"] = len(self.sched.tiers.in_flight)
