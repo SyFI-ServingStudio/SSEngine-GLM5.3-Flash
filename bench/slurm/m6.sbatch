@@ -6,6 +6,7 @@
 #     tier_bringup --dram-gb 48 --ssd-gb none --run-name tier_bringup_dram
 # SSD files (one per GPU, TierConfig.ssd_dir) go to PPIMPL_SSD_DIR, default <repo>/tmp/ssd_<job>; the directory is
 # deleted when the job ends, and df of the repo's file system is printed before and after.
+# HOP2=1 runs bench/tier_hop2.py (two-hop rates, GEMM and stage-edge interference) before the run.
 #SBATCH --gres=gpu:4
 set -uo pipefail
 source "${SLURM_SUBMIT_DIR:-$(dirname "$0")/../..}/bench/slurm/env.sh"
@@ -21,6 +22,9 @@ WHAT=${1:?run name (bench/run.py)}; shift
 echo "== $(date -Is) gpus $G port $P: $WHAT $* (ssd dir $PPIMPL_SSD_DIR)"
 echo "== df before: $(df -h "$ROOT" | tail -1)"
 nvidia-smi --query-gpu=index,pci.bus_id,memory.used --format=csv,noheader
+if [ -n "${HOP2:-}" ]; then                # HOP2=1: the two-hop probe (bench/tier_hop2.py) first; stop if it fails
+  $PY -m bench.tier_hop2 --out "$R/tier_hop2/$JOB" || { echo "== tier_hop2 failed"; exit 1; }
+fi
 $PY -m bench.run "$WHAT" --inline --gpus "$G" --port "$P" --out-root "$R" "$@"; rc=$?
 uptime
 echo "== done $(date -Is) rc=$rc"
