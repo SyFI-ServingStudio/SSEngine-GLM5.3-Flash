@@ -1,7 +1,6 @@
 """DRAM tier end to end on CPU (lanes/m6 TIERS.md §5-§6): `python -m ppimpl serve` with `keep_sessions` and `tiers`,
-FakeStageModel over gloo (its tier engines move no bytes and take the configured bandwidth's time). Every round's
-context is written to DRAM; a session evicted from HBM resumes from DRAM: a read, then only the new tokens are
-computed."""
+FakeStageModel over gloo (its tier engines move no bytes and take the configured bandwidth's time). DRAM is HBM's
+victim tier (kept contexts written back ahead of or at their eviction); a session evicted from HBM resumes from DRAM: a read, then only the new tokens are computed."""
 
 import json
 
@@ -49,19 +48,23 @@ def test_hbm_evicted_session_resumes_from_dram(server):
     assert "tier" not in sr["D_r1"]
     ops = [json.loads(x) for x in (srv.run_dir / "tier_ops.jsonl").read_text().splitlines()]
     kinds = [o["kind"] for o in ops]
-    assert kinds.count("write") == 9 and kinds.count("read") == 2   # every round's context; B and C read back
     reads = [o for o in ops if o["kind"] == "read"]
-    assert {o["req"] for o in reads} == {"B_r1", "C_r1"}
+    assert {o["req"] for o in reads} == {"B_r1", "C_r1"}                 # B and C read back
+    cache = json.loads((srv.run_dir / "cache.json").read_text())
+    # written back only near eviction (the LRU tail above 90% of the pool, or when evicting), not every round's
+    hb = cache["write_back"]["hbm"]
+    assert 0 < kinds.count("write") < 9 and hb["ahead_writes"] + hb["evict_writes"] == kinds.count("write")
+    for o in reads:          # each read entry was written before the read was sent
+        assert any(w["kind"] == "write" and w["entry"] == o["entry"] and w["landed_ms"] <= o["sent_ms"] for w in ops)
     assert all(o["slots"] == 1 + 3 and len(set(o["bytes"])) == 1 for o in reads)   # 1 block + 3 state slots
     tiers = json.loads((srv.run_dir / "tiers.json").read_text())
     assert tiers["state_slots"] == 3 and tiers["slots"]["dram"] == int(0.5e9 // tiers["slot_bytes"])
-    cache = json.loads((srv.run_dir / "cache.json").read_text())
     assert cache["tiers"][0]["reads"] == 2 and cache["tier_ops_in_flight"] == 0
 
 
 def test_dram_evictions_go_to_ssd_and_resume_from_there(tmp_path):
     """DRAM holds one context (4 slots of 7): each write demotes the previous one to SSD. B, evicted from HBM and
-    DRAM, resumes from SSD (copied up into DRAM)."""
+    DRAM, resumes from SSD, through the staging area (a victim DRAM takes no copy-up)."""
     port = free_port_block()
     cfg = {**CPU, "tiers": {"dram_gb": 0.1, "ssd_gb": 1.0, "dram_read_gb_s": 5.0, "ssd_read_gb_s": 2.0,
                             "staging_gb": 0.1}}
@@ -82,6 +85,6 @@ def test_dram_evictions_go_to_ssd_and_resume_from_there(tmp_path):
     assert chunks_of(srv.run_dir)["B_r1"] == [(n, 100)]
     ops = [json.loads(x) for x in (srv.run_dir / "tier_ops.jsonl").read_text().splitlines()]
     kinds = [o["kind"] for o in ops]
-    assert kinds.count("demote") >= 4 and kinds.count("read") == 1
+    assert kinds.count("demote") >= 1 and kinds.count("read") == 1
     rd = next(o for o in ops if o["kind"] == "read")
-    assert rd["tier"] == "ssd" and rd["host_tier"] == "dram"
+    assert rd["tier"] == "ssd" and rd["host_tier"] == "staging"

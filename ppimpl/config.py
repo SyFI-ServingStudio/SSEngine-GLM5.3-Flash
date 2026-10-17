@@ -57,7 +57,12 @@ class TierConfig(msgspec.Struct, forbid_unknown_fields=True):
     dram_read_gb_s: float = 50.0
     ssd_gb: float | None = 128.0          # None: no SSD tier. 128 GB per GPU (user, 2026-10-16); the handoff has 256
     ssd_read_gb_s: float = 10.0
-    ssd_writes: str = "dram-evictions"    # "dram-evictions": SSD is written only with what DRAM evicts; "every-context"
+    # Writes: the victim chain HBM -> DRAM -> SSD (user, 2026-10-17; TIERS.md §5): a tier takes only what the level
+    # above evicts. Each level writes its least recently used entries ahead of their eviction once its occupancy
+    # (HBM: running requests plus kept contexts not yet written; DRAM: entries not yet in SSD) passes its watermark
+    # (kvpool/writeback.py); None: write only when evicting.
+    hbm_write_ahead: float | None = 0.9
+    dram_write_ahead: float | None = 0.9
     bytes_per_token: int = 1635           # own stage (stage 0); balanced storage: 1,499
     state_bytes: int = 39_100_000         # one KDA state per context, own stage (stage 0); balanced: 36.9 MB
     max_read_wait_ms: float | None = 1000.0   # a read that would wait longer for its tier is passed over
@@ -65,7 +70,7 @@ class TierConfig(msgspec.Struct, forbid_unknown_fields=True):
     # one KV block on all stages (balanced: 8,576 x 1,499 B, 4 KiB-aligned); a context's state takes state_slots.
     slot_bytes: int | None = None
     state_slots: int = 3
-    staging_gb: float = 8.0               # host slots for SSD reads/writes without DRAM (none of them is a hit)
+    staging_gb: float = 8.0               # host slots for every SSD read, and SSD writes without DRAM (never a hit)
     hops: str = "two"                     # "two": host <-> own HBM ring <-> the stages over NVLink; "direct": host <->
                                           # the stages' KV (peer writes from host: 31.7 vs 47.6 GB/s, TIERS.md §2.3)
     ring_depth: int = 2                   # two hops: chunks per direction's device ring (2: double buffering)

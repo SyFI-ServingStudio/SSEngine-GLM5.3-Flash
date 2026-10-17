@@ -1,18 +1,21 @@
 """The KV pool: prefix KV and KDA states of n pipeline stages in DRAM and SSD behind HBM (lanes/m6 TIERS.md §13).
 
-`BalancedKVPool` is the leader's object (here the controller's, where the scheduler runs): the scheduler sees only
-`lookup` (a `Hit` with `wait_ns`), `load` -> `Handle` (with `eta_ns`), `store` -> `Handle`, and a handle's
-completion. Shares, slots, tiers' LRU and the ring stay inside. The controller posts every op to all n members
-(`ready_ops`, `member.tier_move`) and reports each one done when all n members did (`complete`). The read-wait bound
-is the scheduler's (from `Hit.wait_ns`), not the pool's.
+`BalancedKVPool` is the leader's object (here the controller's, where the scheduler runs). The scheduler sees only
+`lookup` (a `Hit` with `wait_ns`), `load` -> `Handle` (with `eta_ns`) and a load's completion. Writes are the victim
+chain HBM -> DRAM -> SSD (TIERS.md §5): the HBM KV manager reaches the pool through `hbm_level(kv)`, an `HbmLevel`
+it asks whether a kept context may be evicted and tells about kept, taken-over and evicted contexts; the same
+`writeback.WriteBack` policy writes HBM's LRU tail to the fastest tier and DRAM's to SSD. Shares, slots, tiers' LRU
+and the ring stay inside. The controller posts every op to all n members (`ready_ops`, which also writes ahead,
+`member.tier_move`) and reports each one done when all n members did (`complete`). The read-wait bound is the
+scheduler's (from `Hit.wait_ns`), not the pool's.
 
 Layers, each with its own file: 1 `layout` (which bytes a block or a state owns), 2 `placement` (GPU q's share of
 every range and where it sits in a host slot), 3 `backends` (host arena, SSD file), 4 `mover` (copy engines, two hops
 through the own-HBM ring), 5 `manager` (the leader's policy: LRU, slots, op order). `member.PoolMember` is each
 stage process's data plane over layers 1-4.
 
-Byte mode (`TierConfig.slot_bytes` None, replay): no members; a store is done at once and a load lands at its
-`eta_ns` on the caller's clock.
+Byte mode (`TierConfig.slot_bytes` None, replay): no members; a write is done at once (a level writes what it
+evicts at the eviction, as the simulator) and a load lands at its `eta_ns` on the caller's clock.
 """
 
 from __future__ import annotations
@@ -21,6 +24,7 @@ from dataclasses import dataclass, field
 
 from ppimpl.config import TierConfig
 from ppimpl.kvpool.manager import Hit, KVViews, TierManager, TierOp
+from ppimpl.kvpool.writeback import WriteBack
 
 __all__ = ["BalancedKVPool", "Handle", "Hit", "KVViews"]
 
@@ -49,6 +53,7 @@ class BalancedKVPool:
         self.cfg = cfg
         self.manager = TierManager(cfg, partial_hits)
         self._of: dict[int, Handle] = {}            # slot mode: op id -> the handle waiting for it
+        self.hbm: HbmLevel | None = None
 
     def lookup(self, key, prompt, now_ns: int = 0) -> Hit | None:
         """The fastest tier holding the longest context of `key` that `prompt` (a `scheduler.Request`) can resume
@@ -67,12 +72,18 @@ class BalancedKVPool:
         self._track(h, [o for o in ops if o.op == "read"])
         return h
 
-    def store(self, key, prompt, views: KVViews | list[KVViews] | None) -> Handle:
-        """Write the context of `prompt`'s round, held in `views`, under `key`. The caller keeps the views unchanged
-        until the handle is done (at once without a write from HBM, and in byte mode)."""
-        ops = self.manager.prepare_store(key, prompt, views)
-        h = Handle("store", key, prompt.num_tokens)
-        self._track(h, [o for o in ops if o.op == "write"])
+    def hbm_level(self, kv) -> "HbmLevel":
+        """The tiers as HBM's lower level, for the KV manager `kv` (`KvManager.lower`): HBM's kept contexts are written
+        here before HBM evicts them."""
+        self.hbm = HbmLevel(self, kv)
+        return self.hbm
+
+    def write_back(self, key, tokens: int, content, views: KVViews) -> Handle:
+        """Write HBM's kept context of `key` (`tokens` long, in `views`) to the fastest tier, what its entry lacks.
+        The caller keeps the views unchanged until the handle is done (at once if nothing moves, and in byte
+        mode)."""
+        h = Handle("store", key, tokens)
+        self._track(h, [o for o in self.manager.prepare_write_back(key, tokens, content, views) if o.op == "write"])
         if not h.ops:
             h.status = "done"
         return h
@@ -86,8 +97,15 @@ class BalancedKVPool:
     # --- the leader's executor (the controller) -----------------------------------------------------------------
 
     def ready_ops(self) -> list[TierOp]:
-        """Ops whose dependencies are done, to post to all n members now."""
-        return self.manager.ready_ops()
+        """Write ahead where a level is over its watermark (HBM -> DRAM, DRAM -> SSD), then the ops whose
+        dependencies are done, to post to all n members now."""
+        m = self.manager
+        if self.hbm is not None and self.hbm.wb is not None:
+            for key in m.take_gone():
+                self.hbm.lost(key)
+            self.hbm.wb.step()
+        m.step()
+        return m.ready_ops()
 
     def complete(self, op_id: int, now_ns: int) -> tuple[TierOp, Handle | None]:
         """Every member reported the op done: (the op, the handle that is done with it, if any)."""
@@ -99,7 +117,91 @@ class BalancedKVPool:
                 h = None
             else:
                 h.status, h.t_land = "done", now_ns
+                if h.kind == "store" and self.hbm is not None:
+                    self.hbm.landed(h)
         return o, h
 
     def summary(self) -> list[dict]:
         return self.manager.summary()
+
+    def write_back_stats(self) -> dict:
+        """Per level: writes ahead of need, writes at eviction, evictions that waited for a write (TIERS.md §5)."""
+        out = {} if self.hbm is None or self.hbm.wb is None else {"hbm": dict(self.hbm.wb.stats)}
+        return out | {self.manager.tiers[i].name: dict(wb.stats) for i, wb in self.manager.wb.items()}
+
+
+class HbmLevel:
+    """The tiers below HBM as the KV manager sees them (`KvManager.lower`), and HBM as the upper level of a
+    `WriteBack` to the fastest tier (slot mode; the same policy as DRAM -> SSD, `TierConfig.hbm_write_ahead`).
+
+    The KV manager calls `kept`, `unkept`, `evicted` and `admitted` as its kept contexts change, evicts only what
+    `evictable` allows, counts `held_back` as not evictable, and calls `make_room` when a request fits only by evicting
+    contexts not yet written. A kept context being written is pinned in the KV manager (its next round waits to take
+    it over, `KvManager.busy`). Byte mode (replay): writes take no time, so every kept context is evictable and is
+    written when evicted."""
+
+    def __init__(self, pool: BalancedKVPool, kv):
+        self.pool, self.kv = pool, kv
+        self.wb = WriteBack("hbm", self, pool.cfg.hbm_write_ahead) if pool.manager.slot_mode else None
+        self._writes: dict[Handle, object] = {}
+
+    # --- WriteBack's level --------------------------------------------------------------------------------------
+
+    @property
+    def capacity(self) -> float:
+        return self.kv.capacity
+
+    def fixed(self) -> float:
+        return self.kv.hard                     # running and held requests
+
+    def lru(self):
+        return iter(self.kv.kept)
+
+    def write(self, key, entry=None):
+        k = self.kv.kept[key]
+        h = self.pool.write_back(key, k.tokens, k.content, KVViews(k.alloc.kv_blocks, k.alloc.state_blocks, k.tokens))
+        if h.done():
+            return None
+        self._writes[h] = key
+        self.kv.pin(key)
+        return h
+
+    # --- the KV manager's calls ---------------------------------------------------------------------------------
+
+    def kept(self, key):
+        if self.wb is not None:
+            self.wb.add(key, self.kv.kept_cost(self.kv.kept[key].tokens))
+
+    def unkept(self, key):
+        if self.wb is not None:
+            self.wb.remove(key)
+
+    def evictable(self, key) -> bool:
+        return self.wb is None or self.wb.evictable(key)
+
+    def held_back(self) -> float:
+        return 0 if self.wb is None else self.wb.held_back()
+
+    def make_room(self, short: float):
+        if self.wb is not None:
+            self.wb.make_room(short)
+
+    def evicted(self, key, k):
+        self.unkept(key)
+        self.pool.manager.hbm_evicted(key, k.tokens, k.content)
+
+    def admitted(self, key, req):
+        self.pool.manager.drop_stale(key, req)
+
+    # --- the pool's -----------------------------------------------------------------------------------------------
+
+    def landed(self, h: Handle):
+        key = self._writes.pop(h)
+        self.kv.unpin(key)
+        self.wb.done(key, h)
+
+    def lost(self, key):
+        """The fastest tier no longer holds `key`: HBM's kept copy, if any, is dirty again."""
+        k = self.kv.kept.get(key)
+        if k is not None:
+            self.wb.lost(key, self.kv.kept_cost(k.tokens))

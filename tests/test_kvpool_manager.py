@@ -16,8 +16,8 @@ MB = 1_000_000          # 1 MB per token below: 1 GB holds 1,000 tokens
 MS = 1_000_000
 
 
-def cfg(dram_gb=1.0, ssd_gb=10.0, ssd_writes="dram-evictions", state_bytes=0, wait_ms=1000.0):
-    return TierConfig(dram_gb=dram_gb, dram_read_gb_s=10.0, ssd_gb=ssd_gb, ssd_read_gb_s=1.0, ssd_writes=ssd_writes,
+def cfg(dram_gb=1.0, ssd_gb=10.0, state_bytes=0, wait_ms=1000.0):
+    return TierConfig(dram_gb=dram_gb, dram_read_gb_s=10.0, ssd_gb=ssd_gb, ssd_read_gb_s=1.0,
                       bytes_per_token=MB, state_bytes=state_bytes, max_read_wait_ms=wait_ms)
 
 
@@ -31,8 +31,11 @@ def rnd(session, prefix, new):
     return Request(f"r{_n}", prefix + new, session=session, prefix_tokens=prefix)
 
 
-def store(t, session, tokens):
-    return t.prepare_store(session, rnd(session, 0, tokens))
+def store(t, session, tokens, prefix=0):
+    """A round of `session` (sharing `prefix` tokens with its previous context) admitted, then its `tokens`-token
+    context written back from HBM (byte mode: when HBM evicts it)."""
+    t.drop_stale(session, rnd(session, prefix, tokens - prefix))
+    return t.prepare_write_back(session, tokens, None)
 
 
 def read(t, r, tier, tokens, hbm=0, now=0):
@@ -55,10 +58,7 @@ def test_placement_dram_first_ssd_only_from_dram_evictions():
     store(t, 1, 400)
     assert entries(t, 0) == {1: 400} and entries(t, 1) == {}
     assert hit(t, rnd(1, 401, 10)) == (0, 400)
-    w = TierManager(cfg(ssd_writes="every-context"))
-    store(w, 1, 400)
-    assert entries(w, 0) == {1: 400} and entries(w, 1) == {1: 400}
-    assert hit(w, rnd(1, 401, 10)) == (0, 400)            # the fastest tier with the longest hit
+    assert t.prepare_write_back(1, 400, None) == [] and t.hbm_evicted(1, 400, None) == []   # held: refreshed only
 
 
 def test_lru_eviction_order_whole_sessions_and_read_refreshes():
@@ -149,7 +149,8 @@ def test_scheduler_reads_passes_over_and_admits_landed_first():
 def test_ssd_written_only_with_dram_evictions_and_only_what_it_lacks():
     t = TierManager(cfg())
     store(t, 1, 400)
-    t.prepare_store(1, rnd(1, 401, 49))                     # session 1 grows to 450 in DRAM
+    store(t, 1, 450, prefix=401)                            # session 1 grows to 450 in DRAM: only the new tokens
+    assert t.tiers[0].stats["written_bytes"] == 450 * MB
     store(t, 2, 400)
     assert t.tiers[1].stats["stored"] == 0
     ops = store(t, 3, 400)                                  # evicts 1 from DRAM: SSD takes its latest context
@@ -158,10 +159,10 @@ def test_ssd_written_only_with_dram_evictions_and_only_what_it_lacks():
     demote = [o for o in ops if o.op == "demote"]
     assert [(o.tier, o.token_start, o.token_end) for o in demote] == [("ssd", 0, 450)]
     assert ops.index(demote[0]) < next(i for i, o in enumerate(ops) if o.op == "drop" and o.tier == "dram")
-    # read 1 back (copy-up into DRAM), grow it, evict it again: SSD writes only the new 100 tokens
+    # read 1 back from SSD (no copy-up into DRAM), grow it, evict it from DRAM again: SSD writes only the new 100
     read(t, rnd(1, 451, 1), 1, 450)
-    assert entries(t, 0)[1] == 450
-    t.prepare_store(1, rnd(1, 451, 99))
+    assert 1 not in entries(t, 0)
+    store(t, 1, 550, prefix=451)
     ops = store(t, 4, 900)                                  # evicts everything else from DRAM
     assert entries(t, 1)[1] == 550
     assert any(o.op == "demote" and (o.token_start, o.token_end) == (450, 550) for o in ops)
@@ -172,21 +173,21 @@ def test_unchanged_copy_is_not_written_back():
     store(t, 1, 400)
     store(t, 2, 400)
     store(t, 3, 400)                                        # 1 -> SSD
-    read(t, rnd(1, 401, 1), 1, 400)                         # copy-up, evicts 2 -> SSD
-    stored = t.tiers[1].stats["stored"]
+    t.prepare_write_back(1, 400, None)                      # read back, evicted from HBM again: DRAM rewrites it
+    stored = t.tiers[1].stats["stored"]                     # (2 -> SSD)
     store(t, 4, 400)                                        # evicts 3 -> SSD
     store(t, 5, 400)                                        # evicts 1, which SSD holds whole: not rewritten
     assert t.tiers[1].stats["stored"] == stored + 1
     assert hit(t, rnd(1, 401, 1)) == (1, 400)
 
 
-def test_shrinking_context_drops_the_victim_tiers_older_entry():
+def test_shrinking_context_drops_the_older_entries():
     t = TierManager(cfg())
     store(t, 1, 600)
     store(t, 2, 600)                                        # 1 -> SSD at 600
     assert entries(t, 1) == {1: 600}
     # session 1's next round keeps only its first 300 tokens: SSD's 600-token context has no state at 300
-    t.prepare_store(1, rnd(1, 300, 150))
+    store(t, 1, 450, prefix=300)
     assert 1 not in entries(t, 1) and t.tiers[1].stats["dropped"] == 1
     assert hit(t, rnd(1, 451, 1)) == (0, 450)
     store(t, 3, 900)                                        # evicts 1 (450) -> SSD, written whole

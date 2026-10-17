@@ -3,6 +3,7 @@ v2-realistic targets, with what the read moved and when.
 
     python -m bench.tiers measured/runs_m6/tier_bringup_dram [--target dram] [--reference RUN_DIR]
     python -m bench.tiers RUN_DIR --setting full_dram --n 400     # a session run (step 1b / 2b)
+    python -m bench.tiers RUN_DIR --setting tiers --n 400         # a victim-chain setting (VICTIM_SETTINGS)
 
 Per session (bench/prefix.py `bringup`: client TTFT, server TTFT, cached tokens, per-stage compute) plus, from
 server_requests.jsonl, the tier, tokens read and the read window (read start -> all four TierDone), and from
@@ -13,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 
 import numpy as np
@@ -22,6 +24,32 @@ from bench.prefix import bringup, server_rows
 from bench.report import read_jsonl
 
 VARIANTS = ("hbm_hit", "hbm", "dram", "ssd", "dram_unbal", "ssd_unbal")
+
+# Victim-chain settings (HBM -> DRAM -> SSD, TIERS.md §5): name -> (sim run, HBM GB, `--pool-tokens`, DRAM GB per
+# GPU); SSD 128 GB per GPU. Targets: the simulator's rows of these runs (PPIMPL_VICTIM_TARGETS overrides the path).
+VICTIM_SETTINGS = {"full": ("full_d50", 100.18, None, 50.0),
+                   "tiers": ("h20_d20", 20.0, 12_220_800, 20.0),
+                   "ssd_heavy": ("h12p5_d12p5", 12.5, 7_632_640, 12.5)}
+VICTIM_TARGETS = Path(os.environ.get("PPIMPL_VICTIM_TARGETS") or "/raid/kanzhu/ServingStudio/wt-pp-dram-victim/logs/"
+                      "20261017_5_victim_tier_sizes/rows.jsonl")
+
+
+def victim_target(setting: str, n: int, rows: Path = VICTIM_TARGETS) -> dict | None:
+    """The simulator's row of a victim setting at N = `n`, in data/session_targets.json's keys. prefix_read_share:
+    the hit tokens' tiers (HBM / DRAM / SSD) of minutes 10-20 (the row's 2-minute windows 5-9, weighted by rounds);
+    the rows carry no stage busy."""
+    run = VICTIM_SETTINGS[setting][0]
+    for line in rows.read_text().splitlines():
+        r = json.loads(line)
+        if r["run"].rstrip("/").split("/")[-2:] == [run, f"c{n}"]:
+            w = np.array(r["win_rounds"][5:10], float)
+            split = (np.array(r["win_tok_split"][5:10]) * w[:, None]).sum(0) / w.sum()
+            return {"setting": setting, "max_sessions": n, "rounds_per_s": r["rounds_per_s"],
+                    "new_tokens_per_s": r["new_tokens_per_s"], "prefix_hit_share": r["prefix_hit_share"],
+                    "ttft_s": r["ttft"], "rounds_ttft_over_60s": r["rounds_ttft_over_60s"],
+                    "prefix_read_share": dict(zip(("hbm", "dram", "ssd"), map(float, split[:3]))),
+                    "traffic": r["traffic"], "source": f"{rows}:{r['run']}"}
+    return None
 
 
 def targets(variant: str) -> dict[int, tuple[float, float]]:
@@ -98,8 +126,9 @@ def session_vs_target(run_dir: Path, setting: str, n: int) -> dict:
     from bench.prefix import client_rows, sessions, shift_ms
 
     s = sessions(run_dir)
-    tgt = {(t["setting"], t["max_sessions"]): t for t in json.loads((HANDOFF / "data/session_targets.json")
-                                                                   .read_text())}.get((setting, n))
+    tgt = victim_target(setting, n) if setting in VICTIM_SETTINGS else \
+        {(t["setting"], t["max_sessions"]): t for t in json.loads((HANDOFF / "data/session_targets.json")
+                                                                  .read_text())}.get((setting, n))
     lo = shift_ms(run_dir, client_rows(run_dir)) + 600e3
     got = {"hbm": 0, "dram": 0, "ssd": 0}
     for r in server_rows(run_dir).values():
@@ -126,7 +155,7 @@ def session_vs_target(run_dir: Path, setting: str, n: int) -> dict:
     return {"run": run_dir.name, "reads": read_stats, "trace": trace_summary(run_dir), "setting": setting, "n": n, "metrics": s["metrics"], "stage_busy": s["stage_busy"],
             "server_ttft_s": s["server_ttft_s"], "hit_share_by_tier": share, "target_hit_share_by_tier": want,
             "scheduler": cache.get("scheduler"), "blocked_by_write": cache.get("blocked_by_write"),
-            "tiers": cache.get("tiers"), "target": tgt, "rounds_failed": s["rounds_failed"],
+            "write_back": cache.get("write_back"), "tiers": cache.get("tiers"), "target": tgt, "rounds_failed": s["rounds_failed"],
             "in_run_jit": s["in_run_jit"]}
 
 
@@ -151,6 +180,8 @@ def print_session(x: dict):
         print(f"  {k} trace ({t['ops']} ops x GPUs), p50 / mean: " + ", ".join(
             f"{f} {v['p50']} / {v['mean']}" for f, v in t.items() if f != "ops"))
     print(f"  scheduler {x['scheduler']}, blocked_by_write {x['blocked_by_write']}, failed {x['rounds_failed']}")
+    for lvl, w in (x.get("write_back") or {}).items():
+        print(f"  {lvl} write-back: " + ", ".join(f"{k} {v}" for k, v in w.items()))
 
 
 def trace_parts(op: dict) -> dict:
@@ -204,7 +235,8 @@ def main():
     ap.add_argument("run_dir", type=Path)
     ap.add_argument("--target", choices=VARIANTS)
     ap.add_argument("--reference", type=Path, help="a run whose round-1 tokens to compare (same prompts)")
-    ap.add_argument("--setting", help="a session run: its data/session_targets.json setting (e.g. full_dram)")
+    ap.add_argument("--setting", help="a session run: its data/session_targets.json setting (e.g. full_dram) or a "
+                    f"victim setting ({', '.join(VICTIM_SETTINGS)})")
     ap.add_argument("--n", type=int, help="with --setting: max sessions")
     a = ap.parse_args()
     if a.setting:

@@ -73,7 +73,7 @@ def test_write_evict_read_back_is_byte_equal_and_growth_moves_only_new_blocks(ri
     r0 = Request("s_r0", tokens, session="s", token_ids=None)
     a0 = KVViews([3, 7, 1], [2, 4, 6, 8, 9, 10], tokens)
     want = block_bytes(views, ranges, a0.kv_blocks, a0.state_blocks)
-    h = pool.store("s", r0, a0)
+    h = pool.write_back("s", tokens, None, a0)                    # HBM lets it go: DRAM is its victim tier
     ops = pool.ready_ops()
     assert [o.op for o in ops] == ["write"] and h.ops == {ops[0].op_id}
     moved = run(mems, ops)
@@ -94,7 +94,7 @@ def test_write_evict_read_back_is_byte_equal_and_growth_moves_only_new_blocks(ri
     assert block_bytes(views, ranges, a1.kv_blocks[:3], a1.state_blocks) == want
     # round 1 ends at 3 B + 10: blocks 0, 1 kept in DRAM, blocks 2, 3 and the state written
     r1.num_tokens = 3 * B + 10
-    pool.store("s", r1, KVViews(a1.kv_blocks, a1.state_blocks, r1.num_tokens))
+    pool.write_back("s", r1.num_tokens, None, KVViews(a1.kv_blocks, a1.state_blocks, r1.num_tokens))
     (w,) = pool.ready_ops()
     assert w.block_start == 2 and tier_move(w).b_lo == 2 and tier_move(w).b_hi == 4
     moved = run(mems, [w])
@@ -124,34 +124,35 @@ def drive(pool, mems):
 
 
 @pytest.mark.parametrize("ring", [dict(), dict(ring_depth=2, ring_chunk_slots=1)], ids=["default", "chunk1"])
-def test_ssd_demote_copy_up_and_staging_are_byte_equal(tmp_path, ring):
-    """DRAM holds one 2-block context: Y's write demotes X to SSD (DRAM slots -> file); X's read copies it up
-    through new DRAM slots (demoting Y) into other HBM blocks; Y then reads from SSD. SSD only: writes and reads
-    through the staging arena. Every context byte-equal; the files are deleted at close."""
+def test_ssd_demote_and_staging_are_byte_equal(tmp_path, ring):
+    """DRAM holds one 2-block context: Y's write-back demotes X to SSD (DRAM slots -> file, io_uring); X's read comes
+    back through the staging arena into other HBM blocks, Y's from DRAM. SSD only: writes and reads through the
+    staging arena. Every context byte-equal; the files are deleted at close."""
     T = 2 * B - 5
     X, Y = KVViews([1, 2], [3, 4, 5, 6, 7, 8], T), KVViews([9, 10], [0, 9, 10, 11, 1, 2], T)
     for dram in (None, "one"):
         d = tmp_path / str(dram)
         ss = BalancedPlacement(stages()[1], 4, 0).state_slots
-        views, ranges, mems, tc = members(None if dram is None else 2 + ss, 60, 30, d, **ring)   # DRAM: one context
+        views, ranges, mems, tc = members(None if dram is None else 2 + ss, 60, 30, d, dram_write_ahead=None,
+                                          **ring)   # DRAM: one context, demoted when evicted
         pool = BalancedKVPool(tc)
         want = {}
         for name, a in (("x", X), ("y", Y)):
             want[name] = block_bytes(views, ranges, a.kv_blocks, a.state_blocks)
-            pool.store(name, Request(f"{name}0", T, session=name), a)
+            pool.write_back(name, T, None, a)
             kinds = [o.op for o in drive(pool, mems)]
             assert kinds == (["write"] if dram is None or name == "x" else ["demote", "write"]), kinds
         scramble(views)
         for name, a in (("x", KVViews([5, 6], [0, 1, 2, 3, 4, 5], T)), ("y", KVViews([7, 8], [6, 7, 8, 9, 10, 11], T))):
             r = Request(f"{name}1", T + 9, session=name, prefix_tokens=T)
             hit = pool.lookup(name, r)
-            assert (hit.tier, hit.tokens) == ("ssd", T)
+            assert (hit.tier, hit.tokens) == ("ssd" if dram is None or name == "x" else "dram", T)
             h = pool.load(name, hit, a, 0)
             mine = set(h.ops)
             ops = drive(pool, mems)
             (rd,) = [o for o in ops if o.op_id in mine]
-            assert h.done() and rd.host_tier == ("staging" if dram is None else "dram")
-            assert [o.op for o in ops] == (["read"] if dram is None or name == "y" else ["demote", "read"])
+            assert h.done() and rd.host_tier == ("staging" if hit.tier == "ssd" else None)
+            assert [o.op for o in ops] == ["read"]
             assert block_bytes(views, ranges, a.kv_blocks, a.state_blocks) == want[name]
         paths = [e.ssd.path for e in mems]
         for e in mems:

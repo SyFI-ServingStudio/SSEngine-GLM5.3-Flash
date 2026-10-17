@@ -229,7 +229,8 @@ class Controller:
         pool = BalancedKVPool(tc)
         m = pool.manager
         info = {"slot_bytes": tc.slot_bytes, "state_slots": tc.state_slots,
-                "slots": {x.name: x.num_slots for x in m.tiers}, "staging_slots": m.staging.num_slots}
+                "slots": {x.name: x.num_slots for x in m.tiers}, "staging_slots": m.staging.num_slots,
+                "write_ahead": {"hbm": tc.hbm_write_ahead, "dram": tc.dram_write_ahead}}
         (self.run_dir / "tiers.json").write_text(json.dumps(info) + "\n")
         print("tiers: " + json.dumps(info), flush=True)
         return pool
@@ -313,6 +314,7 @@ class Controller:
         if self.sched.pool is not None:
             m = self.sched.pool.manager
             info["tiers"] = m.summary()
+            info["write_back"] = self.sched.pool.write_back_stats()   # per level: ahead / at eviction / waits (§5)
             info["tier_ops_in_flight"] = len(m.in_flight)
             info["tier_ops_waiting"] = len(m.waiting)
         tmp = self.run_dir / "cache.json.tmp"

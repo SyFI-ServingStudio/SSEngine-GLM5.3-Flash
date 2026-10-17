@@ -8,9 +8,9 @@ its `mover.Mover` (read streams host -> HBM, write streams HBM -> host), and a d
 `TierDone` when the copies completed. No wait on the compute stream: a write's blocks are final and pinned until it
 is done, a read's blocks are held by a request that computes only after all n `TierDone`s.
 
-SSD ops run on two threads (reads; writes and demotes), one op at a time each, their file I/O on `SsdTier`'s pool,
-into and out of host slots: DRAM's (a demote; an SSD read's copy-up) or a staging arena's (SSD without DRAM, or a
-context larger than DRAM). An SSD read lands slot by slot and each KV block's H2D is enqueued as soon as its slot is
+SSD ops run on two threads (reads; writes and demotes), one op at a time each, their file I/O on `SsdTier`'s io_uring,
+into and out of host slots: DRAM's (a demote) or a staging arena's (every SSD read; a write-back to SSD without
+DRAM, or of a context larger than DRAM). An SSD read lands slot by slot and each KV block's H2D is enqueued as soon as its slot is
 in, the state after its slots: read time ~ SSD time + one block. The file is deleted when the member stops.
 
 The fake model has no KV: its member moves nothing and reports each op after the time the configured bandwidth

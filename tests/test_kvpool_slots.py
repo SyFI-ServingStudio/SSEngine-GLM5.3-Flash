@@ -16,9 +16,9 @@ from ppimpl.kvpool.manager import TierManager
 SLOT = 1_000_000          # 1 MB slots: dram_gb=0.01 is 10 slots
 
 
-def cfg(dram=0.010, ssd=0.020, state_slots=1, staging=0.010, writes="dram-evictions"):
+def cfg(dram=0.010, ssd=0.020, state_slots=1, staging=0.010, **kw):
     return TierConfig(dram_gb=dram, ssd_gb=ssd, slot_bytes=SLOT, state_slots=state_slots, staging_gb=staging,
-                      ssd_writes=writes, dram_read_gb_s=10.0, ssd_read_gb_s=1.0)
+                      dram_read_gb_s=10.0, ssd_read_gb_s=1.0, **kw)
 
 
 _n = 0
@@ -31,7 +31,10 @@ def rnd(session, prefix, new):
 
 
 def store(t, session, tokens, prefix=0):
-    return t.prepare_store(session, rnd(session, prefix, tokens - prefix), KVViews([], []))
+    """A round of `session` (sharing `prefix` tokens with its previous context) admitted, then its context written
+    back from HBM."""
+    t.drop_stale(session, rnd(session, prefix, tokens - prefix))
+    return t.prepare_write_back(session, tokens, None, KVViews([], []))
 
 
 def read(t, r, tier, tokens, views=None):
@@ -112,18 +115,17 @@ def test_small_ssd_evicts_lru_and_reuses_slots():
     slots_ok(t)
 
 
-def test_ssd_read_copies_up_through_new_dram_slots_in_one_op():
+def test_ssd_read_goes_through_staging_and_dram_keeps_no_copy():
     t = TierManager(cfg(dram=0.003, ssd=0.020))
     store(t, 1, 2 * B)
-    store(t, 2, 2 * B)                                        # 1 -> SSD
+    ops = store(t, 2, 2 * B)                                  # 1 -> SSD
+    assert [o.op for o in ops] == ["demote", "drop", "write"]
     drain(t)
     r = rnd(1, 2 * B + 1, 10)
     assert hit(t, r) == ("ssd", 2 * B)
     op, ops = read(t, r, "ssd", 2 * B, KVViews([7, 8, 9], [1, 2, 3, 4, 5, 6], 2 * B))
-    e = t.tiers[0].entries[1]
-    assert op.tier == "ssd" and op.host_tier == "dram" and op.host_slots == e.slots and op.host_state == e.state
-    demote = next(o for o in ops if o.op == "demote")         # 2 left DRAM for the copy-up
-    assert op.deps == [demote.op_id]
+    assert op.tier == "ssd" and op.host_tier == "staging" and [o.op for o in ops] == ["read"]
+    assert set(t.tiers[0].entries) == {2}                     # the victim DRAM takes no copy-up
     assert t.read_ns(1, 2 * B) == round(3 * SLOT / 1e9 * 1e9)  # whole context: 2 blocks + state at 1 GB/s
     slots_ok(t)
 
@@ -140,18 +142,22 @@ def test_ssd_only_writes_and_reads_through_staging():
     assert op.host_slots == [3, 0] and op.deps == [w.op_id]   # the ring wraps onto the write's staging slot
 
 
-def test_kept_context_pinned_until_its_write_is_done():
-    kv = KvManager(20, keep_sessions=True)
-    pool = BalancedKVPool(cfg(dram=1.0))
-    s = Scheduler(kv, SchedulerConfig(mb_tokens=8192), pool, dispatch_ahead=0)
-    a = rnd(1, 0, 100)
-    s.add(a, 0)
-    s.next_microbatch(0)
+def finish(s, r, now=0):
+    s.add(r, now)
+    assert s.next_microbatch(now) is not None
     s.stage_done(0, 3)
     s.stage_done(3, 3)
-    s.finish(a)
+    s.finish(r)
+
+
+def test_kept_context_pinned_until_its_write_is_done():
+    """A kept context being written back is pinned: not evicted, and its next round waits to take it over."""
+    kv = KvManager(20, keep_sessions=True)
+    pool = BalancedKVPool(cfg(dram=1.0, hbm_write_ahead=0.1))   # 7 of 20 blocks > 10%: written ahead at once
+    s = Scheduler(kv, SchedulerConfig(mb_tokens=8192), pool, dispatch_ahead=0)
+    finish(s, rnd(1, 0, 100))
     (w,) = pool.ready_ops()
-    assert kv.pinned[1] == 1
+    assert w.op == "write" and kv.pinned[1] == 1
     big = Request("big", 14 * B)                              # needs every block: session 1 is pinned, it waits
     assert not kv.fits(big)
     nxt = rnd(1, 101, 50)                                     # session 1's next round may not take over yet
@@ -226,8 +232,10 @@ class Bytes:
 @pytest.mark.parametrize("seed", range(6))
 @pytest.mark.parametrize("dram", [0.012, None])
 def test_random_sessions_every_read_sees_its_context(seed, dram):
+    """HBM writes contexts back (what the entry lacks), each round's admission drops what it does not resume from,
+    DRAM demotes ahead above its watermark and at eviction."""
     rng = random.Random(seed)
-    t = TierManager(cfg(dram=dram, ssd=0.020, state_slots=2, staging=0.012))
+    t = TierManager(cfg(dram=dram, ssd=0.020, state_slots=2, staging=0.012, dram_write_ahead=0.7))
     mem, keys, ctx = Bytes(), {}, {}
     pending = []
     for step in range(300):
@@ -244,7 +252,10 @@ def test_random_sessions_every_read_sees_its_context(seed, dram):
             if tokens > 4 * B:
                 tokens = rng.randrange(1, 2 * B)
                 grow = False
-            t.prepare_store(s, rnd(s, old + 1 if grow else 0, tokens - (old if grow else 0)), KVViews([], []))
+            r = rnd(s, old + 1 if grow else 0, tokens - (old if grow else 0))
+            t.drop_stale(s, r)
+            t.prepare_write_back(s, tokens, None, KVViews([], []))
+            t.step()
             ctx[s] = tokens
         keys.update({v: k for k, v in t._entry_ids.items()})
         pending += t.ready_ops()
@@ -263,3 +274,93 @@ def test_random_sessions_every_read_sees_its_context(seed, dram):
     assert mem.count["read"] > 20 and mem.count["write"] > 50
     assert dram is None or mem.count["demote"] > 20
     assert t.tiers[-1].stats["evicted"] > 5                   # the SSD evicts (small SSD)
+    if dram:
+        assert t.wb[0].stats["ahead_writes"] > 5
+
+
+# --- the victim chain's write-back ---------------------------------------------------------------------------------
+
+def test_dram_takes_only_write_backs_and_only_what_it_lacks():
+    t = TierManager(cfg(dram=1.0, ssd=None))
+    (w,) = t.prepare_write_back(1, 2 * B, None, KVViews([], []))
+    assert w.op == "write" and w.tier == "dram" and len(w.slots) == 2
+    assert t.prepare_write_back(1, 2 * B, None, KVViews([], [])) == []     # held whole: only refreshed
+    t.drop_stale(1, rnd(1, 2 * B + 1, 50))                            # the next round extends it: kept
+    (w2,) = t.prepare_write_back(1, 3 * B, None, KVViews([], []))
+    assert w2.block_start == 2 and len(w2.slots) == 1                   # only the new block and the state
+    t.drop_stale(1, rnd(1, 0, 4 * B))                                  # a round that does not resume it: dropped
+    assert 1 not in t.tiers[0].entries and t.take_gone() == [1]
+
+
+def test_dram_demotes_ahead_and_its_eviction_then_moves_nothing():
+    t = TierManager(cfg(dram=0.009, ssd=0.020, dram_write_ahead=0.5))   # 9 slots: three 2-block contexts
+    for k in (1, 2):
+        t.prepare_write_back(k, 2 * B, None, KVViews([], []))
+    drain(t)
+    t.step()                            # 6 of 9 dirty > 4.5: the LRU entry (1) goes to SSD, stays in DRAM
+    (d,) = t.ready_ops()
+    assert d.op == "demote" and 1 in t.tiers[1].entries and 1 in t.tiers[0].entries
+    assert not t.wb[0].evictable(1)                         # being written
+    t.complete(d.op_id, 0)
+    assert t.wb[0].evictable(1) and not t.wb[0].evictable(2)
+    assert t.wb[0].stats == dict(ahead_writes=1, evict_writes=0, evict_waits=0)
+    t.prepare_write_back(3, 2 * B, None, KVViews([], []))
+    ops = t.prepare_write_back(4, 2 * B, None, KVViews([], []))      # evicts 1: SSD holds it already
+    assert [o.op for o in ops] == ["drop", "write"] and t.wb[0].stats["evict_waits"] == 0
+    ops = t.prepare_write_back(5, 2 * B, None, KVViews([], []))      # evicts 2, not written: demote, then the write
+    assert [o.op for o in ops if o.moves_bytes] == ["demote", "write"]
+    assert t.wb[0].stats == dict(ahead_writes=1, evict_writes=1, evict_waits=1)
+
+
+def test_ssd_loss_makes_the_dram_entry_dirty_again():
+    t = TierManager(cfg(dram=1.0, ssd=0.003, dram_write_ahead=0.0))      # SSD: one 2-block context
+    t.prepare_write_back(1, 2 * B, None, KVViews([], []))
+    drain(t)
+    t.step()                                                          # 1 -> SSD ahead
+    drain(t)
+    assert t.wb[0].evictable(1)
+    t.prepare_write_back(2, 2 * B, None, KVViews([], []))
+    drain(t)
+    t.step()                                                          # 2 -> SSD evicts 1 there
+    assert 1 not in t.tiers[1].entries and not t.wb[0].evictable(1)
+
+
+def test_scheduler_writes_back_ahead_and_evicts_only_written_contexts():
+    """HBM of 20 blocks; sessions of 1 KV + 6 state blocks. Above 70% the LRU tail is written ahead (the same
+    `WriteBack` as DRAM's); a request that needs the room of a context not yet written starts its write and waits."""
+    kv = KvManager(21, keep_sessions=True)
+    pool = BalancedKVPool(cfg(dram=1.0, ssd=None, hbm_write_ahead=0.7))
+    s = Scheduler(kv, SchedulerConfig(mb_tokens=8192), pool, dispatch_ahead=0)
+    hbm = pool.hbm.wb
+    finish(s, rnd(1, 0, 100))
+    assert pool.ready_ops() == [] and hbm.dirty_charge == 7             # 7 of 21: nothing written
+    finish(s, rnd(2, 0, 100))
+    finish(s, rnd(3, 0, 100))                                           # 21 of 21 > 14.7: write 1 ahead
+    (w,) = pool.ready_ops()
+    assert hbm.stats["ahead_writes"] == 1 and kv.pinned[1] == 1 and not hbm.evictable(1)
+    s.op_done(w.op_id, 0)
+    assert hbm.evictable(1) and not kv.pinned and hbm.dirty_charge == 14
+    big = Request("big", 2 * B, session=9)                              # 2 + 6 blocks: evicts 1 (written) and 2
+    s.add(big, 0)
+    assert s.next_microbatch(0) is None                                 # 2 is not written yet: its write starts
+    assert kv.stats["blocked_by_write"] >= 1 and hbm.stats["evict_writes"] == 1 and hbm.stats["evict_waits"] >= 1
+    (w,) = pool.ready_ops()
+    s.op_done(w.op_id, 0)
+    assert s.next_microbatch(0) is not None and 1 not in kv.kept and 2 not in kv.kept
+    r = rnd(1, 101, 10)                         # session 1 resumes from DRAM, once 3 (not written) makes room
+    s.add(r, 0)
+    rd = None
+    for _ in range(6):                          # big's prompt runs on (it holds 8 blocks)
+        if s.on_stage0:
+            s.stage_done(0, 3)
+        s.next_microbatch(0)
+        for o in pool.ready_ops():
+            if o.op == "read":
+                rd = o
+            else:
+                s.op_done(o.op_id, 0)
+        if rd is not None:
+            break
+    assert rd is not None and rd.req_id == r.req_id and 3 not in kv.kept
+    assert hbm.stats["ahead_writes"] + hbm.stats["evict_writes"] == 3
+    assert set(pool.write_back_stats()) == {"hbm"}

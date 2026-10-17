@@ -23,8 +23,9 @@ The scheduler of 6_scheduler.md §2, built on the plain one (`SchedulerConfig`; 
   of than HBM, its read starts (if its footprint fits; the footprint is held until it lands) and it leaves the queue.
   A read that would wait more than the bound (`TierConfig.max_read_wait_ms`) for its tier (`Hit.wait_ns`) is not
   started: the round is passed over and stays queued. Landed rounds are admitted before every queued request, in
-  landing order. A round's end stores its context; with slot tiers its kept context stays pinned in HBM until the
-  store's handle is done.
+  landing order. Writes are not the scheduler's: the pool is the KV manager's lower level (`pool.hbm_level`), which
+  writes kept contexts before HBM evicts them (a request that fits only once such a write lands waits, as for room).
+  A round whose kept context is still being written waits to take it over (`busy_waits`).
 
 The microbatch-forming procedure follows the reference implementation of the same design (ServingStudioSim
 `pipelined_chunked_prefill_admission.rs`, `srpt.rs`, `fresh_source.rs`, `prefix_fetch.rs`), so that the scheduling
@@ -37,7 +38,7 @@ from dataclasses import dataclass
 
 from ppimpl.config import MAX_IN_FLIGHT, SchedulerConfig
 from ppimpl.engine.kv import Allocation, KvManager
-from ppimpl.kvpool import BalancedKVPool, Handle, KVViews
+from ppimpl.kvpool import BalancedKVPool, KVViews
 
 
 @dataclass(eq=False)
@@ -225,7 +226,10 @@ class Scheduler:
         self._seq = 0
         self._chunks: list[ChunkSpec] = []
         self.stats = dict(microbatches=0, passed_over=0, reads=0, blocked_reads=0, busy_waits=0)
-        self.hbm_writes: dict[Handle, object] = {}  # store -> the kept context it copies from (pinned)
+        if pool is not None:
+            if not kv.keep_sessions:
+                raise ValueError("tiers take what HBM's prefix cache evicts: keep_sessions is required")
+            kv.lower = pool.hbm_level(kv)
 
     # --- events ---------------------------------------------------------------------------------------------------
 
@@ -256,28 +260,13 @@ class Scheduler:
             self.in_flight_tokens -= self._mb_tokens.popleft()
 
     def finish(self, req: Request):
-        """The request's token is out: its context goes to the tiers (if any) and stays kept in HBM, or its blocks
-        are freed. With slot tiers, the kept context is pinned in HBM until its store is done (`op_done`)."""
-        h = None
-        if self.pool is not None and req.session is not None:
-            h = self.pool.store(self.kv.kept_key(req) if self.kv.keep_sessions else req.session, req,
-                                KVViews(req.alloc.kv_blocks, req.alloc.state_blocks, req.num_tokens))
-        key = self.kv.release(req)
-        if key is not None and h is not None and not h.done():
-            self.hbm_writes[h] = key
-            self.kv.pin(key)
+        """The request's token is out: its context stays kept in HBM, or its blocks are freed."""
+        self.kv.release(req)
 
     def op_done(self, op_id: int, now_ns: int):
-        """Every worker reported the tier op done (slot tiers): a store done unpins the kept context it copied from,
-        a load done lands its round."""
+        """Every worker reported the tier op done (slot tiers): a load done lands its round."""
         _, h = self.pool.complete(op_id, now_ns)
-        if h is None:
-            return
-        if h.kind == "store":
-            key = self.hbm_writes.pop(h, None)
-            if key is not None:
-                self.kv.unpin(key)
-        else:
+        if h is not None and h.kind == "load":
             self.read_landed(h.req_id, now_ns)
 
     def read_landed(self, req_id: str, now_ns: int):

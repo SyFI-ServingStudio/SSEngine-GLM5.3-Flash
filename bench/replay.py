@@ -517,7 +517,6 @@ def main():
     p.add_argument("--minutes", type=float, default=20.0)
     p.add_argument("--memory", choices=list(MEMORY), default="full")
     p.add_argument("--tiers", action="store_true")
-    p.add_argument("--ssd-writes", default="dram-evictions")
     p.add_argument("--no-ssd", action="store_true")
     p.add_argument("--accounting", choices=["blocks", "tokens"], default="blocks")
     p.add_argument("--partial-hits", action="store_true", help="the simulator's hit rule (not realizable)")
@@ -545,7 +544,7 @@ def main():
             print(json.dumps(row))
     else:
         mem = MEMORY[a.memory]
-        tc = TierConfig(dram_gb=mem[1], ssd_gb=None if a.no_ssd else 256.0, ssd_writes=a.ssd_writes)
+        tc = TierConfig(dram_gb=mem[1], ssd_gb=None if a.no_ssd else 256.0)
         s = run_sessions(a.step, a.n, a.out, a.minutes, a.memory, a.tiers, a.accounting, a.partial_hits, a.trace,
                          a.pool_tokens, tc, a.dispatch_ahead, a.form_lead_ms,
                          max_in_flight=a.max_in_flight,

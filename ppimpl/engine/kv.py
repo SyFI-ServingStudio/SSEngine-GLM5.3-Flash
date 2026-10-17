@@ -11,6 +11,11 @@ not start with the whole kept context gets no hit (`resumable_tokens`). Kept ses
 requests and yield to them: when a request needs room, kept sessions are evicted least recently used first, a whole
 session at a time.
 
+Tiers (`lower`, set by the scheduler: the KV pool's `HbmLevel`, lanes/m6 TIERS.md §5). The pool is the level below
+HBM: it hears of every kept context (`kept`, `unkept`, `evicted`) and admission (`admitted`), writes kept contexts
+back ahead of eviction, and says which may be evicted now (`evictable`: written whole below) and how much charge is
+not yet (`held_back`, `make_room`). A request that fits only once writes land waits (`blocked_by_write`).
+
 Matching (server, `content_keys`): a kept context is found by content, not by a session id. Its key is its first
 `SESSION_KEY_TOKENS` token ids (all of them if it is shorter); a new prompt looks up the key of its own first tokens
 (`find_session`), and the hit then needs the prompt to start with the whole kept context, compared token by token
@@ -161,9 +166,14 @@ class KvManager:
         self._charge: dict[str, int] = {}
         self.stats = dict(admitted=0, hits=0, hit_tokens=0, evicted_sessions=0, evicted_tokens=0, dropped_stale=0,
                           peak_hard=0, preemptions=0, repeats=0,    # no preemption: the count stays 0
-                          blocked_by_write=0)   # fits() checks a pinned kept context (tier write in flight) turned down
+                          blocked_by_write=0)   # fits() checks turned down only because kept contexts are not yet
+                                                # written to the tier below (an HBM eviction waits for its write)
         self.evicted: dict[object, int] = {}           # key -> tokens of a kept context evicted and not replaced since
-        self.pinned: Counter = Counter()               # kept contexts a tier write still copies from (not evictable)
+        self.pinned: Counter = Counter()               # kept contexts a tier write still copies from (not evictable;
+                                                       # their next round waits to take them over, `busy`)
+        # The tiers below HBM (kvpool.HbmLevel: kept contexts are written there before they are evicted), or None:
+        # it is told about kept, taken-over and evicted contexts and decides which kept context may be evicted now.
+        self.lower = None
 
     @property
     def num_blocks(self) -> int:
@@ -184,13 +194,18 @@ class KvManager:
         return self.footprint(prompt_tokens) <= self.capacity
 
     def fits(self, req) -> bool:
-        """Whether the request's whole footprint fits now, kept sessions evicted as needed (not the pinned ones)."""
-        pinned = sum(self.kept_cost(self.kept[k].tokens) for k in self.pinned if k in self.kept)
+        """Whether the request's whole footprint fits now, kept sessions evicted as needed (only those the lower level
+        lets go: written there). If it fits only by evicting ones not yet written, the lower level starts their
+        writes (`make_room`) and the request waits."""
         need = self.hard + self.footprint(req.num_tokens)
-        if need + pinned <= self.capacity:
+        if need + self.kept_charge <= self.capacity:
             return True
-        if pinned and need <= self.capacity:      # only a tier write's pin keeps it out (write-before-evict)
+        held = 0 if self.lower is None else self.lower.held_back()
+        if need + held <= self.capacity:
+            return True
+        if held and need <= self.capacity:        # only writes still to land keep it out (write-before-evict)
             self.stats["blocked_by_write"] += 1
+            self.lower.make_room(need + held - self.capacity)
         return False
 
     # --- pins: a kept context a tier write copies from ------------------------------------------------------------
@@ -275,8 +290,13 @@ class KvManager:
         self.stats["repeats"] += 1
         return k.token
 
-    def _unkeep(self, k: Kept):
+    def _unkeep(self, k: Kept, evicted: bool = False):
         self.kept_charge -= self.kept_cost(k.tokens)
+        if self.lower is not None:
+            if evicted:
+                self.lower.evicted(k.session, k)
+            else:
+                self.lower.unkept(k.session)
         if self.content_keys and k.tokens < SESSION_KEY_TOKENS:
             self._short[k.tokens] -= 1
 
@@ -322,6 +342,8 @@ class KvManager:
             alloc = Allocation(self.pool.take(n_kv), self.pool.take(STATE_BLOCKS))
         self.held[req.req_id] = alloc
         self._charge[req.req_id] = charge
+        if self.lower is not None and req.session is not None:
+            self.lower.admitted(req.session, req)     # after this admission's evictions, as the simulator
         self.stats["admitted"] += 1
         if hit:
             self.stats["hits"] += 1
@@ -342,11 +364,12 @@ class KvManager:
         free."""
         while self.kept and (self.hard + self.kept_charge > self.capacity
                              or (not self.pool.virtual and self.pool.num_free < blocks_needed)):
-            key = next((x for x in self.kept if x not in self.pinned), None)
+            key = next((x for x in self.kept if x not in self.pinned
+                        and (self.lower is None or self.lower.evictable(x))), None)
             if key is None:
                 break
             k = self.kept.pop(key)
-            self._unkeep(k)
+            self._unkeep(k, evicted=True)
             self.evicted[key] = k.tokens
             self.pool.give(k.alloc.kv_blocks + k.alloc.state_blocks)
             self.stats["evicted_sessions"] += 1
@@ -370,6 +393,8 @@ class KvManager:
         self.kept[key] = Kept(key, req.num_tokens, alloc, content, req.output_token)
         self.evicted.pop(key, None)
         self.kept_charge += self.kept_cost(req.num_tokens)
+        if self.lower is not None:
+            self.lower.kept(key)
         if self.content_keys and req.num_tokens < SESSION_KEY_TOKENS:
             self._short[req.num_tokens] += 1
         self._make_room(0)
