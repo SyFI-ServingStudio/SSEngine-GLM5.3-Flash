@@ -41,8 +41,15 @@ def cudart():
 
 RT = cudart()
 NUMA = ctypes.CDLL("libnuma.so.1")
-NUMA.numa_alloc_onnode.restype = ctypes.c_void_p
-NUMA.numa_alloc_onnode.argtypes = [ctypes.c_size_t, ctypes.c_int]
+
+
+def alloc_on(nbytes: int, node: int) -> int:
+    """nbytes preferred (not bound) on `node`: a strict bind OOM-kills other processes on a full node."""
+    from ppimpl.runtime.tier_worker import anon_map, oom_first, prefer_node
+    oom_first()
+    ptr = anon_map(nbytes)
+    prefer_node(NUMA, ptr, nbytes, node)
+    return ptr
 
 
 def check(rc, what):
@@ -52,8 +59,7 @@ def check(rc, what):
 
 def host_buffer(nbytes: int, node: int) -> torch.Tensor:
     """Pinned host memory on NUMA node `node`: first-touched there, registered portable (every GPU sees it pinned)."""
-    ptr = NUMA.numa_alloc_onnode(nbytes, node)
-    assert ptr, f"numa_alloc_onnode({nbytes}, {node})"
+    ptr = alloc_on(nbytes, node)
     ctypes.memset(ptr, 1, nbytes)
     check(RT.cudaHostRegister(ptr, nbytes, 3), "cudaHostRegister")   # portable | mapped
     return torch.frombuffer((ctypes.c_uint8 * nbytes).from_address(ptr), dtype=torch.uint8)
@@ -264,7 +270,7 @@ class Bench:
         """Time to make 16 GiB of pinned host memory on GPU 0's node: allocate, first touch, cudaHostRegister (the
         tier pins 150 GB per GPU at start-up)."""
         t0 = time.perf_counter()
-        ptr = NUMA.numa_alloc_onnode(16 * GiB, self.node[0])
+        ptr = alloc_on(16 * GiB, self.node[0])
         ctypes.memset(ptr, 0, 16 * GiB)
         t1 = time.perf_counter()
         check(RT.cudaHostRegister(ptr, 16 * GiB, 3), "cudaHostRegister")

@@ -19,7 +19,7 @@ and a ring chunk is reused once the copy that read it is done (events). The ring
 the HBM the KV pool (the contract's 7,144 blocks) leaves; `attach` prints how much that is. `hops: direct` puts the
 pieces straight between host and the stages' KV (one batch per op).
 
-DRAM: one pinned arena per worker on its GPU's NUMA node: libnuma, 4 KiB pages (MADV_HUGEPAGE made the first touch
+DRAM: one pinned arena per worker, preferred (not bound) on its GPU's NUMA node, 4 KiB pages (MADV_HUGEPAGE made the first touch
 compact memory synchronously: 150 GB took ~500 s on a host whose page cache filled the node; PPIMPL_TIER_HUGEPAGE=1
 turns it back on), first touch from TOUCH_THREADS threads on the node's CPUs of the job, on a side thread while the
 model loads, then `cudaHostRegister` in chunks of whole slots (a piece never crosses a slot, so never a
@@ -41,6 +41,7 @@ from __future__ import annotations
 import ctypes
 import errno
 import json
+import mmap
 import os
 import queue
 import threading
@@ -113,6 +114,69 @@ def numa_resident_gb(ptr: int, nbytes: int, maps: str = "/proc/self/numa_maps") 
     return {k: round(v, 2) for k, v in sorted(out.items())}
 
 
+MPOL_PREFERRED = 1
+
+
+def prefer_node(numa, ptr: int, nbytes: int, node: int):
+    """Place [ptr, ptr + nbytes) on `node`, preferred, not bound: on a node short of memory the pages go to another
+    node (the start-up line's resident GB by node shows it). A strict bind (numa_alloc_onnode) does not fall back:
+    on cayenne it ran node 0 out and the kernel's OOM killer killed other users' processes (7996)."""
+    numa.mbind.restype = ctypes.c_long
+    numa.mbind.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int, ctypes.POINTER(ctypes.c_ulong),
+                           ctypes.c_ulong, ctypes.c_uint]
+    words = node // 64 + 1
+    mask = (ctypes.c_ulong * words)()
+    mask[node // 64] = 1 << (node % 64)
+    if numa.mbind(ptr, nbytes, MPOL_PREFERRED, mask, words * 64 + 1, 0) != 0:
+        raise OSError(ctypes.get_errno(), f"mbind(MPOL_PREFERRED, node {node})")
+
+
+def _libc():
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.mmap.restype = ctypes.c_void_p
+    libc.mmap.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_long]
+    libc.munmap.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+    return libc
+
+
+def anon_map(nbytes: int) -> int:
+    """nbytes of anonymous memory with no page faulted in (libnuma's numa_alloc touches every page under the current
+    policy, so a policy set afterwards is too late)."""
+    libc = _libc()
+    ptr = libc.mmap(None, nbytes, mmap.PROT_READ | mmap.PROT_WRITE, mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS, -1, 0)
+    if ptr in (None, ctypes.c_void_p(-1).value):
+        raise OSError(ctypes.get_errno(), f"mmap({nbytes})")
+    return ptr
+
+
+def anon_unmap(ptr: int, nbytes: int):
+    _libc().munmap(ptr, nbytes)
+
+
+def oom_first():
+    """Make this process the OOM killer's first choice (oom_score_adj 1000; raising it needs no privilege): a process
+    pinning 100s of GB must not take other users' processes down with it."""
+    try:
+        with open("/proc/self/oom_score_adj", "w") as f:
+            f.write("1000")
+    except OSError:
+        pass
+
+
+def cgroup_peak_gb() -> float | None:
+    """This process's cgroup memory.peak (cgroup v2), GB, or None where it cannot be read."""
+    try:
+        rel = next(x.split("::", 1)[1].strip() for x in open("/proc/self/cgroup") if x.startswith("0::"))
+        d = "/sys/fs/cgroup" + rel
+        while d.startswith("/sys/fs/cgroup"):
+            if os.path.exists(d + "/memory.peak"):
+                return int(open(d + "/memory.peak").read()) / 1e9
+            d = os.path.dirname(d)
+    except (OSError, StopIteration, ValueError):
+        pass
+    return None
+
+
 class HostArena:
     """`nbytes` of host memory on NUMA node `node` (CUDA: pinned once `register` ran; CPU: a plain numpy buffer)."""
 
@@ -125,13 +189,11 @@ class HostArena:
             self._buf = np.zeros(self.nbytes + 4096, dtype=np.uint8)
             self.ptr = self._buf.ctypes.data + (-self._buf.ctypes.data) % 4096
             return
-        self._numa = ctypes.CDLL("libnuma.so.1")
-        self._numa.numa_alloc_onnode.restype = ctypes.c_void_p
-        self._numa.numa_alloc_onnode.argtypes = [ctypes.c_size_t, ctypes.c_int]
-        self._numa.numa_free.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
-        self.ptr = self._numa.numa_alloc_onnode(self.nbytes, node)
-        if not self.ptr:
-            raise MemoryError(f"numa_alloc_onnode({self.nbytes}, {node})")
+        oom_first()
+        self._numa = ctypes.CDLL("libnuma.so.1", use_errno=True)
+        self.ptr = anon_map(self.nbytes)          # no pages yet: the policy below decides where touch puts them
+        if node is not None:
+            prefer_node(self._numa, self.ptr, self.nbytes, node)
         if HUGEPAGE:
             libc = ctypes.CDLL(None, use_errno=True)
             libc.madvise.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
@@ -194,6 +256,13 @@ class HostArena:
         """GB of the arena resident on each NUMA node (/proc/self/numa_maps, the mappings inside the arena)."""
         return numa_resident_gb(self.ptr, self.nbytes)
 
+    def placement(self) -> str:
+        """`resident GB by node {..}`, plus `REMOTE SPILL x GB` when over 1 GB lies off the arena's node (the
+        preferred node was short of memory: reads from there cross the socket link)."""
+        gb = self.node_gb()
+        off = sum(v for k, v in gb.items() if k != self.node)
+        return f"resident GB by node {gb}" + (f", REMOTE SPILL {off:.1f} GB off node {self.node}" if off > 1 else "")
+
     def close(self):
         if not self.cuda or not self.ptr:
             return
@@ -201,7 +270,7 @@ class HostArena:
         for a, _ in self._chunks:
             rt.cudaHostUnregister(self.ptr + a)
         self._chunks = []
-        self._numa.numa_free(self.ptr, self.nbytes)
+        anon_unmap(self.ptr, self.nbytes)
         self.ptr = 0
 
 
@@ -388,12 +457,13 @@ class TierEngine:
         print(f"stage {self.stage} tiers: slot {self.slot_bytes} B, state {self.layout.state_slots} slots, "
               f"{len(self.layout.kv_len)} kv + {len(self.layout.st_len)} state pieces per block/context, "
               + (f"dram {self.dram.nbytes / 1e9:.1f} GB on node {self.dram.node} (touch {self.dram.touch_s:.1f} s, "
-                 f"of it after the model {self.touch_wait_s:.1f} s, register {self.dram.register_s:.1f} s, resident GB by node {self.dram.node_gb()}), "
+                 f"of it after the model {self.touch_wait_s:.1f} s, register {self.dram.register_s:.1f} s, {self.dram.placement()}), "
                  if self.dram else "")
               + (f"ssd {self.ssd.path} (O_DIRECT {self.ssd.direct}), staging {self.staging.nbytes / 1e9:.1f} GB "
-                 f"(resident GB by node {self.staging.node_gb()}), " if self.ssd else "")
+                 f"({self.staging.placement()}), " if self.ssd else "")
               + f"{len(self.opened)} peer allocations, "
-              + (self.ring_info or "direct"), flush=True)
+              + (self.ring_info or "direct")
+              + (f", cgroup memory.peak {pk:.0f} GB" if (pk := cgroup_peak_gb()) is not None else ""), flush=True)
         return self.slot_bytes, self.layout.state_slots
 
     def start(self):

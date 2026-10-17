@@ -229,3 +229,36 @@ def test_node_cpus():
     assert node_cpus(few, 0) == few                     # fewer than 8 on the node: all of them
     many = set(sorted(node0)[:12]) | {10_000}
     assert node_cpus(many, 0) == set(sorted(node0)[:12])
+
+
+def test_prefer_node_is_preferred_not_bound():
+    """The arena's policy is MPOL_PREFERRED (7996: a strict bind OOM-killed other users' processes on a full node)."""
+    from ppimpl.runtime import tier_worker as tw
+    nodes = sorted(int(d[4:]) for d in os.listdir("/sys/devices/system/node") if d[4:].isdigit())
+    numa = ctypes.CDLL("libnuma.so.1", use_errno=True)
+    n = 64 << 20
+    for node in nodes:                      # each node in turn: placement follows the policy, not the touching CPU
+        _prefer_and_check(tw, numa, n, node)
+
+
+def _prefer_and_check(tw, numa, n, node):
+    ptr = tw.anon_map(n)
+    try:
+        tw.prefer_node(numa, ptr, n, node)
+        ctypes.memset(ptr, 0, n)
+        line = next(x for x in open("/proc/self/numa_maps") if int(x.split()[0], 16) == ptr)
+        assert f"prefer:{node}" in line and "bind:" not in line
+        assert tw.numa_resident_gb(ptr, n).get(node, 0) > 0.06
+    finally:
+        tw.anon_unmap(ptr, n)
+
+
+def test_oom_first_and_cgroup_peak():
+    import subprocess
+    import sys
+    out = subprocess.run([sys.executable, "-c", "from ppimpl.runtime.tier_worker import oom_first; oom_first(); "
+                          "print(open('/proc/self/oom_score_adj').read())"], capture_output=True, text=True, check=True)
+    assert out.stdout.strip() == "1000"
+    from ppimpl.runtime.tier_worker import cgroup_peak_gb
+    pk = cgroup_peak_gb()
+    assert pk is None or pk > 0
