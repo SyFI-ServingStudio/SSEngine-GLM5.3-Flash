@@ -555,13 +555,13 @@ def kpool_seed_tail_cache(tail_kv_cache, key, gate_score, tslot, kpool, head_dim
 # Speed-only overrides that keep every value (bitwise): on in the engine; bench/stage_bench.py --off turns one off in
 # its process, before the model is built, for an A/B at the same clock.
 FAST = {"kpool_expand": True, "kda_split_heads": True}
-# lane m5-perf, off until a session A/B: KDA short conv in one launch per layer (kda_conv) and the KDA state
+# lane m5-perf, on for the session check: KDA short conv in one launch per layer (kda_conv) and the KDA state
 # gather / scatter as wide copies (kda_state); both bitwise (tests/test_kda_conv_gpu.py).
-FAST.update({"kda_conv": False, "kda_state_copy": False})
-# lane m5-glue, off until a session A/B: the stage edge's hc_post run after the graph replay into a fresh tensor
+FAST.update({"kda_conv": True, "kda_state_copy": True})
+# lane m5-glue, on for the session check: the stage edge's hc_post run after the graph replay into a fresh tensor
 # instead of copying the graph's output buffer (stage._run_graph); the indexer's BF16 -> FP32 cast by one Triton
 # kernel (glue_fast; 49.2 -> 20.5 us at 4,096 rows, job 7914).
-FAST.update({"edge_send_eager": False, "indexer_float": False})
+FAST.update({"edge_send_eager": True, "indexer_float": True})
 
 
 def fast_from_env(env: str | None = None) -> dict:
