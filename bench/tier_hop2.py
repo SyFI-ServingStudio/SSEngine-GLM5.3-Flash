@@ -103,25 +103,52 @@ class Probe:
         self.f.write(json.dumps(rec) + "\n")
         self.f.flush()
 
-    def move(self, op: str, kv: list[int], st: list[int], sub: list | None = None) -> tuple[float, int]:
-        """One op of a len(kv)-block context on all GPUs at once (slots from 0, then the state); (seconds, HBM
-        bytes per GPU)."""
+    def move(self, op: str, kv: list[int], st: list[int], sub: list | None = None,
+             gpus: list[int] | None = None) -> tuple[float, int]:
+        """One op of a len(kv)-block context on the GPUs `gpus` (all) at once, each engine submitted from its own
+        thread as each worker does in the server (slots from 0, then the state); (seconds to the last GPU's end, HBM
+        bytes per GPU). `sub` gets the slowest engine's host submit time."""
         ctx = len(kv)
         slots, sslots = list(range(ctx)), list(range(ctx, ctx + self.state_slots))
+        gpus = range(self.n) if gpus is None else gpus
         for d in range(self.n):
             torch.cuda.synchronize(d)
-        t0 = time.perf_counter()
-        for e in self.eng:
-            self.op += 1
-            e.submit(TierMove(self.op, op, "dram", None, 0, ctx, 0, kv, st, slots, sslots, [], []))
-        if sub is not None:
-            sub.append(time.perf_counter() - t0)
-        nbytes = 0
-        for e in self.eng:
+        out = {}
+        barrier = threading.Barrier(len(gpus) + 1)
+
+        def one(g):
+            e = self.eng[g]
+            barrier.wait()
+            t = time.perf_counter()
+            e.submit(TierMove(1_000_000 * g + self.op, op, "dram", None, 0, ctx, 0, kv, st, slots, sslots, [], []))
+            ts = time.perf_counter() - t
             _, ev, _, nb = e.q["read" if op == "read" else "write"].get()
             ev.synchronize()
-            nbytes = nb
-        return time.perf_counter() - t0, nbytes
+            out[g] = (ts, nb)
+
+        self.op += 1
+        ths = [threading.Thread(target=one, args=(g,)) for g in gpus]
+        for t in ths:
+            t.start()
+        barrier.wait()
+        t0 = time.perf_counter()
+        for t in ths:
+            t.join()
+        dt = time.perf_counter() - t0
+        if sub is not None:
+            sub.append(max(ts for ts, _ in out.values()))
+        return dt, next(iter(out.values()))[1]
+
+    def solo(self):
+        """GPU 0's engine alone (the others idle): host submit time vs the op's time, 32k / 128k / 512k reads."""
+        for ctx in (4, 16, 62):
+            kv, st = list(range(1 + ctx, 1 + 2 * ctx)), list(range(6, 12))
+            self.move("read", kv, st, gpus=[0])
+            sub = []
+            r = [self.move("read", kv, st, sub, gpus=[0]) for _ in range(10)]
+            t50 = sorted(t for t, _ in r)[5]
+            self.log(test="solo_read", ring=self.ring, ctx_blocks=ctx, read_ms_p50=round(t50 * 1e3, 3),
+                     submit_ms_p50=round(sorted(sub)[5] * 1e3, 3), gbps=round(r[0][1] / t50 / 1e9, 1))
 
     def rw(self, ctx: int | None = None, reps: int = 5, check: bool = True) -> dict:
         ctx = ctx or CTX
@@ -133,7 +160,7 @@ class Probe:
         for v in self.views:                                    # destination scrambled, then read back
             v[dst_kv if v.shape[0] == NB else dst_st] = 0
         r = [self.move("read", dst_kv, dst_st) for _ in range(reps)]
-        sub = []                                                # host time to submit one op on all 4 engines
+        sub = []                                                # the slowest engine's host submit time
         for _ in range(3):
             self.move("read", dst_kv, dst_st, sub)
         bad = []
@@ -151,7 +178,7 @@ class Probe:
                    read_ms_p50=round(med(r), 3), write_ms_p50=round(med(w), 3),
                    read_gbps_per_gpu=round(best(r), 1), write_gbps_per_gpu=round(best(w), 1),
                    read_ms=[round(t * 1e3, 2) for t, _ in r], write_ms=[round(t * 1e3, 2) for t, _ in w],
-                   submit_ms_4gpus=[round(t * 1e3, 2) for t in sub], bytes_equal=equal, bad=bad[:40])
+                   submit_ms_max_gpu=[round(t * 1e3, 2) for t in sub], bytes_equal=equal, bad=bad[:40])
         self.log(**rec)
         if check:
             assert equal, "two-hop round trip changed bytes"
@@ -167,6 +194,7 @@ class Probe:
             self.build(ring)
             for ctx in (4, 16, 62):
                 recs.append(self.rw(ctx, reps=10, check=False))
+            self.solo()
         self.build(default)
         assert all(r["bytes_equal"] for r in recs), "a ring setting changed bytes (see the rw lines)"
 
