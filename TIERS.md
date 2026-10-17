@@ -175,7 +175,7 @@ into nothing (its slots are reused). HBM eviction waits for the session's write 
   through SSD (DRAM off). Then round 1 of s (A = 1k) after the tier read vs after an HBM hit: logits bitwise equal
   (same microbatch shapes), token equal.
 - `tests/test_tiers.py` (CPU): slot accounting, write-before-evict, takeover wait, demote frees DRAM only when done,
-  landing order; the quarter rule's pointer lists (every byte of every range covered exactly once over the 4 GPUs).
+  SSD LRU eviction at a small SSD (slots reused, the evicted session found nowhere and computed again), landing order; the quarter rule's pointer lists (every byte of every range covered exactly once over the 4 GPUs).
 - Bring-up: round-1 tokens against the no-cache reference as in M4 (`bench/prefix_check.py`).
 
 ## 9. Steps and runs
@@ -187,7 +187,45 @@ into nothing (its slots are reused). HBM eviction waits for the session's write 
 | 2a | SSD file, I/O pool, demote, copy-up, staging | GPU test through SSD; bring-up SSD only (128 GB) |
 | 2b | | sessions full / h25d37 / h12d19 at N = 400/500 with SSD 128 GB (`*_ssd128`); once h25d37 N = 400 at 256 GB |
 
-## 10. Differences from the target to record
+## 10. Targets (v2-realistic, replace the handoff's numbers)
+
+Computed by the coordinator with the realistic-input profile (ServingStudioSim wt-pp-hitrule
+`logs/20261017_2_v2_realistic_tiers`: `tiers/`, `ssdsize/`, `tiercheck/`; metrics by the handoff's `data/metrics.py`).
+
+**Tier bring-up** (`tiercheck/`, `data/tier_targets.py`), ms, read time in parentheses:
+
+| P | Round 0 | HBM hit | No tier | DRAM (balanced) | SSD (balanced) | DRAM own stage | SSD own stage |
+|---|---|---|---|---|---|---|---|
+| 32k | 367.5 | 52.7 | 387.9 | 54.4 (1.72) | 61.3 (8.60) | 54.5 (1.85) | 61.9 (9.26) |
+| 128k | 1,200.2 | 53.7 | 1,221.2 | 58.4 (4.67) | 77.1 (23.34) | 58.8 (5.07) | 79.1 (25.34) |
+| 512k | 4,949.0 | 57.5 | 4,972.7 | 73.9 (16.46) | 139.8 (82.28) | 75.4 (17.93) | 147.1 (89.63) |
+
+The read times do not depend on the compute profile and equal the handoff's.
+
+**Sessions, SSD 128 GB per GPU** (`ssdsize/*_ssd128`; the user's setting): r/s, new tok/s, TTFT p50/p90/p99 (s),
+rounds over 60 s.
+
+| Memory | N = 400 | N = 500 |
+|---|---|---|
+| full | 26.10, 90.8k, 0.16/0.76/6.72, 127 | 28.37, 100.9k, 0.30/2.31/60.90, 753 |
+| h25d37 (Tiers) | 26.06, 90.7k, 0.19/0.80/6.76, 121 | 28.12, 100.0k, 0.37/2.69/60.92, 765 |
+| h12d19 (SSD-heavy) | 26.01, 90.7k, 0.20/0.84/6.88, 119 | 27.69, 98.8k, 0.39/3.37/60.93, 731 |
+
+Step 1 (DRAM only, `tiers/*_dram`): full N = 400 is the same as full_ssd128 (26.10, 90.8k, 0.16/0.76/6.72, 127),
+since at full memory an SSD no larger than DRAM holds nothing DRAM does not.
+
+**SSD size differs from the handoff.** The user set 128 GB of SSD per GPU; `7_offloading.md` has 256 GB. At 128 GB the
+SSD tier evicts (LRU, finished sessions first: the active set is ~73-87 GB per GPU, notes.md 2026-10-16), so the
+runs compare against `*_ssd128`, and the SSD eviction path (slots freed, an evicted session computed again) is part
+of every h25d37/h12d19 run and of the CPU tests (§8). The 256 GB design is run once at the end (h25d37, N = 400,
+target full_design / h25d37_design).
+
+**Memory for full-memory runs.** 600 GB pinned (`--mem=800G`) waits for the user's approval; bring-up (the handoff gives DRAM
+150 GB, but the run writes only ~38 GB per GPU: 75 fillers of 256k at 430 MB plus 15 sessions at 5.7 GB; a 48 GB
+arena per GPU holds all of it, so nothing is evicted, as at 150 GB; `--mem=300G`) and h25d37/h12d19 (37.5 /
+18.75 GB per GPU) do not need it.
+
+## 11. Differences from the target to record
 
 Block-granular slots (§3: +4% space, +5% on a 32k read); real write traffic on the same links (D2H vs H2D, and SSD
 reads vs write-back); host time to start and land a read (measured per read in `reads.jsonl`); SSD latency of small reads (a 32k
