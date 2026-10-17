@@ -11,10 +11,10 @@ refactor into them. Branch lane-m6 from m5-done (a167593).
 | Balanced storage | Every HBM byte range a context owns (each KV page of each DSA layer of each stage, each KDA state of each stage) is cut into 4 equal contiguous quarters; GPU q stores and moves quarter q of every range. Each GPU then holds and reads exactly 1/4 of every context (1,499 B/token + 36.9 MB on average, `7_offloading.md` §2), 3/4 of it to or from the other stages' HBM over NVLink in a second hop through a staging ring in GPU q's HBM (direct peer writes from host run at 2/3 of the rate, §2.3). |
 | Copy mechanism | Copy engine only (no SMs): one `cuMemcpyBatchAsync` per tier op per GPU (vLLM `ops.swap_blocks_batch`), source and destination lists built from a per-GPU pointer table of all 4 stages' KV views (CUDA IPC, opened once at start-up). |
 | DRAM | Pinned host memory per GPU on that GPU's NUMA node (libnuma + `cudaHostRegister`, not torch's power-of-2 pinned allocator), cut into fixed slots of one KV block's quarter; same slot ids on all 4 GPUs, owned by the controller's index. |
-| SSD | One preallocated file per GPU under `PPIMPL_SSD_DIR` on /raid (md RAID0 of 8 NVMe), same slot layout; O_DIRECT `preadv`/`pwritev` from a small thread pool per worker into/out of DRAM slots; written only when DRAM evicts (write-back, wt-pp-ssd-writeback 3247309c), read SSD -> DRAM slot (copy-up) -> HBM, pipelined per slot. No GDS (nvidia-fs is not loaded on this node). |
-| Writes | Issued when a round's token is out; background stream, never waited on by compute; only new blocks + state. HBM cannot evict a session (and its next round cannot take over its blocks) until all 4 GPUs reported its write done. |
+| SSD | One preallocated file per GPU under `PPIMPL_SSD_DIR` on /raid (md RAID0 of 8 NVMe), same slot layout; O_DIRECT, one io_uring per worker (fixed file, the host arenas as fixed buffers, one request per slot, 8 reads / 4 writes in the kernel, reads first; §2.5). Written only with DRAM's victims (§5); read SSD -> staging slots -> HBM, pipelined per slot. No GDS (nvidia-fs is not loaded on this node). |
+| Writes | The victim chain HBM -> DRAM -> SSD (§5): a tier takes only what the level above lets go of. One write-back policy (`kvpool/writeback.py`) for both levels: each writes its least recently used entries ahead of eviction above a watermark (0.9), so eviction finds them clean. Background, never waited on by compute; only what the tier below lacks. HBM cannot evict a kept context (and its next round cannot take over its blocks) until all 4 GPUs reported its write done. |
 | Reads | As `7_offloading.md` §2 and the scheduler already does: HBM footprint reserved at read start, read-wait bound 1 s, one read at a time per tier per GPU, landed rounds admitted first in landing order. A read lands when all 4 GPUs report it. |
-| Eviction | LRU whole sessions per tier (index unchanged); DRAM slots of a session being written back to SSD are freed only when the write-back is done. |
+| Eviction | LRU whole sessions per tier; a level evicts only entries the level below holds whole (else it waits, counted); DRAM slots of a session being demoted to SSD are reused only when the demote is done. |
 | New code (estimate) | worker tier executor ~250 lines, controller wiring ~80, index slot accounting ~60, pinned arena + SSD file ~120, tests ~250. |
 
 ## 1. Bytes per context (this engine's HBM layout)
@@ -184,7 +184,40 @@ Taken now, each with the 7916 number that confirms it or switches to the fallbac
 | page_first host layout (a slot = one block's quarter of all layers and stages, contiguous) | one host run per slot; host side never the small piece | - | - |
 | No layer-wise load pipelining | the round computes only after the whole prefix landed (target model); DRAM reads 1.7-16 ms | - | - |
 | Host memory on the GPU's NUMA node, registered by `cudaHostRegister` (not torch pin_memory) | torch rounds pins to powers of 2; remote NUMA caps lower | **confirmed**: 4 GPUs from the other node 27.2 / 19.4 GB/s vs 48.4 / 38.5 | preferred-local allocation, remote spill logged |
-| SSD: O_DIRECT `preadv`/`pwritev`, 8 threads per GPU, one preallocated file per GPU | fio: 8 psync threads give 53 GB/s on one file; no GDS on this node (nvidia-fs not loaded; it would also need DRAM copy-up anyway) | per-read latency measured at step 2 | io_uring via liburing if threads miss 10 GB/s per GPU |
+| SSD: O_DIRECT through one io_uring per GPU, one preallocated file per GPU | §2.5: at the same throughput as 8 `preadv` threads, half the CPU and half the p99 read latency under write-back; no GDS on this node (nvidia-fs not loaded) | **confirmed** (§2.5, 4 processes on node 0) | - |
+
+### 2.5 SSD I/O: io_uring (bench/ssd_io.py, 2026-10-17)
+
+`SsdTier` drives its file through `kvpool/uring.py`: one ring per worker (liburing-ffi through ctypes), the file
+registered (IOSQE_FIXED_FILE) and every host arena it reads into or writes from (DRAM and staging) registered as
+fixed buffers of at most 1 GiB, so I/O is READ_FIXED / WRITE_FIXED and the kernel pins nothing per request. A
+request is one slot (cut only where a fixed buffer ends). Queued requests wait in a read queue and a write queue; at
+most 8 reads and 4 writes are in the kernel at once, and free read room is filled first, so a write-back never fills
+the device's queues in front of a read. One thread owns the ring (submit and wait in one call, GIL released) and
+completes each slot's future; callers only queue. No fallback: a ring or a registration that fails stops the worker
+at start-up. The file is O_DIRECT (buffered only where the file system has none, as tmpfs in CPU tests).
+
+Benchmark: `bench/ssd_io.py`, the SSD tier's pattern without GPUs. 4 processes (one per GPU) bound to node 0, each
+with its own 16 GB file of 12,857,344 B slots (GLM-5.3 PP4 balanced) and a host arena; a reader of whole sessions
+(3-60 random slots, one session at a time) and a write-back of 3-60 slots at a time paced to a rate. 20 s per run,
+per process (= per GPU):
+
+| Mechanism | Read GB/s (max) + 3 GB/s writes | CPU cores | Read ms, 31-60 slots p50 / p99 | 3-10 slots p99 | Max + 5 GB/s writes: read GB/s, 31-60 p99 | 10 GB/s reads + 3 writes: cores, 31-60 p99 |
+|---|---|---|---|---|---|---|
+| 8 threads, `preadv` / `pwritev` of whole slots (before) | 15.2-16.1 | 1.11-1.15 | 26-27 / 100-115 | 65-79 | 11.0-11.5, 104-115 | 0.96-1.00, 81-87 |
+| **io_uring, whole slots, 8 reads / 4 writes (chosen)** | **16.8-16.9** | **0.49-0.50** | 31-32 / **62-67** | **16-18** | **12.0-12.1, 71-74** | **0.31-0.35, 43-50** |
+| io_uring, whole slots, 4 / 2 | 16.3-16.4 | 0.53 | 34-35 / 65-68 | 13-14 | | |
+| io_uring, 2 MiB pieces, 32 / 8 | 16.1-16.3 | 0.60-0.62 | 34-35 / 61-67 | 13-16 | 11.3-11.5, 70-72 | 0.37-0.40, 43-56 |
+| io_uring, 2 MiB, 16 / 4 | 15.7-15.8 | 0.53 | 34-36 / 62-65 | 12-15 | | |
+| io_uring, 1 MiB, 64 / 16 | 16.2-16.3 | 0.62 | 31-33 / 61-62 | 14-17 | | |
+
+- The node's array delivers ~65-67 GB/s of reads to 4 processes with any mechanism at depth >= 8 slots; io_uring
+  adds ~5% throughput, halves the CPU (one thread, no per-request syscalls or pinning) and halves the read p99
+  under write-back (reads go first, threads share one queue with writes). Writes held their rate in every run.
+- Smaller pieces at a larger depth change nothing measurable; a whole slot per request is the fewest requests.
+  Depth 8 / 4 is the smallest that keeps the maximum (4 / 2: -3%).
+- Need (simulator, victim chain, N = 400-500): SSD reads 0.7-1.8 GB/s per GPU on average (10 s peaks 2.3-4.1), SSD
+  writes ~1.1 GB/s: a fifth of what one GPU's share delivers with 5 GB/s of writes beside it.
 
 Note: own-stage storage (each GPU stores and moves its own stage's bytes) is not balanced. At PP4, stages 0, 2 and 3
 hold 3 DSA layers each (14.02 MB per block, 1,635 B/token: 9% above the mean of 1,499) and stage 1 holds 2 (9.35 MB,
@@ -239,26 +272,41 @@ option for comparison (§13).
   350G for Tiers, 300G for SSD-heavy. If the node lacks local memory, allocation falls back to the other node
   (preferred, not bound) and the split is logged; remote-node bandwidth is in §2.
 
-## 5. Writes (HBM -> DRAM, and DRAM -> SSD)
+## 5. Writes: the victim chain HBM -> DRAM -> SSD
 
-- **When.** `Scheduler.finish` -> `Tiers.store` emits a `write` op with the round's new KV blocks (from the block that
-  holds the previous context's last token) and its state blocks, and the destination slots. The controller sends
-  tier ops to all 4 workers with the next plan (or on their own when no plan is due).
-- **Worker.** A tier thread (not the launch thread) builds the pointer lists (numpy over the start-up pointer table)
-  and calls `swap_blocks_batch` on a write stream; an event per op; the reporter thread sends `TierDone(op_id,
-  stage, start_ns, end_ns)`. Copy engine only, no SM, no wait on the compute stream: the data is final (the round's
-  last chunk passed every stage before stage 3 reported the token).
-- **Safety.** Until all 4 `TierDone`s: the KvManager does not evict that kept session, and the session's next round
-  does not take over its blocks (it waits in the queue, passed over like a read-bound round). Expected rare: a
-  37 MB + new-KV write takes ~1-3 ms. The handoff (§2) requires the write to finish before HBM evicts, so every run
-  counts both waits in `cache.json`: `busy_waits` (a round waited to take over its session's blocks) and
-  `blocked_by_write` (an admission check turned down only because a written session is still pinned). Writes
-  gather by pulling over NVLink (§2.3, ~15 GB/s per GPU at 512k); if either count is non-zero in the bring-up or the
-  sessions, writes change to push (each stage's copy engine pushes its pieces into the owner's ring).
-- **SSD write-back.** DRAM eviction emits `demote` (DRAM slots -> SSD slots). A worker I/O thread pool (8 threads)
-  `pwritev`s the slots (O_DIRECT, 4 KiB aligned). The DRAM slots return to the free list on all-4 `TierDone`. DRAM
-  evicts ahead to keep 2% free, so a write never waits for a write-back. SSD write load at N = 400: 1.12 GB/s per GPU
-  average, 1.7 GB/s peak (§4 of the handoff).
+The user's policy (2026-10-17, as the simulator's victim DRAM, ServingStudioSim 4b93b396): a tier is written only
+with what the level above lets go of, and only with what it lacks. HBM's kept contexts go to the fastest tier (DRAM,
+or SSD when there is no DRAM), DRAM's entries to SSD; SSD evicts into nothing. No write-through: a round's context
+reaches DRAM only on its way out of HBM.
+
+- **One write-back policy for both levels** (`kvpool/writeback.py`, `WriteBack`). A level keeps whole entries in LRU
+  order, each with a charge, and holds a fixed charge outside them. An entry is dirty until the level below holds it
+  whole, writing while its write is in flight, then clean; only a clean entry is evicted without waiting.
+  - Write-ahead (`step`, each scheduler step): once fixed + dirty charge passes `watermark x capacity`, the least
+    recently used dirty entries are written until it is back under; LRU evicts the tail first, so eviction finds it
+    clean.
+  - On demand (`make_room`): an eviction that lacks clean charge starts the writes of the least recently used dirty
+    entries and counts a wait (`evict_waits`, `evict_writes`).
+  - The level below reports a write done (`done`) or that it lost the entry (`lost`: dirty again).
+- **HBM level** (`BalancedKVPool.HbmLevel`): entries = the KV manager's kept contexts (charge: their blocks or
+  tokens), fixed = running and held requests, watermark `TierConfig.hbm_write_ahead`. A write is `write_back` ->
+  `write` ops of what the tier lacks (from the block holding its last token, plus state); the kept context is pinned
+  until all 4 GPUs reported it (its next round waits to take it over, `busy_waits`). A request that fits only by
+  evicting contexts not yet written waits (`blocked_by_write`) while `make_room` writes them.
+- **DRAM level** (`TierManager`, `_TierLevel`): entries = DRAM's entries (charge: slots), fixed 0, watermark
+  `dram_write_ahead`. A write is a `demote` (DRAM slots -> SSD slots, one io_uring write per slot). DRAM evicts at
+  once when it needs slots: a dirty victim's demote is emitted then, a writing one's is already out, and the op that
+  reuses the slots waits for it through `SlotGuard` (`evict_waits`).
+- **What moves.** Only what the tier below lacks: a context that the tier holds whole (same content) is only
+  refreshed there (`hbm_evicted`), a longer one keeps its full blocks' slots. A read back into HBM leaves the tier's
+  copy in place (clean). When a session's next round is admitted, its entries that the round does not resume from
+  are dropped (`drop_stale`).
+- **Counters**, every run: `cache.json` `write_back` = {hbm: {ahead_writes, evict_writes, evict_waits}, dram: {...}}
+  and `blocked_by_write`, `busy_waits`; `tiers.json` `write_ahead` = the two watermarks.
+- **Byte mode** (replay): writes take no time, so each level writes at eviction (no watermark).
+- **Worker.** A tier thread builds the pointer lists and copies on a write stream (copy engine only, no SM, no
+  wait on the compute stream: a kept context's blocks are final). SSD writes and demotes run on the worker's SSD
+  write thread through the io_uring (§2.5).
 
 ## 6. Reads (DRAM/SSD -> HBM)
 
@@ -266,9 +314,9 @@ option for comparison (§13).
   queue, landed first in landing order. Only the blocks HBM lacks (from the block holding HBM's last token) + state.
 - **DRAM read.** One `swap_blocks_batch` per GPU on the read stream (H2D; the writes are D2H, the other PCIe
   direction). Reads of one tier on one GPU run one after another (one stream).
-- **SSD read.** I/O pool `preadv`s the session's SSD slots into newly allocated DRAM slots (copy-up), and after each
-  group of slots lands the tier thread enqueues their H2D: read time ~ max(SSD, H2D) + one slot. SSD-only runs use
-  the staging area instead of DRAM slots.
+- **SSD read.** The io_uring reads the session's SSD slots into staging slots (`staging_gb`, not DRAM: the victim
+  chain puts nothing in DRAM that HBM did not let go of), and as each slot lands the tier thread enqueues its H2D:
+  read time ~ max(SSD, H2D) + one slot.
 - **Landing.** `read_landed` when all 4 `TierDone`s are in. The index's channel clock (when the tier is free, for the
   1 s bound) uses the configured bandwidth and is pushed to the real landing time when a read lands late.
 - No layer-wise pipelining: a round computes only after its whole prefix landed (the target's model); reads are
@@ -276,8 +324,8 @@ option for comparison (§13).
 
 ## 7. Eviction
 
-Unchanged in the index: each tier LRU of whole sessions, a read refreshes. Slots instead of bytes. SSD evicts by LRU
-into nothing (its slots are reused). HBM eviction waits for the session's write (§5).
+Each tier LRU of whole sessions, a read refreshes. Slots instead of bytes. HBM and DRAM evict only what the level
+below holds whole, written ahead (§5); SSD evicts by LRU into nothing (its slots are reused).
 
 ## 8. Correctness
 
@@ -299,7 +347,7 @@ into nothing (its slots are reused). HBM eviction waits for the session's write 
 | 1a | pointer table, quarter rule, DRAM arena, write/read ops, TierDone, scheduler wiring | GPU test §8; tier bring-up DRAM (150 GB, pool 1,234,944 tokens): per-P round-1 TTFT and read time vs §3 |
 | 1b | | sessions full N = 400/500 and h25d37/h12d19 (DRAM only, step 1) against the v2-realistic tier targets |
 | 2a | SSD file, I/O pool, demote, copy-up, staging | GPU test through SSD; bring-up SSD only (128 GB) |
-| 2b | | sessions full / h25d37 / h12d19 at N = 400/500 with SSD 128 GB (`*_ssd128`) |
+| 2b | io_uring SSD tier (§2.5), victim chain (§5) | sessions full / tiers / ssd_heavy (§10) at N = 400/500 with SSD 128 GB |
 
 Status (2026-10-17): the code of 1a and 2a is in and passes on CPU (`tests/test_tiers_slots.py`: index, op order,
 pins; `tests/test_tier_copy.py`: quarters; `tests/test_tier_worker.py`: four engines' DRAM and SSD round trips,
@@ -396,29 +444,30 @@ Computed by the coordinator with the realistic-input profile (ServingStudioSim w
 
 The read times do not depend on the compute profile and equal the handoff's.
 
-**Sessions, SSD 128 GB per GPU** (`ssdsize/*_ssd128`; the user's setting): r/s, new tok/s, TTFT p50/p90/p99 (s),
-rounds over 60 s.
+**Sessions, victim chain, SSD 128 GB per GPU** (user, 2026-10-17; simulator wt-pp-dram-victim
+`logs/20261017_5_victim_tier_sizes/rows.jsonl`, `bench.tiers --setting full|tiers|ssd_heavy`): r/s, new tok/s, TTFT
+p50/p90/p99 (s), rounds over 60 s; prompt tokens hit in HBM / DRAM / SSD, minutes 10-20, N = 400.
 
-| Memory | N = 400 | N = 500 |
-|---|---|---|
-| full | 26.10, 90.8k, 0.16/0.76/6.72, 127 | 28.37, 100.9k, 0.30/2.31/60.90, 753 |
-| h25d37 (Tiers) | 26.06, 90.7k, 0.19/0.80/6.76, 121 | 28.12, 100.0k, 0.37/2.69/60.92, 765 |
-| h12d19 (SSD-heavy) | 26.01, 90.7k, 0.20/0.84/6.88, 119 | 27.69, 98.8k, 0.39/3.37/60.93, 731 |
+| Setting (HBM / DRAM GB per GPU) | `--pool-tokens` | N = 400 | N = 500 | Hit tokens N = 400 |
+|---|---|---|---|---|
+| full (100.18 / 50) | (full pool) | 26.10, 90.8k, 0.16/0.75/6.45, 125 | 28.53, 101.4k, 0.30/2.26/60.89, 729 | 98 / 0.6 / 0.1% |
+| tiers (20 / 20) | 12,220,800 | 26.09, 90.8k, 0.19/0.78/6.79, 112 | 28.04, 99.7k, 0.37/2.93/60.93, 735 | 37 / 33 / 28% |
+| ssd_heavy (12.5 / 12.5) | 7,632,640 | 26.03, 90.6k, 0.20/0.84/6.12, 124 | 27.86, 99.2k, 0.39/3.28/60.92, 720 | 19 / 29 / 50% |
 
 Step 1 (DRAM only, `tiers/*_dram`): full N = 400 is the same as full_ssd128 (26.10, 90.8k, 0.16/0.76/6.72, 127),
 since at full memory an SSD no larger than DRAM holds nothing DRAM does not.
 
 **SSD size differs from the handoff.** The user set 128 GB of SSD per GPU; `7_offloading.md` has 256 GB. At 128 GB the
 SSD tier evicts (LRU, finished sessions first: the active set is ~73-87 GB per GPU, notes.md 2026-10-16), so the
-runs compare against `*_ssd128`, and the SSD eviction path (slots freed, an evicted session computed again) is part
-of every h25d37/h12d19 run and of the CPU tests (§8). Every run uses 128 GB (`TierConfig.ssd_gb` default; user,
+runs compare against 128 GB targets, and the SSD eviction path (slots freed, an evicted session computed again) is
+part of every tiers / ssd_heavy run and of the CPU tests (§8). Every run uses 128 GB (`TierConfig.ssd_gb` default; user,
 2026-10-17); no 256 GB run.
 
 **Memory per run (user, 2026-10-17: reserve, then release).** Only full-memory session runs ask for `--mem=800G` and
 pin 600 GB (150 GB per GPU); the job ends, the memory is free. Bring-up: the handoff gives DRAM 150 GB, but the run
 writes only ~38 GB per GPU (75 fillers of 256k at 430 MB plus 15 sessions at 5.7 GB), so a 48 GB arena per GPU holds
-all of it and nothing is evicted, as at 150 GB: `--mem=300G`. h25d37 / h12d19: 37.5 / 18.75 GB per GPU,
-`--mem=350G` / `300G`.
+all of it and nothing is evicted, as at 150 GB: `--mem=300G`. Victim settings: full / tiers / ssd_heavy pin 50 /
+20 / 12.5 GB of DRAM plus 8 GB of staging per GPU: `--mem=400G` / `250G` / `220G`.
 
 ## 11. What is reused, from where, and why not the others
 
@@ -433,7 +482,7 @@ or SGLang's scheduler; wiring them to balanced striping and our scheduler would 
 | Pinned host memory | libnuma first-touch on the GPU's node + `cudaHostRegister` (portable, mapped), chunked | the pattern of LMCache `csrc/cuda/mem_alloc.cpp` (mmap + mbind + register) and vLLM `kv_offload/cpu/shared_offload_region.py` (mmap + register in <= 64 GB chunks) | torch `pin_memory` rounds to a power of 2 (150 -> 256 GB); vLLM's region is one `/dev/shm` file with per-worker rows and no mbind (NUMA by first touch only): we need each GPU's slice bound to its node and need no shared file (each worker maps only its own slice; peer bytes go over NVLink, not through another worker's host memory) |
 | Host layout | page_first: a slot holds one block of all layers (and all stages, quartered) contiguously | the idea of HiCache `page_first_direct` `(2, pages, L, page, H, D)` and vLLM 0.12's cross-layer block | HiCache's `layer_first` and per-token `page_first` give small copies (10.8 GB/s sustained in Strata's measurement); the HBM side stays vLLM's per-layer layout (changing it would touch every attention kernel), so pieces are per (layer, block) quarters there |
 | O_DIRECT probe | `probe_o_direct` | vLLM fork `kv_offload/tiering/fs/io.py` | - |
-| SSD file I/O | own: one preallocated file per GPU, slot-addressed `os.preadv` / `os.pwritev` with O_DIRECT from 8 threads (GIL released) | pattern of Dynamo KVBM's single fallocated O_DIRECT file per worker | vLLM fs tier and LMCache/HiCache file backends write one file per block or chunk (temp file + rename, or buffered I/O): 10k+ files per GPU and an open/close per 12.9 MB; `fs_io_C` loops serially in C, so it needs the same thread pool anyway. GDS (LMCache cuFile, NIXL) is not available (nvidia-fs not loaded) and would skip the DRAM copy-up the design requires |
+| SSD file I/O | own: one preallocated file per GPU, slot-addressed O_DIRECT through one io_uring per GPU (liburing, fixed file and buffers; `kvpool/uring.py`, §2.5) | pattern of Dynamo KVBM's single fallocated O_DIRECT file per worker; io_uring as NIXL's POSIX backend | vLLM fs tier and LMCache/HiCache file backends write one file per block or chunk (temp file + rename, or buffered I/O): 10k+ files per GPU and an open/close per 12.9 MB; `fs_io_C` loops serially in C. GDS (LMCache cuFile, NIXL) is not available (nvidia-fs not loaded) |
 | Index, LRU, read-wait bound, scheduler | own (`ppimpl/kvpool/manager.py`, was `engine/tiers.py`; `scheduler.py`, already written for M5 replay) | - | the handoff's rules (whole-session LRU per tier, write-back to SSD, read-wait bound, landed rounds first) are not any of these systems' policies |
 
 ## 12. Differences from the target to record
@@ -563,9 +612,9 @@ backends.py, mover.py, manager.py, member.py}`; `engine/tiers.py`, `runtime/tier
   3. If DRAM is full: the LRU victim gets a demote op, emitted before the write that reuses its slots.
   4. Member q: `Mover` batch-copies D2D from the stages to the ring, then D2H per slot.
   5. When all n are done, the caller's blocks are unpinned.
-- **SSD write-back (demote).** Member q: `SsdTier.write(slots, DRAM slot pointers)` with 8 I/O threads. When all n
+- **SSD write-back (demote).** Member q: `SsdTier.write(slots, DRAM slot pointers)` through its io_uring. When all n
   are done, the DRAM slots return to the free list.
-- **SSD load.** `prepare_load` allocates DRAM slots for the copy-up (or staging slots). Member q:
+- **SSD load.** `prepare_load` allocates staging slots (as built: never DRAM, §6). Member q:
   1. `SsdTier.read` of all the entry's slots into those host slots;
   2. as each chunk of slots lands, `Mover` copies its blocks in [b_lo, b_hi) to HBM;
   3. the state goes last;
@@ -605,13 +654,62 @@ Where it differs from §13.1-§13.2, and why:
   `state_blocks`) carries one list for all stages, as this engine has one allocation for all.
   `OwnStagePlacement` is not built: it needs per-GPU slot sizes in the index.
 - **Layer 3.** `HostTier.ptr(slot)` once `register(slot_bytes)` fixed the slot size; slot counts stay
-  `backends.num_slots(gb, slot_bytes)` (no `capacity_slots` attribute). `SsdTier` owns the 8-thread pool.
+  `backends.num_slots(gb, slot_bytes)` (no `capacity_slots` attribute). `SsdTier(path, nbytes, slot_bytes,
+  buffers)` owns its io_uring (`uring.UringFile`, §2.5); `buffers` are the host arenas to register.
 - **Layer 4.** `Mover(device, slot_bytes, hops, ring_depth, ring_chunk_slots)`, `transfer_async(direction,
   segments, ready, tr) -> (event, bytes)`. A segment is host slot pointers plus the pieces in them; the mover cuts
   each segment into ring chunks (KV and state never share a chunk, as before) or, direct, puts all pieces in one
   batch. The ring is allocated after the KV pool, as §3 says (the §13.2 table's "before" was wrong).
 - **Byte mode** (replay): no members; a store's handle is done at once, a load's lands at `eta_ns` on the caller's
   clock (replay pushes its landing at `Request.read_land_ns`).
+
+### 13.5 Victim chain and write-back (lane-m6-ssd)
+
+Tiering is invisible to the scheduler and KV manager beyond one hook object. The scheduler no longer writes: it hands
+the KV manager the pool's HBM level once (`kv.lower = pool.hbm_level(kv)`, sessions kept only) and otherwise sees
+`lookup` / `load` / `ready_ops` / `complete` as before. `store` and `TierManager.prepare_store` are gone.
+
+```python
+# KvManager -> the level below (BalancedKVPool.HbmLevel); None without tiers
+lower.kept(key)                      # a kept context appeared or changed (release): dirty
+lower.unkept(key)                    # it was taken over by its next round
+lower.evicted(key, kept)             # HBM evicted it -> TierManager.hbm_evicted (refresh below, or byte mode: write)
+lower.admitted(key, req)             # a round admitted -> TierManager.drop_stale
+lower.evictable(key) -> bool         # clean: the tier below holds it whole
+lower.held_back() -> float           # charge not evictable now (dirty or writing)
+lower.make_room(short: float)        # a request fits only by evicting unwritten contexts: write them (it waits)
+
+# BalancedKVPool (leader)
+pool.hbm_level(kv) -> HbmLevel
+pool.write_back(key, tokens, content, views: KVViews) -> Handle   # HbmLevel.write: ops to the fastest tier
+pool.ready_ops() -> list[TierOp]     # HBM write-ahead, DRAM write-ahead, then ops whose deps are done
+pool.complete(op_id, now_ns) -> (TierOp, Handle | None)           # a write's landing unpins and marks it clean
+pool.write_back_stats() -> {"hbm": {...}, "dram": {...}}          # into cache.json
+
+# TierManager (layer 5)
+prepare_write_back(key, tokens, content, views=None) -> list[TierOp]
+hbm_evicted(key, tokens, content) -> list[TierOp]
+drop_stale(key, req) -> list[TierOp]
+step() -> list[TierOp]               # DRAM write-ahead (demotes)
+take_gone() -> list                  # keys the fastest tier lost -> HbmLevel.lost (dirty again)
+
+# writeback.py: one class, two levels
+class Level(Protocol):               # HbmLevel (HBM's kept contexts), _TierLevel (DRAM's entries)
+    capacity: float
+    def fixed(self) -> float: ...    # HBM: running requests; DRAM: 0
+    def lru(self) -> Iterable: ...   # keys, least recently used first
+    def write(self, key, entry=None) -> object | None: ...   # start the write below: a token, None if nothing moved
+WriteBack(name, level, watermark)    # add, remove, done, lost, evictable, held_back, step, make_room, evicting
+```
+
+`HbmLevel` and `_TierLevel` are the only per-level code: what an entry is and how a write is issued (HBM: `write`
+ops from the KV blocks, pinned until they land; DRAM: a `demote`). The dirty / writing / clean state, write-ahead and
+the wait counters are `WriteBack`'s. HBM waits by not admitting the request; DRAM evicts at once and orders the slot
+reuse after the demote (`evicting`).
+
+cudaHostRegister stays in `attach` (`HostTier.register`: ~1 GiB chunks of whole slots from 4 threads): its chunks
+must be whole slots, and the slot size is known only once the model is loaded, so it cannot run on the touch thread
+while the model loads. The io_uring's buffer registration comes after it (its time is in the worker's start-up line).
 
 ## 14. Hand-off (2026-10-17)
 
