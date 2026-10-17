@@ -149,12 +149,16 @@ class PoolMember:
         if self._touch is not None:
             self._touch.join()
         self.touch_wait_s = time.perf_counter() - t      # attach (after the model) waiting for the first touch
+        if self.dram is not None and self.dram.touch_error is not None:
+            raise self.dram.touch_error
         if self.dram is not None:
             self.dram.register(sb)
             assert num_slots(self.tc.dram_gb, sb) * sb <= self.dram.nbytes
         if self.tc.ssd_gb:
             self.staging = HostTier(num_slots(self.tc.staging_gb, sb) * sb, node, self.cuda)
             self.staging.touch(node_cpus(self._touch_cpus, node))
+            if self.staging.touch_error is not None:
+                raise self.staging.touch_error
             self.staging.register(sb)
             d = self.tc.ssd_dir or os.environ.get("PPIMPL_SSD_DIR") or os.path.join(self.cfg.run_dir, "ssd")
             self.ssd = SsdTier(os.path.join(d, f"tier_ssd_gpu{self.stage}_{os.getpid()}.bin"),

@@ -3,12 +3,17 @@
 Slot ids are not allocated here: the leader's index (`manager.py`) does, so they are the same on all n GPUs. A
 backend only maps a slot to a host address (`HostTier.ptr`) or a file offset (`SsdTier`, slot i at i x slot_bytes).
 
-DRAM (`HostTier`): one arena per member, preferred (not bound) on its GPU's NUMA node, 4 KiB pages (MADV_HUGEPAGE
+DRAM (`HostTier`): one arena per member on its GPU's NUMA node, 4 KiB pages (MADV_HUGEPAGE
 made the first touch compact memory synchronously: 150 GB took ~500 s on a host whose page cache filled the node;
 PPIMPL_TIER_HUGEPAGE=1 turns it back on), first touch from TOUCH_THREADS threads on the node's CPUs of the job, on a
 side thread while the model loads, then `cudaHostRegister` in chunks of whole slots (a piece never crosses a slot, so
 never a registration). Not torch's pinned allocator: it rounds 150 GB up to 256 GB. Every process that makes an arena
-sets oom_score_adj 1000, so an OOM takes it before anyone else's (§14.1).
+sets oom_score_adj 1000, so an OOM takes it before anyone else's (§14.1). Placement: the whole range is preferred on the
+node, then touched in TOUCH_CHUNK pieces, each bound (MPOL_BIND) to the node only after checking that the node's free
+plus clean file pages, less TOUCH_RESERVE_GB, cover it; a short node fails the touch, never spills. A bind makes the
+kernel reclaim the node's page cache for the piece; a preferred fault does not (zone_reclaim_mode 0): it takes the
+other node once the node's free pages reach the low watermark (8039: 365 of 600 GB landed on node 0 while node 1 held
+662 GB of page cache).
 
 SSD (`SsdTier`): one preallocated file per member, O_DIRECT `preadv`/`pwritev` of whole slots from a pool of
 IO_THREADS threads (GIL released), into and out of host slots. The file is deleted at close.
@@ -28,6 +33,10 @@ import numpy as np
 
 MADV_HUGEPAGE = 14
 MPOL_PREFERRED = 1
+MPOL_BIND = 2
+TOUCH_CHUNK = 1 << 30         # bytes bound and touched per check of the node
+TOUCH_RESERVE_GB = 114.0      # node headroom (50 GB, as memguard's) plus what the node's other touches may take between
+                              # a check and its piece: 4 arenas x TOUCH_THREADS threads x one TOUCH_CHUNK
 REGISTER_CHUNK = 1 << 30      # cudaHostRegister per ~1 GiB of whole slots, from 4 threads
 TOUCH_THREADS = 16           # first-touch threads per arena, on the job's CPUs of the arena's node (page-cache reclaim
                              # runs in the touching threads: 4 threads on the worker's 2 cores were the limit)
@@ -85,18 +94,43 @@ def numa_resident_gb(ptr: int, nbytes: int, maps: str = "/proc/self/numa_maps") 
     return {k: round(v, 2) for k, v in sorted(out.items())}
 
 
-def prefer_node(numa, ptr: int, nbytes: int, node: int):
-    """Place [ptr, ptr + nbytes) on `node`, preferred, not bound: on a node short of memory the pages go to another
-    node (the start-up line's resident GB by node shows it). A strict bind (numa_alloc_onnode) does not fall back:
-    on cayenne it ran node 0 out and the kernel's OOM killer killed other users' processes (7996)."""
+def _mbind(numa, ptr: int, nbytes: int, node: int, mode: int):
     numa.mbind.restype = ctypes.c_long
     numa.mbind.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int, ctypes.POINTER(ctypes.c_ulong),
                            ctypes.c_ulong, ctypes.c_uint]
     words = node // 64 + 1
     mask = (ctypes.c_ulong * words)()
     mask[node // 64] = 1 << (node % 64)
-    if numa.mbind(ptr, nbytes, MPOL_PREFERRED, mask, words * 64 + 1, 0) != 0:
-        raise OSError(ctypes.get_errno(), f"mbind(MPOL_PREFERRED, node {node})")
+    if numa.mbind(ptr, nbytes, mode, mask, words * 64 + 1, 0) != 0:
+        raise OSError(ctypes.get_errno(), f"mbind({mode}, node {node})")
+
+
+def prefer_node(numa, ptr: int, nbytes: int, node: int):
+    """Place [ptr, ptr + nbytes) on `node`, preferred, not bound: on a node short of memory the pages go to another
+    node (the start-up line's resident GB by node shows it)."""
+    _mbind(numa, ptr, nbytes, node, MPOL_PREFERRED)
+
+
+def bind_node(numa, ptr: int, nbytes: int, node: int):
+    """Bind [ptr, ptr + nbytes) to `node`: its faults reclaim the node's page cache rather than leave it. Only for a
+    piece the node was just checked to cover (`node_reclaimable_gb`): a bind on a node that cannot cover it OOM-kills
+    (7996: 3 x 150 GB bound to a node full of another job's shmem)."""
+    _mbind(numa, ptr, nbytes, node, MPOL_BIND)
+
+
+class NodeShort(MemoryError):
+    pass
+
+
+def node_reclaimable_gb(node: int, root: str = "/sys/devices/system/node") -> float:
+    """MemFree plus the clean file LRU pages of NUMA node `node`: what a bound fault can get there without touching
+    anyone's anonymous, shmem or mlocked memory or waiting for writeback, GB."""
+    kb = {}
+    for line in open(f"{root}/node{node}/meminfo"):
+        f = line.split()           # Node <n> <key>: <kB> kB
+        kb[f[2].rstrip(":")] = int(f[3])
+    clean = kb.get("Active(file)", 0) + kb.get("Inactive(file)", 0) - kb.get("Dirty", 0) - kb.get("Writeback", 0)
+    return (kb.get("MemFree", 0) + max(clean, 0)) * 1024 / 1e9
 
 
 def _libc():
@@ -157,6 +191,7 @@ class HostTier:
         self.slot_bytes = 0
         self._chunks: list[tuple[int, int]] = []
         self.touch_s = self.register_s = 0.0
+        self.touch_error: BaseException | None = None    # set by a failed touch (a side thread's exception is lost)
         if not cuda:                       # 4 KiB-aligned (O_DIRECT)
             self._buf = np.zeros(self.nbytes + 4096, dtype=np.uint8)
             self.base = self._buf.ctypes.data + (-self._buf.ctypes.data) % 4096
@@ -175,16 +210,31 @@ class HostTier:
         return self.base + slot * self.slot_bytes
 
     def touch(self, cpus: set[int] | None = None):
-        """First touch from TOUCH_THREADS threads, each on `cpus` (pages land on the arena's node whatever CPU touches
-        them; ctypes.memset releases the GIL)."""
+        """First touch from TOUCH_THREADS threads, each on `cpus`, in TOUCH_CHUNK pieces bound to the arena's node after
+        a check of the node (module docstring; ctypes.memset releases the GIL). A short node sets `touch_error`
+        (NodeShort) and stops the touch: the caller fails the run before anything is timed."""
         if not self.cuda:
             return
         t0 = time.perf_counter()
+        errs: list[BaseException] = []
 
         def run(a, n):
-            if cpus:
-                os.sched_setaffinity(0, cpus)       # this thread only
-            ctypes.memset(self.base + a, 0, n)
+            try:
+                if cpus:
+                    os.sched_setaffinity(0, cpus)       # this thread only
+                for c in range(a, a + n, TOUCH_CHUNK):
+                    m = min(TOUCH_CHUNK, a + n - c)
+                    if self.node is not None:
+                        if errs:
+                            return
+                        have = node_reclaimable_gb(self.node)
+                        if have - TOUCH_RESERVE_GB < m / 1e9:
+                            raise NodeShort(f"node {self.node}: free + clean file pages {have:.0f} GB, need "
+                                            f"{m / 1e9:.1f} + {TOUCH_RESERVE_GB:.0f} GB reserve; arena not placed")
+                        bind_node(self._numa, self.base + c, m, self.node)
+                    ctypes.memset(self.base + c, 0, m)
+            except BaseException as e:   # noqa: BLE001 - kept in touch_error
+                errs.append(e)
 
         step = -(-self.nbytes // TOUCH_THREADS)
         step = -(-step // (2 << 20)) * (2 << 20)
@@ -195,6 +245,8 @@ class HostTier:
         for t in ts:
             t.join()
         self.touch_s = time.perf_counter() - t0
+        if errs:
+            self.touch_error = errs[0]
 
     def register(self, slot_bytes: int):
         """Fix the slot size; pin in chunks of whole slots (CUDA). Chunks register from 4 threads."""
@@ -233,8 +285,8 @@ class HostTier:
         return numa_resident_gb(self.base, self.nbytes)
 
     def placement(self) -> str:
-        """`resident GB by node {..}`, plus `REMOTE SPILL x GB` when over 1 GB lies off the arena's node (the
-        preferred node was short of memory: reads from there cross the socket link)."""
+        """`resident GB by node {..}`, plus `REMOTE SPILL x GB` when over 1 GB lies off the arena's node (cannot happen
+        once the touch binds each piece; kept as the check that it did not)."""
         gb = self.node_gb()
         off = sum(v for k, v in gb.items() if k != self.node)
         return f"resident GB by node {gb}" + (f", REMOTE SPILL {off:.1f} GB off node {self.node}" if off > 1 else "")

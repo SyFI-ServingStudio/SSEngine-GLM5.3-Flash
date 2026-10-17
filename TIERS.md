@@ -714,3 +714,19 @@ No `numa_alloc_onnode`, `MPOL_BIND` or `membind` is left in the lane.
 - **Read notify path:** done-thread wake, GIL and send, 4.0-4.9 ms p50 under load against 0.41 ms idle. Options
   (a) spin event and (b) IPC-event dependency are in §9; a separate tier process per GPU would also remove it.
 
+
+### 14.4 Page-cache reclaim: bind each checked piece (2026-10-17, after 8039)
+
+- **8039** (full_dram N=500 on GPUs 4-7, NUMA 1): precheck passed on node 1 free + file 919 GB, but node 1 had ~240 GB
+  free and ~678 GB page cache. A preferred fault does not reclaim (`zone_reclaim_mode` 0): once node 1 reached its
+  low watermark the pages went to node 0, which had free memory. 365 of 600 GB landed on node 0 (REMOTE SPILL
+  83-100 GB per arena); node 1's page cache fell only 678 -> 662 GB. Cancelled after start-up, nothing timed.
+- **Change (user: reclaim the cache, there is no other way to get the node).** `HostTier.touch` binds each
+  1 GiB piece (`MPOL_BIND`) to the GPU's node right before touching it, after checking that the node's free plus
+  clean file pages (less Dirty and Writeback; shmem and mlocked are not on the file LRU) exceed the piece plus
+  `TOUCH_RESERVE_GB` = 114 GB (50 GB headroom + 4 arenas x 16 threads x 1 GiB in flight). A bound fault makes the
+  kernel reclaim that node's page cache. A short node fails the touch (`NodeShort`, raised from `attach`): no spill,
+  no forced allocation. Other users lose only clean cached file pages (re-read from disk), never anonymous or shmem
+  memory. memguard precheck counts the same clean file pages.
+- 7996 differs: there 3 x 150 GB were bound at once to a node whose memory was another job's shmem, which cannot be
+  reclaimed, with no check per piece.

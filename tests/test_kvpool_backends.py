@@ -5,6 +5,7 @@ import ctypes
 import os
 
 import numpy as np
+import pytest
 
 from ppimpl.kvpool import backends as bk
 
@@ -57,7 +58,7 @@ def test_node_cpus():
 
 
 def test_prefer_node_is_preferred_not_bound():
-    """The arena's policy is MPOL_PREFERRED (7996: a strict bind OOM-killed other users' processes on a full node)."""
+    """prefer_node sets MPOL_PREFERRED: the arena's policy until a checked piece is bound by the touch."""
     nodes = sorted(int(d[4:]) for d in os.listdir("/sys/devices/system/node") if d[4:].isdigit())
     numa = ctypes.CDLL("libnuma.so.1", use_errno=True)
     n = 64 << 20
@@ -85,3 +86,51 @@ def test_oom_first_and_cgroup_peak():
     assert out.stdout.strip() == "1000"
     pk = bk.cgroup_peak_gb()
     assert pk is None or pk > 0
+
+
+def _nodes():
+    return sorted(int(d[4:]) for d in os.listdir("/sys/devices/system/node") if d[4:].isdigit())
+
+
+def test_touch_binds_each_piece_to_the_node(monkeypatch):
+    """The touch binds every piece to the arena's node (a bound fault reclaims that node's page cache; a preferred one
+    leaves for the other node, 8039), and the whole arena lands there."""
+    monkeypatch.setattr(bk, "TOUCH_CHUNK", 16 << 20)
+    monkeypatch.setattr(bk, "TOUCH_RESERVE_GB", 0.0)
+    for node in _nodes():
+        a = bk.HostTier(64 << 20, node, True)
+        try:
+            a.touch()
+            assert a.touch_error is None
+            lines = [x for x in open("/proc/self/numa_maps") if a.base <= int(x.split()[0], 16) < a.base + a.nbytes]
+            assert lines and all(f"bind:{node}" in x for x in lines)
+            assert a.node_gb() == {node: a.node_gb()[node]} and a.node_gb()[node] > 0.06
+        finally:
+            bk.anon_unmap(a.base, a.nbytes)
+
+
+def test_touch_on_a_short_node_fails_without_placing():
+    """A node that cannot cover a piece plus the reserve fails the touch (NodeShort in touch_error) and binds nothing
+    more: no spill, no forced allocation."""
+    node = _nodes()[0]
+    a = bk.HostTier(64 << 20, node, True)
+    try:
+        old = bk.TOUCH_RESERVE_GB
+        bk.TOUCH_RESERVE_GB = bk.node_reclaimable_gb(node) + 1e6
+        try:
+            a.touch()
+        finally:
+            bk.TOUCH_RESERVE_GB = old
+        assert isinstance(a.touch_error, bk.NodeShort)
+        assert sum(a.node_gb().values()) == 0
+    finally:
+        bk.anon_unmap(a.base, a.nbytes)
+
+
+def test_node_reclaimable_counts_free_and_clean_file_pages(tmp_path):
+    d = tmp_path / "node0"
+    d.mkdir()
+    (d / "meminfo").write_text("Node 0 MemFree: 1000000 kB\nNode 0 Active(file): 300000 kB\n"
+                               "Node 0 Inactive(file): 700000 kB\nNode 0 Dirty: 100000 kB\nNode 0 Writeback: 0 kB\n"
+                               "Node 0 Shmem: 5000000 kB\n")
+    assert bk.node_reclaimable_gb(0, str(tmp_path)) == pytest.approx(1_900_000 * 1024 / 1e9)

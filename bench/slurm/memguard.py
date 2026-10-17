@@ -4,8 +4,9 @@
     python bench/slurm/memguard.py watch --pid PID --run-dir DIR     # stop the run if the host thrashes
 
 precheck: MemAvailable must exceed the run's pinned host memory (4 GPUs x (DRAM + staging with SSD)) plus 100 GB;
-on each NUMA node of the job's GPUs, MemFree plus the node's file LRU pages (reclaimable; other users' shmem and
-mlocked memory are not) must exceed the arenas that node takes (its GPUs x the per-GPU pinned GB) plus 50 GB; and the
+on each NUMA node of the job's GPUs, MemFree plus the node's clean file LRU pages (the arenas' touch binds each piece to
+the node, so the kernel reclaims page cache there; other users' shmem, mlocked and dirty memory are not counted) must
+exceed the arenas that node takes (its GPUs x the per-GPU pinned GB) plus 50 GB; and the
 memory PSI's `full avg10` must be under 5%. A run started on a thrashing host measures the host, and a node without
 room for its arenas spills them to the other socket (7996: a strict bind there ran node 0 out and the kernel's OOM
 killer took other users' processes).
@@ -50,13 +51,15 @@ def mem_available_gb() -> float:
 
 
 def node_avail_gb(node: int, root: str = "/sys/devices/system/node") -> float:
-    """MemFree plus the file LRU pages of NUMA node `node` (what the kernel can hand out there without touching
-    anyone's anonymous, shmem or mlocked memory), GB."""
+    """MemFree plus the clean file LRU pages of NUMA node `node` (what the kernel can hand out there without touching
+    anyone's anonymous, shmem or mlocked memory or waiting for writeback), GB; as ppimpl.kvpool.backends'
+    node_reclaimable_gb."""
     kb = {}
     for line in open(f"{root}/node{node}/meminfo"):
         f = line.split()           # Node <n> <key>: <kB> kB
         kb[f[2].rstrip(":")] = int(f[3])
-    return (kb.get("MemFree", 0) + kb.get("Active(file)", 0) + kb.get("Inactive(file)", 0)) * 1024 / 1e9
+    clean = kb.get("Active(file)", 0) + kb.get("Inactive(file)", 0) - kb.get("Dirty", 0) - kb.get("Writeback", 0)
+    return (kb.get("MemFree", 0) + max(clean, 0)) * 1024 / 1e9
 
 
 def gpu_nodes() -> list[int]:
