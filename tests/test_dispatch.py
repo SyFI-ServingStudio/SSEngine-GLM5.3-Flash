@@ -256,30 +256,3 @@ def test_reports_in_any_order_across_stages():
     s0, peak, _ = simulate(rule, n_mb=300, actual=lambda k, s: table[(k, s)], report_delay=lambda k, s: delay[(k, s)])
     assert len(s0) == 300 and peak <= 4
     assert not rule.flight and not rule.on_stage0
-
-
-def test_queue_one_rule_reports_in_any_order():
-    """RunConfig.dispatch = "queue_one" (the rule before a8b80bc, for A/B), with the keyed reports: the same jittered,
-    out-of-order reports run to the end, at most 5 in flight (4 + the queued one; its gate is at 5)."""
-    import random
-    from ppimpl.runtime.dispatch import QueueOneRule
-    rnd = random.Random(12)
-    table = {(k, s): 10.0 * rnd.uniform(0.7, 1.3) for k in range(300) for s in range(4)}
-    delay = {(k, s): (rnd.uniform(50, 500) if s == 0 and rnd.random() < 0.05 else rnd.uniform(0.1, 3.0))
-             for k in range(300) for s in range(4)}
-    rule = QueueOneRule(4, 3.0, 2.0)
-    s0, peak, _ = simulate(rule, n_mb=300, actual=lambda k, s: table[(k, s)],
-                           report_delay=lambda k, s: delay[(k, s)], depth=5)
-    assert len(s0) == 300 and peak <= 5
-    assert not rule.flight and not rule.on_stage0
-
-
-def test_make_rule_by_config():
-    from ppimpl.config import RunConfig
-    from ppimpl.runtime.dispatch import QueueOneRule, make_rule
-    assert isinstance(make_rule(RunConfig(), 4), DispatchRule) and RunConfig().gate_depth() == 4
-    q = RunConfig(dispatch="queue_one")
-    assert isinstance(make_rule(q, 4), QueueOneRule) and q.gate_depth() == 5 and make_rule(q, 4).sched_limits == (5, 1)
-    import pytest
-    with pytest.raises(ValueError):
-        RunConfig(dispatch="other")

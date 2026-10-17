@@ -310,6 +310,6 @@ class _DevMem:
 
 def open_pipe(cfg, stage: int, device: torch.device, width: int):
     if device.type == "cuda":
-        return CePipe(stage, cfg.num_stages, device, cfg.dist_init_method(), cfg.gate_depth(),
+        return CePipe(stage, cfg.num_stages, device, cfg.dist_init_method(), cfg.max_in_flight,
                       cfg.scheduler.mb_tokens, width)
-    return GlooPipe(stage, cfg.num_stages, cfg.dist_init_method(), cfg.gate_depth())
+    return GlooPipe(stage, cfg.num_stages, cfg.dist_init_method(), cfg.max_in_flight)

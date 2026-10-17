@@ -89,9 +89,6 @@ def hold_for(trace: Path) -> int:
 # arrivals a minute (of ~1,450) one microbatch later; 10 ms: 0.02 / 0.03 s/min and 398 / 242. Recorded in each run's
 # server_config.yaml.
 REAL_FORM_LEAD_MS = 3.0
-# RunConfig.dispatch = "queue_one" (the rule before a8b80bc, for A/B): the queued plan forms this long before stage 0
-# frees (its value then: stage 0's host time from forming to its forward returning, p99 41.5 ms, smoke 7658).
-QUEUE_ONE_FORM_LEAD_MS = 45.0
 
 # One request of 64k or more is one microbatch, and its activations outgrow the contract's 13.6 GB reserve beside the
 # full KV pool (job 7117: one_64k needs ~37 GB, one_128k ran out of memory in warm-up). These runs need a few blocks of
@@ -504,10 +501,6 @@ def run_named(name: str, fake: bool, port: int, out_root: Path, args) -> dict:
     if not fake:
         scfg["checkpoint"] = str(CHECKPOINT)
         scfg["form_lead_ms"] = REAL_FORM_LEAD_MS
-    if args.dispatch:
-        scfg["dispatch"] = args.dispatch
-        if args.dispatch == "queue_one" and not fake:
-            scfg["form_lead_ms"] = QUEUE_ONE_FORM_LEAD_MS
     limit = SESSION_CLIENT_LIMIT if kind == "sessions" else None
     return execute(run_dir, scfg, client_config(trace, port, run_dir, fmt=fmt, **ccfg,
                                                 token_pool_limit=args.token_pool_limit),
@@ -604,8 +597,6 @@ def main():
     ap.add_argument("--client-limit", help="prefix/session runs: `timeout` for the client (default 22m for prefix_n<N>)")
     ap.add_argument("--pool-tokens", type=int, help="prefix/session runs: cap the KV pool (harness checks)")
     ap.add_argument("--token-pool-limit", type=int, help="req-frontend corpus.token_pool_limit (harness checks)")
-    ap.add_argument("--dispatch", choices=["project", "queue_one"],
-                    help="RunConfig.dispatch (default project); queue_one forms QUEUE_ONE_FORM_LEAD_MS ahead")
     args = ap.parse_args()
     for n in args.names:
         parse_name(n)
