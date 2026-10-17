@@ -300,7 +300,7 @@ demote, copy-up, staging; `tests/test_tiers_e2e_cpu.py`: the server with the fak
 
 **Step 1a DRAM bring-up (job 7955, 2026-10-17 04:24, load 8.4 at start; two hops, ring depth 2 x chunk 4; DRAM 48
 GB per GPU; the bring-up pool of 1,234,944 tokens, so Ready = 145 blocks and every round 1 reads from DRAM).**
-Per P, p50 of 5 sessions, ms; targets from `tier_targets.json` (`bench/tiers.py --target dram`):
+Per P, mean of 5 sessions, ms; targets from `tier_targets.json` (`bench/tiers.py --target dram`):
 
 | P | Round-1 TTFT (target) | Read (target) | Read on the GPUs | Send -> submit / done -> landed | TTFT - read vs HBM-hit target |
 |---|---|---|---|---|---|
