@@ -27,11 +27,11 @@ Prefix cache (`keep_sessions`, 5_prefix_cache.md §2): a finished request's bloc
 that starts with that whole context takes them over and computes only the rest (`engine/kv.py`, matched by content).
 Its cached tokens go back in `usage.prompt_tokens_details.cached_tokens` and into `server_requests.jsonl`.
 When a microbatch forms is `DispatchRule`'s decision (ppimpl/runtime/dispatch.py); what it holds is the scheduler's.
-Tiers (`tiers`, lanes/m6 TIERS.md): the scheduler's slot index (`engine/tiers.py`) decides every byte move; the
-control thread sends ops whose dependencies are done to all workers' tier sockets (`TierBatch`) and lands an op when
-all of them reported it (`TierDone`): `tier_ops.jsonl`, one line per op (sent, done per stage, bytes per GPU);
-`server_requests.jsonl` gains the tier, tokens read and read start/landing of a round served from a tier, and
-`cache.json` the tiers' counters.
+Tiers (`tiers`, lanes/m6 TIERS.md): the KV pool's leader (`ppimpl/kvpool`, in the scheduler) decides every byte
+move; the control thread sends ops whose dependencies are done to all workers' tier sockets (`TierBatch`) and
+completes an op when all of them reported it (`TierDone`): `tier_ops.jsonl`, one line per op (sent, done per stage,
+bytes per GPU); `server_requests.jsonl` gains the tier, tokens read and read start/landing of a round served from a
+tier, and `cache.json` the tiers' counters.
 """
 
 import asyncio
@@ -58,11 +58,13 @@ import zmq
 from ppimpl.config import BLOCK_TOKENS, CONTRACT_BLOCKS, RunConfig, dump_config
 from ppimpl.engine.kv import KvManager, kv_blocks_for, pool_size
 from ppimpl.engine.scheduler import ChunkSpec, Request, Scheduler
-from ppimpl.engine.tiers import TierOp, Tiers
+from ppimpl.kvpool import BalancedKVPool
+from ppimpl.kvpool.manager import TierOp
+from ppimpl.kvpool.member import tier_move
 from ppimpl.runtime.cpus import CONTROLLER_CORES, cpu_list, pin_process, split_cores, threads
 from ppimpl.runtime.dispatch import NOW, WAIT, DispatchRule
-from ppimpl.runtime.transport import (Chunk, Plan, Ready, Shutdown, StageDone, TierBatch, TierDone, TierMove,
-                                      WorkerError, decode_to_controller, encode, for_stage)
+from ppimpl.runtime.transport import (Chunk, Plan, Ready, Shutdown, StageDone, TierBatch, TierDone, WorkerError,
+                                      decode_to_controller, encode, for_stage)
 from ppimpl.serve.slab import SlabReader
 
 READY_TIMEOUT_S = 1800   # a real stage loads its weights and captures graphs before Ready
@@ -184,15 +186,15 @@ class Controller:
                                f"{CONTRACT_BLOCKS}")
         num_blocks = pool_size([r.num_blocks for r in ready], cfg.pool_tokens)
         self.rule = DispatchRule(cfg.max_in_flight, cfg.form_lead_ms, self.n)
-        tiers = self._tiers(ready) if cfg.tiers is not None else None
+        pool = self._pool(ready) if cfg.tiers is not None else None
         # the scheduler's in-flight limits are the rule's (net of `exiting`, 2 ahead)
         self.sched = Scheduler(KvManager(num_blocks, keep_sessions=cfg.keep_sessions, content_keys=True),
-                               cfg.scheduler, tiers, *self.rule.sched_limits)
+                               cfg.scheduler, pool, *self.rule.sched_limits)
         self.mb_log = open(self.run_dir / "microbatches.jsonl", "w")
         self.host_log = open(self.run_dir / "worker_host.jsonl", "w")
         self.plan_log = open(self.run_dir / "plans.jsonl", "w")
         self.req_log = open(self.run_dir / "server_requests.jsonl", "w")
-        self.tier_log = open(self.run_dir / "tier_ops.jsonl", "w") if tiers is not None else None
+        self.tier_log = open(self.run_dir / "tier_ops.jsonl", "w") if pool is not None else None
         (self.run_dir / "pool.json").write_text(json.dumps(
             {"ready_blocks": [r.num_blocks for r in ready], "num_blocks": num_blocks,
              "pool_tokens": num_blocks * BLOCK_TOKENS, "keep_sessions": cfg.keep_sessions}))
@@ -212,8 +214,8 @@ class Controller:
                 os.sched_setaffinity(p.pid, self.intake_cpus)
             self.intake_procs.append(p)
 
-    def _tiers(self, ready: list[Ready]) -> Tiers:
-        """The slot index, in the workers' slot size (all equal: each moves a quarter of the same ranges), and a
+    def _pool(self, ready: list[Ready]) -> BalancedKVPool:
+        """The pool's leader, in the workers' slot size (all equal: each moves a quarter of the same ranges), and a
         PUSH socket to each worker's tier thread."""
         sizes = {(r.slot_bytes, r.state_slots) for r in ready}
         if len(sizes) != 1 or not ready[0].slot_bytes:
@@ -224,12 +226,13 @@ class Controller:
             sock.setsockopt(zmq.SNDHWM, 0)
             sock.connect(self.cfg.tier_addr(s))
             self.tier_socks.append(sock)
-        t = Tiers(tc)
+        pool = BalancedKVPool(tc)
+        m = pool.manager
         info = {"slot_bytes": tc.slot_bytes, "state_slots": tc.state_slots,
-                "slots": {x.name: x.num_slots for x in t.tiers}, "staging_slots": t.staging.num_slots}
+                "slots": {x.name: x.num_slots for x in m.tiers}, "staging_slots": m.staging.num_slots}
         (self.run_dir / "tiers.json").write_text(json.dumps(info) + "\n")
         print("tiers: " + json.dumps(info), flush=True)
-        return t
+        return pool
 
     def _pin(self):
         """The controller takes the job's CPUs that the workers did not pin themselves to; cpus.json records both."""
@@ -307,10 +310,11 @@ class Controller:
                 "kept_tokens": sum(k.tokens for k in kv.kept.values()), "used_tokens": kv.used_tokens,
                 "free_blocks": kv.pool.num_free, "time_ms": self._ms(time.time_ns()) if self.t0_ns else None,
                 "scheduler": dict(self.sched.stats)}    # busy_waits: rounds that waited for a tier write (TIERS.md §5)
-        if self.sched.tiers is not None:
-            info["tiers"] = self.sched.tiers.summary()
-            info["tier_ops_in_flight"] = len(self.sched.tiers.in_flight)
-            info["tier_ops_waiting"] = len(self.sched.tiers.waiting)
+        if self.sched.pool is not None:
+            m = self.sched.pool.manager
+            info["tiers"] = m.summary()
+            info["tier_ops_in_flight"] = len(m.in_flight)
+            info["tier_ops_waiting"] = len(m.waiting)
         tmp = self.run_dir / "cache.json.tmp"
         tmp.write_text(json.dumps(info) + "\n")
         tmp.replace(self.run_dir / "cache.json")
@@ -599,7 +603,7 @@ class Controller:
 
     def _tier_send(self):
         """Send the tier ops whose dependencies are done (reads, writes after `finish`, dependents of landed ops)."""
-        ops = self.sched.tiers.ready_ops()
+        ops = self.sched.pool.ready_ops()
         if not ops:
             return
         msg = encode(TierBatch([tier_move(o) for o in ops]))
@@ -654,13 +658,6 @@ class Controller:
             self.intake.send_multipart([fut.ident, b"A", self.pack.encode((fut.key, req.req_id, tok, req.cached))])
             return []
         return [(fut, tok, info)]
-
-
-def tier_move(o: TierOp) -> TierMove:
-    """What every worker needs of a tier op: HBM blocks [b_lo, b_hi) of the context move (none for a demote)."""
-    b_lo, b_hi = (0, 0) if o.op == "demote" else (o.token_start // BLOCK_TOKENS, kv_blocks_for(o.token_end))
-    return TierMove(o.op_id, o.op, o.tier, o.host_tier, b_lo, b_hi, o.block_start, o.kv_blocks[:b_hi],
-                    o.state_blocks, o.slots, o.state_slots, o.host_slots, o.host_state)
 
 
 def _fail_all(futs: list[asyncio.Future], why: str):

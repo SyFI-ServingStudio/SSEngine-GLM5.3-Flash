@@ -1,44 +1,74 @@
-"""DRAM and SSD behind the HBM prefix cache (7_offloading.md §2). A pure index: the engine decides, the workers move
-the bytes. Every decision that moves bytes becomes a `TierOp` the controller sends to all n workers (n = PP degree).
+"""Layer 5 of the KV pool (lanes/m6 TIERS.md §3-§7, §13.2): the DRAM and SSD index behind the HBM prefix cache
+(7_offloading.md §2). Pure policy on the leader, no torch: it decides, the members move the bytes. Every decision
+that moves bytes becomes a `TierOp` the leader sends to all n members (n = PP degree).
 
-- **What a tier keeps.** One entry per session: its latest context, KV of the prompt's tokens plus the KDA state at
-  the prompt's end. Each tier evicts on its own, least recently used first, a whole session at a time; a read
-  refreshes its session.
+- **What a tier keeps.** One entry per key (a session): its latest context, KV of the prompt's tokens plus the KDA
+  state at the prompt's end. Each tier evicts on its own, least recently used first, a whole entry at a time; a read
+  refreshes its entry.
 - **Accounting.** Bytes (`TierConfig.slot_bytes` None: replay, the target's own accounting, bytes per token plus one
-  state per context) or slots (the server, lanes/m6 TIERS.md §3): a tier is a free list of fixed slots, one slot per
-  KV block of the context plus `state_slots` for its state, the same slot ids on every GPU. Each GPU's slot holds its
-  1/n of that block on all n stages (balanced storage); own-stage storage is the same code with other sizes.
-- **Writes.** When a round ends its context goes to the fastest tier (DRAM), only what the session's entry there does
-  not already hold: the new tokens' KV and the new state. With `ssd_writes = "dram-evictions"` the SSD is written only
-  with what DRAM evicts (or cannot hold), again only what SSD's entry lacks; a context SSD already holds whole is not
-  written again. A context whose session moved on with a shorter one (a prompt that keeps only part of the previous
-  context) no longer resumes from its state, so a victim tier's older entry for that session is dropped. With
-  `"every-context"`, SSD is written through like DRAM. Writes are free in the target; the engine issues them and
-  goes on.
-- **Reads.** One channel per tier: reads queue one after another at the tier's bandwidth; the two tiers read in
-  parallel. A read moves the tokens HBM lacks plus the KDA state. A read that would wait more than `max_read_wait_ms`
-  for its channel is not started (the scheduler passes the round over). A read from SSD also puts the session back
-  in DRAM (copy-up); in slot mode that is the same op: SSD -> the new DRAM slots -> HBM.
+  state per context) or slots (the server, TIERS.md §3): a tier is a free list of fixed slots, one slot per KV block
+  of the context plus `state_slots` for its state, the same slot ids on every GPU. Each GPU's slot holds its 1/n of
+  that block on all n stages (balanced storage, `placement.py`).
+- **Writes** (`prepare_store`). When a round ends its context goes to the fastest tier (DRAM), only what the key's
+  entry there does not already hold: the new tokens' KV and the new state. With `ssd_writes = "dram-evictions"` the
+  SSD is written only with what DRAM evicts (or cannot hold), again only what SSD's entry lacks; a context SSD
+  already holds whole is not written again. A context whose session moved on with a shorter one (a prompt that keeps
+  only part of the previous context) no longer resumes from its state, so a victim tier's older entry for that key
+  is dropped. With `"every-context"`, SSD is written through like DRAM. Writes are free in the target; the engine
+  issues them and goes on.
+- **Reads** (`lookup`, `prepare_load`). One channel per tier: reads queue one after another at the tier's bandwidth;
+  the two tiers read in parallel. A read moves the tokens HBM lacks plus the KDA state. `Hit.wait_ns` is how long a
+  read started now waits for its channel; the read-wait bound is the scheduler's. A read from SSD also puts the
+  entry back in DRAM (copy-up); in slot mode that is the same op: SSD -> the new DRAM slots -> HBM.
 - **Slot order.** A context that grows keeps the slots of its full blocks and takes new ones for its last (partial)
   block, the new blocks and its state. A freed slot is reused at once; the ops keep their order through `TierOp.deps`:
   an op waits for the ops in flight that write a slot it reads or writes, or read a slot it writes (an evicted
-  context's demote is emitted before the write that reuses its slots). The controller sends an op once its deps are
-  done (`ready_ops`) and reports it done (`op_done`).
+  context's demote is emitted before the write that reuses its slots). The leader sends an op once its deps are
+  done (`ready_ops`) and reports it done (`complete`).
 """
 
 from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 
 from ppimpl.config import BLOCK_TOKENS, TierConfig
-from ppimpl.engine.kv import Allocation, kv_blocks_for, prefix_content, resumable_tokens
+from ppimpl.engine.kv import kv_blocks_for, prefix_content, resumable_tokens
 
 NS = 1_000_000_000
 
 
 @dataclass
+class KVViews:
+    """A context's blocks in the KV caches the members registered: KV block ids from block 0 and the state blocks.
+    One KVViews names the same blocks on every stage (this engine: one allocation for all); a list of n names each
+    stage's own. A load fills tokens [hbm_tokens, tokens): HBM already holds the first hbm_tokens."""
+    kv_blocks: list[int]
+    state_blocks: list[int]
+    tokens: int = 0
+    hbm_tokens: int = 0
+
+
+@dataclass(frozen=True)
+class Hit:
+    """`lookup`: the fastest tier holding the longest context of the key the prompt resumes from, and how long a
+    read started now waits for that tier's channel."""
+    tier: str
+    tokens: int
+    wait_ns: int
+
+
+def _blocks(views: KVViews | list[KVViews] | None) -> dict:
+    """A TierOp's block lists: one list for every stage, or one per stage."""
+    if views is None:
+        return {}
+    vs = views if isinstance(views, list) else [views]
+    return dict(kv_blocks=[list(v.kv_blocks) for v in vs], state_blocks=[list(v.state_blocks) for v in vs])
+
+
+@dataclass
 class TierOp:
-    """One byte move for the workers. `kv_blocks`/`state_blocks` are HBM block ids (reads: the held blocks to fill;
-    writes: the kept blocks to copy from). Tokens [token_start, token_end) of KV plus the KDA state move.
+    """One byte move for the members. `kv_blocks`/`state_blocks` are HBM block ids, one list for every stage or one
+    per stage (reads: the held blocks to fill; writes: the kept blocks to copy from). Tokens [token_start, token_end)
+    of KV plus the KDA state move.
 
     Slot mode: `slots[i]` is `tier`'s slot of the context's KV block `block_start + i`, `state_slots` its state.
     `host_slots`/`host_state` are the host side of an SSD op on the same blocks: the DRAM entry (demote: the source;
@@ -48,11 +78,11 @@ class TierOp:
     op: str                    # "write" HBM -> tier, "read" tier -> HBM, "demote" DRAM -> SSD, "promote" SSD -> DRAM,
                                # "drop" forget the tier's entry
     tier: str                  # destination tier for write/demote/promote, source tier for read, the tier for drop
-    entry: int                 # the session's entry id (same on every worker)
+    entry: int                 # the key's entry id (same on every member)
     token_start: int = 0
     token_end: int = 0
-    kv_blocks: list[int] = field(default_factory=list)
-    state_blocks: list[int] = field(default_factory=list)
+    kv_blocks: list[list[int]] = field(default_factory=list)
+    state_blocks: list[list[int]] = field(default_factory=list)
     req_id: str | None = None  # read: the request it is for
     land_ns: int | None = None  # read: when the engine expects it to land
     block_start: int = 0
@@ -66,6 +96,12 @@ class TierOp:
     @property
     def moves_bytes(self) -> bool:
         return self.op != "drop"
+
+    @property
+    def blocks(self) -> tuple[int, int]:
+        """HBM blocks [b_lo, b_hi) the op moves: from the block holding token_start to the last one (none for a
+        demote)."""
+        return (0, 0) if self.op == "demote" else (self.token_start // BLOCK_TOKENS, kv_blocks_for(self.token_end))
 
 
 @dataclass
@@ -201,8 +237,11 @@ class TierStore:
         return out
 
 
-class Tiers:
-    """The DRAM/SSD index of one pipeline, fastest first, and the reads in flight."""
+class TierManager:
+    """The DRAM/SSD index of one pipeline, fastest first, and the ops in flight (slot mode).
+
+    `prepare_load` / `prepare_store` return the ops they emitted, in order. Slot mode keeps the byte-moving ones for
+    `ready_ops` / `complete`; byte mode (replay) keeps none: nothing executes them, reads land at their `land_ns`."""
 
     def __init__(self, cfg: TierConfig, partial_hits: bool = False):
         self.cfg = cfg
@@ -220,15 +259,15 @@ class Tiers:
                                         **kw))
         self.staging = TierStore("staging", cfg.staging_gb * 1e9, 0, 0, 0, False, **kw) if self.slot_mode else None
         assert cfg.ssd_writes in ("dram-evictions", "every-context")
-        self.max_wait_ns = None if cfg.max_read_wait_ms is None else int(cfg.max_read_wait_ms * 1e6)
-        self.ops: list[TierOp] = []
+        self.level = {t.name: i for i, t in enumerate(self.tiers)}
+        self._out: list[TierOp] = []                              # emitted by the current prepare_* call
         self.waiting: OrderedDict[int, TierOp] = OrderedDict()   # slot mode: emitted, deps not done yet
         self.in_flight: dict[int, TierOp] = {}
         self._entry_ids: dict[object, int] = {}
         self._next_op = 0
 
-    def take_ops(self) -> list[TierOp]:
-        ops, self.ops = self.ops, []
+    def _take(self) -> list[TierOp]:
+        ops, self._out = self._out, []
         return ops
 
     def _entry(self, key) -> int:
@@ -239,7 +278,8 @@ class Tiers:
         self._next_op += 1
         if self.slot_mode and o.moves_bytes:
             o.deps = self.guard.add(o.op_id, *self._touches(o))
-        self.ops.append(o)
+            self.waiting[o.op_id] = o
+        self._out.append(o)
         return o
 
     @staticmethod
@@ -255,13 +295,10 @@ class Tiers:
             return t, h
         return [], []
 
-    # --- the controller's side of slot mode ---------------------------------------------------------------------
+    # --- the leader's side of slot mode ---------------------------------------------------------------------------
 
     def ready_ops(self) -> list[TierOp]:
-        """Slot mode: take the new ops and return, in emission order, those whose deps are done (to send now)."""
-        for o in self.take_ops():
-            if o.moves_bytes:
-                self.waiting[o.op_id] = o
+        """Slot mode: the emitted ops whose deps are done (to send now), in emission order."""
         ready = [o for o in self.waiting.values() if not any(d in self.waiting or d in self.in_flight
                                                                  for d in o.deps)]
         for o in ready:
@@ -269,86 +306,89 @@ class Tiers:
             self.in_flight[o.op_id] = o
         return ready
 
-    def op_done(self, op_id: int) -> TierOp:
-        """Every worker reported the op done: free what it held, its dependents may go."""
+    def complete(self, op_id: int, now_ns: int) -> TierOp:
+        """Every member reported the op done at `now_ns`: free what it held, its dependents may go. A read's channel
+        is free no earlier than that (real reads may run slower than the configured bandwidth; `Hit.wait_ns` then
+        sees the real queue)."""
         o = self.in_flight.pop(op_id)
         self.guard.done(op_id)
+        if o.op == "read":
+            t = self.tiers[self.level[o.tier]]
+            t.channel_free_ns = max(t.channel_free_ns, now_ns)
         return o
 
     # --- lookups ------------------------------------------------------------------------------------------------
 
-    def lookup(self, req) -> tuple[int, int] | None:
-        """(tier index, tokens): the fastest tier holding the longest resumable context of the request's session."""
+    def lookup(self, key, prompt, now_ns: int = 0) -> Hit | None:
+        """The fastest tier holding the longest context of `key` that `prompt` (a `scheduler.Request`) resumes from."""
         best = None
         for i, t in enumerate(self.tiers):
-            e = t.entries.get(req.session)
+            e = t.entries.get(key)
             if e is not None:
-                n = resumable_tokens(e.tokens, e.content, req, self.partial_hits)
+                n = resumable_tokens(e.tokens, e.content, prompt, self.partial_hits)
                 if n > 0 and (best is None or n > best[1]):
                     best = (i, n)
-        return best
+        return None if best is None else Hit(self.tiers[best[0]].name, best[1], self.wait_ns(best[0], now_ns))
 
-    def queue_wait_ns(self, tier: int, now_ns: int) -> int:
-        return max(0, self.tiers[tier].channel_free_ns - now_ns)
+    def wait_ns(self, tier: int | str, now_ns: int) -> int:
+        """How long a read started at `now_ns` waits for the tier's channel."""
+        return max(0, self.tiers[self.level.get(tier, tier)].channel_free_ns - now_ns)
 
-    def read_ns(self, tier: int, tokens: int, hbm_tokens: int = 0) -> int:
-        t = self.tiers[tier]
+    def read_ns(self, tier: int | str, tokens: int, hbm_tokens: int = 0) -> int:
+        t = self.tiers[self.level.get(tier, tier)]
         if self.slot_mode and t.name == "ssd":
             hbm_tokens = 0              # an SSD read reads the whole context (copy-up)
         return round(t.move_bytes(hbm_tokens, tokens) / t.read_bps * NS)
 
-    def passed_over(self, tier: int, now_ns: int) -> bool:
-        return self.max_wait_ns is not None and self.queue_wait_ns(tier, now_ns) > self.max_wait_ns
-
-    def landed_late(self, tier_name: str, now_ns: int):
-        """A read landed at `now_ns`: the channel is free no earlier than that (real reads may run slower than the
-        configured bandwidth; the read-wait bound then sees the real queue)."""
-        for t in self.tiers:
-            if t.name == tier_name:
-                t.channel_free_ns = max(t.channel_free_ns, now_ns)
-
     # --- reads --------------------------------------------------------------------------------------------------
 
-    def read(self, req, tier: int, tokens: int, hbm_tokens: int, alloc: Allocation, now_ns: int) -> TierOp:
-        """Queue a read of the session's first `tokens` into the request's held blocks; HBM already has the first
-        `hbm_tokens`. Copies an SSD context up into DRAM."""
+    def prepare_load(self, key, hit: Hit, views: KVViews | list[KVViews] | None, now_ns: int,
+                     req_id: str | None = None) -> tuple[list[TierOp], int] | None:
+        """Queue a read of the key's first `hit.tokens` from `hit.tier` into `views` (HBM already has their first
+        `hbm_tokens`). Copies an SSD context up into DRAM. Returns (the ops, the read's expected landing time), or
+        None if the tier no longer holds the key."""
+        tier = self.level[hit.tier]
         t = self.tiers[tier]
+        e = t.entries.get(key)
+        if e is None:
+            return None
+        tokens = hit.tokens
+        hbm_tokens = 0 if views is None else (views if isinstance(views, KVViews) else views[0]).hbm_tokens
         start = max(t.channel_free_ns, now_ns)
         land = start + self.read_ns(tier, tokens, hbm_tokens)
         t.channel_free_ns = land
         t.stats["reads"] += 1
         t.stats["read_tokens"] += tokens - hbm_tokens
         t.stats["read_bytes"] += t.move_bytes(hbm_tokens, tokens)
-        t.touch(req.session)
-        e = t.entries[req.session]
-        kw = dict(token_start=hbm_tokens, token_end=tokens, kv_blocks=list(alloc.kv_blocks),
-                  state_blocks=list(alloc.state_blocks), req_id=req.req_id, land_ns=land)
+        t.touch(key)
+        kw = dict(token_start=hbm_tokens, token_end=tokens, req_id=req_id, land_ns=land, **_blocks(views))
         if not self.slot_mode:
-            op = self._emit("read", t.name, req.session, **kw)
+            self._emit("read", t.name, key, **kw)
             for faster in range(tier):
-                self._store_in(faster, req.session, tokens, e.content, "promote", alloc)
-            return op
+                self._store_in(faster, key, tokens, e.content, "promote", views)
+            return self._take(), land
         n = kv_blocks_for(tokens)
         if t.name == "dram":
             b0 = hbm_tokens // BLOCK_TOKENS
-            return self._emit("read", t.name, req.session, block_start=b0, slots=e.slots[b0:n],
-                              state_slots=list(e.state), **kw)
-        host = self._store_in(0, req.session, tokens, e.content, "promote", emit=False) if tier > 0 else None
+            self._emit("read", t.name, key, block_start=b0, slots=e.slots[b0:n], state_slots=list(e.state), **kw)
+            return self._take(), land
+        host = self._store_in(0, key, tokens, e.content, "promote", emit=False) if tier > 0 else None
         if host is None:                # no DRAM, or it cannot hold the context: through the staging area
             hs = self.staging.take(n + self.staging.state_slots)
             host_tier, host_slots, host_state = "staging", hs[:n], hs[n:]
         else:
             host_tier, host_slots, host_state = "dram", host.slots[:n], host.state
-        return self._emit("read", t.name, req.session, slots=e.slots[:n], state_slots=list(e.state),
-                          host_tier=host_tier, host_slots=host_slots, host_state=host_state, **kw)
+        self._emit("read", t.name, key, slots=e.slots[:n], state_slots=list(e.state), host_tier=host_tier,
+                   host_slots=host_slots, host_state=host_state, **kw)
+        return self._take(), land
 
     # --- writes -------------------------------------------------------------------------------------------------
 
-    def store(self, req, alloc: Allocation, key=None):
-        """A round ended: write its context to the fastest tier and every write-through tier; a victim tier's older
-        entry stays valid only if the new context starts with it. `key`: the session's key (default req.session;
-        the server keys by content, as the HBM cache does)."""
-        key = req.session if key is None else key
+    def prepare_store(self, key, prompt, views: KVViews | list[KVViews] | None = None) -> list[TierOp]:
+        """A round of `prompt` (a `scheduler.Request`) ended in `views`: write its context to the fastest tier and
+        every write-through tier; a victim tier's older entry stays valid only if the new context starts with it.
+        `key`: the session (replay) or the context's content key (the server, as the HBM cache). Returns the ops."""
+        req = prompt
         tokens = req.num_tokens
         content = prefix_content(req.token_ids, tokens) if req.token_ids is not None else None
         for t in self.tiers[1:]:
@@ -357,7 +397,8 @@ class Tiers:
                 self._drop(t, key)
         for i, t in enumerate(self.tiers):
             if i == 0 or not t.victim:
-                self._store_in(i, key, tokens, content, "write", alloc, req)
+                self._store_in(i, key, tokens, content, "write", views, req)
+        return self._take()
 
     def _drop(self, t: TierStore, key):
         e = t.remove(key)
@@ -376,7 +417,7 @@ class Tiers:
             return old.tokens if resumable_tokens(old.tokens, old.content, req, self.partial_hits) == old.tokens else 0
         return old.tokens if old.tokens <= tokens else 0
 
-    def _store_in(self, i: int, key, tokens: int, content, op: str, alloc: Allocation | None = None, req=None,
+    def _store_in(self, i: int, key, tokens: int, content, op: str, views=None, req=None,
                   src: TierEntry | None = None, emit: bool = True) -> TierEntry | None:
         """Store into tier i (op "write" from HBM, "promote" SSD -> DRAM, "demote" DRAM -> SSD from `src`). What the
         tier evicts for it goes down to the next tier if that one is a victim tier, then is dropped here. Returns the
@@ -400,9 +441,7 @@ class Tiers:
                     self._store_in(nxt, victim, e.tokens, e.content, "demote", src=e)
             self._emit("drop", t.name, victim)
         if stored and emit:
-            kw = {}
-            if alloc is not None:
-                kw = dict(kv_blocks=list(alloc.kv_blocks), state_blocks=list(alloc.state_blocks))
+            kw = _blocks(views)
             if self.slot_mode:
                 b0 = keeps // BLOCK_TOKENS
                 kw |= dict(block_start=b0, slots=entry.slots[b0:], state_slots=list(entry.state))
@@ -417,7 +456,7 @@ class Tiers:
         elif not stored and old is not None:
             self._emit("drop", t.name, key)
         if too_large and nxt is not None and op == "write":
-            self._store_in(nxt, key, tokens, content, "write", alloc, req)
+            self._store_in(nxt, key, tokens, content, "write", views, req)
         return entry
 
     # --- reporting ----------------------------------------------------------------------------------------------

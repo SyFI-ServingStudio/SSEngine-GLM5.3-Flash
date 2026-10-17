@@ -19,10 +19,12 @@ The scheduler of 6_scheduler.md §2, built on the plain one (`SchedulerConfig`; 
   prompts' unscheduled tokens, the waiting prompts' new tokens (beyond the session's previous context, even if that
   must be recomputed: `Request.fresh`) and the in-flight microbatches' tokens.
 - **Force-schedule** (`force_after_ms`): a request whose wait since it arrived has reached the bound goes first.
-- **Tiers** (phase D, `tiers`): when the order reaches a waiting round that DRAM or SSD holds more of than HBM, its
-  read starts (if its footprint fits; the footprint is held until it lands) and it leaves the queue. A read that
-  would wait more than the bound for its tier is not started: the round is passed over and stays queued. Landed
-  rounds are admitted before every queued request, in landing order.
+- **Tiers** (phase D, `pool`, `ppimpl/kvpool`): when the order reaches a waiting round that DRAM or SSD holds more
+  of than HBM, its read starts (if its footprint fits; the footprint is held until it lands) and it leaves the queue.
+  A read that would wait more than the bound (`TierConfig.max_read_wait_ms`) for its tier (`Hit.wait_ns`) is not
+  started: the round is passed over and stays queued. Landed rounds are admitted before every queued request, in
+  landing order. A round's end stores its context; with slot tiers its kept context stays pinned in HBM until the
+  store's handle is done.
 
 The microbatch-forming procedure follows the reference implementation of the same design (ServingStudioSim
 `pipelined_chunked_prefill_admission.rs`, `srpt.rs`, `fresh_source.rs`, `prefix_fetch.rs`), so that the scheduling
@@ -35,7 +37,7 @@ from dataclasses import dataclass
 
 from ppimpl.config import MAX_IN_FLIGHT, SchedulerConfig
 from ppimpl.engine.kv import Allocation, KvManager
-from ppimpl.engine.tiers import TierOp, Tiers
+from ppimpl.kvpool import BalancedKVPool, Handle, KVViews
 
 
 @dataclass(eq=False)
@@ -200,11 +202,13 @@ LANDED, OVERDUE, POLICY = "landed", "overdue", "policy"
 
 
 class Scheduler:
-    def __init__(self, kv: KvManager, cfg: SchedulerConfig | None = None, tiers: Tiers | None = None,
+    def __init__(self, kv: KvManager, cfg: SchedulerConfig | None = None, pool: BalancedKVPool | None = None,
                  max_in_flight: int = MAX_IN_FLIGHT, dispatch_ahead: int = 1):
         self.kv = kv
         self.cfg = cfg = cfg or SchedulerConfig()
-        self.tiers = tiers
+        self.pool = pool
+        wait = None if pool is None else pool.cfg.max_read_wait_ms
+        self.max_wait_ns = None if wait is None else int(wait * 1e6)    # the read-wait bound
         self.max_in_flight = max_in_flight
         self.dispatch_ahead = dispatch_ahead
         self.srpt = cfg.order == "srpt"
@@ -221,7 +225,7 @@ class Scheduler:
         self._seq = 0
         self._chunks: list[ChunkSpec] = []
         self.stats = dict(microbatches=0, passed_over=0, reads=0, blocked_reads=0, busy_waits=0)
-        self.hbm_writes: dict[int, object] = {}  # tier write op -> the kept context it copies from (pinned)
+        self.hbm_writes: dict[Handle, object] = {}  # store -> the kept context it copies from (pinned)
 
     # --- events ---------------------------------------------------------------------------------------------------
 
@@ -233,10 +237,10 @@ class Scheduler:
         if now_ns is not None and not req.arrival_ns:
             req.arrival_ns = now_ns
         rank = self.kv.peek_hit(req)
-        if self.tiers is not None and req.session is not None:
-            hit = self.tiers.lookup(req)
+        if self.pool is not None and req.session is not None:
+            hit = self.pool.lookup(req.session, req)
             if hit is not None:
-                rank = max(rank, hit[1])
+                rank = max(rank, hit.tokens)
         req.size = req.num_tokens - rank
         if req.token_ids is not None and not req.prefix_tokens:     # server: no declared prefix
             req.backlog_prefix = self.kv.shared_prefix(req)
@@ -253,36 +257,34 @@ class Scheduler:
 
     def finish(self, req: Request):
         """The request's token is out: its context goes to the tiers (if any) and stays kept in HBM, or its blocks
-        are freed. With slot tiers, the kept context is pinned in HBM until its write is done (`op_done`)."""
-        first = len(self.tiers.ops) if self.tiers is not None else 0
-        if self.tiers is not None and req.session is not None:
-            self.tiers.store(req, req.alloc, self.kv.kept_key(req) if self.kv.keep_sessions else req.session)
+        are freed. With slot tiers, the kept context is pinned in HBM until its store is done (`op_done`)."""
+        h = None
+        if self.pool is not None and req.session is not None:
+            h = self.pool.store(self.kv.kept_key(req) if self.kv.keep_sessions else req.session, req,
+                                KVViews(req.alloc.kv_blocks, req.alloc.state_blocks, req.num_tokens))
         key = self.kv.release(req)
-        if key is not None and self.tiers is not None and self.tiers.slot_mode:
-            for o in self.tiers.ops[first:]:
-                if o.op == "write":
-                    self.hbm_writes[o.op_id] = key
-                    self.kv.pin(key)
+        if key is not None and h is not None and not h.done():
+            self.hbm_writes[h] = key
+            self.kv.pin(key)
 
     def op_done(self, op_id: int, now_ns: int):
-        """Every worker reported the tier op done (slot tiers): unpin the kept context it copied from, land a read."""
-        o = self.tiers.op_done(op_id)
-        key = self.hbm_writes.pop(op_id, None)
-        if key is not None:
-            self.kv.unpin(key)
-        if o.op == "read":
-            self.tiers.landed_late(o.tier, now_ns)
-            self.read_landed(o.req_id, now_ns)
+        """Every worker reported the tier op done (slot tiers): a store done unpins the kept context it copied from,
+        a load done lands its round."""
+        _, h = self.pool.complete(op_id, now_ns)
+        if h is None:
+            return
+        if h.kind == "store":
+            key = self.hbm_writes.pop(h, None)
+            if key is not None:
+                self.kv.unpin(key)
+        else:
+            self.read_landed(h.req_id, now_ns)
 
     def read_landed(self, req_id: str, now_ns: int):
         """Every worker reported the read done: the round is admitted before every queued request."""
         req = self.reading.pop(req_id)
         req.read_land_ns = now_ns
         self.landed.append(req)
-
-    def take_ops(self) -> list[TierOp]:
-        """Tier byte moves decided since the last call, for the workers, in order."""
-        return self.tiers.take_ops() if self.tiers is not None else []
 
     @property
     def waiting(self) -> list[Request]:
@@ -298,7 +300,7 @@ class Scheduler:
 
     def next_microbatch(self, now_ns: int = 0, exiting: int = 0) -> list[ChunkSpec] | None:
         """Form and commit the next microbatch, or None (nothing to run, or no room in flight). May start tier
-        reads (`take_ops`). `exiting`: the oldest in-flight microbatches that leave the last stage before this one
+        reads (`reading`). `exiting`: the oldest in-flight microbatches that leave the last stage before this one
         starts (the controller forms ahead, ppimpl/runtime/dispatch.py): not counted in flight or in the backlog."""
         if not self.can_dispatch(exiting):
             return None
@@ -416,7 +418,7 @@ class Scheduler:
                 self._take(src)
                 passed.append((src, r))
                 continue
-            if src != LANDED and self.tiers is not None:
+            if src != LANDED and self.pool is not None:
                 outcome = self._at_head(r, now_ns)
                 if outcome == "read":
                     self._take(src)
@@ -457,11 +459,10 @@ class Scheduler:
         if r.session is None:
             return "admit"
         hbm = self.kv.peek_hit(r)
-        found = self.tiers.lookup(r)
-        if found is None or found[1] <= hbm:
+        hit = self.pool.lookup(r.session, r, now_ns)
+        if hit is None or hit.tokens <= hbm:
             return "admit"
-        tier, tokens = found
-        if self.tiers.passed_over(tier, now_ns):
+        if self.max_wait_ns is not None and hit.wait_ns > self.max_wait_ns:
             self.stats["passed_over"] += 1
             return "passed"
         if not self.kv.fits(r):
@@ -471,12 +472,13 @@ class Scheduler:
             return "blocked"
         r.hbm_tokens = self.kv.allocate(r)
         r.alloc = self.kv.held[r.req_id]
-        op = self.tiers.read(r, tier, tokens, r.hbm_tokens, r.alloc, now_ns)
-        r.cached = tokens
-        r.tier = self.tiers.tiers[tier].name
-        r.tier_tokens = tokens - r.hbm_tokens
+        h = self.pool.load(r.session, hit, KVViews(r.alloc.kv_blocks, r.alloc.state_blocks, hit.tokens, r.hbm_tokens),
+                           now_ns, r.req_id)
+        r.cached = hit.tokens
+        r.tier = hit.tier
+        r.tier_tokens = hit.tokens - r.hbm_tokens
         r.read_start_ns = now_ns
-        r.read_land_ns = op.land_ns
+        r.read_land_ns = h.eta_ns
         self.reading[r.req_id] = r
         self.stats["reads"] += 1
         return "read"

@@ -1,7 +1,7 @@
-"""Two-hop tier copies on the GPUs, the engine's own code path (lanes/m6 TIERS.md §2.3 "Second hop").
+"""Two-hop tier copies on the GPUs, the pool's own code path (lanes/m6 TIERS.md §2.3 "Second hop").
 
-One process drives the job's 4 GPUs with four `TierEngine`s (`ppimpl/runtime/tier_worker.py`, `hops = "two"`), each on
-its own GPU, over fake per-stage KV laid out like GLM-5.3 PP4 (DSA layers 3/2/3/3 at 545 B/token each, split 4:1
+One process drives the job's 4 GPUs with four `PoolMember`s (`ppimpl/kvpool/member.py`, `hops = "two"`), each on its
+own GPU, over fake per-stage KV laid out like GLM-5.3 PP4 (DSA layers 3/2/3/3 at 545 B/token each, split 4:1
 between an MLA-like and an indexer-like view; KDA states 9/9/8/8 of 4 MiB + 144 KiB; a 2 KiB tail per DSA layer).
 Measured, every result one JSON line in OUT/tier_hop2.jsonl:
 - sweep: the ring's depth (2, 4) x chunk (1, 3 = the state, 4 slots) and direct, 32k / 128k / 512k contexts (4 / 16 /
@@ -25,8 +25,8 @@ from types import SimpleNamespace as NS
 import torch
 
 from ppimpl.config import HIDDEN_WIDTH, TierConfig
-from ppimpl.runtime import tier_worker
-from ppimpl.runtime.tier_copy import ViewRange
+from ppimpl.kvpool import member
+from ppimpl.kvpool.layout import ViewRange
 from ppimpl.runtime.transport import TierMove
 
 B = 8576
@@ -79,24 +79,24 @@ class Probe:
         peer_access(self.n)
         self.views, ranges = fake_kv(self.n)
         self.ranges = ranges
-        tier_worker.share_ranges = lambda stage, n, r: (ranges, [])     # one process: no IPC
+        member.share_ranges = lambda stage, n, r: (ranges, [])          # one process: no IPC
         self.eng = []
         self.build(ring)
         self.op = 0
 
     def build(self, ring: dict):
-        """Four engines with TierConfig's ring settings `ring` (hops, ring_depth, ring_chunk_slots)."""
+        """Four members with TierConfig's ring settings `ring` (hops, ring_depth, ring_chunk_slots)."""
         for e in self.eng:
             e.close()
         self.ring = ring
         tc = TierConfig(dram_gb=4.0, ssd_gb=None, **ring)
         self.eng = []
         for g in range(self.n):
-            e = tier_worker.TierEngine(NS(tiers=tc, num_stages=self.n, model="glm53", run_dir=str(self.out)), g,
-                                       torch.device("cuda", g), None)
+            e = member.PoolMember(NS(tiers=tc, num_stages=self.n, model="glm53", run_dir=str(self.out)), g,
+                                  torch.device("cuda", g), None)
             e.attach(self.ranges)
             self.eng.append(e)
-        self.state_slots = self.eng[0].layout.state_slots
+        self.state_slots = self.eng[0].placement.state_slots
 
     def log(self, **rec):
         print(json.dumps(rec), flush=True)
@@ -105,9 +105,9 @@ class Probe:
 
     def move(self, op: str, kv: list[int], st: list[int], sub: list | None = None,
              gpus: list[int] | None = None) -> tuple[float, int]:
-        """One op of a len(kv)-block context on the GPUs `gpus` (all) at once, each engine submitted from its own
+        """One op of a len(kv)-block context on the GPUs `gpus` (all) at once, each member submitted from its own
         thread as each worker does in the server (slots from 0, then the state); (seconds to the last GPU's end, HBM
-        bytes per GPU). `sub` gets the slowest engine's host submit time."""
+        bytes per GPU). `sub` gets the slowest member's host submit time."""
         ctx = len(kv)
         slots, sslots = list(range(ctx)), list(range(ctx, ctx + self.state_slots))
         gpus = range(self.n) if gpus is None else gpus
@@ -121,11 +121,11 @@ class Probe:
             torch.cuda.set_device(g)                            # as the worker's tier threads: a current context
             barrier.wait()
             t = time.perf_counter()
-            e.submit(TierMove(1_000_000 * g + self.op, op, "dram", None, 0, ctx, 0, kv, st, slots, sslots, [], []))
+            e.submit(TierMove(1_000_000 * g + self.op, op, "dram", None, 0, ctx, 0, [kv], [st], slots, sslots, [], []))
             ts = time.perf_counter() - t
             op_id, ev, start_ns, nb, _, mark = e.q["read" if op == "read" else "write"].get()
             ev.synchronize()
-            if (tr := e._traces.pop(op_id, None)) is not None:     # the engine's per-batch trace (run dir)
+            if (tr := e._traces.pop(op_id, None)) is not None:     # the member's per-batch trace (run dir)
                 e._write_trace(op_id, start_ns, mark, *tr)
             out[g] = (ts, nb)
 
@@ -143,7 +143,7 @@ class Probe:
         return dt, next(iter(out.values()))[1]
 
     def solo(self):
-        """GPU 0's engine alone (the others idle): host submit time vs the op's time, 32k / 128k / 512k reads."""
+        """GPU 0's member alone (the others idle): host submit time vs the op's time, 32k / 128k / 512k reads."""
         for ctx in (4, 16, 62):
             kv, st = list(range(1 + ctx, 1 + 2 * ctx)), list(range(6, 12))
             self.move("read", kv, st, gpus=[0])
@@ -163,7 +163,7 @@ class Probe:
         for v in self.views:                                    # destination scrambled, then read back
             v[dst_kv if v.shape[0] == NB else dst_st] = 0
         r = [self.move("read", dst_kv, dst_st) for _ in range(reps)]
-        sub = []                                                # the slowest engine's host submit time
+        sub = []                                                # the slowest member's host submit time
         for _ in range(3):
             self.move("read", dst_kv, dst_st, sub)
         bad = []
@@ -244,7 +244,7 @@ class Probe:
             cases = {"local": (buf[0].data_ptr(), dst[0].data_ptr()), "push": (buf[0].data_ptr(), dst[1].data_ptr()),
                      "pull": (buf[1].data_ptr(), dst[0].data_ptr())}
             if host is not None and host.nbytes >= total:
-                cases["h2d"] = (host.ptr, dst[0].data_ptr())
+                cases["h2d"] = (host.base, dst[0].data_ptr())
             for name, (a, b) in cases.items():
                 dt = timed([lambda a=a, b=b: batch(0, [a + o for o in offs], [b + o for o in offs], size)])
                 res[name] = dict(gbps=round(total / dt / 1e9, 1), us_per_piece=round(dt / n * 1e6, 2))

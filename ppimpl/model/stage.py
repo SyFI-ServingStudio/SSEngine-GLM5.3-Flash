@@ -620,9 +620,9 @@ class StageModel:
     # ------------------------------------------------------------------------------------------------ forward
 
     def tier_ranges(self) -> list:
-        """This stage's KV byte ranges per logical block / state block, for the tiers (ppimpl/runtime/tier_copy.py)."""
-        from ppimpl.runtime.tier_copy import stage_ranges
-        return stage_ranges(self.stage, self.vc.compilation_config.static_forward_context, self.kv)
+        """This stage's KV byte ranges per logical block / state block, for the tiers (ppimpl/kvpool/layout.py)."""
+        from ppimpl.kvpool.layout import from_stage_kv
+        return from_stage_kv(self.stage, self.vc.compilation_config.static_forward_context, self.kv)
 
     def forward(self, plan, hidden_in: torch.Tensor | None) -> torch.Tensor:
         return self.run(self.prepare(plan), hidden_in)

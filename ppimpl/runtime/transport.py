@@ -41,8 +41,8 @@ class Shutdown(msgspec.Struct, tag=True):
 
 
 class TierMove(msgspec.Struct, array_like=True):
-    """One tier op as every worker runs it on its 1/n share, n = PP degree (ppimpl/engine/tiers.py TierOp,
-    lanes/m6 TIERS.md §3)."""
+    """One tier op as every worker runs it on its 1/n share, n = PP degree (ppimpl/kvpool: manager.TierOp,
+    member.tier_move; lanes/m6 TIERS.md §3)."""
     op_id: int
     op: str                       # "write" HBM -> tier, "read" tier -> HBM, "demote" DRAM -> SSD
     tier: str                     # "dram" | "ssd": destination of write/demote, source of read
@@ -50,8 +50,8 @@ class TierMove(msgspec.Struct, array_like=True):
     b_lo: int                     # HBM blocks [b_lo, b_hi) of the context move (an SSD read moves all of its slots)
     b_hi: int
     block_start: int              # slots[i] holds block block_start + i
-    kv_blocks: list[int]          # the context's HBM blocks from block 0
-    state_blocks: list[int]
+    kv_blocks: list[list[int]]    # the context's HBM blocks from block 0: one list for every stage, or one per stage
+    state_blocks: list[list[int]]
     slots: list[int]
     state_slots: list[int]
     host_slots: list[int]

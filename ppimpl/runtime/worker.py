@@ -218,9 +218,9 @@ def run_worker(cfg: RunConfig, stage: int):   # makes inference tensors, which a
     reporter.start()
     pipe, tiers, ok, mbs = None, None, False, 0
     try:
-        if cfg.tiers is not None:   # DRAM arena first-touched while the model loads (ppimpl/runtime/tier_worker.py)
-            from ppimpl.runtime.tier_worker import TierEngine
-            tiers = TierEngine(cfg, stage, device, ctx, touch_cpus=job_cpus)
+        if cfg.tiers is not None:   # DRAM arena first-touched while the model loads (ppimpl/kvpool/member.py)
+            from ppimpl.kvpool.member import PoolMember
+            tiers = PoolMember(cfg, stage, device, ctx, touch_cpus=job_cpus)
         width = cfg.fake.hidden_width if cfg.model == "fake" else HIDDEN_WIDTH
         pipe = open_pipe(cfg, stage, device, width)   # before the model: its KV pool is sized from what is left
         t_model = time.monotonic()

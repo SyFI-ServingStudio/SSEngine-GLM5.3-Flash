@@ -1,4 +1,5 @@
-"""Tier bytes on 4 GPUs (lanes/m6 TIERS.md §8): real StageModels joined by the serving pipe, a TierEngine per worker.
+"""KV pool bytes on 4 GPUs (lanes/m6 TIERS.md §8): real StageModels joined by the serving pipe, a PoolMember per
+worker (ppimpl/kvpool/member.py); the ranges come from the real StageKV (layout.from_stage_kv).
 
 Round 0 (P = 40,000 tokens: a partial last block, chunk starts off KDA's 64-token grid) on blocks K0. Every worker
 writes its quarter of all four stages' KV and state to its DRAM arena (peer stages' KV over NVLink). Fresh blocks
@@ -8,7 +9,7 @@ is demoted to the SSD file (O_DIRECT) and read back through the staging arena in
 (an HBM hit) and on K1 (after the tier read): the logits are bitwise equal. The workers run with expandable segments,
 as the server's do (the KV is allocated IPC-shareable regardless). Run through Slurm:
 
-    sbatch -p main --gres=gpu:4 --time=00:20:00 -o measured/logs/%j.out bench/slurm/gtest.sbatch tier_bytes
+    sbatch -p main --gres=gpu:4 --time=00:20:00 -o measured/logs/%j.out bench/slurm/gtest.sbatch kvpool_bytes
 """
 
 import json
@@ -86,14 +87,14 @@ def _worker(rank: int, port: int, out_dir: str):
 
     from ppimpl.config import HIDDEN_WIDTH, RunConfig, SchedulerConfig, TierConfig
     from ppimpl.model.stage import StageModel, bench_config
-    from ppimpl.runtime.tier_worker import TierEngine
+    from ppimpl.kvpool.member import PoolMember
     from ppimpl.runtime.transport import TierMove, open_pipe
 
     dev = torch.device("cuda", rank)
     torch.cuda.set_device(dev)
     pipe = open_pipe(RunConfig(port=port, scheduler=SchedulerConfig(mb_tokens=CHUNK)), rank, dev, HIDDEN_WIDTH)
     tc = TierConfig(dram_gb=2.0, ssd_gb=1.0, staging_gb=0.5, ssd_dir=out_dir)
-    eng = TierEngine(NS(tiers=tc, num_stages=4, model="glm53", run_dir=out_dir), rank, dev, zmq.Context())
+    eng = PoolMember(NS(tiers=tc, num_stages=4, model="glm53", run_dir=out_dir), rank, dev, zmq.Context())
     m = StageModel(bench_config(CHUNK), rank, dev, num_blocks=1 + 4 * (N_KV + N_ST), max_model_len=P + A + B,
                    cuda_graphs=False, ipc_kv=True)
     mine = m.tier_ranges()
@@ -115,9 +116,9 @@ def _worker(rank: int, port: int, out_dir: str):
 
         def move(op_id, op, kv, st, b_lo, tier="dram", host=None):
             if host is None:
-                mv = TierMove(op_id, op, tier, None, b_lo, n0, 0, kv, st, slots, sslots, [], [])
+                mv = TierMove(op_id, op, tier, None, b_lo, n0, 0, [kv], [st], slots, sslots, [], [])
             else:                           # SSD: file slots = the DRAM ones' ids; host side DRAM or staging
-                mv = TierMove(op_id, op, tier, host, b_lo, n0, 0, kv, st, slots, sslots, slots, sslots)
+                mv = TierMove(op_id, op, tier, host, b_lo, n0, 0, [kv], [st], slots, sslots, slots, sslots)
             eng.submit(mv)
             if tier == "ssd":
                 eng._ssd_op(*eng.ssd_q[eng.direction(mv)].get())

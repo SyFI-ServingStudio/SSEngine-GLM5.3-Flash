@@ -40,7 +40,7 @@ from bench.common import HANDOFF
 from ppimpl.config import BLOCK_TOKENS, SCHEDULER_STEPS, SchedulerConfig, TierConfig
 from ppimpl.engine.kv import KvManager
 from ppimpl.engine.scheduler import Request, Scheduler
-from ppimpl.engine.tiers import Tiers
+from ppimpl.kvpool import BalancedKVPool
 
 NUM_STAGES = 4
 POOL_TOKENS = 61_258_368
@@ -274,10 +274,11 @@ class Replay:
 
     def _form(self, now: int):
         while self._may_form(now):
+            reads = self.sched.stats["reads"]
             chunks = self.sched.next_microbatch(now)
-            for op in self.sched.take_ops():
-                if op.op == "read":
-                    self._push(op.land_ns, LAND, op.req_id)
+            if self.sched.stats["reads"] > reads:      # the reads it started, in start order: land at their eta
+                for r in list(self.sched.reading.values())[reads - self.sched.stats["reads"]:]:
+                    self._push(r.read_land_ns, LAND, r.req_id)
             if chunks is None:
                 break
             self._launch(chunks, now)
@@ -363,7 +364,7 @@ class Replay:
                                for k in ("hbm", "dram", "ssd")} if share["prefix_tokens"] else None,
             pool=dict(capacity=kv.capacity, accounting=kv.accounting, **kv.stats),
             scheduler=self.sched.stats,
-            tiers=self.sched.tiers.summary() if self.sched.tiers is not None else None,
+            tiers=self.sched.pool.summary() if self.sched.pool is not None else None,
             unanswered=len(self.reqs) - len(self.first_ns),
         )
 
@@ -376,8 +377,8 @@ def make_scheduler(step: str | SchedulerConfig, pool_tokens: int = POOL_TOKENS, 
     cfg = SCHEDULER_STEPS[step] if isinstance(step, str) else step
     kv = KvManager(pool_tokens // BLOCK_TOKENS, keep_sessions=keep_sessions, accounting=accounting,
                    partial_hits=partial_hits)
-    t = Tiers(tiers, partial_hits=partial_hits) if tiers is not None else None
-    return Scheduler(kv, cfg, t, max_in_flight=max_in_flight, dispatch_ahead=dispatch_ahead)
+    pool = BalancedKVPool(tiers, partial_hits=partial_hits) if tiers is not None else None
+    return Scheduler(kv, cfg, pool, max_in_flight=max_in_flight, dispatch_ahead=dispatch_ahead)
 
 
 def check_sched(step: str, handoff: Path = HANDOFF, dispatch_ahead: int = 0,
