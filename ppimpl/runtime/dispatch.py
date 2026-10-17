@@ -24,8 +24,6 @@ Replaces the earlier queue-one rule (one plan queued behind stage 0's running on
 reports, which with plan delivery left stage 0 idle 2.4 s/min at good N=400 (7763) vs the targets' 1.0.
 """
 
-from collections import deque
-
 NOW, WAIT, NO = "now", "wait", "no"
 
 
@@ -76,7 +74,7 @@ class DispatchRule:
         self.stage_pred = [StagePredictor() for _ in range(num_stages)]
         self.pred = self.stage_pred[0]
         self.host = HostPredictor()
-        self.on_stage0: deque[int] = deque()        # formed, stage 0 not reported done
+        self.on_stage0: dict[int, None] = {}        # formed, stage 0 not reported done (insertion = mb order)
         self.flight: dict[int, list] = {}           # mb_id -> [dispatch_ns, tokens, stage ends (None: not reported)]
         self.exits: dict[int, int] = {}             # mb_id -> reported last-stage end, the last few
         self.last_end_ns: int | None = None         # stage-0 end of the last plan stage 0 reported
@@ -94,26 +92,31 @@ class DispatchRule:
     # --- events -----------------------------------------------------------------------------------------------------
 
     def dispatched(self, mb_id: int, now_ns: int, tokens: int):
-        self.on_stage0.append(mb_id)
+        self.on_stage0[mb_id] = None
         self.flight[mb_id] = [now_ns, tokens, [None] * self.num_stages]
         self.last_tokens = tokens
         self.next_mb = mb_id + 1
 
     def stage_done(self, stage: int, mb_id: int, start_ns: int, end_ns: int):
+        """A stage's report, in any order across stages: each stage's worker reports its microbatches in order, but a
+        stage-0 report may reach the controller after later stages' reports of the same microbatch (job 7878: stage 0's
+        reporter held ~0.5 s by its main thread's forward of the next one; mb 6279 left stage 3 before its stage-0
+        report came). Keyed by mb_id; a stage that finished microbatch k finished every earlier one on it (one
+        stream per stage), so any stage's report of k retires stage 0's entries up to k."""
+        self.stage_end[stage] = max(self.stage_end[stage], end_ns)
+        for k in [k for k in self.on_stage0 if k <= mb_id]:
+            del self.on_stage0[k]
         f = self.flight.get(mb_id)
         if f is None:
-            return
+            return                                   # left the pipeline already (its last-stage report came first)
         dispatch_ns, tokens, ends = f
         self.stage_pred[stage].observe(tokens, end_ns - start_ns)
         ends[stage] = end_ns
-        self.stage_end[stage] = max(self.stage_end[stage], end_ns)
         if stage == 0:
-            head = self.on_stage0.popleft()
-            assert head == mb_id, (head, mb_id)
             ready = max(self.last_end_ns or 0, self._exit_known(mb_id - self.max_in_flight) or 0)
             if ready <= dispatch_ns and self._exit_known(mb_id - self.max_in_flight) is not False:
                 self.host.observe(tokens, max(start_ns - dispatch_ns, 0))     # stage 0 was ready: host time only
-            self.last_end_ns = end_ns
+            self.last_end_ns = max(self.last_end_ns or 0, end_ns)
         if stage == self.num_stages - 1:
             del self.flight[mb_id]
             self.exits[mb_id] = end_ns

@@ -83,10 +83,11 @@ def ideal(n_mb: int, sts: list[int], depth: int = 4, t0: int = 0) -> list[int]:
 
 
 def simulate(rule: DispatchRule | None, n_mb=60, stage_ms=10.0, report_ms=0.3, form_ms=0.8, actual=None,
-             out: dict | None = None):
+             out: dict | None = None, report_delay=None):
     """A 4-stage pipeline, integer ns, with the GPU gate: stage 0 starts mb k at max(plan arrived, stage 0 free, exit
     of k-4). The host learns of a stage end `report_ms` later; a plan reaches stage 0 `form_ms` after it is formed.
-    `actual(k, s)`: a stage time other than `stage_ms` (ms). rule=None: form on reports (stage 0 free, < 4 in flight
+    `actual(k, s)`: a stage time other than `stage_ms` (ms). `report_delay(k, s)`: a report latency other than
+    `report_ms` (ms); each stage's reports still arrive in order (one reporter per worker), across stages in any. rule=None: form on reports (stage 0 free, < 4 in flight
     by reports). Returns the stage-0 starts (ns), the peak in flight on the GPU, the peak number waiting at stage 0."""
     sts = [int(x * MS) for x in (stage_ms if isinstance(stage_ms, list) else [stage_ms] * 4)]
     rep, form = int(report_ms * MS), int(form_ms * MS)
@@ -95,6 +96,7 @@ def simulate(rule: DispatchRule | None, n_mb=60, stage_ms=10.0, report_ms=0.3, f
     starts, ends, formed, arrived = {}, {}, {}, {}
     state = dict(in_flight=0, next_mb=0, timer=None)
     on0 = []
+    last_report = [0] * 4
 
     def t_of(k, s):
         return int(actual(k, s) * MS) if actual else sts[s]
@@ -148,7 +150,10 @@ def simulate(rule: DispatchRule | None, n_mb=60, stage_ms=10.0, report_ms=0.3, f
                 starts[k].append(begin)
                 ends[k].append(end)
             for s in range(4):
-                push(ends[k][s] + rep, "done", (s, k))
+                at = ends[k][s] + (int(report_delay(k, s) * MS) if report_delay else rep)
+                at = max(at, last_report[s])
+                last_report[s] = at
+                push(at, "done", (s, k))
         elif kind == "done":
             s, k = data
             if s == 0:
@@ -222,3 +227,32 @@ def test_host_time_learned_only_when_stage0_was_ready():
     r.dispatched(1, 10 * MS, 8192)                 # formed while stage 0 was busy: its start is not host time
     done(r, 1, [(50, 100), (100, 150), (150, 200), (200, 250)], stages=(0,))
     assert r.host.predict_ns(8192) == pytest.approx(0.7 * MS)
+
+
+def test_stage0_report_after_the_last_stages_report():
+    """7878: mb 6279's stage-0 report reached the controller after its stage-3 report (stage 0's reporter held up),
+    then mb 6280's stage-0 report came: the rule asserted on a queue head. Reports are keyed by mb_id."""
+    r = DispatchRule(4, 3.0)
+    for k in range(3):
+        r.dispatched(k, k * MS, 4096)
+    done(r, 0, [(0, 10), (10, 20), (20, 30), (30, 40)])
+    done(r, 1, [(10, 20), (20, 30), (30, 40), (40, 50)], stages=(1, 2, 3))     # stage 0's report of 1 is late
+    assert 1 not in r.flight and list(r.on_stage0) == [2]
+    done(r, 2, [(20, 30), (30, 40), (40, 50), (50, 60)], stages=(0,))
+    done(r, 1, [(10, 20), (20, 30), (30, 40), (40, 50)], stages=(0,))          # the late one: ignored
+    assert not r.on_stage0 and list(r.flight) == [2]
+    assert r.decide(61 * MS)[0] in (NOW, WAIT)
+
+
+def test_reports_in_any_order_across_stages():
+    """Jittered stage times, stage-0 reports sometimes held 50-500 ms (behind a slow forward on the host), the other
+    stages' 0.1-3 ms: the pipeline runs to the end, at most 4 in flight, the rule's bookkeeping empty after."""
+    import random
+    rnd = random.Random(11)
+    table = {(k, s): 10.0 * rnd.uniform(0.7, 1.3) for k in range(300) for s in range(4)}
+    delay = {(k, s): (rnd.uniform(50, 500) if s == 0 and rnd.random() < 0.05 else rnd.uniform(0.1, 3.0))
+             for k in range(300) for s in range(4)}
+    rule = DispatchRule(4, 3.0)
+    s0, peak, _ = simulate(rule, n_mb=300, actual=lambda k, s: table[(k, s)], report_delay=lambda k, s: delay[(k, s)])
+    assert len(s0) == 300 and peak <= 4
+    assert not rule.flight and not rule.on_stage0
