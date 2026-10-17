@@ -540,8 +540,9 @@ def kpool_seed_tail_cache(tail_kv_cache, key, gate_score, tslot, kpool, head_dim
 # its process, before the model is built, for an A/B at the same clock.
 FAST = {"kpool_expand": True, "kda_split_heads": True}
 # lane m5-glue, off until a session A/B: the stage edge's hc_post run after the graph replay into a fresh tensor
-# instead of copying the graph's output buffer (stage._run_graph).
-FAST.update({"edge_send_eager": False})
+# instead of copying the graph's output buffer (stage._run_graph); the indexer's BF16 -> FP32 cast by one Triton
+# kernel (glue_fast; 49.2 -> 20.5 us at 4,096 rows, job 7914).
+FAST.update({"edge_send_eager": False, "indexer_float": False})
 
 
 def fast_from_env(env: str | None = None) -> dict:
@@ -556,6 +557,13 @@ def fast_from_env(env: str | None = None) -> dict:
 
 
 fast_from_env()   # every process that imports pp_patch (workers, benches) sees the run's PPIMPL_FAST
+
+
+def install_indexer_float() -> None:
+    """`glue_fast.install_indexer_float`: glm5next `Indexer.forward` with the Triton BF16 -> FP32 cast (process-wide)."""
+    from ppimpl.model import glue_fast
+
+    glue_fast.install_indexer_float()
 
 
 def install_kda_split_heads() -> None:

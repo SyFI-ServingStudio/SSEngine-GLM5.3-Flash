@@ -264,6 +264,8 @@ class StageModel:
             pp_patch.install_kpool_expand()
         if pp_patch.FAST["kda_split_heads"]:
             pp_patch.install_kda_split_heads()
+        if pp_patch.FAST["indexer_float"]:
+            pp_patch.install_indexer_float()
         # the stage edge's hc_post outside the graphs (`_run_graph`); fixed here, before any capture
         self.edge_send_eager = bool(pp_patch.FAST["edge_send_eager"]) and not self.last
         pp_patch.install_decode_topk_canon()
