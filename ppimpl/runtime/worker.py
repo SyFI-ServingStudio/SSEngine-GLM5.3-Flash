@@ -12,6 +12,7 @@ import os
 import pstats
 import queue
 import signal
+import sys
 import threading
 import time
 import traceback
@@ -192,6 +193,8 @@ def build_model(cfg: RunConfig, stage: int, device: torch.device):
 @torch.inference_mode()   # all of it: model construction, warm-up, receive, forward, send (StageModel's warm-up
 def run_worker(cfg: RunConfig, stage: int):   # makes inference tensors, which autograd-tracked code may not use)
     signal.signal(signal.SIGINT, signal.SIG_IGN)   # the controller stops us (Shutdown), or we see it is gone
+    if cfg.tiers is not None:   # the tier threads (receive, done) get the GIL within 0.5 ms of the launch thread
+        sys.setswitchinterval(0.0005)
     parent = os.getppid()
     n = cfg.num_stages
     last = stage == n - 1

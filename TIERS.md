@@ -304,9 +304,9 @@ Per P, p50 of 5 sessions, ms; targets from `tier_targets.json` (`bench/tiers.py 
 
 | P | Round-1 TTFT (target) | Read (target) | Read on the GPUs | Send -> submit / done -> landed | TTFT - read vs HBM-hit target |
 |---|---|---|---|---|---|
-| 32k | 58.24 (54.0) | 3.58 (1.72) | 2.4 (35-40 GB/s per GPU) | 0.3 / 0.4 | 54.7 vs 52.7 |
-| 128k | 63.77 (58.1) | 6.69 (4.67) | 5.2 (44-48 GB/s) | 0.4 / 0.4 | 57.1 vs 53.7 |
-| 512k | 82.88 (73.5) | 17.71 (16.46) | 16.0 (52 GB/s) | 0.4 / 0.4 | 65.2 vs 57.5 |
+| 32k | 58.24 (54.4) | 3.58 (1.72) | 2.4 (35-40 GB/s per GPU) | 0.3 / 0.4 | 54.7 vs 52.7 |
+| 128k | 63.77 (58.4) | 6.69 (4.67) | 5.2 (44-48 GB/s) | 0.4 / 0.4 | 57.1 vs 53.7 |
+| 512k | 82.88 (73.9) | 17.71 (16.46) | 16.0 (52 GB/s) | 0.4 / 0.4 | 65.2 vs 57.5 |
 
 - In the server each worker submits its own share, and a 512k read runs at line rate on every GPU (52 GB/s); the
   probe's lower rates (§2.3) came from submitting four engines from one thread.

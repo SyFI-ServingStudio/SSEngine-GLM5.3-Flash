@@ -30,6 +30,20 @@ def targets(variant: str) -> dict[int, tuple[float, float]]:
     return {r["prefix_tokens"]: (r["round1_ttft_ms"], r["read_ms"]) for r in rows}
 
 
+def read_parts(o: dict) -> dict | None:
+    """Where a read op's time went, on the GPU that reported last: sent -> that worker's tier thread took the op
+    (`recv`), its copies' submission (`submit`, overlaps `gpu`), the copies' GPU time from a mark recorded as submission
+    began (`gpu`), GPU end -> its TierDone left (`notify`: done thread wake + send), last TierDone -> landed in the
+    scheduler (`land`). None for ops logged without the GPU time."""
+    spans = o.get("gpu_span_ms")
+    if not spans or any(x is None for x in spans):
+        return None
+    g = max(range(len(o["gpu_ms"])), key=lambda i: o["gpu_ms"][i][1])
+    (a, b), span = o["gpu_ms"][g], spans[g]
+    return {"recv": round(a - o["sent_ms"], 3), "submit": o["submit_ms"][g], "gpu": span,
+            "notify": round(b - a - span, 3), "land": round(o["landed_ms"] - b, 3)}
+
+
 def summarize(run_dir: Path, target: str | None, reference: Path | None = None) -> dict:
     lines = [x for x in bringup(run_dir, reference) if x.get("round1_ttft_ms") is not None]
     sreq = server_rows(run_dir)
@@ -58,6 +72,7 @@ def summarize(run_dir: Path, target: str | None, reference: Path | None = None) 
             row["read_bytes_per_gpu"] = o["bytes"]
             row["read_gb_s_per_gpu"] = [round(n / max(b - a, 1e-6) / 1e6, 2)
                                         for n, (a, b) in zip(o["bytes"], o["gpu_ms"])]
+            row["read_parts_ms"] = read_parts(o)
         sessions.append(row)
     by_p = {}
     for P in sorted({r["P"] for r in sessions}):
@@ -68,10 +83,16 @@ def summarize(run_dir: Path, target: str | None, reference: Path | None = None) 
                    "round1_server_ttft_ms": round(float(np.mean([r["round1_server_ttft_ms"] for r in rs
                                                                  if r["round1_server_ttft_ms"] is not None])), 2),
                    "read_ms": round(float(np.mean(reads_ms)), 3) if reads_ms else None,
+                   "read_parts_ms": mean_parts([r.get("read_parts_ms") for r in rs]),
                    "tiers": sorted({str(r["tier"]) for r in rs}),
                    "cached_all_P": all(r["cached"] == P for r in rs),
                    "target_ttft_ms": tgt[0] if tgt else None, "target_read_ms": tgt[1] if tgt else None}
     return {"run": str(run_dir), "target": target, "by_P": by_p, "sessions": sessions}
+
+
+def mean_parts(parts: list) -> dict | None:
+    parts = [p for p in parts if p]
+    return {k: round(float(np.mean([p[k] for p in parts])), 3) for k in parts[0]} if parts else None
 
 
 def main():
@@ -87,6 +108,8 @@ def main():
         print(f"{P:>7} {r['sessions']:>2} {r['round1_ttft_ms']:>9} {str(r['target_ttft_ms']):>7} "
               f"{str(r['read_ms']):>8} {str(r['target_read_ms']):>7}  {','.join(r['tiers'])}"
               f"{'' if r['cached_all_P'] else '  (not all P cached)'}")
+        if r["read_parts_ms"]:
+            print(f"{'':>10} read parts ms: " + ", ".join(f"{k} {v}" for k, v in r["read_parts_ms"].items()))
 
 
 if __name__ == "__main__":

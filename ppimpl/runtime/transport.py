@@ -87,6 +87,8 @@ class TierDone(msgspec.Struct, tag=True):
     start_ns: int                 # host clock: copies submitted
     end_ns: int                   # host clock: seen complete
     nbytes: int                   # moved by this GPU
+    submit_ns: int = 0            # host clock: all of the op's copies submitted
+    gpu_ns: int | None = None     # GPU time from a mark recorded as submission began to the op's last copy's end
 
 
 class WorkerError(msgspec.Struct, tag=True):

@@ -121,7 +121,7 @@ def _worker(rank: int, port: int, out_dir: str):
             eng.submit(mv)
             if tier == "ssd":
                 eng._ssd_op(*eng.ssd_q[eng.direction(mv)].get())
-            _, ev, _, nbytes = eng.q[eng.direction(mv)].get()
+            _, ev, _, nbytes, _, _ = eng.q[eng.direction(mv)].get()
             if ev is not None:
                 ev.synchronize()
             torch.cuda.synchronize()

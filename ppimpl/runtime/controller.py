@@ -625,6 +625,8 @@ class Controller:
             "expected_land_ms": round((o.land_ns - t0) / 1e6, 4) if o.land_ns else None,
             "gpu_ms": [[round((x.start_ns - t0) / 1e6, 4), round((x.end_ns - t0) / 1e6, 4)]
                        for x in (done[s] for s in range(self.n))],
+            "submit_ms": [round((done[s].submit_ns - done[s].start_ns) / 1e6, 4) for s in range(self.n)],
+            "gpu_span_ms": [None if done[s].gpu_ns is None else round(done[s].gpu_ns / 1e6, 4) for s in range(self.n)],
             "bytes": [done[s].nbytes for s in range(self.n)]}) + "\n")
 
     def _own(self, req_id: str):

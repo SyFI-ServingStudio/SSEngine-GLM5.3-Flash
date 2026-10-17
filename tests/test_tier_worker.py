@@ -52,7 +52,7 @@ def run(engs, ops):
             e.submit(m)
             if m.tier == "ssd":                      # the SSD thread's work, here
                 e._ssd_op(*e.ssd_q[e.direction(m)].get_nowait())
-            op_id, wait, _, nbytes = e.q[e.direction(m)].get_nowait()
+            op_id, wait, _, nbytes, _, _ = e.q[e.direction(m)].get_nowait()
             assert op_id == m.op_id and wait is None
             moved.setdefault(op_id, []).append(nbytes)
     return moved
@@ -190,6 +190,7 @@ def test_fake_engine_reports_after_bandwidth_time():
     dt = time.monotonic() - t0
     assert all(isinstance(g, TierDone) and g.stage == 2 and g.nbytes == 50_000_000 for g in got)
     assert [g.op_id for g in got] == [0, 1] and 0.09 < dt < 0.5
+    assert all(g.start_ns <= g.submit_ns <= g.end_ns and g.gpu_ns is None for g in got)
     for q in e.q.values():
         q.put(None)
     for th in e.threads:

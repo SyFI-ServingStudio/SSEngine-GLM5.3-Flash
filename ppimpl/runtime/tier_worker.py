@@ -417,14 +417,17 @@ class TierEngine:
                 if isinstance(item, WorkerError):
                     push.send(encode(item))
                     break
-                op_id, wait, start_ns, nbytes = item
+                op_id, wait, start_ns, nbytes, submit_ns, mark = item
+                gpu_ns = None
                 if isinstance(wait, float):     # fake engine: due time (monotonic)
                     d = wait - time.monotonic()
                     if d > 0:
                         time.sleep(d)
                 elif wait is not None:
                     wait.synchronize()
-                push.send(encode(TierDone(self.stage, op_id, start_ns, time.time_ns(), nbytes)))
+                    if mark is not None:
+                        gpu_ns = int(mark.elapsed_time(wait) * 1e6)
+                push.send(encode(TierDone(self.stage, op_id, start_ns, time.time_ns(), nbytes, submit_ns, gpu_ns)))
         finally:
             push.close()
 
@@ -443,16 +446,21 @@ class TierEngine:
             nbytes = (blocks + len(op.state_slots)) * self.slot_bytes
             bw = (self.tc.ssd_read_gb_s if ssd else self.tc.dram_read_gb_s) * 1e9
             self._due[d] = max(self._due.get(d, 0.0), time.monotonic()) + nbytes / bw
-            self.q[d].put((op.op_id, self._due[d], start_ns, nbytes))
+            self.q[d].put((op.op_id, self._due[d], start_ns, nbytes, time.time_ns(), None))
             return
         if op.tier == "ssd":
             self.ssd_q[d].put((op, start_ns))
             return
         if op.tier != "dram" or op.host_tier is not None or op.op not in ("read", "write"):
             raise ValueError(f"tier op {op.op} {op.tier} via {op.host_tier}")
+        mark = None
+        if self.cuda:                   # GPU time of the op (TierDone.gpu_ns), from the stream its first copy is on
+            import torch
+            mark = torch.cuda.Event(enable_timing=True)
+            mark.record(self.streams["write_nvl" if d == "write" and self.ring is not None else d])
         ev, nbytes = self._move(d, self.dram.ptr, op.kv_blocks, op.state_blocks, op.slots, op.state_slots, op.b_lo,
                                 op.b_hi, op.block_start)
-        self.q[d].put((op.op_id, ev, start_ns, nbytes))
+        self.q[d].put((op.op_id, ev, start_ns, nbytes, time.time_ns(), mark))
 
     def _batch(self, stream: str, src, dst, lens, wait=()):
         """One `cuMemcpyBatchAsync` on `stream` after the events `wait`; its end event (None on CPU, done)."""
@@ -467,7 +475,7 @@ class TierEngine:
                 st.wait_event(ev)
         with torch.cuda.stream(st):
             self.swap(*(torch.from_numpy(np.ascontiguousarray(x, dtype=np.int64)) for x in (src, dst, lens)))
-        ev = torch.cuda.Event(blocking=True)
+        ev = torch.cuda.Event(blocking=True, enable_timing=True)   # timing: TierDone.gpu_ns
         ev.record(st)
         return ev
 
@@ -550,5 +558,5 @@ class TierEngine:
             for f in [self.pool.submit(self.ssd.write, f, host.ptr + h * sb) for f, h in zip(files, hosts)]:
                 f.result()
             ev = None
-        self.q[self.direction(op)].put((op.op_id, ev, start_ns, len(files) * sb))
+        self.q[self.direction(op)].put((op.op_id, ev, start_ns, len(files) * sb, time.time_ns(), None))
 

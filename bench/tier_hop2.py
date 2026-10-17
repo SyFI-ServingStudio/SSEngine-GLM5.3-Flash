@@ -123,7 +123,7 @@ class Probe:
             t = time.perf_counter()
             e.submit(TierMove(1_000_000 * g + self.op, op, "dram", None, 0, ctx, 0, kv, st, slots, sslots, [], []))
             ts = time.perf_counter() - t
-            _, ev, _, nb = e.q["read" if op == "read" else "write"].get()
+            _, ev, _, nb, _, _ = e.q["read" if op == "read" else "write"].get()
             ev.synchronize()
             out[g] = (ts, nb)
 
