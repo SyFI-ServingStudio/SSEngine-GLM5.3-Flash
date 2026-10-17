@@ -20,6 +20,7 @@ caches and KDA layers read their views from `layer.kv_cache`).
 from __future__ import annotations
 
 import contextlib
+import os
 from dataclasses import dataclass
 from types import SimpleNamespace
 
@@ -141,7 +142,11 @@ def resolve_layout(vc, static_ctx: dict, local_spec: dict):
     return layout
 
 
-def allocate(vc, static_ctx: dict, local_spec: dict, num_blocks: int, device: torch.device) -> StageKV:
+def allocate(vc, static_ctx: dict, local_spec: dict, num_blocks: int, device: torch.device,
+             ipc: bool = False) -> StageKV:
+    """This stage's KV tensors, bound to its layers. `ipc`: allocated by plain cudaMalloc segments, which CUDA IPC can
+    share (the tiers' peers copy them), also when the process runs with expandable segments (their VMM memory is not
+    IPC-shareable); the setting is restored after, as vLLM's CuMemAllocator does around its pool."""
     from vllm.v1.kv_cache_interface import KpoolTailSpec, MambaSpec, UniformTypeKVCacheSpecs
     from vllm.v1.worker.utils import allocate_kv_cache, bind_kv_cache_to_layers
 
@@ -165,7 +170,15 @@ def allocate(vc, static_ctx: dict, local_spec: dict, num_blocks: int, device: to
     layout = resolve_layout(vc, static_ctx, local_spec)
     if hasattr(cfg, "kv_cache_layout"):
         cfg.kv_cache_layout = layout.name
-    tensors = allocate_kv_cache(cfg, device, layout, kernel_block_sizes)
+    expandable = ipc and "expandable_segments:True" in os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "")
+    if expandable:
+        torch.cuda.empty_cache()
+        torch.cuda.memory._set_allocator_settings("expandable_segments:False")
+    try:
+        tensors = allocate_kv_cache(cfg, device, layout, kernel_block_sizes)
+    finally:
+        if expandable:
+            torch.cuda.memory._set_allocator_settings("expandable_segments:True")
     bind_kv_cache_to_layers(tensors, static_ctx, 1, kv_cache_groups=cfg.kv_cache_groups)
     return StageKV(cfg, num_blocks, per_block, mla, idx, tail, kda,
                    local_spec[mla[0]], local_spec[idx[0]], local_spec[tail[0]] if tail else None)

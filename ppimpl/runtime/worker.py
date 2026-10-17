@@ -186,7 +186,7 @@ def build_model(cfg: RunConfig, stage: int, device: torch.device):
         from ppimpl.model.fake import FakeStageModel
         return FakeStageModel(cfg, stage, device)
     from ppimpl.model.stage import StageModel
-    return StageModel(cfg, stage, device)
+    return StageModel(cfg, stage, device, ipc_kv=cfg.tiers is not None)   # tiers: peers copy our KV (CUDA IPC)
 
 
 @torch.inference_mode()   # all of it: model construction, warm-up, receive, forward, send (StageModel's warm-up
@@ -208,11 +208,18 @@ def run_worker(cfg: RunConfig, stage: int):   # makes inference tensors, which a
     plans = worker_sockets(ctx, cfg.plan_addr(stage))
     reporter = Reporter(ctx, cfg.report_addr(), device)
     reporter.start()
-    pipe, ok, mbs = None, False, 0
+    pipe, tiers, ok, mbs = None, None, False, 0
     try:
+        if cfg.tiers is not None:   # DRAM arena first-touched while the model loads (ppimpl/runtime/tier_worker.py)
+            from ppimpl.runtime.tier_worker import TierEngine
+            tiers = TierEngine(cfg, stage, device, ctx)
         width = cfg.fake.hidden_width if cfg.model == "fake" else HIDDEN_WIDTH
         pipe = open_pipe(cfg, stage, device, width)   # before the model: its KV pool is sized from what is left
         model = build_model(cfg, stage, device)
+        slots = (0, 0)
+        if tiers is not None:       # collective over the workers (CUDA IPC of every stage's KV)
+            slots = tiers.attach(model.tier_ranges() if hasattr(model, "tier_ranges") else None)
+            tiers.start()
         # which FlashInfer tactics the stage runs with (StageModel.tactics: source file|tuned_in_process, file, sha256)
         info = {"stage": stage, "tactics": getattr(model, "tactics", None),
                 "cuda_graphs": getattr(model, "graph_info", None)}
@@ -231,7 +238,7 @@ def run_worker(cfg: RunConfig, stage: int):   # makes inference tensors, which a
         # walk what serving allocates.
         gc.collect()
         gc.freeze()
-        reporter.q.put(Ready(stage, model.num_blocks))
+        reporter.q.put(Ready(stage, model.num_blocks, *slots))
         while True:
             while not plans.poll(1000):
                 if os.getppid() != parent:
@@ -291,6 +298,8 @@ def run_worker(cfg: RunConfig, stage: int):   # makes inference tensors, which a
         reporter.q.put(WorkerError(stage, traceback.format_exc()))
         raise
     finally:
+        if tiers is not None:
+            tiers.close()
         reporter.q.put(None)
         reporter.join(timeout=10)
         if pipe is not None and ok:   # a failed stage exits without waiting on its peers

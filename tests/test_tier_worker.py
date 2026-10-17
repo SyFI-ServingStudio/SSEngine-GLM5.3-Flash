@@ -1,0 +1,142 @@
+"""The workers' tier engines on CPU (ppimpl/runtime/tier_worker.py): the controller's index (slot mode) decides the ops,
+`tier_move` turns them into what the workers get, four engines (one per quarter, all four fake stages' views in this
+process) run them into their own DRAM arenas. A context written at the end of round 0, evicted from HBM and read
+back into other blocks is byte-equal; growth rewrites only the new blocks; the fake engine reports ops after their
+bandwidth time."""
+
+import ctypes
+import time
+from types import SimpleNamespace as NS
+
+import torch
+
+from ppimpl.config import BLOCK_TOKENS as B, TierConfig
+from ppimpl.engine.kv import Allocation
+from ppimpl.engine.scheduler import Request
+from ppimpl.engine.tiers import Tiers
+from ppimpl.runtime.controller import tier_move
+from ppimpl.runtime.tier_copy import Layout
+from ppimpl.runtime.tier_worker import TierEngine
+from ppimpl.runtime.transport import TierBatch, decode_tier, encode
+from test_tier_copy import block_bytes, stages
+
+
+def engines(nslots: int = 40):
+    """Four engines over the fake stages, with DRAM arenas of `nslots` slots, and the index's config."""
+    views, ranges = stages()
+    L = Layout(ranges, 0)
+    tc = TierConfig(dram_gb=(nslots + 0.5) * L.slot_bytes / 1e9, ssd_gb=None, slot_bytes=L.slot_bytes,
+                    state_slots=L.state_slots)
+    cfg = NS(tiers=tc, num_stages=4, model="glm53")
+    engs = []
+    for q in range(4):
+        e = TierEngine(cfg, q, torch.device("cpu"), None)
+        assert e.attach(ranges) == (L.slot_bytes, L.state_slots)
+        assert e.dram.nbytes >= nslots * L.slot_bytes
+        engs.append(e)
+    return views, ranges, engs, tc
+
+
+def run(engs, ops):
+    """Every engine runs the batch (as received over the wire); returns the bytes each moved per op."""
+    msg = decode_tier(encode(TierBatch([tier_move(o) for o in ops])))
+    moved = {}
+    for e in engs:
+        for m in msg.ops:
+            e.submit(m)
+            op_id, wait, _, nbytes = e.q[e.direction(m)].get_nowait()
+            assert op_id == m.op_id and wait is None
+            moved.setdefault(op_id, []).append(nbytes)
+    return moved
+
+
+def scramble(views):
+    for v in views:
+        v.view(torch.uint8).random_(0, 255) if v.dtype == torch.uint8 else v.normal_()
+
+
+def test_write_evict_read_back_is_byte_equal_and_growth_moves_only_new_blocks():
+    views, ranges, engs, tc = engines()
+    t = Tiers(tc)
+    assert t.tiers[0].num_slots == 40
+    tokens = 2 * B + 77
+    r0 = Request("s_r0", tokens, session="s", token_ids=None)
+    a0 = Allocation([3, 7, 1], [2, 4, 6, 8, 9, 10])
+    want = block_bytes(views, ranges, a0.kv_blocks, a0.state_blocks)
+    t.store(r0, a0)
+    ops = t.ready_ops()
+    assert [o.op for o in ops] == ["write"]
+    moved = run(engs, ops)
+    st = sum(r.nbytes for r in ranges if r.kind == "state")
+    kv = sum(r.nbytes for r in ranges if r.kind == "kv")
+    assert sum(moved[ops[0].op_id]) == 3 * kv + st                 # the four quarters: every byte once
+    for o in ops:
+        t.op_done(o.op_id)
+    scramble(views)                                                # HBM lost the context
+    r1 = Request("s_r1", tokens + 50, session="s", prefix_tokens=tokens)
+    a1 = Allocation([5, 0 + 11, 2, 9], [1, 3, 5, 7, 11, 0])
+    assert t.lookup(r1) == (0, tokens)
+    rd = t.read(r1, 0, tokens, 0, a1, 0)
+    ops = t.ready_ops()
+    assert ops == [rd]
+    run(engs, ops)
+    t.op_done(rd.op_id)
+    assert block_bytes(views, ranges, a1.kv_blocks[:3], a1.state_blocks) == want
+    # round 1 ends at 3 B + 10: blocks 0, 1 kept in DRAM, blocks 2, 3 and the state written
+    r1.num_tokens = 3 * B + 10
+    t.store(r1, Allocation(a1.kv_blocks, a1.state_blocks))
+    (w,) = t.ready_ops()
+    assert w.block_start == 2 and tier_move(w).b_lo == 2 and tier_move(w).b_hi == 4
+    moved = run(engs, [w])
+    assert sum(moved[w.op_id]) == 2 * kv + st
+    t.op_done(w.op_id)
+    want = block_bytes(views, ranges, a1.kv_blocks, a1.state_blocks)
+    scramble(views)
+    r2 = Request("s_r2", 3 * B + 99, session="s", prefix_tokens=3 * B + 10)
+    a2 = Allocation([8, 6, 4, 10], [6, 5, 4, 3, 2, 1])
+    rd = t.read(r2, 0, 3 * B + 10, 0, a2, 0)
+    run(engs, t.ready_ops())
+    t.op_done(rd.op_id)
+    assert block_bytes(views, ranges, a2.kv_blocks, a2.state_blocks) == want
+
+
+def test_fake_engine_reports_after_bandwidth_time():
+    """The fake model's engine: no bytes, each op done after slots x slot_bytes / bandwidth, one after another per
+    direction; TierDone goes out over the report socket."""
+    import zmq
+
+    from ppimpl.runtime.transport import TierDone, TierMove, decode_to_controller
+
+    ctx = zmq.Context()
+    pull = ctx.socket(zmq.PULL)
+    port = pull.bind_to_random_port("tcp://127.0.0.1")
+    tc = TierConfig(dram_gb=1.0, ssd_gb=None, slot_bytes=10_000_000, dram_read_gb_s=1.0)
+    cfg = NS(tiers=tc, num_stages=4, model="fake", report_addr=lambda: f"tcp://127.0.0.1:{port}")
+    e = TierEngine(cfg, 2, torch.device("cpu"), ctx)
+    assert e.attach(None) == (10_000_000, 3)
+    for name in ("read", "write"):
+        import threading
+        th = threading.Thread(target=e._done_loop, args=(name,), daemon=True)
+        th.start()
+        e.threads.append(th)
+    t0 = time.monotonic()
+    # read of 2 blocks + 3 state slots = 50 MB at 1 GB/s: 50 ms; two of them back to back: 100 ms
+    for i in range(2):
+        e.submit(TierMove(i, "read", "dram", None, 0, 2, 0, [1, 2], [1] * 6, [0, 1], [2, 3, 4], [], []))
+    got = [decode_to_controller(pull.recv()) for _ in range(2)]
+    dt = time.monotonic() - t0
+    assert all(isinstance(g, TierDone) and g.stage == 2 and g.nbytes == 50_000_000 for g in got)
+    assert [g.op_id for g in got] == [0, 1] and 0.09 < dt < 0.5
+    for q in e.q.values():
+        q.put(None)
+    for th in e.threads:
+        th.join(5)
+    pull.close(linger=0)
+    ctx.term()
+
+
+def test_arena_is_plain_memory_on_cpu():
+    from ppimpl.runtime.tier_worker import HostArena
+    a = HostArena(3 << 20, None, False)
+    assert a.nbytes == 4 << 20
+    ctypes.memset(a.ptr + a.nbytes - 1, 7, 1)

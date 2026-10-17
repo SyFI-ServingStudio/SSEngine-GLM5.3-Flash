@@ -27,6 +27,11 @@ Prefix cache (`keep_sessions`, 5_prefix_cache.md §2): a finished request's bloc
 that starts with that whole context takes them over and computes only the rest (`engine/kv.py`, matched by content).
 Its cached tokens go back in `usage.prompt_tokens_details.cached_tokens` and into `server_requests.jsonl`.
 When a microbatch forms is `DispatchRule`'s decision (ppimpl/runtime/dispatch.py); what it holds is the scheduler's.
+Tiers (`tiers`, lanes/m6 TIERS.md): the scheduler's slot index (`engine/tiers.py`) decides every byte move; the
+control thread sends ops whose dependencies are done to all workers' tier sockets (`TierBatch`) and lands an op when
+all of them reported it (`TierDone`): `tier_ops.jsonl`, one line per op (sent, done per stage, bytes per GPU);
+`server_requests.jsonl` gains the tier, tokens read and read start/landing of a round served from a tier, and
+`cache.json` the tiers' counters.
 """
 
 import asyncio
@@ -53,10 +58,11 @@ import zmq
 from ppimpl.config import BLOCK_TOKENS, RunConfig, dump_config
 from ppimpl.engine.kv import KvManager, kv_blocks_for, pool_size
 from ppimpl.engine.scheduler import ChunkSpec, Request, Scheduler
+from ppimpl.engine.tiers import TierOp, Tiers
 from ppimpl.runtime.cpus import CONTROLLER_CORES, cpu_list, pin_process, split_cores, threads
 from ppimpl.runtime.dispatch import NOW, WAIT, make_rule
-from ppimpl.runtime.transport import (Chunk, Plan, Ready, Shutdown, StageDone, WorkerError, decode_to_controller,
-                                      encode, for_stage)
+from ppimpl.runtime.transport import (Chunk, Plan, Ready, Shutdown, StageDone, TierBatch, TierDone, TierMove,
+                                      WorkerError, decode_to_controller, encode, for_stage)
 from ppimpl.serve.slab import SlabReader
 
 READY_TIMEOUT_S = 1800   # a real stage loads its weights and captures graphs before Ready
@@ -127,6 +133,9 @@ class Controller:
         self.slabs = SlabReader()            # the intakes' shared-memory prompt slabs (ppimpl/serve/slab.py)
         self.slab_views: set[str] = set()    # requests admitted on a view of a slab, not yet copied out (_own)
         self.answered: dict[str, dict] = {}  # answered, response not yet sent: id -> log record
+        self.tier_socks: list = []           # tiers: PUSH to each worker's tier socket
+        self.tier_log = None
+        self.tier_sent: dict[int, tuple[TierOp, int, dict]] = {}   # op id -> (op, sent ns, stage -> TierDone)
         self.pack, self.unpack = msgspec.msgpack.Encoder(), msgspec.msgpack.Decoder()
 
     # --- lifecycle ------------------------------------------------------------------------------------------------
@@ -174,13 +183,15 @@ class Controller:
         self._pin()
         num_blocks = pool_size([r.num_blocks for r in ready], cfg.pool_tokens)
         self.rule = make_rule(cfg, self.n)
+        tiers = self._tiers(ready) if cfg.tiers is not None else None
         # the scheduler's in-flight limits are the rule's (DispatchRule: net of `exiting`, 2 ahead; QueueOneRule: +1, 1)
         self.sched = Scheduler(KvManager(num_blocks, keep_sessions=cfg.keep_sessions, content_keys=True),
-                               cfg.scheduler, None, *self.rule.sched_limits)
+                               cfg.scheduler, tiers, *self.rule.sched_limits)
         self.mb_log = open(self.run_dir / "microbatches.jsonl", "w")
         self.host_log = open(self.run_dir / "worker_host.jsonl", "w")
         self.plan_log = open(self.run_dir / "plans.jsonl", "w")
         self.req_log = open(self.run_dir / "server_requests.jsonl", "w")
+        self.tier_log = open(self.run_dir / "tier_ops.jsonl", "w") if tiers is not None else None
         (self.run_dir / "pool.json").write_text(json.dumps(
             {"ready_blocks": [r.num_blocks for r in ready], "num_blocks": num_blocks,
              "pool_tokens": num_blocks * BLOCK_TOKENS, "keep_sessions": cfg.keep_sessions}))
@@ -199,6 +210,25 @@ class Controller:
             if self.intake_cpus:
                 os.sched_setaffinity(p.pid, self.intake_cpus)
             self.intake_procs.append(p)
+
+    def _tiers(self, ready: list[Ready]) -> Tiers:
+        """The slot index, in the workers' slot size (all equal: each moves a quarter of the same ranges), and a
+        PUSH socket to each worker's tier thread."""
+        sizes = {(r.slot_bytes, r.state_slots) for r in ready}
+        if len(sizes) != 1 or not ready[0].slot_bytes:
+            raise RuntimeError(f"workers report tier slots {sorted(sizes)}")
+        tc = msgspec.structs.replace(self.cfg.tiers, slot_bytes=ready[0].slot_bytes, state_slots=ready[0].state_slots)
+        for s in range(self.n):
+            sock = self.ctx.socket(zmq.PUSH)
+            sock.setsockopt(zmq.SNDHWM, 0)
+            sock.connect(self.cfg.tier_addr(s))
+            self.tier_socks.append(sock)
+        t = Tiers(tc)
+        info = {"slot_bytes": tc.slot_bytes, "state_slots": tc.state_slots,
+                "slots": {x.name: x.num_slots for x in t.tiers}, "staging_slots": t.staging.num_slots}
+        (self.run_dir / "tiers.json").write_text(json.dumps(info) + "\n")
+        print("tiers: " + json.dumps(info), flush=True)
+        return t
 
     def _pin(self):
         """The controller takes the job's CPUs that the workers did not pin themselves to; cpus.json records both."""
@@ -259,11 +289,11 @@ class Controller:
                 await asyncio.to_thread(p.wait, 60)
             except subprocess.TimeoutExpired:
                 p.kill()
-        for sock in (*self.plans, self.reports, self.wake_rx, self.wake_tx, self.intake):
+        for sock in (*self.plans, *self.tier_socks, self.reports, self.wake_rx, self.wake_tx, self.intake):
             if sock is not None:
                 sock.close(linger=0)
-        for f in ("mb_log", "host_log", "req_log", "plan_log"):
-            if hasattr(self, f):
+        for f in ("mb_log", "host_log", "req_log", "plan_log", "tier_log"):
+            if getattr(self, f, None) is not None:
                 getattr(self, f).close()
         if self.sched is not None:
             self._write_cache()
@@ -275,6 +305,10 @@ class Controller:
                 "pool_tokens": kv.num_blocks * BLOCK_TOKENS, **kv.stats, "kept_sessions": len(kv.kept),
                 "kept_tokens": sum(k.tokens for k in kv.kept.values()), "used_tokens": kv.used_tokens,
                 "free_blocks": kv.pool.num_free, "time_ms": self._ms(time.time_ns()) if self.t0_ns else None}
+        if self.sched.tiers is not None:
+            info["tiers"] = self.sched.tiers.summary()
+            info["tier_ops_in_flight"] = len(self.sched.tiers.in_flight)
+            info["tier_ops_waiting"] = len(self.sched.tiers.waiting)
         tmp = self.run_dir / "cache.json.tmp"
         tmp.write_text(json.dumps(info) + "\n")
         tmp.replace(self.run_dir / "cache.json")
@@ -346,6 +380,8 @@ class Controller:
                         raise RuntimeError(f"worker {msg.stage} failed:\n{msg.error}")
                     if isinstance(msg, StageDone):
                         self._on_stage_done(msg)
+                    elif isinstance(msg, TierDone):
+                        self._on_tier_done(msg)
                 while self.wake_rx.poll(0):
                     self.wake_rx.recv()
                 self.wake_sent = False
@@ -372,13 +408,16 @@ class Controller:
                 if self.timer_at is not None and time.time_ns() >= self.timer_at:
                     self.timer_at = None
                 self._pump()
+                if self.tier_socks:
+                    self._tier_send()
                 for req_id in list(self.slab_views):
                     self._own(req_id)
                 if time.monotonic() >= next_check:
                     next_check = time.monotonic() + 1.0
                     self._check_procs()
-                    for f in (self.mb_log, self.host_log, self.plan_log, self.req_log):
-                        f.flush()
+                    for f in (self.mb_log, self.host_log, self.plan_log, self.req_log, self.tier_log):
+                        if f is not None:
+                            f.flush()
                     if next_check >= next_cache:
                         next_cache = next_check + 10.0
                         self._write_cache()
@@ -520,6 +559,10 @@ class Controller:
                     info.update(r.admit_info)
                 info["admit_wait_ms"] = (round((r.admit_ns - r.room_wait_ns) / 1e6, 3)
                                          if r.room_wait_ns is not None and r.admit_ns is not None else 0.0)
+                if r.tier is not None:
+                    info.update(tier=r.tier, tier_tokens=r.tier_tokens, hbm_tokens=r.hbm_tokens,
+                                read_start_ms=round(self._ms(r.read_start_ns), 4),
+                                read_land_ms=round(self._ms(r.read_land_ns), 4))
             info["chunks"] = info.get("chunks", 0) + 1
         plan = Plan(mb_id, chunks)
         for s in range(self.n):
@@ -557,6 +600,36 @@ class Controller:
             if done:
                 self.loop.call_soon_threadsafe(self._answered, done)
 
+    def _tier_send(self):
+        """Send the tier ops whose dependencies are done (reads, writes after `finish`, dependents of landed ops)."""
+        ops = self.sched.tiers.ready_ops()
+        if not ops:
+            return
+        msg = encode(TierBatch([tier_move(o) for o in ops]))
+        for sock in self.tier_socks:
+            sock.send(msg)
+        now = time.time_ns()
+        for o in ops:
+            self.tier_sent[o.op_id] = (o, now, {})
+
+    def _on_tier_done(self, d: TierDone):
+        o, sent, done = self.tier_sent[d.op_id]
+        done[d.stage] = d
+        if len(done) < self.n:
+            return
+        del self.tier_sent[d.op_id]
+        now = time.time_ns()
+        self.sched.op_done(d.op_id, now)
+        t0 = self.t0_ns or sent
+        self.tier_log.write(json.dumps({
+            "op": d.op_id, "kind": o.op, "tier": o.tier, "host_tier": o.host_tier, "entry": o.entry,
+            "req": o.req_id, "tokens": [o.token_start, o.token_end], "slots": len(o.slots) + len(o.state_slots),
+            "deps": o.deps, "sent_ms": round((sent - t0) / 1e6, 4), "landed_ms": round((now - t0) / 1e6, 4),
+            "expected_land_ms": round((o.land_ns - t0) / 1e6, 4) if o.land_ns else None,
+            "gpu_ms": [[round((x.start_ns - t0) / 1e6, 4), round((x.end_ns - t0) / 1e6, 4)]
+                       for x in (done[s] for s in range(self.n))],
+            "bytes": [done[s].nbytes for s in range(self.n)]}) + "\n")
+
     def _own(self, req_id: str):
         """A request admitted on a view of an intake's slab: copy its ids out (the intake reuses the range once the
         request is answered; the scheduler's kept contexts and the response log keep them longer)."""
@@ -582,6 +655,13 @@ class Controller:
             self.intake.send_multipart([fut.ident, b"A", self.pack.encode((fut.key, req.req_id, tok, req.cached))])
             return []
         return [(fut, tok, info)]
+
+
+def tier_move(o: TierOp) -> TierMove:
+    """What every worker needs of a tier op: HBM blocks [b_lo, b_hi) of the context move (none for a demote)."""
+    b_lo, b_hi = (0, 0) if o.op == "demote" else (o.token_start // BLOCK_TOKENS, kv_blocks_for(o.token_end))
+    return TierMove(o.op_id, o.op, o.tier, o.host_tier, b_lo, b_hi, o.block_start, o.kv_blocks[:b_hi],
+                    o.state_blocks, o.slots, o.state_slots, o.host_slots, o.host_state)
 
 
 def _fail_all(futs: list[asyncio.Future], why: str):

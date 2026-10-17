@@ -4,8 +4,8 @@ import socket
 import pytest
 
 
-def free_port_block(n: int = 8) -> int:
-    """A base port with n free consecutive ports (HTTP, zmq, torch.distributed), below the ephemeral range so
+def free_port_block(n: int = 12) -> int:
+    """A base port with n free consecutive ports (HTTP, zmq, torch.distributed, tier ops), below the ephemeral range so
     client connections in TIME_WAIT never hold them, and clear of the 63xxx service ports."""
     for _ in range(200):
         base = random.randrange(18000, 30000)

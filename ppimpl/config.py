@@ -81,7 +81,7 @@ class RunConfig(msgspec.Struct, forbid_unknown_fields=True):
                                       # "cpu": gloo (tests)
     host: str = "127.0.0.1"
     port: int = 8000                  # HTTP
-    control_port: int | None = None   # zmq + torch.distributed ports: control_port .. control_port+5 (default port+1)
+    control_port: int | None = None   # zmq, torch.distributed, tier ports: control_port .. +2+2N (default port+1)
     run_dir: str = "run"              # microbatches.jsonl, server logs
     layer_split: list[int] = msgspec.field(default_factory=lambda: list(LAYER_SPLIT))
     max_in_flight: int = MAX_IN_FLIGHT
@@ -115,7 +115,7 @@ class RunConfig(msgspec.Struct, forbid_unknown_fields=True):
         return self.control_port if self.control_port is not None else self.port + 1
 
     # Port layout: base = controller PULL (reports), base+1+s = worker s PULL (plans), base+1+N = torch.distributed,
-    # base+2+N = controller ROUTER for intake processes.
+    # base+2+N = controller ROUTER for intake processes, base+3+N+s = worker s PULL (tier ops).
     def report_addr(self) -> str:
         return f"tcp://127.0.0.1:{self.base_port}"
 
@@ -135,6 +135,9 @@ class RunConfig(msgspec.Struct, forbid_unknown_fields=True):
 
     def intake_addr(self) -> str:   # controller ROUTER <- intake DEALERs (intake_procs > 0)
         return f"tcp://127.0.0.1:{self.base_port + 2 + self.num_stages}"
+
+    def tier_addr(self, stage: int) -> str:   # worker s PULL <- controller: tier ops (tiers on)
+        return f"tcp://127.0.0.1:{self.base_port + 3 + self.num_stages + stage}"
 
 
 def load_config(path: str | Path, **overrides) -> RunConfig:

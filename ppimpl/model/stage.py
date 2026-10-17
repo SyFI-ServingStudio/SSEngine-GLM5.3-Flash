@@ -198,7 +198,7 @@ class StageModel:
     def __init__(self, cfg, stage: int, device: torch.device, *, layers: range | None = None,
                  first: bool | None = None, last: bool | None = None, num_blocks: int | None = None,
                  max_model_len: int | None = None, warmup: bool = True,
-                 host_trims: bool = True, cuda_graphs: bool | None = None):
+                 host_trims: bool = True, cuda_graphs: bool | None = None, ipc_kv: bool = False):
         st = stage_settings(cfg)
         check_ninja()
         split = st["layer_split"]
@@ -286,7 +286,7 @@ class StageModel:
             num_blocks = kv_tensors.blocks_that_fit(per_block, free, int(RESERVE_GB * 1e9),
                                                     st["pool_tokens"])
         self.kv = kv_tensors.allocate(vc, vc.compilation_config.static_forward_context, local_spec, num_blocks,
-                                      device)
+                                      device, ipc=ipc_kv)
         self.num_blocks = num_blocks
         self.meta = StageMetadata(vc, self.kv, device)
         self.max_tokens = max_tokens
@@ -618,6 +618,11 @@ class StageModel:
         return self.output_head(b, x, residual, post, comb)
 
     # ------------------------------------------------------------------------------------------------ forward
+
+    def tier_ranges(self) -> list:
+        """This stage's KV byte ranges per logical block / state block, for the tiers (ppimpl/runtime/tier_copy.py)."""
+        from ppimpl.runtime.tier_copy import stage_ranges
+        return stage_ranges(self.stage, self.vc.compilation_config.static_forward_context, self.kv)
 
     def forward(self, plan, hidden_in: torch.Tensor | None) -> torch.Tensor:
         return self.run(self.prepare(plan), hidden_in)

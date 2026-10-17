@@ -40,11 +40,34 @@ class Shutdown(msgspec.Struct, tag=True):
     pass
 
 
+class TierMove(msgspec.Struct, array_like=True):
+    """One tier op as every worker runs it on its quarter (ppimpl/engine/tiers.py TierOp, lanes/m6 TIERS.md §3)."""
+    op_id: int
+    op: str                       # "write" HBM -> tier, "read" tier -> HBM, "demote" DRAM -> SSD
+    tier: str                     # "dram" | "ssd": destination of write/demote, source of read
+    host_tier: str | None         # SSD ops: the host side ("dram" | "staging")
+    b_lo: int                     # HBM blocks [b_lo, b_hi) of the context move (an SSD read moves all of its slots)
+    b_hi: int
+    block_start: int              # slots[i] holds block block_start + i
+    kv_blocks: list[int]          # the context's HBM blocks from block 0
+    state_blocks: list[int]
+    slots: list[int]
+    state_slots: list[int]
+    host_slots: list[int]
+    host_state: list[int]
+
+
+class TierBatch(msgspec.Struct, tag=True):
+    ops: list[TierMove]           # dependencies done: a worker may run them in any order
+
+
 # --- worker -> controller -------------------------------------------------------------------------------------------
 
 class Ready(msgspec.Struct, tag=True):
     stage: int
     num_blocks: int               # blocks this stage can back with its KV tensors (incl. the null block)
+    slot_bytes: int = 0           # tiers: one tier slot (this GPU's quarter of one KV block of all stages)
+    state_slots: int = 0          # tiers: slots of one context's state
 
 
 class StageDone(msgspec.Struct, tag=True):
@@ -56,17 +79,26 @@ class StageDone(msgspec.Struct, tag=True):
     host_ns: tuple[int, int, int] | None = None    # host clock: plan received, prepare called, run returned
 
 
+class TierDone(msgspec.Struct, tag=True):
+    stage: int
+    op_id: int
+    start_ns: int                 # host clock: copies submitted
+    end_ns: int                   # host clock: seen complete
+    nbytes: int                   # moved by this GPU
+
+
 class WorkerError(msgspec.Struct, tag=True):
     stage: int
     error: str
 
 
 ToWorker = Plan | Shutdown
-ToController = Ready | StageDone | WorkerError
+ToController = Ready | StageDone | TierDone | WorkerError
 
 _enc = msgspec.msgpack.Encoder()
 _dec_worker = msgspec.msgpack.Decoder(ToWorker)
 _dec_controller = msgspec.msgpack.Decoder(ToController)
+_dec_tier = msgspec.msgpack.Decoder(TierBatch | Shutdown)
 
 
 def encode(msg) -> bytes:
@@ -77,8 +109,12 @@ def decode_to_worker(buf: bytes) -> Plan | Shutdown:
     return _dec_worker.decode(buf)
 
 
-def decode_to_controller(buf: bytes) -> Ready | StageDone | WorkerError:
+def decode_to_controller(buf: bytes) -> Ready | StageDone | TierDone | WorkerError:
     return _dec_controller.decode(buf)
+
+
+def decode_tier(buf: bytes) -> TierBatch | Shutdown:
+    return _dec_tier.decode(buf)
 
 
 def for_stage(plan: Plan, stage: int) -> Plan:
