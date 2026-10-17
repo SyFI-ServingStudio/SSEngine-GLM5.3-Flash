@@ -637,7 +637,17 @@ No `numa_alloc_onnode`, `MPOL_BIND` or `membind` is left in the lane.
 
 ### 14.2 Next, in order
 
-1. Coordinator reviews 0e5bc04 (and runs the small-job check of 14.1).
+1. Coordinator review of 0e5bc04: done 13:20 PDT 2026-10-17, no change needed.
+   - `mbind` mask/maxnode, `anon_map`/`anon_unmap`, `oom_score_adj` in the arena-making workers, and the per-node
+     sums are right. Shmem sits on the anon LRU, so `Active(file) + Inactive(file)` does not count other users'
+     shmem as available.
+   - The 50 GB per-node watchdog trips before a real spill: the kernel spills only at the node's low watermark, far
+     under 50 GB. So with the precheck, a node that runs short stops our run; spill is the backstop, not the plan.
+   - The small-job filler test of 14.1 is not run, by choice. Filling a node's MemFree to its watermark on this
+     shared host makes the kernel reclaim other users' page cache on that node and pushes their allocations
+     remote. That is the kind of interference the fix exists to prevent. MPOL_PREFERRED's fallback is kernel
+     semantics, and the no-filler checks above cover our side. The scripts stay in coord/ (pp-impl orchestrator,
+     untracked) if the user still wants it on an otherwise idle node.
 2. Pre-submit check, posted to the coordinator before submitting:
    - per node, MemFree + file pages;
    - other users' shmem and mlock holders per node (cgroup `memory.stat`, read only);
