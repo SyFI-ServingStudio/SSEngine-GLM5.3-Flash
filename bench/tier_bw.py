@@ -260,6 +260,17 @@ class Bench:
             except Exception as e:  # noqa: BLE001
                 self.log(test="peer_batch", dir=direction, error=repr(e))
 
+    def register(self):
+        """Time to make 16 GiB of pinned host memory on GPU 0's node: allocate, first touch, cudaHostRegister (the
+        tier pins 150 GB per GPU at start-up)."""
+        t0 = time.perf_counter()
+        ptr = NUMA.numa_alloc_onnode(16 * GiB, self.node[0])
+        ctypes.memset(ptr, 0, 16 * GiB)
+        t1 = time.perf_counter()
+        check(RT.cudaHostRegister(ptr, 16 * GiB, 3), "cudaHostRegister")
+        t2 = time.perf_counter()
+        self.log(test="register", gib=16, touch_s=round(t1 - t0, 2), register_s=round(t2 - t1, 2))
+
     def gemm(self):
         """GPU 0: 8192^3 BF16 GEMMs, alone; with every GPU's CE H2D running; with the SM kernel (16 CTAs) running."""
         torch.cuda.set_device(0)
@@ -296,7 +307,7 @@ class Bench:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True)
-    ap.add_argument("--tests", default="ce_single,ce_all,batch,sm,peer,gemm")
+    ap.add_argument("--tests", default="ce_single,ce_all,batch,sm,peer,gemm,register")
     ap.add_argument("--quick", action="store_true")
     a = ap.parse_args()
     out = Path(a.out)
