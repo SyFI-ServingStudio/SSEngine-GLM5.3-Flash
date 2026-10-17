@@ -36,9 +36,11 @@ def test_topk_choice_matches_the_faster_row_at_every_profiled_shape():
 
 
 def test_check_trace_flags_fallbacks_and_unknowns():
-    names = ["nvjet_tst_128x64", "causal_conv1d_channellast_fwd_kernel", "_causal_conv1d_fwd_kernel", "weird_kernel_x"]
+    names = ["nvjet_tst_128x64", "kda_conv_qkv_kernel", "kda_conv_state_kernel", "_causal_conv1d_fwd_kernel",
+             "causal_conv1d_channellast_fwd_kernel", "weird_kernel_x"]
     r = K.check_trace(names, 1)
     assert (4, "_causal_conv1d_fwd_kernel") in r.forbidden
+    assert (4, "causal_conv1d_channellast_fwd_kernel") in r.forbidden
     assert 4 in r.matched and 2 in r.matched
     assert not r.ok
 

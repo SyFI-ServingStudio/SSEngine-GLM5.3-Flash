@@ -7,7 +7,8 @@ call-path verdict (`measured/kernels_identity.md`), and the GPU kernel names it 
 - the M1 identity check against the profiler rows (`measured/kernels_identity.md` is the table form of this file);
 - one entry point for `bench/` and the tests (`CONFIGS`, `by_position`);
 - `check_trace`: a stage's traced GPU kernel names must be exactly the manifest's, with none of the fallbacks a
-  silent backend switch would launch (FlashKDA, the Triton conv, the TileLang fused mHC at a layer boundary, ...).
+  silent backend switch would launch (FlashKDA, the fork's Triton conv, the TileLang fused mHC at a layer boundary,
+  ...).
 
 Indexer top-k picks DeepSelect or vLLM `topKPerRowPrefill` per shape, whichever profiler row is faster
 (`2_kernels.md` §3): `topk_backend(num_queries, num_keys)`, from `data/topk_rows.json` (the 412 shapes that have
@@ -77,10 +78,13 @@ CONFIGS: tuple[KernelConfig, ...] = (
                  ROW_IMAGE_3F667D7, "ARGS (lda 24896)", False, "fork", _CUBLAS),
     KernelConfig(4, "gdn_causal_conv_prefill", "dao_channellast", "24576 channels, width 4",
                  ("kda.short_conv_prefill",), KDA,
-                 "causal_conv1d.causal_conv1d_fn (Dao 1.7.0), channel-last, one launch per sequence, BF16 weight, "
-                 "final conv state written", "Dao causal_conv1d_fn, one launch per sequence", "causal-conv1d 1.7.0",
-                 "DIFF in the fork (Triton, FP32 weight); ours follows the row", False, "pp_patch.kda_prefill",
-                 (r"causal_conv1d_channellast_fwd_kernel",), (r"_causal_conv1d_fwd_kernel",)),
+                 "ppimpl.model.kda_conv.conv_qkv (Triton): the Dao 1.7.0 channel-last kernel's arithmetic for the "
+                 "whole microbatch in one launch, BF16 weight, final conv states in a second launch; q, k, v and states "
+                 "bitwise equal to causal_conv1d_fn per sequence (tests/test_kda_conv_gpu.py)",
+                 "Dao causal_conv1d_fn, one launch per sequence", "causal-conv1d 1.7.0",
+                 "DIFF in the fork (Triton, FP32 weight); ours is bitwise the row's output in fewer launches", False,
+                 "pp_patch.kda_prefill", (r"kda_conv_qkv_kernel", r"kda_conv_state_kernel"),
+                 (r"_causal_conv1d_fwd_kernel", r"causal_conv1d_channellast_fwd_kernel")),
     KernelConfig(5, "kda_chunk_prefill", "flashinfer_cute_persistent", "64 heads, head dim 128",
                  ("kda.chunk_prefill",), KDA,
                  "flashinfer.kda.recurrent_kda(backend='cute-dsl-persistent')",

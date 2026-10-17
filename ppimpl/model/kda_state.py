@@ -17,7 +17,7 @@ NUM_WARPS = 4
 
 
 @triton.jit
-def _gather_kernel(pool_ptr, pool_s0, slots_ptr, init_ptr, out_ptr, E, BLOCK: tl.constexpr):
+def state_gather_kernel(pool_ptr, pool_s0, slots_ptr, init_ptr, out_ptr, E, BLOCK: tl.constexpr):
     i = tl.program_id(0)
     offs = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
     m = offs < E
@@ -28,7 +28,7 @@ def _gather_kernel(pool_ptr, pool_s0, slots_ptr, init_ptr, out_ptr, E, BLOCK: tl
 
 
 @triton.jit
-def _scatter_kernel(state_ptr, slots_ptr, pool_ptr, pool_s0, E, BLOCK: tl.constexpr):
+def state_scatter_kernel(state_ptr, slots_ptr, pool_ptr, pool_s0, E, BLOCK: tl.constexpr):
     i = tl.program_id(0)
     offs = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
     m = offs < E
@@ -45,7 +45,7 @@ def gather(pool: torch.Tensor, slots: torch.Tensor, init: torch.Tensor) -> torch
     E = pool[0].numel()
     out = torch.empty((N,) + tuple(pool.shape[1:]), dtype=pool.dtype, device=pool.device)
     if N:
-        _gather_kernel[(N, triton.cdiv(E, BLOCK))](pool, pool.stride(0), slots, init, out, E, BLOCK=BLOCK,
+        state_gather_kernel[(N, triton.cdiv(E, BLOCK))](pool, pool.stride(0), slots, init, out, E, BLOCK=BLOCK,
                                                     num_warps=NUM_WARPS)
     return out
 
@@ -56,5 +56,5 @@ def scatter(state: torch.Tensor, slots: torch.Tensor, pool: torch.Tensor) -> Non
     N = slots.shape[0]
     E = pool[0].numel()
     if N:
-        _scatter_kernel[(N, triton.cdiv(E, BLOCK))](state, slots, pool, pool.stride(0), E, BLOCK=BLOCK,
+        state_scatter_kernel[(N, triton.cdiv(E, BLOCK))](state, slots, pool, pool.stride(0), E, BLOCK=BLOCK,
                                                      num_warps=NUM_WARPS)

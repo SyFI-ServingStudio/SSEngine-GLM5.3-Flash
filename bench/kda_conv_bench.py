@@ -1,4 +1,4 @@
-"""KDA short conv of one layer: the per-sequence Dao calls (pp_patch.kda_prefill_forward) vs `ppimpl.model.kda_conv`
+"""KDA short conv of one layer: the per-sequence Dao calls the design prices (the reference) vs `ppimpl.model.kda_conv`
 (two launches), bitwise and timed, on 1 GPU.
 
   python -m bench.kda_conv_bench [--reps 100] [--out x.json]

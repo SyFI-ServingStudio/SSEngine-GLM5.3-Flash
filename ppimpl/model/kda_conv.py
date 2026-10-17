@@ -6,12 +6,12 @@ per stage microbatch on stage 2, 1.12 ms of kernels plus 0.18 ms of launch gaps 
 108 us per layer for one 4,096-row sequence where reading and writing the 4,096 x 24,576 BF16 rows bounds it at ~57 us.
 
 Here, per layer:
-- `_conv_kernel`: one program per (token block of one sequence, channel block), its rows in order with the previous 3
-  rows in registers and the next 4 loaded ahead; x rows before the sequence start come from its conv state (or are 0
-  for a fresh request); out = SiLU(sum_w weight[c, w] * x[t - 3 + w, c]) written into three contiguous [T, P] buffers
-  (q, k, v; FlashInfer's KDA takes them contiguous).
-- `_state_kernel`: one program per (sequence, channel block) after it: the last 3 x rows of the sequence (from its old
-  state where the sequence is shorter) into its conv state.
+- `kda_conv_qkv_kernel`: one program per (token block of one sequence, channel block), its rows in order with the
+  previous 3 rows in registers and the next 4 loaded ahead; x rows before the sequence start come from its conv state
+  (or are 0 for a fresh request); out = SiLU(sum_w weight[c, w] * x[t - 3 + w, c]) written into three contiguous
+  [T, P] buffers (q, k, v; FlashInfer's KDA takes them contiguous).
+- `kda_conv_state_kernel`: one program per (sequence, channel block) after it: the last 3 x rows of the sequence (from
+  its old state where the sequence is shorter) into its conv state.
 The arithmetic is the Dao kernel's SASS (sm_100, built with --use_fast_math): fma.rn.ftz from 0 over w = 0..3, then
 x * rcp.approx.ftz(1 + ex2.approx.ftz(x * -log2(e))), in inline PTX so the compiler cannot reorder or refuse FTZ.
 Measured (bench/kda_conv_bench.py, job 7927, B200, BLOCK_T 16 / BLOCK_C 512 / 4 warps, within 1% of the best of 36):
@@ -64,7 +64,7 @@ def _x_row(x_ptr, x_s0, st_ptr, st_s0, P, t, cols, s, slot, init, cmask):
 
 
 @triton.jit(do_not_specialize=["T"])   # one compile for every microbatch size (the warm-up's; no in-run JIT)
-def _conv_kernel(x_ptr, x_s0, w_ptr, st_ptr, st_s0, out_ptr, T, P, tab_ptr,
+def kda_conv_qkv_kernel(x_ptr, x_s0, w_ptr, st_ptr, st_s0, out_ptr, T, P, tab_ptr,
                  BT: tl.constexpr, BC: tl.constexpr):
     """One program: BT rows of one sequence x BC channels. The 3 rows before the block are loaded once and slide in
     registers, so every x row is read once (plus 3 per block)."""
@@ -108,7 +108,7 @@ def _ld(x_ptr, x_s0, t, cols, cmask, end):
 
 
 @triton.jit
-def _state_kernel(x_ptr, x_s0, st_ptr, st_s0, seq_ptr, C, BC: tl.constexpr):
+def kda_conv_state_kernel(x_ptr, x_s0, st_ptr, st_s0, seq_ptr, C, BC: tl.constexpr):
     r = tl.program_id(0)
     s = tl.load(seq_ptr + 3 * r)
     e = tl.load(seq_ptr + 3 * r + 1)
@@ -155,9 +155,10 @@ def conv_qkv(x: torch.Tensor, weight: torch.Tensor, conv_state: torch.Tensor, bl
     out = torch.empty(3, T, P, dtype=x.dtype, device=x.device)
     nb = block_tab.shape[0]
     if T and nb:
-        _conv_kernel[(nb, triton.cdiv(C, BLOCK_C))](x, x.stride(0), weight, conv_state, conv_state.stride(0), out,
-                                                     T, P, block_tab, BT=BLOCK_T, BC=BLOCK_C, num_warps=NUM_WARPS)
-        _state_kernel[(seq_tab.shape[0], triton.cdiv(C, STATE_BLOCK_C))](x, x.stride(0), conv_state,
-                                                                         conv_state.stride(0), seq_tab, C,
-                                                                         BC=STATE_BLOCK_C, num_warps=4)
+        kda_conv_qkv_kernel[(nb, triton.cdiv(C, BLOCK_C))](x, x.stride(0), weight, conv_state, conv_state.stride(0),
+                                                           out, T, P, block_tab, BT=BLOCK_T, BC=BLOCK_C,
+                                                           num_warps=NUM_WARPS)
+        kda_conv_state_kernel[(seq_tab.shape[0], triton.cdiv(C, STATE_BLOCK_C))](x, x.stride(0), conv_state,
+                                                                                 conv_state.stride(0), seq_tab, C,
+                                                                                 BC=STATE_BLOCK_C, num_warps=4)
     return out[0], out[1], out[2]

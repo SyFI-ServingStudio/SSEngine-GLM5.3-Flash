@@ -1,9 +1,10 @@
-"""GPU test of pp_patch FAST["edge_send_eager"] (one GPU, through Slurm: pytest -m gpu tests/test_glue_gpu.py).
+"""GPU tests of the stage-edge send and the indexer's cast (one GPU, through Slurm: pytest -m gpu
+tests/test_glue_gpu.py).
 
-The stage edge's hc_post run after the graph replay, into a new tensor, must send the same bits as the graph that
-computes it and whose output is then copied (`StageModel._run_graph`). One stage model, graphs captured for two
-buckets with the switch off, a sequence of microbatches run (fresh, continuing a cached prefix, padded, two
-requests), then recaptured with the switch on and the same sequence rerun: every sent row bitwise equal.
+The stage edge's hc_post runs after the graph replay, into a new tensor (`StageModel._run_graph`; job 7919 proved it
+bitwise equal to the hc_post captured in the graph and copied out). Here: one stage model, graphs captured for two
+buckets, a sequence of microbatches (fresh, continuing a cached prefix, padded, two requests) replayed and run eagerly
+on the same buffers (`replay=False`, the exactness reference): every sent row bitwise equal.
 """
 
 import pytest
@@ -12,7 +13,7 @@ pytestmark = pytest.mark.gpu
 
 
 @pytest.mark.parametrize("stage", [0, 2])
-def test_edge_send_eager_matches_graph_copy(stage):
+def test_edge_send_after_replay_matches_eager(stage):
     from types import SimpleNamespace as NS
 
     import torch
@@ -33,7 +34,7 @@ def test_edge_send_eager_matches_graph_copy(stage):
              NS(mb_id=2, chunks=[chunk("c", 0, 1024, 15)]),                          # another bucket
              NS(mb_id=3, chunks=[chunk("b", 999, 700, 8)])]                          # continuation, padded 1024
 
-    def run_all():
+    def run_all(replay: bool):
         g = torch.Generator(device=dev).manual_seed(3)
         outs = []
         with torch.inference_mode():
@@ -43,25 +44,21 @@ def test_edge_send_eager_matches_graph_copy(stage):
                     torch.bfloat16)
                 b = model.prepare(p)
                 assert b.bucket is not None
-                outs.append(model._run_graph(b, h).clone())
+                outs.append(model._run_graph(b, h, replay=replay).clone())
         torch.cuda.synchronize(dev)
         return outs
 
-    model.edge_send_eager = False
     model.capture_graphs(buckets=[1024, 4096])
-    old = run_all()
-    model.graphs = {}
-    model.edge_send_eager = True
-    model.capture_graphs(buckets=[1024, 4096])
-    new = run_all()
+    old = run_all(replay=False)
+    new = run_all(replay=True)
     assert all(bool(torch.isfinite(o.float()).all()) for o in old)
     for i, (x, y) in enumerate(zip(old, new)):
         assert x.shape == y.shape and torch.equal(x, y), (i, (x.float() - y.float()).abs().max().item())
 
 
 def test_indexer_float_matches_torch_cast():
-    """pp_patch FAST["indexer_float"] (glue_fast.to_float for the indexer's `hidden_states.float()`): on stage 2 (3 DSA
-    layers), the same microbatches eagerly with the fork's forward and with the rewritten one give the same top-k
+    """pp_patch `install_indexer_float` (glue_fast.to_float for the indexer's `hidden_states.float()`): on stage 2
+    (3 DSA layers), the same microbatches eagerly with the fork's forward and with the rewritten one give the same top-k
     indices from every indexer call and the same sent rows, bitwise; then graphs captured with it on replay the
     first microbatch (exactly the bucket) to the same rows."""
     from types import SimpleNamespace as NS
@@ -125,4 +122,4 @@ def test_indexer_float_matches_torch_cast():
         torch.cuda.synchronize(dev)
         assert torch.equal(rep, old[0])
     finally:
-        glue_fast.uninstall_indexer_float()
+        glue_fast.install_indexer_float()   # as the engine runs

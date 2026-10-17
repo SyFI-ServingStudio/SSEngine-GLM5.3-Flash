@@ -260,14 +260,9 @@ class StageModel:
                 pp_patch.route_kda(layer.self_attn)
         pp_patch.install_topk_router()
         pp_patch.install_kpool_unaligned()
-        if pp_patch.FAST["kpool_expand"]:
-            pp_patch.install_kpool_expand()
-        if pp_patch.FAST["kda_split_heads"]:
-            pp_patch.install_kda_split_heads()
-        if pp_patch.FAST["indexer_float"]:
-            pp_patch.install_indexer_float()
-        # the stage edge's hc_post outside the graphs (`_run_graph`); fixed here, before any capture
-        self.edge_send_eager = bool(pp_patch.FAST["edge_send_eager"]) and not self.last
+        pp_patch.install_kpool_expand()
+        pp_patch.install_kda_split_heads()
+        pp_patch.install_indexer_float()
         pp_patch.install_decode_topk_canon()
         pp_patch.install_sparse_mla_split()
         pp_patch.install_indexer_split()
@@ -589,20 +584,20 @@ class StageModel:
                                    batch_descriptor=BatchDescriptor(num_tokens=e.bucket))
 
     def _graph_body(self, e) -> tuple:
-        """The stage forward on a graph's static buffers (what is captured, and its eager equivalent)."""
+        """The stage forward on a graph's static buffers (what is captured, and its eager equivalent), up to the last
+        layer's outputs: a non-last stage's edge `hc_post` runs after the replay (`_run_graph`)."""
         x = self.embed(e.rows[2]) if self.first else pp_patch.edge_recv(e.hidden)
         residual = post = comb = None
         for layer in self.layers:
             x, residual, post, comb = layer(e.rows[0], x, residual, post, comb)
-        if not self.last and not self.edge_send_eager:
-            return (pp_patch.edge_send(self.layers[-1], x, residual, post, comb),)
         return (x, residual, post, comb)
 
     def _run_graph(self, b, hidden_in, replay: bool = True, raw: bool = False):
         """Pad to the bucket, replay (or, `replay=False`, run the same body eagerly on the same static buffers: the
-        exactness reference), then the output rows. A non-last stage returns a copy: the next replay of this bucket
-        overwrites the graph's output while the send of this one may still be queued. `raw`: copies of the body's
-        outputs' first T rows instead (tests)."""
+        exactness reference), then the output rows. A non-last stage runs the stage edge's `hc_post` on the bucket's
+        rows eagerly into a new tensor (same kernel, same inputs as in the graph, without a copy out of the graph's
+        output buffer, which the next replay of this bucket overwrites while this send may still be queued). `raw`:
+        copies of the first T rows (tests)."""
         e = self.graphs[b.bucket]
         T = b.num_tokens
         e.rows.copy_(b.graph_rows)
@@ -614,15 +609,11 @@ class StageModel:
                 out = e.out
             else:
                 out = self._graph_body(e)
-            if self.edge_send_eager:
-                # the last layer's hc_post on the bucket's rows, eagerly into a new tensor: what the graph would
-                # have computed (same kernel, same inputs), without the copy out of the graph's output buffer
+            if not self.last:
                 sent = pp_patch.edge_send(self.layers[-1], *out)
                 return (sent[:T].clone(),) if raw else sent[:T]
         if raw:
             return tuple(None if t is None else t[:T].clone() for t in out)
-        if not self.last:
-            return out[0][:T].clone()
         x, residual, post, comb = (None if t is None else t[:T] for t in out)
         return self.output_head(b, x, residual, post, comb)
 

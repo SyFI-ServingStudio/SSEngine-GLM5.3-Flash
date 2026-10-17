@@ -3,8 +3,7 @@
 # the repo root:
 #   sbatch -p main --gres=gpu:1 -c 28 --mem=200G --time=00:10:00 -o measured/logs/%j_stage_bench.out \
 #     bench/slurm/stage_bench.sbatch "0:time 0:kernels 0:stacks"
-# Each item is stage:mode[:spec][+on][@off] (spec: prefix:append,...; on / off: pp_patch.FAST switches turned on / off,
-# comma lists, for A/B); STAGE_BENCH_ARGS adds options to every run.
+# Each item is stage:mode[:spec] (spec: prefix:append,...); STAGE_BENCH_ARGS adds options to every run.
 #SBATCH --gres=gpu:1
 #SBATCH -J ppm-stagebench
 set -uo pipefail
@@ -14,13 +13,11 @@ mkdir -p "$O"
 nvidia-smi --query-gpu=index,clocks.sm,power.draw,temperature.gpu --format=csv,noheader
 rc=0; i=0
 for item in ${1:-0:time}; do
-  off=; [[ $item == *@* ]] && { off=${item##*@}; item=${item%@*}; }
-  on=; [[ $item == *+* ]] && { on=${item##*+}; item=${item%+*}; }
   s=${item%%:*}; rest=${item#*:}; m=${rest%%:*}; spec=; [[ $rest == *:* ]] && spec=${rest#*:}
   extra=(); [ -n "${spec:-}" ] && extra=(--spec "$spec")
-  i=$((i + 1)); tag=${i}_s${s}_${m}${on:+_on-${on//,/-}}${off:+_off-${off//,/-}}
-  echo "== $(date -Is) stage $s $m ${spec:-} on=${on:-} off=${off:-}"
-  $PY -m bench.stage_bench --stage "$s" --mode "$m" "${extra[@]}" --on "${on:-}" --off "${off:-}" ${STAGE_BENCH_ARGS:-} \
+  i=$((i + 1)); tag=${i}_s${s}_${m}
+  echo "== $(date -Is) stage $s $m ${spec:-}"
+  $PY -m bench.stage_bench --stage "$s" --mode "$m" "${extra[@]}" ${STAGE_BENCH_ARGS:-} \
     --out "$O/$tag.json" > "$O/$tag.log" 2>&1 || rc=1
   grep -E "^\[stage_bench\]|Error|error" "$O/$tag.log" | tail -5
 done

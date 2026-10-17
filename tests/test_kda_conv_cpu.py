@@ -1,6 +1,6 @@
-"""CPU test of `kda_conv.tables`: the token blocks of `_conv_kernel` cover every row of every sequence exactly once,
-never cross a sequence, and carry its (start, end, state block, has initial state); one row per sequence for
-`_state_kernel`. tests/test_kda_conv_gpu.py checks the kernels against the Dao calls."""
+"""CPU test of `kda_conv.tables`: the token blocks of `kda_conv_qkv_kernel` cover every row of every sequence exactly
+once, never cross a sequence, and carry its (start, end, state block, has initial state); one row per sequence for
+`kda_conv_state_kernel`. tests/test_kda_conv_gpu.py checks the kernels against the Dao calls."""
 
 import numpy as np
 
