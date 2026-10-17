@@ -16,17 +16,18 @@ from pathlib import Path
 
 import numpy as np
 
+from bench.common import HANDOFF
 from bench.prefix import bringup, server_rows
 from bench.report import read_jsonl
 
-# TIERS.md §10 (tiercheck/, the coordinator's v2-realistic run): round-1 TTFT ms, read ms; per P in tokens
-TARGETS = {
-    "round0": {32768: (367.5, None), 131072: (1200.2, None), 524288: (4949.0, None)},
-    "hbm_hit": {32768: (52.7, None), 131072: (53.7, None), 524288: (57.5, None)},
-    "none": {32768: (387.9, None), 131072: (1221.2, None), 524288: (4972.7, None)},
-    "dram": {32768: (54.4, 1.72), 131072: (58.4, 4.67), 524288: (73.9, 16.46)},
-    "ssd": {32768: (61.3, 8.60), 131072: (77.1, 23.34), 524288: (139.8, 82.28)},
-}
+VARIANTS = ("hbm_hit", "hbm", "dram", "ssd", "dram_unbal", "ssd_unbal")
+
+
+def targets(variant: str) -> dict[int, tuple[float, float]]:
+    """P -> (round-1 TTFT ms, read ms) of the handoff's data/tier_targets.json (v2-realistic overlay: the coordinator's
+    tiercheck runs, TIERS.md §10)."""
+    rows = json.loads((HANDOFF / "data/tier_targets.json").read_text())[variant]
+    return {r["prefix_tokens"]: (r["round1_ttft_ms"], r["read_ms"]) for r in rows}
 
 
 def summarize(run_dir: Path, target: str | None, reference: Path | None = None) -> dict:
@@ -61,7 +62,7 @@ def summarize(run_dir: Path, target: str | None, reference: Path | None = None) 
     by_p = {}
     for P in sorted({r["P"] for r in sessions}):
         rs = [r for r in sessions if r["P"] == P]
-        tgt = TARGETS.get(target, {}).get(P)
+        tgt = targets(target).get(P) if target else None
         reads_ms = [r["read_ms"] for r in rs if "read_ms" in r]
         by_p[P] = {"sessions": len(rs), "round1_ttft_ms": round(float(np.mean([r["round1_ttft_ms"] for r in rs])), 2),
                    "round1_server_ttft_ms": round(float(np.mean([r["round1_server_ttft_ms"] for r in rs
@@ -76,7 +77,7 @@ def summarize(run_dir: Path, target: str | None, reference: Path | None = None) 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("run_dir", type=Path)
-    ap.add_argument("--target", choices=sorted(TARGETS))
+    ap.add_argument("--target", choices=VARIANTS)
     ap.add_argument("--reference", type=Path, help="a run whose round-1 tokens to compare (same prompts)")
     a = ap.parse_args()
     out = summarize(a.run_dir, a.target, a.reference)

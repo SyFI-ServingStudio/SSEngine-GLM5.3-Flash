@@ -15,6 +15,7 @@ export CUDA_DEVICE_ORDER=PCI_BUS_ID
 G=${CUDA_VISIBLE_DEVICES:-0,1,2,3}
 P=$((20000 + ${SLURM_JOB_ID:-0} % 120 * 100))
 export PPIMPL_SSD_DIR=${PPIMPL_SSD_DIR:-$ROOT/tmp/ssd_$JOB}
+export PPIMPL_HANDOFF=${PPIMPL_HANDOFF:-$MAIN/third_party/handoff_v2_realistic}   # v2-realistic targets
 trap 'rm -rf "$PPIMPL_SSD_DIR" "$TMPDIR"; echo "== df after: $(df -h "$ROOT" | tail -1)"' EXIT
 WHAT=${1:?run name (bench/run.py)}; shift
 echo "== $(date -Is) gpus $G port $P: $WHAT $* (ssd dir $PPIMPL_SSD_DIR)"
