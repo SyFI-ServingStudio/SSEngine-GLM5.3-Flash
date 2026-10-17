@@ -1,12 +1,15 @@
 """Tune FlashInfer's tactics once and persist them (`ppimpl.model.stage.TACTICS`), or verify a persisted file.
 
-    python -m bench.tune_tactics tune   [--out PATH]                 # 1 GPU, ~5 min
+    python -m bench.tune_tactics tune   [--out PATH] --routing RUN_DIR [--routing ...] | --routing-json PATH  # 1 GPU
     python -m bench.tune_tactics verify [--lengths 1024,8192,131072]  # fresh process: load, Ready time, cache misses
 
 `tune` builds stage 0 with the output head (every FlashInfer op the four stages use: KDA-dense and MoE layers'
 NVFP4 GEMMs, the trtllm NVFP4 MoE, the TRTLLM sparse MLA), budget 131,072 tokens (the largest microbatch any run
 config uses, so every token bucket is profiled), runs the warm-up with tuning forced and saves the autotuner's
-configs. The file carries FlashInfer's metadata (FlashInfer/CUDA/cuBLAS/cuDNN versions, GPU); a stage loads it only
+configs. The fused MoE is tuned at the serving buckets (`ppimpl.model.moe_tuning`, installed by every stage) on
+served routing: `--routing` reads the experts_stage<S>.jsonl of runs made with PPIMPL_LOG_EXPERTS=1 and folds each
+routed-row count's histograms; `--routing-json` takes {rows: histogram} or a single histogram list (then every
+bucket scales it). The histograms each bucket was tuned on go to <out>.routing.json. The file carries FlashInfer's metadata (FlashInfer/CUDA/cuBLAS/cuDNN versions, GPU); a stage loads it only
 where they match, otherwise it tunes in-process and warns.
 
 `verify` builds the same stage in a new process with `warmup(tune="auto")`, reports the warm-up time and, over one
@@ -40,17 +43,42 @@ def build(warmup: str):
     return model, built, time.time() - t0
 
 
-def tune(out: Path) -> None:
-    from flashinfer.autotuner import AutoTuner
+def load_profile(runs: list[Path], json_path: Path | None) -> dict[int, list[int]]:
+    from ppimpl.model import moe_tuning
 
-    model, built, warm = build("force")
+    if runs:
+        return moe_tuning.routing_profile(runs)
+    d = json.loads(json_path.read_text())
+    if isinstance(d, list):
+        return {sum(d) // moe_tuning.TOP_K: d}
+    return {int(k): v for k, v in d.items() if not k.startswith("_")}
+
+
+def tune(out: Path, profile: dict[int, list[int]], sources: list[str]) -> None:
+    from flashinfer.autotuner import AutoTuner
+    from ppimpl.model import moe_tuning
+
+    if not profile:
+        raise SystemExit("tune: no routing histograms (--routing / --routing-json)")
+    print(f"[tune] routing profile: row counts {sorted(profile)[:8]}..{sorted(profile)[-3:]} "
+          f"({len(profile)}) from {sources}", flush=True)
+    with moe_tuning.real_routing(profile) as used:
+        model, built, warm = build("force")
     out.parent.mkdir(parents=True, exist_ok=True)
     if out.exists():
         out.unlink()            # a fresh file: no merge with entries tuned elsewhere
     AutoTuner.get().save_configs(str(out))
     data = json.loads(out.read_text())
+    moe = sorted(int(k.split("((")[1].split(",")[0]) for k in data if "trtllm_fp4_block_scale_moe" in k)
+    side = out.with_suffix(".routing.json")
+    side.write_text(json.dumps({"sources": sources, "moe_buckets": moe,
+                                "tuned_on": {str(k): {"max": max(h), "active": sum(1 for x in h if x), "hist": h}
+                                             for k, h in sorted(used.items())}}))
     print(f"[tune] built {built:.0f} s, tuned warm-up {warm:.0f} s; wrote {out} ({len(data)} keys, "
-          f"metadata {data.get('_metadata')})", flush=True)
+          f"{len(moe)} MoE buckets, routing at {len(used)} token counts -> {side}; metadata {data.get('_metadata')})",
+          flush=True)
+    if not used:
+        raise SystemExit("tune: the MoE was not tuned on the given routing (initializer never called)")
 
 
 def verify(lengths: list[int]) -> None:
@@ -95,10 +123,12 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("mode", choices=["tune", "verify"])
     ap.add_argument("--out", type=Path, default=TACTICS)
-    ap.add_argument("--lengths", default="1024,2048,4096,8192,131072")
+    ap.add_argument("--lengths", default="1024,2048,4096,4352,6144,8192,131072")
+    ap.add_argument("--routing", type=Path, action="append", default=[], help="run dir with experts_stage*.jsonl")
+    ap.add_argument("--routing-json", type=Path)
     a = ap.parse_args()
     if a.mode == "tune":
-        tune(a.out)
+        tune(a.out, load_profile(a.routing, a.routing_json), [str(p) for p in a.routing or [a.routing_json]])
     else:
         verify([int(x) for x in a.lengths.split(",")])
 

@@ -263,6 +263,7 @@ class StageModel:
         pp_patch.install_decode_topk_canon()
         pp_patch.install_sparse_mla_split()
         pp_patch.install_indexer_split()
+        pp_patch.install_moe_buckets()
         # host trims (no kernel or argument changes): env cache, FlashInfer tactic memo / mm_fp4 skip_check, plain
         # parameters
         self.host_trims = self.install_host_trims() if host_trims else None
