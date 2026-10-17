@@ -18,8 +18,9 @@ the tokens. Logs, in `run_dir` (times in ms from t0, the first request's arrival
   at admission, 0 if none), `common_prefix_tokens` (prompt and kept context, compared only on a miss),
   `evicted_context_tokens` (evicted), `evicted_sessions_at_admit` and `admit_wait_ms` (at the head, waiting for pool
   room);
-- `plans.jsonl`: one line per microbatch at dispatch: tokens, dispatch time, whether it was queued behind a running
-  stage-0 plan, and that plan's predicted stage-0 end;
+- `plans.jsonl`: one line per microbatch: tokens, dispatch (forming) time, the time its plan was sent to the
+  workers, whether stage 0 had a plan not reported done, the in-flight count with it (by reports), how many of
+  those the rule projected to leave before it starts (`exiting`) and its projected stage-0 start;
 - `cache.json` (rewritten every 10 s and at stop): the pool in blocks and tokens, the prefix cache's counters (hits,
   hit tokens, evicted sessions and tokens, preemptions: always 0), the kept sessions and the pool in use.
 Prefix cache (`keep_sessions`, 5_prefix_cache.md §2): a finished request's blocks stay as its context; the next prompt
@@ -172,11 +173,10 @@ class Controller:
             raise
         self._pin()
         num_blocks = pool_size([r.num_blocks for r in ready], cfg.pool_tokens)
-        self.rule = DispatchRule(cfg.max_in_flight, cfg.dispatch_ahead >= 1, cfg.form_lead_ms, cfg.pace_margin_ms,
-                                 self.n)
-        # the scheduler's own cap is not the binding one: the rule admits the extra queued plan
+        self.rule = DispatchRule(cfg.max_in_flight, cfg.form_lead_ms, self.n)
+        # forming ahead: up to 2 other plans not reported done on stage 0; in flight net of the `exiting` ones
         self.sched = Scheduler(KvManager(num_blocks, keep_sessions=cfg.keep_sessions, content_keys=True),
-                               cfg.scheduler, None, self.rule.cap, 1)
+                               cfg.scheduler, None, cfg.max_in_flight, 2)
         self.mb_log = open(self.run_dir / "microbatches.jsonl", "w")
         self.host_log = open(self.run_dir / "worker_host.jsonl", "w")
         self.plan_log = open(self.run_dir / "plans.jsonl", "w")
@@ -486,13 +486,13 @@ class Controller:
             self.held = None
         while True:
             now = time.time_ns()
-            verdict, at = self.rule.decide(self.sched.in_flight, now)
+            verdict, at = self.rule.decide(now)
             if verdict == WAIT:
                 self.timer_at = at
                 return
             if verdict != NOW:
                 return
-            chunks = self.sched.next_microbatch(now)
+            chunks = self.sched.next_microbatch(now, self.rule.exiting)
             if chunks is None:
                 return
             self._dispatch(chunks, now)
@@ -500,12 +500,11 @@ class Controller:
     def _dispatch(self, specs: list[ChunkSpec], now: int):
         mb_id, self.next_mb = self.next_mb, self.next_mb + 1
         queued = len(self.rule.on_stage0) > 0
-        pred = self.rule.predicted_end_ns() if queued else None
-        tokens = sum(c.num_tokens for c in specs)
-        self.rule.dispatched(mb_id, now, tokens)
-        self.plan_log.write(json.dumps({"index": mb_id, "tokens": tokens, "dispatch_ms": round(self._ms(now), 4),
-                                        "queued": queued, "in_flight": self.sched.in_flight,
-                                        "predicted_s0_end_ms": round(self._ms(pred), 4) if pred else None}) + "\n")
+        start = self.rule.projected["start"] if self.rule.projected else None
+        log = {"index": mb_id, "tokens": sum(c.num_tokens for c in specs), "dispatch_ms": round(self._ms(now), 4),
+               "queued": queued, "in_flight": self.sched.in_flight, "exiting": self.rule.exiting,
+               "predicted_start_ms": round(self._ms(start), 4) if start else None}
+        self.rule.dispatched(mb_id, now, log["tokens"])
         chunks = []
         for c in specs:
             r = c.req
@@ -525,6 +524,8 @@ class Controller:
         plan = Plan(mb_id, chunks)
         for s in range(self.n):
             self.plans[s].send(encode(for_stage(plan, s)))
+        log["sent_ms"] = round(self._ms(time.time_ns()), 4)
+        self.plan_log.write(json.dumps(log) + "\n")
         self.inflight_plans[mb_id] = ([{"id": c.req.req_id, "prefix": c.start, "append": c.num_tokens}
                                        for c in specs], self.n)
 
@@ -542,8 +543,6 @@ class Controller:
         else:
             self.inflight_plans[d.mb_id] = (reqs, left - 1)
         self.sched.stage_done(d.stage, self.n - 1)
-        if d.stage == 0:
-            self.rule.stage0_done(d.mb_id, d.start_ns, d.end_ns)
         self.rule.stage_done(d.stage, d.mb_id, d.start_ns, d.end_ns)
         if d.tokens:
             now = time.time_ns()

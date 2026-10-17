@@ -81,11 +81,12 @@ def hold_for(trace: Path) -> int:
     return sum(float(r.split(",")[col]) == 0 for r in rows[1:] if r.strip())
 
 
-# The queued plan forms this long before stage 0 frees: stage 0's host time from a plan's forming to its forward
-# returning with all GPU work enqueued, with CUDA graphs (smoke 7658, worker_host.jsonl): p50 / p90 / p99 7.2 / 10.1 /
-# 41.5 ms (the p99 is 8,192-token microbatches with 56k-134k contexts), plus margin. Recorded in each run's
+# A plan forms this long before its predicted host time ahead of its projected stage-0 start (ppimpl/runtime/
+# dispatch.py): the projection's error. Stage-0 time predicted per size bucket over measured (good N=400/500,
+# 7763/7764): p90 / p99 +3.9 / +10.7 ms and +5.6 / +13.3 ms. The host time itself (forming to the stage-0 start when stage 0 is
+# ready, p50 0.7 ms) is predicted separately; a forward's later launches overlap its GPU work. Recorded in each run's
 # server_config.yaml.
-REAL_FORM_LEAD_MS = 45.0
+REAL_FORM_LEAD_MS = 10.0
 
 # One request of 64k or more is one microbatch, and its activations outgrow the contract's 13.6 GB reserve beside the
 # full KV pool (job 7117: one_64k needs ~37 GB, one_128k ran out of memory in warm-up). These runs need a few blocks of

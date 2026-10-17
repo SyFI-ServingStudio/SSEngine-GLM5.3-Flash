@@ -122,10 +122,11 @@ launches should not also be the one that services messages or sends, or it stall
   backlog / 4), good (force-schedule after 60 s). A run config may set the budget larger (one-request runs: the
   whole prompt in one microbatch).
 - Dispatch (`runtime/dispatch.py`; its docstring has the rule and why): when the next microbatch forms. At most 4 in
-  flight (dispatched, stage 3 not done) plus one plan queued behind stage 0's running one (`dispatch_ahead` 1),
-  formed `form_lead_ms` before stage 0's predicted end, so stage 0 has no host gap. Pacing (`pace_margin_ms`, 2 ms)
-  delays that plan until it would reach each later stage no earlier than the margin before the stage frees, so a
-  slower later stage does not collect a queue that every round in it pays in TTFT.
+  flight, held on the GPU: stage 0's stream waits before microbatch k until the last stage has finished k-4 (a flag
+  it writes, `transport.py`). The controller forms each plan ahead, `form_lead_ms` plus the predicted host time
+  before its projected stage-0 start (stage ends reported, or predicted per stage), so neither the reports' latency
+  nor the plan's delivery leaves stage 0 idle; the scheduler leaves the microbatches projected to exit by then out
+  of the in-flight count and the backlog.
 - Admission: a request enters the scheduler once its blocks are allocated; otherwise it waits in arrival order.
 - A request completes when stage 3 reports its token: the HTTP response returns it, its blocks are freed.
 

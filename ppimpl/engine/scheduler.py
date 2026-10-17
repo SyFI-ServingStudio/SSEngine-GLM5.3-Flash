@@ -3,7 +3,8 @@ feeds it events (`add`, `stage_done`, `finish`, `read_landed`).
 
 The scheduler of 6_scheduler.md §2, built on the plain one (`SchedulerConfig`; `SCHEDULER_STEPS` names the steps):
 - **In flight.** At most `max_in_flight` microbatches (formed, last stage not done). A microbatch forms when stage 0 is
-  free, or up to `dispatch_ahead` microbatches early (0 reproduces the targets, which decide at stage-0-free time).
+  free, or up to `dispatch_ahead` microbatches early (0 reproduces the targets, which decide at stage-0-free time);
+  a caller forming ahead says how many in-flight ones will have left by then (`exiting`).
 - **Progress** is committed when a chunk is scheduled; chunks end at any token; the next chunk can ride the next
   microbatch.
 - **Admission.** A request reserves its whole footprint once, when its first chunk is scheduled (`KvManager`); the
@@ -275,18 +276,19 @@ class Scheduler:
 
     # --- decisions ------------------------------------------------------------------------------------------------
 
-    def can_dispatch(self) -> bool:
-        return self.in_flight < self.max_in_flight and self.on_stage0 <= self.dispatch_ahead
+    def can_dispatch(self, exiting: int = 0) -> bool:
+        return self.in_flight - exiting < self.max_in_flight and self.on_stage0 <= self.dispatch_ahead
 
-    def next_microbatch(self, now_ns: int = 0) -> list[ChunkSpec] | None:
+    def next_microbatch(self, now_ns: int = 0, exiting: int = 0) -> list[ChunkSpec] | None:
         """Form and commit the next microbatch, or None (nothing to run, or no room in flight). May start tier
-        reads (`take_ops`)."""
-        if not self.can_dispatch():
+        reads (`take_ops`). `exiting`: the oldest in-flight microbatches that leave the last stage before this one
+        starts (the controller forms ahead, ppimpl/runtime/dispatch.py): not counted in flight or in the backlog."""
+        if not self.can_dispatch(exiting):
             return None
         if self.overdue is not None:
             self.overdue.promote(self.policy, now_ns)
         self._chunks = []
-        budget = self.budget()
+        budget = self.budget(exiting)
         if self.srpt:
             self._form_srpt(budget, now_ns)
         else:
@@ -302,17 +304,19 @@ class Scheduler:
         self.stats["microbatches"] += 1
         return chunks
 
-    def backlog(self) -> int:
-        """B: started prompts' unscheduled tokens + waiting prompts' new tokens + in-flight microbatches' tokens."""
+    def backlog(self, exiting: int = 0) -> int:
+        """B: started prompts' unscheduled tokens + waiting prompts' new tokens + in-flight microbatches' tokens
+        (without the `exiting` oldest)."""
+        gone = sum(self._mb_tokens[i] for i in range(min(exiting, len(self._mb_tokens))))
         return (sum(r.remaining for r in self.started) + self.policy.tokens
-                + (self.overdue.tokens if self.overdue else 0) + self.in_flight_tokens)
+                + (self.overdue.tokens if self.overdue else 0) + self.in_flight_tokens - gone)
 
-    def budget(self) -> int:
+    def budget(self, exiting: int = 0) -> int:
         cfg = self.cfg
         b = cfg.mb_tokens
         if not (cfg.load_budget or cfg.even_split):
             return b
-        backlog = self.backlog()
+        backlog = self.backlog(exiting)
         if cfg.load_budget:
             rise = min(max((backlog - cfg.backlog_lo) / (cfg.backlog_hi - cfg.backlog_lo), 0.0), 1.0)
             b = min(b, cfg.load_budget_low + int((cfg.mb_tokens - cfg.load_budget_low) * rise + 0.5))

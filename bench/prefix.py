@@ -121,10 +121,13 @@ def replay_window(run_dir: Path, n: int, window_ms: float) -> dict | None:
     if step is None:
         return None
     out = run_dir / "replay_fit"
+    # runs before the in-flight gate queued one plan ahead (dispatch_ahead 1); since, stage 0 starts as the targets do
+    ahead = cfg.get("dispatch_ahead", 0)
+    lead = cfg["form_lead_ms"] if ahead else None
     if not (out / "requests.jsonl").exists():
-        run_sessions(step, n, out, minutes=window_ms / 60e3 + 0.25, dispatch_ahead=cfg["dispatch_ahead"],
-                     form_lead_ms=cfg["form_lead_ms"], max_in_flight=cfg["max_in_flight"])
-    return {"step": step, "dispatch_ahead": cfg["dispatch_ahead"], "form_lead_ms": cfg["form_lead_ms"],
+        run_sessions(step, n, out, minutes=window_ms / 60e3 + 0.25, dispatch_ahead=ahead, form_lead_ms=lead,
+                     max_in_flight=cfg["max_in_flight"])
+    return {"step": step, "dispatch_ahead": ahead, "form_lead_ms": lead,
             **window_metrics(real_arrays(out / "requests.jsonl"), window_ms)}
 
 
