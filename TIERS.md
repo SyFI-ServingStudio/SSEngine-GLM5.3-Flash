@@ -1,6 +1,7 @@
 # M6 design: prefix KV in DRAM and SSD (7_offloading.md)
 
-Status: draft for review, nothing implemented. Branch lane-m6 from m5-done (a167593).
+Status: steps 1a/2a code in, CPU-tested; two hops in (`hops = "two"`); interfaces under review (§13) before the
+refactor into them. Branch lane-m6 from m5-done (a167593).
 
 ## 0. Summary
 
@@ -110,6 +111,26 @@ Job 7916 (`bench/tier_bw.py`, 2026-10-17 03:30, load 10.3; the job's GPUs 0-3 we
   ~60 s of touch on one thread (4 threads in the worker, overlapping the model load) and ~15 s of registering.
 - **GDS:** `gdscheck -p` reports no nvidia-fs (`measured/tier_bw/7916/gdscheck.txt`), as expected.
 
+**Second hop (job 7943, the coordinator's probe `pp-impl/coord/d2d_probe.py`, output `coord/d2d_probe_7943.out`;
+3 GPUs, physical 1-3 on NUMA node 0, host load 66).**
+
+| Measurement | Result |
+|---|---|
+| Peer `copy_` in the kineto trace | "Memcpy PtoP (Device -> Device)", no kernel row: copy engine, 0 SMs |
+| D2D GPU q -> the peers, one 64 MiB copy | 699.6 GB/s |
+| D2D, all GPUs copying in a ring at once | 670.7 GB/s per GPU |
+| D2D, 2 MiB pieces, one `copy_` each from Python | 54.8 GB/s (launch overhead; one batch call avoids it) |
+| H2D alone / H2D while D2D runs at the H2D rate | 55.5 / 55.0 GB/s (D2D also 55.0): H2D unaffected |
+| GEMM 8192^3 on the sending GPU: alone, with D2D at 700 GB/s, with H2D + D2D at 55 GB/s, alone again | 0.686 / 0.735 (+7%) / 0.713 (+4%) / 0.682 ms |
+| the same on a receiving GPU | 0.691 / 0.728 (+5%) / 0.717 (+4%) / 0.710 ms |
+
+- The second hop runs on copy engines. Its HBM traffic slows a GEMM by 5-7% at full D2D rate (HBM contention, not SMs);
+  at the rate it actually runs (paced by the host hop, <= 55 GB/s) the slowdown is ~4%, against ~3% between the two
+  "alone" runs of the same GPU: near noise.
+- Still to measure, in the first DRAM bring-up job (no separate job): the GEMM slowdown with the real
+  `cuMemcpyBatchAsync` pipeline at the real rate, and the second hop beside the stage edges' `CePipe` sends (both on
+  NVLink: does either slow the other).
+
 ### 2.4 Choices
 
 Taken now, each with the 7916 number that confirms it or switches to the fallback:
@@ -123,9 +144,13 @@ Taken now, each with the 7916 number that confirms it or switches to the fallbac
 | Host memory on the GPU's NUMA node, registered by `cudaHostRegister` (not torch pin_memory) | torch rounds pins to powers of 2; remote NUMA caps lower | **confirmed**: 4 GPUs from the other node 27.2 / 19.4 GB/s vs 48.4 / 38.5 | preferred-local allocation, remote spill logged |
 | SSD: O_DIRECT `preadv`/`pwritev`, 8 threads per GPU, one preallocated file per GPU | fio: 8 psync threads give 53 GB/s on one file; no GDS on this node (nvidia-fs not loaded; it would also need DRAM copy-up anyway) | per-read latency measured at step 2 | io_uring via liburing if threads miss 10 GB/s per GPU |
 
-Note: with pipeline-parallel stages, own-stage storage already sends about a quarter of a context through each link
-(stage 0's share is 1,635 / 1,499 = 9% above the mean). Balanced storage buys that 9% and equal tier sizes; the
-handoff makes it the design (§2), so step 1 builds it, and the own-stage variant stays a config for the record.
+Note: own-stage storage (each GPU stores and moves its own stage's bytes) is not balanced. At PP4, stages 0, 2 and 3
+hold 3 DSA layers each (14.02 MB per block, 1,635 B/token: 9% above the mean of 1,499) and stage 1 holds 2 (9.35 MB,
+27% below); the KDA states are 39.1 / 39.1 / 34.7 / 34.7 MB. So three links carry 9% more than the mean and one 27%
+less, and the slowest link sets a read's landing time. At PP8 the 11 DSA layers split 2 or 1 per stage (mean 1.375),
+so the busiest link carries at least 2 / 1.375 = 45% more than the mean. Balanced storage is exact for every PP degree
+and every context; the code takes the PP degree as a parameter (n = `num_stages`), and own-stage stays a placement
+option for comparison (§13).
 
 ## 3. Balanced storage and the slot layout
 
@@ -284,3 +309,123 @@ Block-granular slots (§3: +4% space, +5% on a 32k read); real write traffic on 
 reads vs write-back); host time to start and land a read (measured per read in `reads.jsonl`); SSD latency of small reads (a 32k
 context is 90 MB per GPU; fio's one-shot reads of that size were dominated by fio's own start-up, so measured in
 step 2 inside the engine).
+
+## 13. Interfaces (proposal for review, 2026-10-17; the refactor waits for approval)
+
+One public object, `BalancedKVPool`, with five internal layers. Every layer has a small interface and runs on CPU in
+tests. Names follow vLLM's offloading API where the concept is the same (`OffloadingManager.lookup` /
+`prepare_load` / `prepare_store` / `complete_*`, `OffloadingWorker.transfer_async` / `get_finished`,
+`register_kv_caches`), and SGLang HiCache's host pool (`HostKVCache.alloc` / `free` / `available_size`,
+`HiCacheStorage` `batch_get` / `batch_set`).
+
+### 13.1 Public API
+
+```python
+pool = BalancedKVPool(group, tiers=[HostTier(gb=150), SsdTier(gb=128, dir=...)], hops="two")
+pool.register(stage_kv)              # once per process after the KV pool is allocated (collective)
+h = pool.store(key, views)           # collective: all n processes, same key
+h = pool.load(key, views)            # collective
+pool.lookup(key, prompt=None) -> Hit(tier, tokens) | None
+pool.close()
+```
+
+- **`group`.** The PP group: n stage processes (n = PP degree, any value) plus one leader that holds the index. In
+  this engine the leader is the controller (where the scheduler runs). Without a controller, rank 0 is the leader.
+- **`views` are block ids, not tensors.** `KVViews(kv_blocks, state_blocks, tokens, hbm_tokens=0)` names this
+  process's blocks in the caches it registered. Tensors cannot be passed per call: GPU q writes into every stage's
+  KV, so it needs the other processes' device addresses, and opening a CUDA IPC handle takes milliseconds. That is
+  why `register` exchanges the handles once, the same split as vLLM's `register_kv_caches` plus per-call block
+  ids. Each process passes only its own blocks; the block ids may differ between stages.
+- **Collective semantics.** The n calls with the same key form one operation, matched by (key, seq), where seq
+  counts that process's calls on the key. Every process must call in the same order per key, as with NCCL. Placement
+  is hidden from the caller: GPU q moves 1/n of every process's bytes over its own PCIe link and passes it over
+  NVLink to the stage that owns it. Capacity, LRU, DRAM eviction written back to SSD, and slot allocation are also
+  hidden.
+- **Two call sites, one operation.** A process calls `store` / `load` with its own views. The leader can also post
+  the whole collective in one call, `pool.load(key, [views_0, ..., views_{n-1}])`. The member form costs one round
+  trip to the leader before the copies start: the views go up, the plan comes back. That is ~0.1 ms over zmq,
+  which is 6% of a 32k DRAM read (1.72 ms). This engine uses the leader form:
+  - the controller already owns the block ids and decides when a round ends and when a read starts;
+  - the workers run only the pool's data plane (their own threads, nothing in the compute loop).
+
+  Both forms build the same plan.
+- **Asynchronous.** `store` / `load` return a `Handle` at once and never block on I/O:
+  - `h.status`: pending, done, rejected or failed;
+  - `h.done()` and `h.wait(timeout)`;
+  - `h.eta_ns`: for a load, the expected landing time from the tier's read channel; this is what the 1 s read-wait
+    bound uses;
+  - `h.tier`, `h.tokens`, and `h.t_start` / `h.t_land`.
+
+  A load is done when all n GPUs have reported their share, so completion is host-side. A CUDA event can only cover
+  one GPU's share; the scheduler admits a round only after it has landed, so it does not need a GPU-side wait.
+- **`lookup(key, prompt)`.** Returns the fastest tier that holds the longest context of `key` the prompt can resume
+  from. The KDA state exists only at an entry's end, so `tokens` is either the entry's whole length (the prompt
+  starts with the entry's content) or no hit. A hit inside an entry is not possible with one KDA state per context
+  (`partial_hits` exists only so replay can reproduce the simulator). `lookup` is advisory: `load` checks again.
+- **Partial transfer.** `load(key, views)` with `views.tokens = T` (the hit) and `views.hbm_tokens = H` (what the
+  views already hold from an HBM prefix hit) moves:
+  - KV blocks floor(H / B) to ceil(T / B);
+  - the whole state.
+
+  `T` must equal the entry's length, otherwise the load is rejected. An SSD load reads the whole entry from the file
+  into DRAM (copy-up) and copies only [H, T) to HBM. `store(key, views)` with `views.tokens = T` replaces the key's
+  entry. It writes only the blocks from floor(old / B) on plus the new state, where old is what the entry already
+  holds and the new context still starts with. A context that does not extend the entry drops it and writes in full.
+- **Errors.**
+  - `load` of a key that is gone, or whose wait would exceed the read-wait bound: rejected at once, no bytes moved.
+    The caller computes the prefix instead; the scheduler passes the round over.
+  - `store` larger than a tier: goes to the next tier, or is rejected. It never waits for space.
+  - An SSD I/O error (`preadv` / `pwritev`) on any GPU: that op fails; the entry is dropped from that tier; a load's
+    views hold garbage and the caller recomputes.
+  - A CUDA error or a dead member: the group aborts, and every pending handle fails.
+- **One key, concurrent ops.** Ops run in call order per key. Slot dependencies keep the bytes right:
+  - a store then a load reads the stored bytes (RAW);
+  - a load then a store does not overwrite the load's source slots before they are read (WAR). A store writes new
+    slots from the last partial block on, so this rarely waits.
+  - Eviction while an op is in flight: the slots return to the free list, but reuse waits for the op.
+
+  The caller must not change a store's source views until `h.done()`; the scheduler keeps a kept session's blocks
+  pinned until its write lands. The caller must not compute on a load's views before `h.done()`.
+
+### 13.2 Internal layers
+
+| Layer | Class and methods | Side, torch? | Today | Tests |
+|---|---|---|---|---|
+| 1. `KVLayout` (model-agnostic) | `KVLayout.from_stage_kv(stage, ctx, kv) -> list[ViewRange]`; `ViewRange(stage, name, kind: kv/state, base, stride, nbytes, group)`. Only "which bytes a block / a state owns". | member, reads torch tensors once | `tier_copy.stage_ranges`, `ViewRange` | ranges of the real `StageKV` (GPU test), fake stages (CPU) |
+| 2. `Placement` (pure, numpy) | `BalancedPlacement(ranges_all_stages, n, q)`, `OwnStagePlacement(...)` for comparison: `slot_bytes`, `state_slots`, `pieces(views_by_stage, slots, state_slots, b_lo, b_hi) -> (dev, host_off, len)`. A slot = share q of one block of all stages, page_first. | member, no torch | `tier_copy.Layout` (one block-id list for all stages: becomes per stage) | `test_tier_copy.py` at n = 4 and 8 |
+| 3. Tier backends | `HostTier`: NUMA-local pinned arena, `capacity_slots`, `ptr(slot)`. `SsdTier`: O_DIRECT file, `capacity_slots`, `read(slots, host_ptrs) -> futures`, `write(slots, host_ptrs) -> futures`. A new medium (CXL, remote) implements the same interface. Slot ids are allocated by layer 5, not here: they must be the same on all n GPUs. | member, no torch | `HostArena`, `SsdFile` | arena, file round trip, unlink |
+| 4. `Mover` (one per GPU) | `Mover(device, hops="two" / "direct", ring_mb)`: `transfer_async(direction, host_ptrs, host_len, dev, ring_off, lens, ready=None) -> event`. Copy engines only, `cuMemcpyBatchAsync`. Two hops: host <-> own HBM ring (PCIe), ring <-> the stages (NVLink); the ring is allocated before the KV pool. Nothing above sees the ring. | member, torch / CUDA (CPU: memmove) | `TierEngine._batch` / `_move` | byte-equal through both hop modes (CPU), GPU byte test |
+| 5. `TierManager` (pure policy) | `lookup(key, prompt) -> Hit`, `prepare_load(key, views_by_stage, now) -> (ops, eta) / reject`, `prepare_store(key, views_by_stage, tokens, content) -> ops` (with demotes and drops from eviction), `ready_ops()`, `complete(op_id, ok)`. Per-tier LRU and slot tables, write-back to SSD on DRAM eviction, read channels and the read-wait bound. Byte mode (no slots) stays for replay. | leader, no torch | `engine/tiers.Tiers` | `test_tiers.py`, `test_tiers_slots.py` |
+
+Glue: a `PoolMember` per process (today's `TierEngine` without the copy code) receives plans, maps slots to host
+addresses through the backends, asks `Placement` for pieces, runs `Mover` and the SSD I/O, and reports `TierDone`.
+The facade `BalancedKVPool` holds a `TierManager` on the leader and a `PoolMember` on each member. The scheduler
+sees only `lookup`, `load` -> `Handle` (with `eta_ns`), `store`, and the handle's completion. It never sees shares,
+slots or the ring.
+
+Proposed files: `ppimpl/kvpool/{__init__ (BalancedKVPool, KVViews, Hit, Handle), layout.py, placement.py,
+backends.py, mover.py, manager.py, member.py}`; `engine/tiers.py`, `runtime/tier_copy.py` and
+`runtime/tier_worker.py` go away. All existing tests move to the new layers, with no compatibility shims.
+
+### 13.3 Data flow
+
+- **DRAM-hit load.**
+  1. The scheduler calls `lookup` and reserves the HBM blocks, then calls `pool.load(key, views)`.
+  2. `TierManager.prepare_load` touches the LRU and emits a read op (slots, state slots, deps, eta).
+  3. Once its deps are done, the op goes to all n members.
+  4. Member q: `Placement.pieces` for its share; `Mover` copies one contiguous slot H2D into the ring, then
+     batch-copies D2D from the ring to every stage's blocks; then reports done.
+  5. When all n are done, `complete` runs and the handle is done. The scheduler admits landed rounds first.
+- **Store.**
+  1. At the end of a round, `pool.store(key, views)`.
+  2. `prepare_store` keeps the entry's full blocks and allocates slots for the rest plus the state.
+  3. If DRAM is full: the LRU victim gets a demote op, emitted before the write that reuses its slots.
+  4. Member q: `Mover` batch-copies D2D from the stages to the ring, then D2H per slot.
+  5. When all n are done, the caller's blocks are unpinned.
+- **SSD write-back (demote).** Member q: `SsdTier.write(slots, DRAM slot pointers)` with 8 I/O threads. When all n
+  are done, the DRAM slots return to the free list.
+- **SSD load.** `prepare_load` allocates DRAM slots for the copy-up (or staging slots). Member q:
+  1. `SsdTier.read` of all the entry's slots into those host slots;
+  2. as each chunk of slots lands, `Mover` copies its blocks in [b_lo, b_hi) to HBM;
+  3. the state goes last;
+  4. done.
