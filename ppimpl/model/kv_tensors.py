@@ -27,12 +27,12 @@ from types import SimpleNamespace
 import torch
 
 from ppimpl import kernels
+from ppimpl.config import CONTRACT_BLOCKS
 
 PREFIX = "language_model.model.layers"
 NUM_LAYERS = 45
 STATE_BLOCKS = 6
 TAIL_STATE = 5            # state_blocks[5] backs the kpool tail group
-CONTRACT_BLOCKS = 7144    # 1_contract.md §1, incl. the null block
 
 
 def layer_spec_names(i: int) -> list[str]:

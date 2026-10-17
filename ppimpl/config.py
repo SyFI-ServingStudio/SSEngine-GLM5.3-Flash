@@ -9,6 +9,7 @@ import yaml
 
 # 1_contract.md §1 and README "Design".
 BLOCK_TOKENS = 8576          # one block: 8,576 tokens of DSA KV, or one KDA layer's state
+CONTRACT_BLOCKS = 7144       # 1_contract.md §1: KV blocks per stage, incl. the null block
 STATE_BLOCKS = 6             # KDA state blocks per request (5 cache groups + 1 scratch)
 NULL_BLOCK = 0
 HIDDEN_WIDTH = 4 * 4096      # 4-stream mHC residual, BF16: 32 KiB per token between stages

@@ -55,7 +55,7 @@ import msgspec
 import numpy as np
 import zmq
 
-from ppimpl.config import BLOCK_TOKENS, RunConfig, dump_config
+from ppimpl.config import BLOCK_TOKENS, CONTRACT_BLOCKS, RunConfig, dump_config
 from ppimpl.engine.kv import KvManager, kv_blocks_for, pool_size
 from ppimpl.engine.scheduler import ChunkSpec, Request, Scheduler
 from ppimpl.engine.tiers import TierOp, Tiers
@@ -181,6 +181,12 @@ class Controller:
                 p.kill()
             raise
         self._pin()
+        if cfg.tiers is not None and cfg.model != "fake" and cfg.pool_tokens is None \
+                and min(r.num_blocks for r in ready) < CONTRACT_BLOCKS:
+            for p in self.procs:                 # the tiers' HBM (staging, IPC-shareable KV) must not shrink the pool
+                p.kill()
+            raise RuntimeError(f"tiers on: Ready blocks {[r.num_blocks for r in ready]} below the contract's "
+                               f"{CONTRACT_BLOCKS}")
         num_blocks = pool_size([r.num_blocks for r in ready], cfg.pool_tokens)
         self.rule = make_rule(cfg, self.n)
         tiers = self._tiers(ready) if cfg.tiers is not None else None
