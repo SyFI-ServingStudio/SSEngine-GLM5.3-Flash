@@ -252,7 +252,12 @@ def nsys_prefix(run_dir: Path, window: int) -> list[str]:
     only between the workers' cudaProfilerStart/Stop (server config `profile_mbs`), `window` ranges (one report each:
     trace.nsys-rep, then nsys numbers the next ones)."""
     argv = [NSYS, "profile", "-o", str(run_dir / "trace"), "--force-overwrite", "true", "-t", "cuda,nvtx,osrt",
-            "--cuda-graph-trace=node", "--sample=none", "--cpuctxsw=none"]
+            "--cuda-graph-trace=node"]
+    if os.environ.get("PPIMPL_NSYS_HOST"):   # where host time goes: CPU + Python samples, context switches
+        argv += ["--sample=process-tree", "--cpuctxsw=process-tree", "--python-sampling=true",
+                 "--python-sampling-frequency=1000", "--python-backtrace=cuda"]
+    else:
+        argv += ["--sample=none", "--cpuctxsw=none"]
     if window:
         argv += ["--capture-range=cudaProfilerApi",
                  "--capture-range-end=stop" if window == 1 else f"--capture-range-end=repeat:{window}"]
