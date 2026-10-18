@@ -578,7 +578,9 @@ class Controller:
                "predicted_start_ms": round(self._ms(start), 4) if start else None}
         if self.sched.staged:                            # loading areas in use: HBM blocks, DRAM slots
             d = self.sched.pool.manager.dram_area
-            log.update(area_held=self.sched.kv.area_held, dram_area_used=None if d is None else d.area_used)
+            kv = self.sched.kv                           # HBM: kept contexts and their blocks, running+held blocks
+            log.update(area_held=kv.area_held, dram_area_used=None if d is None else d.area_used, kept=len(kv.kept),
+                       kept_blocks=kv.kept_charge, hard=kv.hard, evicted=kv.stats["evicted_sessions"])
         self.rule.dispatched(mb_id, now, log["tokens"])
         chunks = []
         for c in specs:
