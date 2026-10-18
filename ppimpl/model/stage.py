@@ -353,6 +353,7 @@ class StageModel:
             self.forward(plan, hidden)
 
         with torch.inference_mode():
+            self.meta.h2d.warmup()            # the metadata copy kernel's variants (sm_h2d)
             for i, plan in enumerate(plans()):
                 with ctx if i == 0 else contextlib.nullcontext():
                     run(plan)

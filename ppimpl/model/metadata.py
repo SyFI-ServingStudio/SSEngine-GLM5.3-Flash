@@ -19,8 +19,10 @@ vLLM's own builder classes build the MLA, indexer and kpool-tail metadata (as `G
 - KDA (g2..g6): `pp_patch.KdaPrefillMeta`, read by our KDA prefill forward (the fork's GDN metadata is not built:
   the `_forward` that reads it is replaced).
 
-Everything is built on the host, packed into one pinned staging buffer and copied with one non-blocking H2D copy
-on the compute stream (`Pack`), so building microbatch k+1 never waits for the GPU work of microbatch k.
+Everything is built on the host, packed into one pinned staging buffer and copied to the device in stream order on
+the compute stream (`Pack`), so building microbatch k+1 never waits for the GPU work of microbatch k. On a GPU the
+copy is a kernel reading the mapped pinned buffer (`sm_h2d.SmH2D`), not a copy-engine copy: the copy engine is shared
+with the KV tier reads, and a metadata copy queued behind them started up to tens of ms late (job 8367).
 """
 
 from __future__ import annotations
@@ -31,7 +33,7 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
-from ppimpl.model import kda_conv, kv_tensors
+from ppimpl.model import kda_conv, kv_tensors, sm_h2d
 from ppimpl.model.pp_patch import (KPOOL_HEADS, TOPK_SEGMENTS, KdaPrefillMeta, KpoolHeads, kpool_heads_all,
                                    kpool_heads_suffix, make_kda_plan)
 
@@ -72,15 +74,17 @@ def graph_rows(positions, slots, token_ids, bucket: int) -> np.ndarray:
 
 
 class Pack:
-    """All of one microbatch's host arrays in one pinned staging buffer, copied to the device in one non-blocking H2D
+    """All of one microbatch's host arrays in one pinned staging buffer, copied to the device in one stream-ordered
     copy; each array is a typed view of the staging buffer (host side) and of the device buffer (device side).
-    `add` returns a handle; `copy` stages and issues the copy; `host(h)` / `dev(h)` return the views. The views
-    keep both buffers alive (the caching host allocator holds the pinned block until the copy has completed)."""
+    `add` returns a handle; `copy` stages and issues the copy; `host(h)` / `dev(h)` return the views. With `h2d`
+    (`sm_h2d.SmH2D`) the copy is its kernel, which keeps the pinned buffer until the copy has run; without it, a
+    non-blocking copy (the caching host allocator holds the pinned block until the copy has completed)."""
 
-    def __init__(self):
+    def __init__(self, h2d=None):
         self.items: list[tuple[int, np.ndarray, torch.dtype, tuple]] = []
         self.size = 0
         self.host_buf = self.dev_buf = None
+        self.h2d = h2d
 
     def add(self, a, dtype: torch.dtype) -> int:
         arr = np.ascontiguousarray(a, dtype=_NP[dtype])
@@ -90,11 +94,14 @@ class Pack:
         return len(self.items) - 1
 
     def copy(self, device: torch.device, pin: bool = True) -> None:
-        self.host_buf = torch.empty(max(self.size, 1), dtype=torch.uint8, pin_memory=pin)
+        self.host_buf = torch.empty(-(-max(self.size, 1) // 8) * 8, dtype=torch.uint8, pin_memory=pin)
         hv = self.host_buf.numpy()
         for off, arr, _, _ in self.items:
             hv[off:off + arr.nbytes] = arr.reshape(-1).view(np.uint8)
-        self.dev_buf = self.host_buf.to(device, non_blocking=True)
+        if self.h2d is not None and torch.device(device).type == "cuda":
+            self.dev_buf = self.h2d.to_device(self.host_buf)
+        else:
+            self.dev_buf = self.host_buf.to(device, non_blocking=True)
 
     def _view(self, buf: torch.Tensor, h: int) -> torch.Tensor:
         off, arr, dtype, shape = self.items[h]
@@ -143,6 +150,7 @@ class StageMetadata:
         self.kpool = int(getattr(text, "index_kpool", 1) or 1)
         self.num_kda_heads = num_kda_heads
         self._plans: collections.OrderedDict = collections.OrderedDict()
+        self.h2d = sm_h2d.for_device(device)
         self._side = torch.cuda.Stream(device)
 
     def table_width(self, blocks: int) -> int:
@@ -205,7 +213,7 @@ class StageMetadata:
 
         # every host array of this microbatch -> one pinned buffer -> one H2D copy (M3: was 16 pinned allocations,
         # 16 copies and 2 fills per build)
-        pk = Pack()
+        pk = Pack(self.h2d)
         h_pos = pk.add(positions, torch.int64)
 
         def cm_arrays(block_table: np.ndarray, slot_mapping: np.ndarray) -> dict:
