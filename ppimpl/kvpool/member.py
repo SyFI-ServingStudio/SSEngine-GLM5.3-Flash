@@ -16,7 +16,8 @@ in, the state after its slots: read time ~ SSD time + one block. The file is sha
 slot) of the set the leader took (`shards.py`), kept for the next run; its contents are never trusted. A read's
 file reads are queued as it arrives, behind the earlier reads' (as many reads in flight as the leader gave staging
 slots; the ring keeps `SSD_READ_DEPTH` in the kernel), and a copy thread moves each read to HBM in order as its slots
-land. Writes and demotes do not wait for their file writes: many are in flight at once (the leader orders
+land. A fetch (staged loading: SSD -> DRAM's loading area, no HBM copy) is reported when its last slot is in DRAM; the
+leader then moves it on with a DRAM read. Writes and demotes do not wait for their file writes: many are in flight at once (the leader orders
 ops that share slots, `TierOp.deps`), and each is reported when its last slot is on the SSD.
 
 The fake model has no KV: its member moves nothing and reports each op after the time the configured bandwidth
@@ -381,7 +382,7 @@ class PoolMember:
 
     @staticmethod
     def direction(op: TierMove) -> str:
-        return "read" if op.op == "read" else "write"
+        return "read" if op.op in ("read", "fetch") else "write"
 
     def submit(self, op: TierMove):
         start_ns = time.time_ns()
@@ -437,6 +438,9 @@ class PoolMember:
         if op.op == "read":                 # file -> host slots (all blocks); the copy thread moves them to HBM
             self.ssd_copy_q.put((op, start_ns, self.ssd.read(files, hosts)))
             return
+        if op.op == "fetch":                # file -> DRAM's loading area, reported as its last slot lands
+            self._report_when_done(op, self.ssd.read(files, hosts), start_ns, len(files) * sb, "read")
+            return
         if op.op == "write":                # HBM -> staging, then the file
             owned = []
             ev, _ = self._move("write", host, op, op.host_slots, op.host_state, op.block_start, owned=owned)
@@ -445,7 +449,7 @@ class PoolMember:
             self.mover.release(owned)
         elif op.op != "demote":
             raise ValueError(f"SSD op {op.op}")
-        self._report_when_written(op, self.ssd.write(files, hosts), start_ns, len(files) * sb)
+        self._report_when_done(op, self.ssd.write(files, hosts), start_ns, len(files) * sb, "write")
 
     def _ssd_read_copy(self, op: TierMove, start_ns: int, futs: list):
         """An SSD read whose file reads are queued: HBM [b_lo, b_hi) as its slots land, the state after them."""
@@ -463,13 +467,13 @@ class PoolMember:
             self._owned[op.op_id] = owned
         self.q["read"].put((op.op_id, ev, start_ns, len(futs) * self.slot_bytes, time.time_ns(), None))
 
-    def _report_when_written(self, op: TierMove, futs: list, start_ns: int, nbytes: int):
-        """Report an SSD write or demote once its last file write completed (on the io_uring's thread), without
-        holding the SSD write thread: the next op's writes queue behind it in the ring. A failed write fails the run
+    def _report_when_done(self, op: TierMove, futs: list, start_ns: int, nbytes: int, d: str):
+        """Report an SSD write, demote or fetch once its last file I/O completed (on the io_uring's thread), without
+        holding its SSD thread: the next op's I/O queues behind it in the ring. A failed I/O fails the run
         (`WorkerError`)."""
         done = (op.op_id, None, start_ns, nbytes)
         if not futs:
-            self.q["write"].put((*done, time.time_ns(), None))
+            self.q[d].put((*done, time.time_ns(), None))
             return
         left, failed, lock = [len(futs)], [False], threading.Lock()
         with self._ssd_cv:
@@ -483,10 +487,10 @@ class PoolMember:
                 first_failure = exc is not None and not failed[0]
                 failed[0] |= exc is not None
             if first_failure:
-                self.q["write"].put(WorkerError(self.stage, f"tier SSD write of op {op.op_id}: {exc!r}"))
+                self.q[d].put(WorkerError(self.stage, f"tier SSD {op.op} of op {op.op_id}: {exc!r}"))
             if last:
                 if not failed[0]:
-                    self.q["write"].put((*done, time.time_ns(), None))
+                    self.q[d].put((*done, time.time_ns(), None))
                 with self._ssd_cv:
                     self._ssd_writes -= 1
                     self._ssd_cv.notify_all()

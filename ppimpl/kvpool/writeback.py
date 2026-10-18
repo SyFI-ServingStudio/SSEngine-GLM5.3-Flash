@@ -9,6 +9,10 @@ flight, then **clean**; only a clean entry may be evicted without waiting.
 - **Write-ahead** (`step`): above `watermark` x capacity of fixed + dirty charge, the least recently used dirty
   entries are written ahead, until fixed + dirty is back under it. LRU evicts the tail first, so the tail is clean
   when eviction reaches it: an eviction rarely waits for a write.
+- **Reserve** (staged loading, `reserve` set): instead of the watermark, the least recently used entries holding
+  `reserve` charge are kept written (clean or being written): fixed + dirty <= capacity - reserve. The reserve is what
+  the level must free in one batch period (the scheduler sets it from the loading area and the microbatch budget),
+  so admission evicts clean entries and does not wait for a write.
 - **Demand** (`make_room`): a level that must evict `short` more charge than its clean entries hold starts the
   writes of its least recently used dirty entries (`evict_writes`) and counts a wait (`evict_waits`). HBM's caller
   then waits (the request is admitted later); DRAM evicts at once and the op that reuses its slots waits for the
@@ -40,6 +44,7 @@ class Level(Protocol):
 class WriteBack:
     def __init__(self, name: str, level: Level, watermark: float | None):
         self.name, self.level, self.watermark = name, level, watermark
+        self.reserve: float | None = None           # staged loading: replaces the watermark (module docs)
         self.dirty: dict[object, float] = {}        # key -> charge, not held below
         self.writing: dict[object, tuple] = {}      # key -> (token, charge), write in flight
         self.dirty_charge = 0.0
@@ -99,9 +104,13 @@ class WriteBack:
 
     def step(self):
         """Write ahead above the watermark."""
-        if self.watermark is None:
+        if self.reserve is not None:
+            limit = self.level.capacity - self.reserve
+        elif self.watermark is None:
             return
-        over = self.level.fixed() + self.dirty_charge - self.watermark * self.level.capacity
+        else:
+            limit = self.watermark * self.level.capacity
+        over = self.level.fixed() + self.dirty_charge - limit
         if over > 0:
             self._write_lru(over, "ahead_writes")
 

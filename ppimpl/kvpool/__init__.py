@@ -20,9 +20,11 @@ evicts at the eviction, as the simulator) and a load lands at its `eta_ns` on th
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 from ppimpl.config import TierConfig
+from ppimpl.engine.kv import blocks_for
 from ppimpl.kvpool.manager import Hit, KVViews, TierManager, TierOp
 from ppimpl.kvpool.writeback import WriteBack
 
@@ -71,6 +73,68 @@ class BalancedKVPool:
         h = Handle("load", key, hit.tokens, hit.tier, req_id, eta, now_ns)
         self._track(h, [o for o in ops if o.op == "read"])
         return h
+
+    # --- staged loading -------------------------------------------------------------------------------------------
+
+    def loading_area_blocks(self, mb_tokens: int) -> int:
+        """HBM's loading area in blocks by Little's law (`TierConfig.loading_read_gb_s`): what the tiers read into
+        HBM in one batch period, mb_tokens / prefill tokens/s; 0 when staged loading is off."""
+        c = self.cfg
+        if c.loading_read_gb_s is None:
+            return 0
+        if not self.manager.slot_mode or not c.loading_prefill_tok_s:
+            raise ValueError("staged loading needs slot mode and tiers.loading_prefill_tok_s")
+        return math.ceil(c.loading_read_gb_s * 1e9 * mb_tokens / c.loading_prefill_tok_s / c.slot_bytes)
+
+    def set_loading_area(self, kv, mb_tokens: int) -> int:
+        """Stage loads (engine/scheduler.py): HBM's loading area in `kv` (`KvManager.area`), the same fraction of DRAM
+        with an SSD behind it, and each level's write-ahead reserve: what it frees in one batch period, the area plus
+        one microbatch's footprint. Returns the area in blocks (0: off)."""
+        area = self.loading_area_blocks(mb_tokens)
+        if not area:
+            return 0
+        fraction = area / kv.capacity
+        if not 0 < fraction < 0.5:
+            raise ValueError(f"loading area {area} blocks = {fraction:.1%} of HBM's {kv.capacity}: must be in (0, 50%)")
+        kv.area = area
+        self.manager.set_dram_area(fraction)
+        reserve = area + blocks_for(mb_tokens)
+        if self.hbm is not None and self.hbm.wb is not None:
+            self.hbm.wb.reserve = reserve
+        for wb in self.manager.wb.values():
+            wb.reserve = reserve * self.cfg.slot_bytes
+        return area
+
+    def dram_area_fits(self, tokens: int) -> bool | None:
+        """Whether an SSD read of `tokens` may start into DRAM's loading area now; None without one (the SSD read
+        goes to HBM's area directly)."""
+        d = self.manager.dram_area
+        n = self.manager.fetch_slots(tokens)
+        if d is None or n > d.num_slots:
+            return None
+        return d.area_fits(n)
+
+    def fetch(self, key, hit: Hit, now_ns: int, req_id: str | None = None) -> tuple[Handle, list[int]] | None:
+        """SSD -> DRAM's loading area (`dram_area_fits` said yes): (the handle, the area slots), or None if the SSD
+        no longer holds the key."""
+        got = self.manager.prepare_fetch(key, hit, now_ns, req_id)
+        if got is None:
+            return None
+        ops, eta, area = got
+        h = Handle("load", key, hit.tokens, "ssd", req_id, eta, now_ns)
+        self._track(h, [o for o in ops if o.op == "fetch"])
+        return h, area
+
+    def hop(self, key, tokens: int, area: list[int], views: KVViews, now_ns: int, req_id: str | None = None
+            ) -> Handle:
+        """DRAM's loading area -> HBM's: the second hop of a staged SSD read."""
+        ops, eta = self.manager.prepare_hop(key, tokens, area, views, now_ns, req_id)
+        h = Handle("load", key, tokens, "dram", req_id, eta, now_ns)
+        self._track(h, [o for o in ops if o.op == "read"])
+        return h
+
+    def release_dram_area(self, area: list[int]):
+        self.manager.dram_area.area_give(area)
 
     def hbm_level(self, kv) -> "HbmLevel":
         """The tiers as HBM's lower level, for the KV manager `kv` (`KvManager.lower`): HBM's kept contexts are written
@@ -152,7 +216,7 @@ class HbmLevel:
         return self.kv.capacity
 
     def fixed(self) -> float:
-        return self.kv.hard                     # running and held requests
+        return self.kv.hard + self.kv.area_charge()     # running and held requests, the loading area
 
     def lru(self):
         return iter(self.kv.kept)

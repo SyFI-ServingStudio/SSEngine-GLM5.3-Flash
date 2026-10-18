@@ -772,6 +772,38 @@ cudaHostRegister stays in `attach` (`HostTier.register`: ~1 GiB chunks of whole 
 must be whole slots, and the slot size is known only once the model is loaded, so it cannot run on the touch thread
 while the model loads. The io_uring's buffer registration comes after it (its time is in the worker's start-up line).
 
+### 13.6 Exclusive DRAM and staged loading (lane-m6-staged)
+
+The real-engine counterpart of ServingStudioSim pp-staged (`prefix_fetch.rs`, `prefix_tiers.rs`, `dram_tier_writes:
+hbm-evictions-exclusive`), k = 1 (one KDA state per entry).
+
+- **Exclusive DRAM** (`tiers.dram_writes: hbm-evictions-exclusive`): a DRAM read releases its entry (`_release_read`;
+  the slots' next writer waits for the read by `deps`); a round admitted on HBM's kept context releases the copy
+  write-ahead made of it (`taken_over`). SSD stays inclusive (a read leaves its entry). An entry stored where the tier
+  below holds it whole is clean.
+- **Staged loading** (`tiers.loading_read_gb_s`, `loading_prefill_tok_s`): pending -> loading -> ready -> batch
+  (`engine/scheduler.py` "Staged loading").
+  - HBM's loading area lives in `KvManager` (`area`, `area_held`, `reads`): a set number of blocks counted held
+    whether used or not (`hard + kept + max(area_held, area) <= capacity`, in `fits` and `_make_room`). A read holds
+    its context's blocks there (`hold_read`) until admission takes them over (`allocate`).
+  - DRAM's area lives in the DRAM `TierStore` (`area`, `area_used`): the same fraction of its slots, out of what
+    entries may use. An SSD read is a `fetch` op (file -> area slots, reported when its last slot is in DRAM), then a
+    `hop` (a DRAM read from those slots into HBM's area) once HBM's area has room, in fetch landing order; DRAM's
+    area goes back when the hop lands. A full DRAM area stops the SSD queue (no direct SSD -> HBM bypass).
+  - `Scheduler.load` walks the overdue queue, then the policy order; each area's queue stops at its first read that
+    does not fit (a read larger than the area starts when it is empty). Admission takes landed reads first (overdue
+    ones also in the force-schedule pass), then the queues, passing over rounds that still need a read. Rounds found
+    ready in HBM and later read are counted (`rereads`).
+  - Size (Little's law, `BalancedKVPool.loading_area_blocks`): area = read rate into HBM x one batch period
+    (mb_tokens / prefill tokens/s). `bench/loading_area.py` measures both on a run of the setting: Fix C runs give
+    ssd_heavy 3.30 GB/s x 0.306 s = 79 blocks (8.9% of 890), Tiers 2.47 GB/s x 0.314 s = 61 blocks (4.3% of 1,425).
+  - **Eviction stays ahead** (the lesson of Fix D, where every eviction waited for its write: blocked_by_write
+    44k): each level's write-back keeps the LRU entries holding `reserve` written (`WriteBack.reserve`, replacing the
+    0.9 watermark): fixed + dirty <= capacity - reserve, fixed counting the loading area. The reserve is what one
+    batch period frees: the area (the reads admission takes over) plus one microbatch's footprint
+    (`blocks_for(mb_tokens)`); DRAM's the same in slot bytes. Admission evicts written contexts and does not wait for
+    a write as long as a write lands within one batch period.
+
 ## 14. Hand-off (2026-10-17)
 
 ### 14.1 Host-memory OOM prevention (commit 0e5bc04)

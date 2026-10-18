@@ -5,7 +5,8 @@ Round 0 (P = 40,000 tokens: a partial last block, chunk starts off KDA's 64-toke
 writes its quarter of all four stages' KV and state to its DRAM arena (peer stages' KV over NVLink). Fresh blocks
 K1 are filled with garbage and the context is read back into them: every byte of every stage equals K0's. A partial
 read (blocks 2.. and the state, as when HBM holds the first blocks) into K2 likewise. Through SSD: the DRAM copy
-is demoted to the SSD file (O_DIRECT) and read back through the staging arena into K3. Then round 1 (A = 1,000) on K0
+is demoted to the SSD file (O_DIRECT) and read back through the staging arena into K3; staged loading: fetched from
+the file into other DRAM slots (a loading area) and moved on from there into K4 by a DRAM read. Then round 1 (A = 1,000) on K0
 (an HBM hit) and on K1 (after the tier read): the logits are bitwise equal. The workers run with expandable segments,
 as the server's do (the KV is allocated IPC-shareable regardless). Run through Slurm:
 
@@ -95,14 +96,14 @@ def _worker(rank: int, port: int, out_dir: str):
     pipe = open_pipe(RunConfig(port=port, scheduler=SchedulerConfig(mb_tokens=CHUNK)), rank, dev, HIDDEN_WIDTH)
     tc = TierConfig(dram_gb=2.0, ssd_gb=1.0, staging_gb=0.5, ssd_dir=f"{out_dir}/set0")   # the shard set, made below
     eng = PoolMember(NS(tiers=tc, num_stages=4, model="glm53", run_dir=out_dir), rank, dev, zmq.Context())
-    m = StageModel(bench_config(CHUNK), rank, dev, num_blocks=1 + 4 * (N_KV + N_ST), max_model_len=P + A + B,
+    m = StageModel(bench_config(CHUNK), rank, dev, num_blocks=1 + 5 * (N_KV + N_ST), max_model_len=P + A + B,
                    cuda_graphs=False, ipc_kv=True)
     mine = m.tier_ranges()
     slot_bytes, state_slots = eng.attach(mine)
     res = {"rank": rank, "slot_bytes": slot_bytes, "state_slots": state_slots,
            "register_s": eng.dram.register_s, "touch_s": eng.dram.touch_s}
     blocks = iter(range(1, m.num_blocks))
-    K0, S0, K1, S1, K2, S2, K3, S3 = ([next(blocks) for _ in range(k)] for k in (N_KV, N_ST) * 4)
+    K0, S0, K1, S1, K2, S2, K3, S3, K4, S4 = ([next(blocks) for _ in range(k)] for k in (N_KV, N_ST) * 5)
     g = torch.Generator().manual_seed(7)
     toks = torch.randint(1, 150_000, (P + A,), generator=g).tolist()
     sizes = [CHUNK] * (P // CHUNK) + [P % CHUNK]
@@ -133,7 +134,7 @@ def _worker(rank: int, port: int, out_dir: str):
 
         res["write_bytes"] = move(0, "write", K0, S0, 0)
         want = [v.clone() for v in _views(mine, dev, K0[:n0], S0)]
-        for kv, st in ((K1, S1), (K2, S2), (K3, S3)):
+        for kv, st in ((K1, S1), (K2, S2), (K3, S3), (K4, S4)):
             for v in _views(mine, dev, kv[:n0], st):
                 v.random_(0, 256)
         torch.cuda.synchronize()
@@ -150,6 +151,19 @@ def _worker(rank: int, port: int, out_dir: str):
         res["demote_bytes"] = move(3, "demote", [], [], 0, "ssd", "dram")
         res["ssd_read_bytes"] = move(4, "read", K3, S3, 0, "ssd", "staging")
         res["ssd_read_equal"] = all(torch.equal(a, b) for a, b in zip(want, _views(mine, dev, K3[:n0], S3)))
+        area = list(range(n0 + state_slots, 2 * (n0 + state_slots)))     # DRAM slots of a loading area
+        fetch = TierMove(5, "fetch", "ssd", "dram", 0, 0, 0, [[]], [[]], slots, sslots, area[:n0], area[n0:])
+        eng.submit(fetch)
+        eng._ssd_op(*eng.ssd_q["read"].get())
+        res["fetch_bytes"] = eng.q["read"].get()[3]
+        dist.barrier()
+        hop = TierMove(6, "read", "dram", None, 0, n0, 0, [K4], [S4], area[:n0], area[n0:], [], [])
+        eng.submit(hop)
+        _, ev, _, res["hop_bytes"], _, _ = eng.q["read"].get()
+        ev.synchronize()
+        torch.cuda.synchronize()
+        dist.barrier()
+        res["staged_read_equal"] = all(torch.equal(a, b) for a, b in zip(want, _views(mine, dev, K4[:n0], S4)))
         la = _run(m, pipe, rank, _plans("r1_hbm", toks, P, [A], K0, S0, 100))
         lb = _run(m, pipe, rank, _plans("r1_tier", toks, P, [A], K1, S1, 200))
     if rank == 3:
@@ -178,4 +192,5 @@ def test_tier_round_trip_is_bitwise(tmp_path):
         assert r["full_read_equal"] and r["partial_read_equal"] and r["partial_left_garbage"], r
         assert r["write_bytes"] == r["read_bytes"] > r["partial_read_bytes"] > 0
         assert r["ssd_read_equal"] and r["ssd_direct"] and r["demote_bytes"] == r["ssd_read_bytes"] > 0, r
+        assert r["staged_read_equal"] and r["fetch_bytes"] == r["demote_bytes"] and r["hop_bytes"] > 0, r
     assert res[3]["round1_logits_equal"], res[3]

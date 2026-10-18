@@ -208,7 +208,9 @@ class Controller:
         self.tier_log = open(self.run_dir / "tier_ops.jsonl", "w") if pool is not None else None
         (self.run_dir / "pool.json").write_text(json.dumps(
             {"ready_blocks": [r.num_blocks for r in ready], "num_blocks": num_blocks,
-             "pool_tokens": num_blocks * BLOCK_TOKENS, "keep_sessions": cfg.keep_sessions}))
+             "pool_tokens": num_blocks * BLOCK_TOKENS, "keep_sessions": cfg.keep_sessions,
+             "loading_area_blocks": self.sched.kv.area,
+             "dram_area_slots": pool.manager.tiers[0].area if pool is not None and pool.manager.tiers else 0}))
         self._write_cache()
         # Leave start-up objects (torch, FastAPI, ...) out of later collections: a full one took ~50 ms with the GIL
         # held, stalling the control thread during a burst.
@@ -241,7 +243,8 @@ class Controller:
         m = pool.manager
         info = {"slot_bytes": tc.slot_bytes, "state_slots": tc.state_slots,
                 "slots": {x.name: x.num_slots for x in m.tiers}, "staging_slots": m.staging.num_slots,
-                "write_ahead": {"hbm": tc.hbm_write_ahead, "dram": tc.dram_write_ahead}, "dram_writes": tc.dram_writes}
+                "write_ahead": {"hbm": tc.hbm_write_ahead, "dram": tc.dram_write_ahead}, "dram_writes": tc.dram_writes,
+                "loading": {"read_gb_s": tc.loading_read_gb_s, "prefill_tok_s": tc.loading_prefill_tok_s}}
         (self.run_dir / "tiers.json").write_text(json.dumps(info) + "\n")
         print("tiers: " + json.dumps(info), flush=True)
         return pool
@@ -323,7 +326,8 @@ class Controller:
                 "pool_tokens": kv.num_blocks * BLOCK_TOKENS, **kv.stats, "kept_sessions": len(kv.kept),
                 "kept_tokens": sum(k.tokens for k in kv.kept.values()), "used_tokens": kv.used_tokens,
                 "free_blocks": kv.pool.num_free, "time_ms": self._ms(time.time_ns()) if self.t0_ns else None,
-                "scheduler": dict(self.sched.stats)}    # busy_waits: rounds that waited for a tier write (TIERS.md §5)
+                "scheduler": dict(self.sched.stats),
+                "loading_area": {"blocks": kv.area, "held": kv.area_held, "reads": len(kv.reads)}}    # busy_waits: rounds that waited for a tier write (TIERS.md §5)
         if self.sched.pool is not None:
             m = self.sched.pool.manager
             info["tiers"] = m.summary()
@@ -425,6 +429,7 @@ class Controller:
                     self.timer_at = None
                 self._pump()
                 if self.tier_socks:
+                    self.sched.load(time.time_ns())      # staged loading: reads whose area has room now
                     self._tier_send()
                 for req_id in list(self.slab_views):
                     self._own(req_id)
@@ -579,6 +584,9 @@ class Controller:
                     info.update(tier=r.tier, tier_tokens=r.tier_tokens, hbm_tokens=r.hbm_tokens,
                                 read_start_ms=round(self._ms(r.read_start_ns), 4),
                                 read_land_ms=round(self._ms(r.read_land_ns), 4))
+                    if r.fetch_land_ns is not None:          # staged SSD read: landed in DRAM's area, hop to HBM
+                        info.update(fetch_land_ms=round(self._ms(r.fetch_land_ns), 4),
+                                    hop_start_ms=round(self._ms(r.hop_start_ns), 4))
             info["chunks"] = info.get("chunks", 0) + 1
         plan = Plan(mb_id, chunks)
         for s in range(self.n):

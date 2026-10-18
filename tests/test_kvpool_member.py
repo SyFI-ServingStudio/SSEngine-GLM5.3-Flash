@@ -299,8 +299,8 @@ def test_ssd_writes_are_reported_when_their_last_file_write_is_done():
     e = PoolMember.__new__(PoolMember)
     e.stage, e.q, e._ssd_writes, e._ssd_cv = 0, {"write": queue.Queue()}, 0, threading.Condition()
     a, b = [Future(), Future()], [Future()]
-    e._report_when_written(NS(op_id=1), a, 0, 10)
-    e._report_when_written(NS(op_id=2), b, 0, 10)
+    e._report_when_done(NS(op_id=1, op="write"), a, 0, 10, "write")
+    e._report_when_done(NS(op_id=2, op="write"), b, 0, 10, "write")
     assert e._ssd_writes == 2 and e.q["write"].empty()
     b[0].set_result(None)                                   # op 2 lands first
     a[0].set_result(None)
@@ -308,7 +308,7 @@ def test_ssd_writes_are_reported_when_their_last_file_write_is_done():
     a[1].set_result(None)
     assert e.q["write"].get_nowait()[0] == 1 and e._ssd_writes == 0
     c = [Future(), Future()]
-    e._report_when_written(NS(op_id=3), c, 0, 10)
+    e._report_when_done(NS(op_id=3, op="write"), c, 0, 10, "write")
     c[0].set_exception(OSError("disk"))
     c[1].set_result(None)
     assert isinstance(e.q["write"].get_nowait(), WorkerError) and e.q["write"].empty() and e._ssd_writes == 0

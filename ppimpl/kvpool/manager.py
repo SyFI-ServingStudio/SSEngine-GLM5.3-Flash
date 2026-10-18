@@ -33,6 +33,7 @@ that moves bytes becomes a `TierOp` the leader sends to all n members (n = PP de
   done (`ready_ops`) and reports it done (`complete`).
 """
 
+import math
 from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 
@@ -83,8 +84,8 @@ class TierOp:
     or the staging area (an SSD read's target; an SSD write from HBM without DRAM) (`host_tier`). An SSD read reads all of `slots` (from block
     0) into the host side and copies to HBM only the blocks from token_start // BLOCK_TOKENS on."""
     op_id: int
-    op: str                    # "write" HBM -> tier, "read" tier -> HBM, "demote" DRAM -> SSD, "drop" forget the
-                               # tier's entry
+    op: str                    # "write" HBM -> tier, "read" tier -> HBM, "demote" DRAM -> SSD, "fetch" SSD ->
+                               # DRAM's loading area (staged loading), "drop" forget the tier's entry
     tier: str                  # destination tier for write/demote, source tier for read, the tier for drop
     entry: int                 # the key's entry id (same on every member)
     token_start: int = 0
@@ -109,7 +110,7 @@ class TierOp:
     def blocks(self) -> tuple[int, int]:
         """HBM blocks [b_lo, b_hi) the op moves: from the block holding token_start to the last one (none for a
         demote)."""
-        return (0, 0) if self.op == "demote" else (self.token_start // BLOCK_TOKENS, kv_blocks_for(self.token_end))
+        return (0, 0) if self.op in ("demote", "fetch") else (self.token_start // BLOCK_TOKENS, kv_blocks_for(self.token_end))
 
 
 @dataclass
@@ -169,9 +170,12 @@ class TierStore:
         self._ring = 0
         self.entries: OrderedDict[object, TierEntry] = OrderedDict()
         self.used = 0.0
+        self.area = 0                   # slot mode: loading area (staged loading) in slots, held whether used or not
+        self.area_used = 0              # slots its reads hold
         self.channel_free_ns = 0
         self.stats = dict(stored=0, written_bytes=0, evicted=0, evicted_tokens=0, reads=0, read_tokens=0,
-                          read_bytes=0, dropped=0, released=0)      # released: exclusive DRAM, moved into HBM
+                          read_bytes=0, dropped=0, released=0,      # released: exclusive DRAM, moved into HBM
+                          hops=0, hop_bytes=0)                      # DRAM: SSD reads moved on from its area to HBM
 
     @property
     def num_slots(self) -> int:
@@ -190,6 +194,39 @@ class TierStore:
 
     def release(self, slots: list[int]):
         self.free.extend(slots)
+
+    def _short(self, c: float, need: int) -> bool:
+        """Whether an entry of charge `c` taking `need` free slots does not fit beside the entries and the loading
+        area (held whole, at least; its unused slots stay free)."""
+        sb = self.slot_bytes or 0
+        return (self.used + c > self.capacity - max(self.area_used, self.area) * sb
+                or len(self.free) - max(self.area - self.area_used, 0) < need)
+
+    def _evict_lru(self) -> tuple[object, TierEntry]:
+        victim, e = self.entries.popitem(last=False)
+        self.used -= self.charge(e.tokens)
+        self.release(e.slots + e.state)
+        self.stats["evicted"] += 1
+        self.stats["evicted_tokens"] += e.tokens
+        return victim, e
+
+    def area_fits(self, n: int) -> bool:
+        """Whether a read of `n` slots may start in the loading area: it fits, or the area is empty."""
+        return self.area_used == 0 or self.area_used + n <= self.area
+
+    def area_take(self, n: int) -> tuple[list[int], list[tuple[object, TierEntry]]]:
+        """`n` slots of the loading area (the caller checked `area_fits`), and the entries evicted for them (a read
+        larger than the area)."""
+        self.area_used += n
+        left = []
+        while self.entries and self._short(0, n):
+            left.append(self._evict_lru())
+        assert len(self.free) >= n, (self.name, n, len(self.free))
+        return [self.free.popleft() for _ in range(n)], left
+
+    def area_give(self, slots: list[int]):
+        self.area_used -= len(slots)
+        self.release(slots)
 
     def remove(self, key) -> TierEntry | None:
         e = self.entries.pop(key, None)
@@ -212,17 +249,12 @@ class TierStore:
         if old is not None and self.slot_bytes:
             self.release(old.slots[len(reuse):] + old.state)
         need = kv_blocks_for(tokens) - len(reuse) + self.state_slots if self.slot_bytes else 0
-        if c > self.capacity:
+        if c > self.capacity - self.area * (self.slot_bytes or 0):
             self.release(reuse)
             return False, [(key, TierEntry(tokens, content))]
         left = []
-        while self.used + c > self.capacity or len(self.free) < need:
-            victim, e = self.entries.popitem(last=False)
-            self.used -= self.charge(e.tokens)
-            self.release(e.slots + e.state)
-            self.stats["evicted"] += 1
-            self.stats["evicted_tokens"] += e.tokens
-            left.append((victim, e))
+        while self._short(c, need):
+            left.append(self._evict_lru())
         e = TierEntry(tokens, content)
         if self.slot_bytes:
             fresh = [self.free.popleft() for _ in range(need)]
@@ -253,7 +285,7 @@ class _TierLevel:
         self.capacity = self.t.capacity
 
     def fixed(self) -> float:
-        return 0.0
+        return max(self.t.area_used, self.t.area) * (self.t.slot_bytes or 0)     # its loading area
 
     def lru(self):
         return iter(self.t.entries)
@@ -325,7 +357,7 @@ class TierManager:
         h = [(o.host_tier, s) for s in o.host_slots + o.host_state]
         if o.op == "write":
             return t + h, []            # SSD write through staging: staging written, then read, by this op
-        if o.op == "read":
+        if o.op in ("read", "fetch"):
             return h, t
         if o.op == "demote":
             return t, h
@@ -368,10 +400,19 @@ class TierManager:
     def lookup(self, key, prompt, now_ns: int = 0) -> Hit | None:
         """The fastest tier holding the longest context of `key` that `prompt` (a `scheduler.Request`) resumes from."""
         best = None
+        memo = getattr(prompt, "tier_memo", False) if self.slot_mode else False
+        if memo is None:
+            memo = prompt.tier_memo = {}
         for i, t in enumerate(self.tiers):
             e = t.entries.get(key)
             if e is not None:
-                n = resumable_tokens(e.tokens, e.content, prompt, self.partial_hits)
+                m = memo.get(i) if memo is not False else None
+                if m is not None and m[0] is e and m[1] == e.tokens:   # compared before (a long prompt: ~0.1 ms)
+                    n = m[2]
+                else:
+                    n = resumable_tokens(e.tokens, e.content, prompt, self.partial_hits)
+                    if memo is not False:
+                        memo[i] = (e, e.tokens, n)
                 if n > 0 and (best is None or n > best[1]):
                     best = (i, n)
         return None if best is None else Hit(self.tiers[best[0]].name, best[1], self.wait_ns(best[0], now_ns))
@@ -445,6 +486,65 @@ class TierManager:
             t.release(e.slots + e.state)
             t.stats["released"] += 1
             self._removed(0, key)
+
+    # --- staged loading: SSD reads through DRAM's loading area -------------------------------------------------------
+
+    def set_dram_area(self, fraction: float):
+        """Carve `fraction` of DRAM's slots out as its loading area (slot mode, an SSD behind DRAM)."""
+        if not (self.slot_mode and len(self.tiers) == 2 and self.tiers[0].name == "dram"):
+            return
+        d = self.tiers[0]
+        d.area = math.ceil(fraction * d.num_slots)
+
+    @property
+    def dram_area(self) -> TierStore | None:
+        d = self.tiers[0] if self.tiers else None
+        return d if d is not None and d.name == "dram" and d.area else None
+
+    def fetch_slots(self, tokens: int) -> int:
+        return kv_blocks_for(tokens) + self.cfg.state_slots
+
+    def prepare_fetch(self, key, hit: Hit, now_ns: int, req_id: str | None = None
+                      ) -> tuple[list[TierOp], int, list[int]] | None:
+        """Read the key's first `hit.tokens` from SSD into slots of DRAM's loading area (the caller checked
+        `area_fits`), evicting DRAM entries for a read larger than the area. Returns (the ops, the expected landing,
+        the area slots: KV blocks from block 0, then the state), or None if the SSD no longer holds the key."""
+        t = self.tiers[self.level["ssd"]]
+        e = t.entries.get(key)
+        if e is None:
+            return None
+        d = self.dram_area
+        tokens = hit.tokens
+        n = kv_blocks_for(tokens)
+        area, left = d.area_take(n + self.cfg.state_slots)
+        for victim, ve in left:
+            self._evict(0, victim, ve)
+        start = max(t.channel_free_ns, now_ns)
+        land = start + self.read_ns(self.level["ssd"], tokens)
+        t.channel_free_ns = land
+        t.stats["reads"] += 1
+        t.stats["read_tokens"] += tokens
+        t.stats["read_bytes"] += t.move_bytes(0, tokens)
+        t.touch(key)
+        self._emit("fetch", "ssd", key, token_start=0, token_end=tokens, req_id=req_id, land_ns=land,
+                   slots=e.slots[:n], state_slots=list(e.state), host_tier="dram", host_slots=area[:n],
+                   host_state=area[n:])
+        return self._take(), land, area
+
+    def prepare_hop(self, key, tokens: int, area: list[int], views: KVViews, now_ns: int,
+                    req_id: str | None = None) -> tuple[list[TierOp], int]:
+        """Move a fetched context from DRAM's loading area `area` into `views` (HBM's loading area) on DRAM's read
+        channel. The area slots are given back when it is done (`area_give`)."""
+        d = self.dram_area
+        n = kv_blocks_for(tokens)
+        start = max(d.channel_free_ns, now_ns)
+        land = start + round(d.move_bytes(0, tokens) / d.read_bps * NS)
+        d.channel_free_ns = land
+        d.stats["hops"] += 1
+        d.stats["hop_bytes"] += d.move_bytes(0, tokens)
+        self._emit("read", "dram", key, token_start=0, token_end=tokens, req_id=req_id, land_ns=land, block_start=0,
+                   slots=area[:n], state_slots=area[n:], **_blocks(views))
+        return self._take(), land
 
     # --- writes: the victim chain ---------------------------------------------------------------------------------
 

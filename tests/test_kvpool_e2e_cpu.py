@@ -88,3 +88,41 @@ def test_dram_evictions_go_to_ssd_and_resume_from_there(tmp_path):
     assert kinds.count("demote") >= 1 and kinds.count("read") == 1
     rd = next(o for o in ops if o["kind"] == "read")
     assert rd["tier"] == "ssd" and rd["host_tier"] == "staging"
+
+
+def test_staged_loading_end_to_end(tmp_path):
+    """Staged loading (exclusive DRAM, loading areas): HBM's 29 blocks keep a 7-block area (one 5,000-token context),
+    so 3 contexts stay kept; DRAM (7 slots) keeps a 2-slot area and one context. A..E: A and B leave HBM and DRAM.
+    A's next round is fetched from SSD into DRAM's area (larger than the area: it starts with the area empty) and
+    hops to HBM's."""
+    from ppimpl.kvpool.member import FAKE_BLOCK_BYTES
+    slot = -(-FAKE_BLOCK_BYTES // 4 // 4096) * 4096
+    port = free_port_block()
+    cfg = {**CPU, "tiers": {"dram_gb": 7 * slot / 1e9, "ssd_gb": 1.0, "dram_read_gb_s": 5.0, "ssd_read_gb_s": 2.0,
+                            "staging_gb": 0.1, "dram_writes": "hbm-evictions-exclusive",
+                            "loading_read_gb_s": 6.5 * slot / 1e9, "loading_prefill_tok_s": 8192}}
+    srv = Server(tmp_path / "run", port, intake_procs=0, **cfg)
+    try:
+        srv.wait_ready()
+        c = Client(port)
+        n = 5000
+        r0 = {s: c.new_tokens(n) for s in "ABCDE"}
+        tok = {s: c.send(f"{s}_r0", r0[s])[0] for s in "ABCDE"}
+        assert c.send("B_r1", r0["B"] + [tok["B"]] + c.new_tokens(99))[1] == n
+        assert c.send("A_r1", r0["A"] + [tok["A"]] + c.new_tokens(99))[1] == n
+    finally:
+        assert srv.stop() == 0, (tmp_path / "run/server.log").read_text()
+    pool = json.loads((srv.run_dir / "pool.json").read_text())
+    assert pool["loading_area_blocks"] == 7 and pool["dram_area_slots"] == 2
+    sr = sreq_of(srv.run_dir)
+    assert sr["A_r1"]["tier"] == "ssd" and sr["A_r1"]["fetch_land_ms"] <= sr["A_r1"]["hop_start_ms"]
+    assert sr["B_r1"]["tier"] in ("dram", "ssd")    # DRAM's one context: B's or a later one written ahead
+    ch = chunks_of(srv.run_dir)
+    assert ch["A_r1"] == [(n, 100)] and ch["B_r1"] == [(n, 100)]
+    ops = [json.loads(x) for x in (srv.run_dir / "tier_ops.jsonl").read_text().splitlines()]
+    f = next(o for o in ops if o["kind"] == "fetch" and o["req"] == "A_r1")
+    hop = next(o for o in ops if o["kind"] == "read" and o["req"] == "A_r1")
+    assert f["req"] == "A_r1" and f["host_tier"] == "dram" and hop["tier"] == "dram" and hop["sent_ms"] >= f["landed_ms"]
+    cache = json.loads((srv.run_dir / "cache.json").read_text())
+    assert cache["loading_area"]["held"] == 0 and cache["loading_area"]["reads"] == 0
+    assert cache["tiers"][0]["hops"] == sum(o["kind"] == "fetch" for o in ops) >= 1

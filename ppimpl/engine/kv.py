@@ -23,6 +23,13 @@ Matching (server, `content_keys`): a kept context is found by content, not by a 
 (5_prefix_cache.md §2). Two prompts that share their first tokens but not the whole kept context get no hit, and the
 newer context replaces the older one.
 
+Loading area (staged loading, `area` > 0; the scheduler's docstring). `area` blocks are held for tier reads whether
+used or not: running requests and kept contexts never use them (`hard + kept + max(area_held, area) <= capacity`, in
+`fits` and `_make_room`). A read holds its context's blocks there (`hold_read`, `area_held`) until its request is
+admitted, which takes them over (`allocate`); a read larger than the whole area starts when the area is empty, once
+kept contexts make the room. A read whose room is held only by kept contexts not yet written below waits
+(`area_waits`), never an admission.
+
 Accounting. `blocks` (the real pool): a request costs blocks_for(prompt), a kept session the same. `tokens` (replay
 only, to reproduce the targets): the simulator's token ledger, a running request costs prompt + 1 + 51,456 tokens and
 a kept session prompt + 51,456, against the pool's token count; block ids then come from an unbounded virtual pool.
@@ -166,14 +173,18 @@ class KvManager:
         self._charge: dict[str, int] = {}
         self.stats = dict(admitted=0, hits=0, hit_tokens=0, evicted_sessions=0, evicted_tokens=0, dropped_stale=0,
                           peak_hard=0, preemptions=0, repeats=0,    # no preemption: the count stays 0
-                          blocked_by_write=0)   # fits() checks turned down only because kept contexts are not yet
+                          blocked_by_write=0,   # fits() checks turned down only because kept contexts are not yet
                                                 # written to the tier below (an HBM eviction waits for its write)
+                          area_waits=0)         # hold_read turned down only for that reason (a read waits)
         self.evicted: dict[object, int] = {}           # key -> tokens of a kept context evicted and not replaced since
         self.pinned: Counter = Counter()               # kept contexts a tier write still copies from (not evictable;
                                                        # their next round waits to take them over, `busy`)
         # The tiers below HBM (kvpool.HbmLevel: kept contexts are written there before they are evicted), or None:
         # it is told about kept, taken-over and evicted contexts and decides which kept context may be evicted now.
         self.lower = None
+        self.area = 0                                  # loading area in blocks (staged loading), held for reads
+        self.area_held = 0                             # blocks the reads hold in it
+        self.reads: dict[str, Allocation] = {}         # req id -> the blocks its read holds, until admitted
 
     @property
     def num_blocks(self) -> int:
@@ -193,11 +204,24 @@ class KvManager:
     def fits_ever(self, prompt_tokens: int) -> bool:
         return self.footprint(prompt_tokens) <= self.capacity
 
+    def area_charge(self, area_held: int | None = None) -> int:
+        """What the loading area counts as held: its reads' blocks, at least the whole area."""
+        return max(self.area_held if area_held is None else area_held, self.area)
+
+    def area_fits(self, tokens: int) -> bool:
+        """Whether a read of a `tokens`-long context may start in the loading area now: it fits, or the area is empty
+        (a read larger than the whole area)."""
+        c = self.kept_cost(tokens)
+        return self.area_held == 0 or self.area_held + c <= self.area
+
     def fits(self, req) -> bool:
         """Whether the request's whole footprint fits now, kept sessions evicted as needed (only those the lower level
         lets go: written there). If it fits only by evicting ones not yet written, the lower level starts their
-        writes (`make_room`) and the request waits."""
-        need = self.hard + self.footprint(req.num_tokens)
+        writes (`make_room`) and the request waits. A request whose read holds blocks in the loading area takes them
+        over."""
+        rd = self.reads.get(req.req_id)
+        need = self.hard + self.footprint(req.num_tokens) \
+            + self.area_charge(self.area_held - (0 if rd is None else rd.num_blocks))
         own = self.kept.get(req.session) if req.session is not None else None   # taken over (or given back) at
         own = 0 if own is None else self.kept_cost(own.tokens)                  # admission: not counted twice
         if need + self.kept_charge - own <= self.capacity:
@@ -211,6 +235,32 @@ class KvManager:
             self.stats["blocked_by_write"] += 1
             self.lower.make_room(need + held - self.capacity)
         return False
+
+    def hold_read(self, req, tokens: int) -> Allocation | None:
+        """Hold the blocks of a `tokens`-long context (KV and state) in the loading area for the request's read (the
+        caller checked `area_fits`), kept sessions evicted as needed. None if that needs kept contexts not yet written
+        below: their writes start (`make_room`) and the read waits."""
+        assert self.accounting == "blocks" and req.req_id not in self.reads
+        c = self.kept_cost(tokens)
+        base = self.hard + self.area_charge(self.area_held + c)
+        if base + self.kept_charge > self.capacity:
+            held = 0 if self.lower is None else self.lower.held_back()
+            if base + held > self.capacity:
+                if held and base <= self.capacity:
+                    self.stats["area_waits"] += 1
+                    self.lower.make_room(base + held - self.capacity)
+                return None
+        self.area_held += c
+        self._make_room(c)
+        alloc = Allocation(self.pool.take(kv_blocks_for(tokens)), self.pool.take(STATE_BLOCKS))
+        self.reads[req.req_id] = alloc
+        return alloc
+
+    def drop_read(self, req):
+        """Give back what the request's read holds in the loading area (a read that could not start)."""
+        alloc = self.reads.pop(req.req_id)
+        self.area_held -= alloc.num_blocks
+        self.pool.give(alloc.kv_blocks + alloc.state_blocks)
 
     # --- pins: a kept context a tier write copies from ------------------------------------------------------------
 
@@ -314,7 +364,16 @@ class KvManager:
         hit = 0
         evicted_before = self.stats["evicted_sessions"]
         info = {"hit_kind": "none_first_round", "kept_tokens": 0, "common_prefix_tokens": None}
-        if k is not None:
+        rd = self.reads.pop(req.req_id, None)
+        if rd is not None:                              # its read landed in the loading area: it takes the blocks
+            self.area_held -= rd.num_blocks
+            info["hit_kind"] = "tier"
+            if k is not None:                           # a shorter kept context the read superseded
+                self._unkeep(k)
+                self.pool.give(k.alloc.kv_blocks + k.alloc.state_blocks)
+                self.stats["dropped_stale"] += 1
+                k = None
+        elif k is not None:
             self._unkeep(k)
             hit = self._hit(k, req)
             info["kept_tokens"] = k.tokens
@@ -333,7 +392,12 @@ class KvManager:
         self.hard += charge
         self.stats["peak_hard"] = max(self.stats["peak_hard"], self.hard)
         n_kv = kv_blocks_for(req.num_tokens)
-        if hit:
+        if rd is not None:
+            alloc = rd
+            need = n_kv - len(alloc.kv_blocks)
+            self._make_room(need)
+            alloc.kv_blocks += self.pool.take(need)
+        elif hit:
             alloc = k.alloc
             if len(alloc.kv_blocks) > n_kv:                 # partial hit (simulator rule): the rest goes back
                 self.pool.give(alloc.kv_blocks[n_kv:])
@@ -366,7 +430,7 @@ class KvManager:
     def _make_room(self, blocks_needed: int):
         """Evict kept sessions, least recently used first, until the hard charge fits and `blocks_needed` blocks are
         free."""
-        while self.kept and (self.hard + self.kept_charge > self.capacity
+        while self.kept and (self.hard + self.kept_charge + self.area_charge() > self.capacity
                              or (not self.pool.virtual and self.pool.num_free < blocks_needed)):
             key = next((x for x in self.kept if x not in self.pinned
                         and (self.lower is None or self.lower.evictable(x))), None)

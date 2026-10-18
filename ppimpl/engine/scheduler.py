@@ -27,6 +27,20 @@ The scheduler of 6_scheduler.md §2, built on the plain one (`SchedulerConfig`; 
   writes kept contexts before HBM evicts them (a request that fits only once such a write lands waits, as for room;
   when a write lands, that round's read starts at once if it fits then).
   A round whose kept context is still being written waits to take it over (`busy_waits`).
+- **Staged loading** (`TierConfig.loading_read_gb_s`; ServingStudioSim pp-staged `prefix_tier_loading_area`, not
+  vLLM): pending -> loading -> ready -> batch. A loading area of HBM (`KvManager.area`, Little's law:
+  `BalancedKVPool.loading_area_blocks`) is always counted held, so admission and kept contexts leave it free, and the
+  pool writes kept contexts back ahead by what one batch period frees (`WriteBack.reserve`), so admission evicts
+  written contexts and never waits for a write. `load` walks the pending queues in admission order (overdue, then
+  the policy order) and starts the read of every round a tier holds more of than HBM while its area has room: a
+  DRAM read (or an SSD read without a DRAM area) into HBM's area; an SSD read into DRAM's area (the same fraction of
+  DRAM, `fetch`), which moves on to HBM's area over DRAM's channel once that has room (`hop`, in fetch landing
+  order). Each queue stops at the first read that does not fit (a read larger than the whole area starts when the
+  area is empty): later reads never jump it. A read holds its area until its round is admitted (DRAM's area until
+  its hop lands). Admission takes only rounds whose context is all in HBM: landed reads first (overdue ones in the
+  force-schedule pass too), then the queues, passing over rounds that still need a read; a round found ready in HBM
+  that needs a read again later (its context evicted before admission) is read again (`rereads`). The read-wait
+  bound is not used.
 
 The microbatch-forming procedure follows the reference implementation of the same design (ServingStudioSim
 `pipelined_chunked_prefill_admission.rs`, `srpt.rs`, `fresh_source.rs`, `prefix_fetch.rs`), so that the scheduling
@@ -34,6 +48,7 @@ check matches chunk for chunk.
 """
 
 import heapq
+import time
 from collections import deque
 from dataclasses import dataclass
 
@@ -67,6 +82,12 @@ class Request:
     output_token: int | None = None    # the token the prompt got (server; kept with the context)
     room_wait_ns: int | None = None    # first time it was at the head and its footprint did not fit
     admit_info: dict | None = None     # KvManager.allocate: how the prefix cache served it (hit_kind, ...)
+    tier_memo: dict | None = None      # TierManager.lookup: tier -> (entry, its tokens, the resumable tokens)
+    load_phase: str | None = None      # staged: "read" into HBM's area, "fetch" SSD -> DRAM's area, "hop_wait", "hop"
+    dram_area: list[int] | None = None  # staged: the DRAM area slots its SSD read holds
+    fetch_land_ns: int | None = None
+    hop_start_ns: int | None = None
+    hbm_ready: bool = False            # staged: found with its context in HBM at an admission check
 
     @property
     def remaining(self) -> int:
@@ -228,10 +249,16 @@ class Scheduler:
         self._chunks: list[ChunkSpec] = []
         self._room_blocked: Request | None = None   # the waiting round whose footprint did not fit at the last check
         self.stats = dict(microbatches=0, passed_over=0, reads=0, blocked_reads=0, busy_waits=0)
+        self.staged = False
+        self.waiting_hop: deque[Request] = deque()     # staged: fetched into DRAM's area, waiting for HBM's
+        self._load_dirty = True
         if pool is not None:
             if not kv.keep_sessions:
                 raise ValueError("tiers take what HBM's prefix cache evicts: keep_sessions is required")
             kv.lower = pool.hbm_level(kv)
+            if pool.set_loading_area(kv, cfg.mb_tokens):
+                self.staged = True
+                self.stats.update(fetches=0, hops=0, rereads=0, load_passes=0, load_pass_ns=0)
 
     # --- events ---------------------------------------------------------------------------------------------------
 
@@ -253,6 +280,7 @@ class Scheduler:
         self.policy.push(req)
         if self.overdue is not None:
             self.overdue.arrivals.append(req)
+        self._load_dirty = True
 
     def stage_done(self, stage: int, last_stage: int):
         if stage == 0:
@@ -264,10 +292,14 @@ class Scheduler:
     def finish(self, req: Request):
         """The request's token is out: its context stays kept in HBM, or its blocks are freed."""
         self.kv.release(req)
+        self._load_dirty = True
 
     def op_done(self, op_id: int, now_ns: int):
         """Every worker reported the tier op done (slot tiers): a load done lands its round."""
         _, h = self.pool.complete(op_id, now_ns)
+        if self.staged:
+            self._staged_done(h, now_ns)
+            return
         if h is not None and h.kind == "load":
             self.read_landed(h.req_id, now_ns)
         elif h is not None and h.kind == "store" and self._room_blocked is not None:
@@ -290,6 +322,125 @@ class Scheduler:
         req.read_land_ns = now_ns
         self.landed.append(req)
 
+    # --- staged loading -----------------------------------------------------------------------------------------
+
+    def _staged_done(self, h, now_ns: int):
+        """A staged op is done: a fetch waits for HBM's area, a hop gives DRAM's area back, a read or hop lands."""
+        self._load_dirty = True
+        if h is None or h.kind != "load":
+            return
+        r = self.reading[h.req_id]
+        if r.load_phase == "fetch":
+            r.load_phase, r.fetch_land_ns = "hop_wait", now_ns
+            self.waiting_hop.append(r)
+            self._start_hops(now_ns)
+            return
+        if r.load_phase == "hop":
+            self.pool.release_dram_area(r.dram_area)
+            r.dram_area = None
+        r.load_phase = None
+        self.read_landed(r.req_id, now_ns)
+
+    def _start_hops(self, now_ns: int):
+        """Fetched SSD reads move on to HBM's area in fetch landing order while it has room."""
+        while self.waiting_hop:
+            r = self.waiting_hop[0]
+            if not self.kv.area_fits(r.cached):
+                return
+            alloc = self.kv.hold_read(r, r.cached)
+            if alloc is None:
+                return
+            self.waiting_hop.popleft()
+            h = self.pool.hop(r.session, r.cached, r.dram_area, KVViews(alloc.kv_blocks, alloc.state_blocks, r.cached),
+                              now_ns, r.req_id)
+            r.load_phase, r.hop_start_ns, r.read_land_ns = "hop", now_ns, h.eta_ns
+            self.stats["hops"] += 1
+
+    def _needs_read(self, r: Request, now_ns: int):
+        """The tier hit of a round a tier holds more of than HBM, else None."""
+        if r.session is None:
+            return None
+        hit = self.pool.lookup(r.session, r, now_ns)
+        return hit if hit is not None and hit.tokens > self.kv.peek_hit(r) else None
+
+    def load(self, now_ns: int):
+        """Staged loading pass (module docs): start the reads of pending rounds in admission order while their
+        loading areas have room. Runs only after something changed (arrival, landing, admission, finish)."""
+        if not self.staged or not self._load_dirty:
+            return
+        t0 = time.perf_counter_ns()
+        self._load_dirty = False
+        self._start_hops(now_ns)
+        if self.overdue is not None:
+            self.overdue.promote(self.policy, now_ns)
+        hbm_open, dram_open = True, True
+        queues = ([(OVERDUE, list(self.overdue.q))] if self.overdue is not None else []) \
+            + [(POLICY, list(self.policy))]
+        for src, rs in queues:
+            for r in rs:
+                if not (hbm_open or dram_open):
+                    break
+                if self.kv.busy(r):
+                    continue
+                hit = self._needs_read(r, now_ns)
+                if hit is None:
+                    continue
+                via_dram = hit.tier == "ssd" and self.pool.dram_area_fits(hit.tokens) is not None
+                if via_dram:
+                    if not dram_open:
+                        continue
+                    if not self.pool.dram_area_fits(hit.tokens) or not self._start_fetch(r, hit, now_ns):
+                        dram_open = False
+                        continue
+                else:
+                    if not hbm_open:
+                        continue
+                    if not self.kv.area_fits(hit.tokens) or not self._start_read(r, hit, now_ns):
+                        hbm_open = False
+                        continue
+                if src == OVERDUE:
+                    self.overdue.q.remove(r)
+                    self.overdue.tokens -= r.fresh
+                else:
+                    self.policy.remove(r)
+        self.stats["load_passes"] += 1
+        self.stats["load_pass_ns"] += time.perf_counter_ns() - t0
+
+    def _reading(self, r: Request, hit, now_ns: int, phase: str):
+        if r.hbm_ready or r.read_land_ns is not None:
+            self.stats["rereads"] += 1               # its context was in HBM and was evicted before admission
+        r.hbm_ready = False
+        r.cached, r.tier, r.tier_tokens, r.hbm_tokens = hit.tokens, hit.tier, hit.tokens, 0
+        r.read_start_ns, r.load_phase = now_ns, phase
+        r.fetch_land_ns = r.hop_start_ns = None
+        self.reading[r.req_id] = r
+        self.stats["reads"] += 1
+
+    def _start_read(self, r: Request, hit, now_ns: int) -> bool:
+        """A tier read into HBM's loading area (the whole context; HBM holds none of it, or a shorter one the read
+        supersedes)."""
+        alloc = self.kv.hold_read(r, hit.tokens)
+        if alloc is None:
+            return False
+        h = self.pool.load(r.session, hit, KVViews(alloc.kv_blocks, alloc.state_blocks, hit.tokens, 0), now_ns,
+                           r.req_id)
+        if h is None:                                # the tier let it go meanwhile: compute it
+            self.kv.drop_read(r)
+            return False
+        self._reading(r, hit, now_ns, "read")
+        r.read_land_ns = h.eta_ns
+        return True
+
+    def _start_fetch(self, r: Request, hit, now_ns: int) -> bool:
+        got = self.pool.fetch(r.session, hit, now_ns, r.req_id)
+        if got is None:
+            return False
+        h, r.dram_area = got
+        self._reading(r, hit, now_ns, "fetch")
+        r.read_land_ns = h.eta_ns
+        self.stats["fetches"] += 1
+        return True
+
     @property
     def waiting(self) -> list[Request]:
         return list(self.policy)
@@ -310,6 +461,7 @@ class Scheduler:
             return None
         if self.overdue is not None:
             self.overdue.promote(self.policy, now_ns)
+        self.load(now_ns)
         self._chunks = []
         budget = self.budget(exiting)
         if self.srpt:
@@ -317,6 +469,9 @@ class Scheduler:
         else:
             self._form_fifo(budget, now_ns)
         chunks, self._chunks = self._chunks, []
+        if self.staged and chunks:
+            self._load_dirty = True                   # admission freed area and evicted kept contexts
+            self.load(now_ns)
         if not chunks:
             return None
         tokens = sum(c.num_tokens for c in chunks)
@@ -390,9 +545,13 @@ class Scheduler:
             self._admit(budget, now_ns)
         self.started = still + self.started               # admitted now join after the ones already started
 
-    def _peek(self, overdue_only: bool) -> tuple[str, Request] | tuple[None, None]:
+    def _peek(self, overdue_only: bool, now_ns: int = 0) -> tuple[str, Request] | tuple[None, None]:
         if self.landed and not overdue_only:
             return LANDED, self.landed[0]
+        if self.landed and self.staged and self.overdue is not None:     # force-schedule covers landed reads too
+            od = [r for r in self.landed if self.overdue.is_overdue(r, now_ns)]
+            if od:
+                return LANDED, min(od, key=lambda r: r.arrival_ns)
         if self.overdue is not None and self.overdue.q:
             return OVERDUE, self.overdue.q[0]
         if overdue_only:
@@ -400,9 +559,12 @@ class Scheduler:
         r = self.policy.peek()
         return (POLICY, r) if r is not None else (None, None)
 
-    def _take(self, src: str):
+    def _take(self, src: str, r: Request | None = None):
         if src == LANDED:
-            self.landed.popleft()
+            if r is None or r is self.landed[0]:
+                self.landed.popleft()
+            else:
+                self.landed.remove(r)
         elif src == OVERDUE:
             self.overdue.pop()
         else:
@@ -414,15 +576,20 @@ class Scheduler:
         left = budget
         passed = []
         while left > 0:
-            src, r = self._peek(overdue_only)
+            src, r = self._peek(overdue_only, now_ns)
             if r is None:
                 break
+            if src != LANDED and self.staged and self._needs_read(r, now_ns) is not None:
+                self.stats["passed_over"] += 1      # not ready: the loading pass reads it
+                self._take(src)
+                passed.append((src, r))
+                continue
             if src != LANDED and self.kv.busy(r):    # its kept context is still being written to a tier
                 self.stats["busy_waits"] += 1
                 self._take(src)
                 passed.append((src, r))
                 continue
-            if src != LANDED and self.pool is not None:
+            if src != LANDED and self.pool is not None and not self.staged:
                 outcome = self._at_head(r, now_ns)
                 if outcome == "read":
                     self._take(src)
@@ -440,13 +607,18 @@ class Scheduler:
             n = min(remaining, left)
             if n == 0:
                 break
-            if src != LANDED and not self.kv.fits(r):
+            if self.staged and src != LANDED and hit:
+                r.hbm_ready = True                  # its context is in HBM now
+            if (src != LANDED or self.staged) and not self.kv.fits(r):
                 if r.room_wait_ns is None:
                     r.room_wait_ns = now_ns
                 self._room_blocked = r
                 break
-            self._take(src)
-            if src != LANDED:
+            self._take(src, r)
+            if src == LANDED and self.staged:
+                self.kv.allocate(r)                 # takes over its read's blocks in the loading area
+                r.alloc = self.kv.held[r.req_id]
+            elif src != LANDED:
                 r.cached = r.hbm_tokens = self.kv.allocate(r)
                 r.alloc = self.kv.held[r.req_id]
             r.admit_ns = now_ns
