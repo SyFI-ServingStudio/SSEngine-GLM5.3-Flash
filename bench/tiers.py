@@ -187,7 +187,8 @@ def print_session(x: dict):
 def trace_parts(op: dict) -> dict:
     """One traced op (tier_trace_s<stage>.jsonl) on one GPU, us: host-to-device (or device-to-host) copy time and
     GB/s, the NVLink hop's time, host time outside the batch calls (Python, and waiting for the GIL before a call),
-    inside the calls on the CPU (driver) and blocked in them (the GIL back after the call, or the driver blocking), the
+    inside the calls on the CPU (driver) and blocked in them (the GIL back after the call, or the driver blocking; of
+    it, runnable without a CPU: `call_runq_us`), the
     time the PCIe stream sat idle between its batches (ring waits or late submission) and how much of that idle was
     waiting for the host (the batch started within 30 us of its call returning), and the GPU span."""
     b = op["batches"]
@@ -208,6 +209,8 @@ def trace_parts(op: dict) -> dict:
             "host_outside_calls_us": round(host_end - sum(x["call_us"] for x in b), 1),
             "call_cpu_us": round(sum(x["cpu_us"] for x in b), 1),
             "call_blocked_us": round(sum(x["call_us"] - x["cpu_us"] for x in b), 1),
+            "call_runq_us": round(sum(x.get("runq_us", 0.0) for x in b), 1),     # of it: runnable, no CPU
+            "call_max_us": round(max(x["call_us"] for x in b), 1),
             "pcie_idle_us": round(idle, 1), "pcie_idle_waiting_host_us": round(host_wait, 1),
             "span_us": round(max(x["gpu_end_us"] for x in b) - min(x["gpu_start_us"] for x in b), 1)}
 
@@ -220,9 +223,18 @@ def trace_summary(run_dir: Path) -> dict | None:
             rows.setdefault(op["kind"], []).append(trace_parts(op))
     if not rows:
         return None
-    return {k: {"ops": len(v), **{f: {"p50": round(float(np.median([r[f] for r in v])), 1),
-                                      "mean": round(float(np.mean([r[f] for r in v])), 1)} for f in v[0]}}
-            for k, v in rows.items()}
+    out = {k: {"ops": len(v), **{f: {"p50": round(float(np.median([r[f] for r in v])), 1),
+                                     "mean": round(float(np.mean([r[f] for r in v])), 1),
+                                     "max": round(float(np.max([r[f] for r in v])), 1)} for f in v[0]}}
+           for k, v in rows.items()}
+    probes = [dict(p, stage=int(f.stem.rsplit("_s", 1)[1])) for f in sorted(run_dir.glob("tier_probe_s*.jsonl"))
+              for p in read_jsonl(f)]
+    if probes:   # the member's probe thread woke > 20 ms late: GIL held elsewhere (runq small) or no CPU (runq large)
+        out["probe"] = {"late": len(probes), "over_100ms": sum(p["late_ms"] > 100 for p in probes),
+                        "max_late_ms": max(p["late_ms"] for p in probes),
+                        "runq_share": round(sum(p["runq_ms"] for p in probes) / sum(p["late_ms"] for p in probes), 3),
+                        "by_stage": {s: sum(p["stage"] == s for p in probes) for s in sorted({p["stage"] for p in probes})}}
+    return out
 
 
 def mean_parts(parts: list) -> dict | None:

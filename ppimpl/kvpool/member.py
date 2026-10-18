@@ -8,11 +8,13 @@ its `mover.Mover` (read streams host -> HBM, write streams HBM -> host), and a d
 `TierDone` when the copies completed. No wait on the compute stream: a write's blocks are final and pinned until it
 is done, a read's blocks are held by a request that computes only after all n `TierDone`s.
 
-SSD ops run on two threads (reads; writes and demotes), one op at a time each, their file I/O on `SsdTier`'s io_uring,
-into and out of host slots: DRAM's (a demote) or a staging arena's (every SSD read; a write-back to SSD without
+SSD ops run on two threads, their file I/O on `SsdTier`'s io_uring (reads first in the kernel), into and out of host
+slots: DRAM's (a demote) or a staging arena's (every SSD read; a write-back to SSD without
 DRAM, or of a context larger than DRAM). An SSD read lands slot by slot and each KV block's H2D is enqueued as soon as its slot is
 in, the state after its slots: read time ~ SSD time + one block. The file is shard q (this member's quarter of every
-slot) of the set the leader took (`shards.py`), kept for the next run; its contents are never trusted.
+slot) of the set the leader took (`shards.py`), kept for the next run; its contents are never trusted. Reads run one
+op at a time; writes and demotes do not wait for their file writes: many are in flight at once (the leader orders
+ops that share slots, `TierOp.deps`), and each is reported when its last slot is on the SSD.
 
 The fake model has no KV: its member moves nothing and reports each op after the time the configured bandwidth
 gives its bytes, one op after another per direction (CPU tests, fake runs).
@@ -36,6 +38,7 @@ from ppimpl.kvpool.mover import Mover, Segment
 from ppimpl.kvpool.placement import BalancedPlacement
 from ppimpl.runtime.transport import Shutdown, TierDone, TierMove, WorkerError, decode_tier, encode
 
+PROBE_S, PROBE_LATE_S = 0.005, 0.020   # the GIL / CPU probe (`PoolMember._probe_loop`, with the trace)
 FAKE_BLOCK_BYTES = 8576 * 5996  # one block over all stages (GLM-5.3 PP4: 4 x 1,499 B/token); a GPU's slot is 1/n of
                                 # it rounded up to 4 KiB (PP4: 12,857,344 B, the real balanced slot, TIERS.md §3)
 
@@ -117,6 +120,8 @@ class PoolMember:
         self.stop = threading.Event()
         self.q = {"read": queue.Queue(), "write": queue.Queue()}       # done threads: (op id, wait, start, bytes)
         self.ssd_q = {"read": queue.Queue(), "write": queue.Queue()}   # SSD threads: (op, start)
+        self._ssd_writes = 0                       # SSD writes / demotes whose file writes are in flight
+        self._ssd_cv = threading.Condition()
         self._due: dict[str, float] = {}           # fake member: when each direction's last op is done
         if tc.hops not in ("two", "direct"):
             raise ValueError(f"tiers.hops: {tc.hops!r} (two | direct)")
@@ -192,6 +197,25 @@ class PoolMember:
         t = threading.Thread(target=self._recv_loop, name="tier-recv", daemon=True)
         t.start()
         self.threads.append(t)
+        if self.trace:
+            t = threading.Thread(target=self._probe_loop, name="tier-probe", daemon=True)
+            t.start()
+            self.threads.append(t)
+
+    def _probe_loop(self):
+        """Instrumentation (with the trace): a thread that wakes every PROBE_S and logs each wake-up more than
+        PROBE_LATE_S late to tier_probe_s<stage>.jsonl, with how long it was runnable without a CPU then. Late but not
+        waiting for a CPU: another thread held the GIL (a tier copy call that blocks at the same time waits for it)."""
+        from ppimpl.kvpool.mover import runq_ns
+        with open(os.path.join(self.cfg.run_dir, f"tier_probe_s{self.stage}.jsonl"), "a") as f:
+            while not self.stop.is_set():
+                t0, q0 = time.perf_counter(), runq_ns()
+                time.sleep(PROBE_S)
+                late, q = time.perf_counter() - t0 - PROBE_S, runq_ns() - q0
+                if late > PROBE_LATE_S:
+                    f.write(json.dumps({"at_ns": time.time_ns(), "late_ms": round(late * 1e3, 2),
+                                        "runq_ms": round(q / 1e6, 2)}) + "\n")
+                    f.flush()
 
     def close(self):
         self.stop.set()
@@ -255,6 +279,8 @@ class PoolMember:
         except BaseException:   # noqa: BLE001 - reported to the controller, which fails the run
             err = WorkerError(self.stage, "tier SSD thread:\n" + traceback.format_exc())
         finally:
+            with self._ssd_cv:                  # the writes in flight report before the end does
+                self._ssd_cv.wait_for(lambda: self._ssd_writes == 0, timeout=60)
             self.q[direction].put(err)
 
     def _done_loop(self, direction: str):
@@ -295,8 +321,9 @@ class PoolMember:
         us = lambda ns: round(ns / 1e3, 1)
         self._trace_log.write(json.dumps({"op": op_id, "kind": kind, "start_ns": start_ns, "batches": [
             {"stream": s, "pieces": n, "bytes": b, "host_at_us": us(h0 - t0), "call_us": us(h1 - h0), "cpu_us": us(c),
-             "gpu_start_us": round(mark.elapsed_time(e0) * 1e3, 1), "gpu_end_us": round(mark.elapsed_time(e1) * 1e3, 1)}
-            for s, n, b, h0, h1, c, e0, e1 in tr]}) + "\n")
+             "runq_us": us(q), "gpu_start_us": round(mark.elapsed_time(e0) * 1e3, 1),
+             "gpu_end_us": round(mark.elapsed_time(e1) * 1e3, 1)}
+            for s, n, b, h0, h1, c, q, e0, e1 in tr]}) + "\n")
 
     # --- one op -----------------------------------------------------------------------------------------------------
 
@@ -369,7 +396,37 @@ class PoolMember:
                     ev.synchronize()
             elif op.op != "demote":
                 raise ValueError(f"SSD op {op.op}")
-            for f in self.ssd.write(files, hosts):
-                f.result()
-            ev = None
+            self._report_when_written(op, self.ssd.write(files, hosts), start_ns, len(files) * sb)
+            return
         self.q[self.direction(op)].put((op.op_id, ev, start_ns, len(files) * sb, time.time_ns(), None))
+
+    def _report_when_written(self, op: TierMove, futs: list, start_ns: int, nbytes: int):
+        """Report an SSD write or demote once its last file write completed (on the io_uring's thread), without
+        holding the SSD write thread: the next op's writes queue behind it in the ring. A failed write fails the run
+        (`WorkerError`)."""
+        done = (op.op_id, None, start_ns, nbytes)
+        if not futs:
+            self.q["write"].put((*done, time.time_ns(), None))
+            return
+        left, failed, lock = [len(futs)], [False], threading.Lock()
+        with self._ssd_cv:
+            self._ssd_writes += 1
+
+        def one(f):
+            exc = f.exception()
+            with lock:
+                left[0] -= 1
+                last = left[0] == 0
+                first_failure = exc is not None and not failed[0]
+                failed[0] |= exc is not None
+            if first_failure:
+                self.q["write"].put(WorkerError(self.stage, f"tier SSD write of op {op.op_id}: {exc!r}"))
+            if last:
+                if not failed[0]:
+                    self.q["write"].put((*done, time.time_ns(), None))
+                with self._ssd_cv:
+                    self._ssd_writes -= 1
+                    self._ssd_cv.notify_all()
+
+        for f in futs:
+            f.add_done_callback(one)

@@ -24,6 +24,15 @@ from typing import NamedTuple
 import numpy as np
 
 
+def runq_ns() -> int:
+    """This thread's time runnable but waiting for a CPU so far (/proc/thread-self/schedstat; 0 if unavailable)."""
+    try:
+        with open("/proc/thread-self/schedstat") as f:
+            return int(f.read().split()[1])
+    except (OSError, IndexError, ValueError):
+        return 0
+
+
 class Segment(NamedTuple):
     """Host slots and the pieces that live in them. Piece i's host side is `off[i]` bytes into the slots counted
     `slot_bytes` apart (slot k at k x slot_bytes, k < len(host_ptrs)); `host_len` bytes of each slot are used."""
@@ -119,8 +128,8 @@ class Mover:
 
     def _batch(self, stream: str, src, dst, lens, wait=(), tr: list | None = None):
         """One `cuMemcpyBatchAsync` on `stream` after the events `wait`; its end event (None on CPU, done). `tr`: append
-        (stream, pieces, bytes, host ns before the call, host ns after it, thread CPU ns in it, GPU start event, end
-        event)."""
+        (stream, pieces, bytes, host ns before the call, host ns after it, thread CPU ns in it, ns runnable without a
+        CPU in it, GPU start event, end event): the rest of the call is a wait for a lock (GIL or driver)."""
         if not self.cuda:
             for s, t, k in zip(np.asarray(src).tolist(), np.asarray(dst).tolist(), np.asarray(lens).tolist()):
                 ctypes.memmove(t, s, k)
@@ -134,13 +143,13 @@ class Mover:
         if tr is not None:
             ev0 = torch.cuda.Event(enable_timing=True)
             ev0.record(st)
-            h0, c0 = time.perf_counter_ns(), time.thread_time_ns()
+            h0, c0, q0 = time.perf_counter_ns(), time.thread_time_ns(), runq_ns()
         with torch.cuda.stream(st):
             self.swap(*args)
         if tr is not None:
-            h1, c1 = time.perf_counter_ns(), time.thread_time_ns()
+            h1, c1, q1 = time.perf_counter_ns(), time.thread_time_ns(), runq_ns()
         ev = torch.cuda.Event(blocking=True, enable_timing=True)   # timing: TierDone.gpu_ns
         ev.record(st)
         if tr is not None:
-            tr.append((stream, len(args[2]), int(args[2].sum()), h0, h1, c1 - c0, ev0, ev))
+            tr.append((stream, len(args[2]), int(args[2].sum()), h0, h1, c1 - c0, q1 - q0, ev0, ev))
         return ev

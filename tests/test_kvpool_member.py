@@ -53,7 +53,7 @@ def run(mems, ops):
             e.submit(m)
             if m.tier == "ssd":                      # the SSD thread's work, here
                 e._ssd_op(*e.ssd_q[e.direction(m)].get_nowait())
-            op_id, wait, _, nbytes, _, _ = e.q[e.direction(m)].get_nowait()
+            op_id, wait, _, nbytes, _, _ = e.q[e.direction(m)].get(timeout=30)   # SSD writes: reported async
             assert op_id == m.op_id and wait is None
             moved.setdefault(op_id, []).append(nbytes)
     return moved
@@ -138,7 +138,7 @@ def test_ssd_demote_and_staging_are_byte_equal(tmp_path, ring):
     for dram in (None, "one"):
         d = tmp_path / str(dram)
         ss = BalancedPlacement(stages()[1], 4, 0).state_slots
-        views, ranges, mems, tc = members(None if dram is None else 2 + ss, 60, 30, d, dram_write_ahead=None,
+        views, ranges, mems, tc = members(None if dram is None else 2 + ss, 60, 30, d,
                                           **ring)   # DRAM: one context, demoted when evicted
         pool = BalancedKVPool(tc)
         want = {}
@@ -226,3 +226,30 @@ def test_fake_member_reports_after_bandwidth_time():
         th.join(5)
     pull.close(linger=0)
     ctx.term()
+
+
+def test_ssd_writes_are_reported_when_their_last_file_write_is_done():
+    """Writes and demotes do not hold the SSD write thread: each is reported once all its file writes completed, in
+    completion order, and a failed one fails the run."""
+    import queue
+    import threading
+    from concurrent.futures import Future
+
+    from ppimpl.runtime.transport import WorkerError
+
+    e = PoolMember.__new__(PoolMember)
+    e.stage, e.q, e._ssd_writes, e._ssd_cv = 0, {"write": queue.Queue()}, 0, threading.Condition()
+    a, b = [Future(), Future()], [Future()]
+    e._report_when_written(NS(op_id=1), a, 0, 10)
+    e._report_when_written(NS(op_id=2), b, 0, 10)
+    assert e._ssd_writes == 2 and e.q["write"].empty()
+    b[0].set_result(None)                                   # op 2 lands first
+    a[0].set_result(None)
+    assert e.q["write"].get_nowait()[0] == 2 and e.q["write"].empty()
+    a[1].set_result(None)
+    assert e.q["write"].get_nowait()[0] == 1 and e._ssd_writes == 0
+    c = [Future(), Future()]
+    e._report_when_written(NS(op_id=3), c, 0, 10)
+    c[0].set_exception(OSError("disk"))
+    c[1].set_result(None)
+    assert isinstance(e.q["write"].get_nowait(), WorkerError) and e.q["write"].empty() and e._ssd_writes == 0
