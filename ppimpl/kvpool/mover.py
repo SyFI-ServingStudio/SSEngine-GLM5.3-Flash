@@ -61,6 +61,8 @@ class Driver:
         self._wait, self._record = lib.cuStreamWaitEvent, lib.cuEventRecord
         self._wait.argtypes, self._wait.restype = [vp, vp, ctypes.c_uint], ctypes.c_int
         self._record.argtypes, self._record.restype = [vp, vp], ctypes.c_int
+        self._elapsed = lib.cuEventElapsedTime
+        self._elapsed.argtypes, self._elapsed.restype = [ctypes.POINTER(ctypes.c_float), vp, vp], ctypes.c_int
         self._attr = (ctypes.c_uint32 * 6)(1, 0, 0, 0, 0, 0)    # CUmemcpyAttributes: srcAccessOrder STREAM (1)
         self._attr_idx = (ctypes.c_size_t * 1)(0)
 
@@ -76,6 +78,14 @@ class Driver:
         rc = self._batch(dst.ctypes.data, src.ctypes.data, lens.ctypes.data, len(lens), ctypes.addressof(self._attr),
                          ctypes.addressof(self._attr_idx), 1, ctypes.byref(fail), stream)
         self._ok(rc, f"cuMemcpyBatchAsync of {len(lens)} copies failed at {fail.value}")
+
+    def elapsed_ms(self, a, b) -> float:
+        """ms from event `a` to event `b`, both completed (as torch's `elapsed_time`, without its two event queries,
+        each a GIL release): `cuEventElapsedTime` with the GIL held. The calling thread needs the device's context
+        current (`torch.cuda.set_device`)."""
+        ms = ctypes.c_float()
+        self._ok(self._elapsed(ctypes.byref(ms), a.cuda_event, b.cuda_event), "cuEventElapsedTime")
+        return ms.value
 
     def wait(self, stream: int, ev):
         self._ok(self._wait(stream, ev.cuda_event, 0), "cuStreamWaitEvent")
@@ -208,7 +218,7 @@ class Mover:
             a.ev.record(a.stream)
             a.ev.synchronize()
             a.ns, a.at = time.time_ns(), now
-        return a.ns + int(a.ev.elapsed_time(ev) * 1e6)
+        return a.ns + int(self.drv.elapsed_ms(a.ev, ev) * 1e6)
 
     def transfer_async(self, direction: str, segments: list[Segment], ready=None, tr: list | None = None,
                        owned: list | None = None, gate=None, marks: list | None = None):

@@ -369,6 +369,9 @@ class PoolMember:
         push.setsockopt(zmq.LINGER, 5000)
         push.connect(self.cfg.report_addr())
         try:
+            if self.cuda:                       # the driver's elapsed time needs the device's context current
+                import torch
+                torch.cuda.set_device(self.device)
             while (item := self.q[direction].get()) is not None:
                 if isinstance(item, WorkerError):
                     push.send(encode(item))
@@ -382,7 +385,7 @@ class PoolMember:
                 elif wait is not None:
                     wait.synchronize()
                     if mark is not None:
-                        gpu_ns = int(mark.elapsed_time(wait) * 1e6)
+                        gpu_ns = int(self.mover.drv.elapsed_ms(mark, wait) * 1e6)
                         mark_ns = self.mover.host_ns(mark)
                 push.send(encode(TierDone(self.stage, op_id, start_ns, time.time_ns(), nbytes, submit_ns, gpu_ns,
                                           mark_ns, self._recv_ns.pop(op_id, None))))
@@ -399,6 +402,9 @@ class PoolMember:
         """Done ops' per-batch traces (`_write_trace`) and pooled events (back to the mover), after their TierDone:
         a report never waits for an earlier op's trace. Ends after both done threads did."""
         ended = set()
+        if self.cuda:                           # the driver's elapsed time needs the device's context current
+            import torch
+            torch.cuda.set_device(self.device)
         while len(ended) < 2:
             item = self.trace_q.get()
             if isinstance(item, str):
@@ -420,10 +426,11 @@ class PoolMember:
         if self._trace_log is None:
             self._trace_log = open(os.path.join(self.cfg.run_dir, f"tier_trace_s{self.stage}.jsonl"), "a")
         us = lambda ns: round(ns / 1e3, 1)
+        ms = self.mover.drv.elapsed_ms       # the op's last copy completed: so did every event here
         self._trace_log.write(json.dumps({"op": op_id, "kind": kind, "start_ns": start_ns, "batches": [
             {"stream": s, "pieces": n, "bytes": b, "host_at_us": us(h0 - t0), "call_us": us(h1 - h0), "cpu_us": us(c),
-             "gpu_start_us": round(mark.elapsed_time(e0) * 1e3, 1),
-             "gpu_end_us": round(mark.elapsed_time(e1) * 1e3, 1)}
+             "gpu_start_us": round(ms(mark, e0) * 1e3, 1),
+             "gpu_end_us": round(ms(mark, e1) * 1e3, 1)}
             for s, n, b, h0, h1, c, e0, e1 in tr]}) + "\n")
 
     # --- reads first ------------------------------------------------------------------------------------------------
