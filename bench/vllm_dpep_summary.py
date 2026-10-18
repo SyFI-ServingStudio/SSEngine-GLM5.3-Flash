@@ -167,14 +167,21 @@ def main(run: Path, trace: Path = TRACE) -> dict:
     late = tuple(a[(arr >= 600e3)] for a in rows)            # rounds arriving in minutes 10-20, first token < 20 min
     m1020 = window_metrics(late, 1200e3)
     m1020 = {**m1020, "rounds_per_s": m1020["rounds"] / 600, "new_tokens_per_s": m1020["new_tokens_per_s"] * 2,
-             "window_s": 600.0}
+             "computed_tokens_per_s": m1020["computed_tokens_per_s"] * 2,
+             "prompt_tokens_per_s": m1020["prompt_tokens_per_s"] * 2, "window_s": 600.0}
+    first = rows[1]
+    ft = tuple(x[(first >= 600e3)] for x in rows)             # first token in minutes 10-20 (the sim rows' window)
+    mft = window_metrics(ft, 1200e3)
+    mft = {**mft, "rounds_per_s": mft["rounds"] / 600, "new_tokens_per_s": mft["new_tokens_per_s"] * 2,
+           "computed_tokens_per_s": mft["computed_tokens_per_s"] * 2, "prompt_tokens_per_s": mft["prompt_tokens_per_s"] * 2,
+           "window_s": 600.0}
     sent = failed = 0
     for line in (run / "requests.jsonl").read_text().splitlines():
         o = json.loads(line).get("outcome", {})
         sent += 1
         failed += str(o.get("status")).upper() != "SUCCESS"
     out = {"run": run.name, "metrics_0_20": json.loads((run / "metrics.json").read_text()),
-           "metrics_arrival_10_20": m1020, "rounds_sent": sent, "rounds_failed": failed, "inside_rounds": inside_rounds(run, trace),
+           "metrics_arrival_10_20": m1020, "metrics_first_token_10_20": mft, "rounds_sent": sent, "rounds_failed": failed, "inside_rounds": inside_rounds(run, trace),
            "prom": counters(run), "engines": engines(run), "router": router(run)}
     (run / "dpep_summary.json").write_text(json.dumps(out, indent=1))
     return out
