@@ -2,8 +2,8 @@
 
 Copy engines only, no SMs, no wait on the compute stream: `cuMemcpyBatchAsync` on the mover's own streams; on CPU
 (tests) `ctypes.memmove`, done at once. The copies, stream waits and event records go straight to the driver
-(`Driver`, ctypes on libcuda: no torch dispatch, stream context or tensor wrapping per call, and the GIL is released
-in each call), so a transfer's host work is the driver's own (job 8202: 4.3 ms per DRAM op through torch and vLLM's
+(`Driver`, ctypes on libcuda: no torch dispatch, stream context or tensor wrapping per call; the GIL is released
+in each batch call), so a transfer's host work is the driver's own (job 8202: 4.3 ms per DRAM op through torch and vLLM's
 `swap_blocks_batch`, of it 1.7 ms CPU in the driver).
 
 Two hops (`TierConfig.hops`, default; §2.3: a copy engine writing host data straight into the other GPUs' HBM runs at
@@ -42,9 +42,12 @@ HOPS = {"read": ("read", "read_nvl"), "write": ("write_nvl", "write")}
 
 
 class Driver:
-    """The driver calls of a transfer, through ctypes (each releases the GIL): `cuMemcpyBatchAsync` at its CUDA 12.8
-    ABI (as vLLM's `swap_blocks_batch`: one attribute, source in stream order), `cuStreamWaitEvent`, `cuEventRecord`.
-    Streams and events are torch's (`cuda_stream`, `cuda_event` handles)."""
+    """The driver calls of a transfer, through ctypes: `cuMemcpyBatchAsync` at its CUDA 12.8 ABI (as vLLM's
+    `swap_blocks_batch`: one attribute, source in stream order), `cuStreamWaitEvent`, `cuEventRecord`. Streams and
+    events are torch's (`cuda_stream`, `cuda_event` handles). The batch (tens of us in the driver) releases the GIL;
+    the record and the wait (1-4 us) keep it (`ctypes.PyDLL`): a release hands the GIL to a waiting thread, and the
+    tier threads' ~5k releases per second kept stage 0's main thread waiting for it in short slices, 25-40% of its
+    host prepare (jobs 8349/8350, nsys: take_gil waits p50 20-30 us)."""
 
     def __init__(self):
         from cuda.bindings import driver
@@ -54,7 +57,7 @@ class Driver:
             raise RuntimeError(f"cuMemcpyBatchAsync (CUDA 12.8 ABI) not available: {err}")
         vp, sz = ctypes.c_void_p, ctypes.c_size_t
         self._batch = ctypes.CFUNCTYPE(ctypes.c_int, vp, vp, vp, sz, vp, vp, sz, vp, vp)(int(fn))
-        lib = ctypes.CDLL("libcuda.so.1")
+        lib = ctypes.PyDLL("libcuda.so.1")      # the GIL held through the call
         self._wait, self._record = lib.cuStreamWaitEvent, lib.cuEventRecord
         self._wait.argtypes, self._wait.restype = [vp, vp, ctypes.c_uint], ctypes.c_int
         self._record.argtypes, self._record.restype = [vp, vp], ctypes.c_int
