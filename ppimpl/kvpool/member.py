@@ -151,11 +151,12 @@ class PoolMember:
                                            name="tier-touch", daemon=True)
             self._touch.start()
 
-    def attach(self, ranges: list[ViewRange] | None) -> tuple[int, int]:
-        """`ranges`: this stage's KV ranges (`layout.from_stage_kv`), None for a model without KV (fake)."""
+    def attach(self, ranges: list[ViewRange] | None) -> tuple[int, int, int]:
+        """`ranges`: this stage's KV ranges (`layout.from_stage_kv`), None for a model without KV (fake). Returns the
+        slot bytes, a state's slots and its bytes."""
         if ranges is None:
             self.slot_bytes = self.slot_bytes or -(-FAKE_BLOCK_BYTES // self.n // 4096) * 4096
-            return self.slot_bytes, self.tc.state_slots
+            return self.slot_bytes, self.tc.state_slots, self.tc.state_slots * self.slot_bytes
         self.real = True
         allr, self.opened = share_ranges(self.stage, self.n, ranges) if self.cuda else (ranges, [])
         self.placement = P = BalancedPlacement(allr, self.n, self.stage, slot_bytes=self.tc.slot_bytes)
@@ -198,7 +199,7 @@ class PoolMember:
               + f"{len(self.opened)} peer allocations, "
               + self.mover.info
               + (f", cgroup memory.peak {pk:.0f} GB" if (pk := cgroup_peak_gb()) is not None else ""), flush=True)
-        return self.slot_bytes, P.state_slots
+        return self.slot_bytes, P.state_slots, P.state_bytes
 
     def start(self):
         for name in ("read", "write"):

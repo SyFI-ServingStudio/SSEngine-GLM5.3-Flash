@@ -185,6 +185,13 @@ class KvManager:
         self.area = 0                                  # loading area in blocks (staged loading), held for reads
         self.area_held = 0                             # blocks the reads hold in it
         self.reads: dict[str, Allocation] = {}         # req id -> the blocks its read holds, until admitted
+        # Byte gate (staged loading, as the simulator's held area): reads start while their bytes in the tiers' units
+        # (`read_bytes(tokens)`: KV and one state as a tier stores them) fit `area_bytes`; their blocks are held
+        # physically, the area counting max(blocks held, area). None: the gate is the blocks themselves.
+        self.read_bytes = None
+        self.area_bytes = 0
+        self.area_used_bytes = 0
+        self._read_charge: dict[str, int] = {}
 
     @property
     def num_blocks(self) -> int:
@@ -210,7 +217,9 @@ class KvManager:
 
     def area_fits(self, tokens: int) -> bool:
         """Whether a read of a `tokens`-long context may start in the loading area now: it fits, or the area is empty
-        (a read larger than the whole area)."""
+        (a read larger than the whole area). With the byte gate, in the tiers' bytes (`read_bytes`)."""
+        if self.read_bytes is not None:
+            return self.area_used_bytes == 0 or self.area_used_bytes + self.read_bytes(tokens) <= self.area_bytes
         c = self.kept_cost(tokens)
         return self.area_held == 0 or self.area_held + c <= self.area
 
@@ -251,15 +260,22 @@ class KvManager:
                     self.lower.make_room(base + held - self.capacity)
                 return None
         self.area_held += c
+        if self.read_bytes is not None:
+            self._read_charge[req.req_id] = b = self.read_bytes(tokens)
+            self.area_used_bytes += b
         self._make_room(c)
         alloc = Allocation(self.pool.take(kv_blocks_for(tokens)), self.pool.take(STATE_BLOCKS))
         self.reads[req.req_id] = alloc
         return alloc
 
+    def _read_gone(self, req_id: str, alloc: Allocation):
+        self.area_held -= alloc.num_blocks
+        self.area_used_bytes -= self._read_charge.pop(req_id, 0)
+
     def drop_read(self, req):
         """Give back what the request's read holds in the loading area (a read that could not start)."""
         alloc = self.reads.pop(req.req_id)
-        self.area_held -= alloc.num_blocks
+        self._read_gone(req.req_id, alloc)
         self.pool.give(alloc.kv_blocks + alloc.state_blocks)
 
     # --- pins: a kept context a tier write copies from ------------------------------------------------------------
@@ -366,7 +382,7 @@ class KvManager:
         info = {"hit_kind": "none_first_round", "kept_tokens": 0, "common_prefix_tokens": None}
         rd = self.reads.pop(req.req_id, None)
         if rd is not None:                              # its read landed in the loading area: it takes the blocks
-            self.area_held -= rd.num_blocks
+            self._read_gone(req.req_id, rd)
             info["hit_kind"] = "tier"
             if k is not None:                           # a shorter kept context the read superseded
                 self._unkeep(k)

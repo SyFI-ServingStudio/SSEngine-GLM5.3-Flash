@@ -210,7 +210,7 @@ class Controller:
         (self.run_dir / "pool.json").write_text(json.dumps(
             {"ready_blocks": [r.num_blocks for r in ready], "num_blocks": num_blocks,
              "pool_tokens": num_blocks * BLOCK_TOKENS, "keep_sessions": cfg.keep_sessions,
-             "loading_area_blocks": self.sched.kv.area,
+             "loading_area_blocks": self.sched.kv.area, "loading_area_bytes": self.sched.kv.area_bytes,
              "dram_area_slots": pool.manager.tiers[0].area if pool is not None and pool.manager.tiers else 0}))
         self._write_cache()
         # Leave start-up objects (torch, FastAPI, ...) out of later collections: a full one took ~50 ms with the GIL
@@ -241,11 +241,12 @@ class Controller:
             sock.connect(self.cfg.tier_addr(s))
             self.tier_socks.append(sock)
         pool = BalancedKVPool(tc)
+        pool.state_bytes = max(r.state_bytes for r in ready) or pool.state_bytes
         m = pool.manager
         info = {"slot_bytes": tc.slot_bytes, "state_slots": tc.state_slots,
                 "slots": {x.name: x.num_slots for x in m.tiers}, "staging_slots": m.staging.num_slots,
                 "write_ahead": {"hbm": tc.hbm_write_ahead, "dram": tc.dram_write_ahead}, "dram_writes": tc.dram_writes,
-                "loading_area": tc.loading_area}
+                "loading_area": tc.loading_area, "state_bytes": pool.state_bytes}
         (self.run_dir / "tiers.json").write_text(json.dumps(info) + "\n")
         print("tiers: " + json.dumps(info), flush=True)
         return pool

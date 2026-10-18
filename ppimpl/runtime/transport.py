@@ -70,6 +70,7 @@ class Ready(msgspec.Struct, tag=True):
     num_blocks: int               # blocks this stage can back with its KV tensors (incl. the null block)
     slot_bytes: int = 0           # tiers: one tier slot (this GPU's 1/n of one KV block of all stages)
     state_slots: int = 0          # tiers: slots of one context's state
+    state_bytes: int = 0          # tiers: bytes of one context's state in them
 
 
 class StageDone(msgspec.Struct, tag=True):

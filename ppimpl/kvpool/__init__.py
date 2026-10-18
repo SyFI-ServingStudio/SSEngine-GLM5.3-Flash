@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from ppimpl.config import TierConfig
+from ppimpl.config import BLOCK_TOKENS, TierConfig
 from ppimpl.engine.kv import blocks_for
 from ppimpl.kvpool.manager import Hit, KVViews, TierManager, TierOp
 from ppimpl.kvpool.writeback import WriteBack
@@ -55,6 +55,8 @@ class BalancedKVPool:
         self.manager = TierManager(cfg, partial_hits)
         self._of: dict[int, Handle] = {}            # slot mode: op id -> the handle waiting for it
         self.hbm: HbmLevel | None = None
+        # one context's state as a tier slot holds it, bytes per GPU (the members report it; default: whole slots)
+        self.state_bytes = cfg.state_slots * (cfg.slot_bytes or 0)
 
     def lookup(self, key, prompt, now_ns: int = 0) -> Hit | None:
         """The fastest tier holding the longest context of `key` that `prompt` (a `scheduler.Request`) can resume
@@ -79,7 +81,10 @@ class BalancedKVPool:
         """Stage loads (engine/scheduler.py): HBM's loading area in `kv` (`KvManager.area`), `TierConfig.loading_area`
         of its blocks (rounded down, as the simulator), the same fraction of DRAM with an SSD behind it, and each
         level's write-ahead reserve: what it frees in one batch period, the area plus one microbatch's footprint.
-        Returns the area in blocks (0: off)."""
+        Reads are gated in bytes as the simulator's held area (`KvManager.read_bytes`): a read counts its KV and one
+        state as a tier slot holds them (per GPU), the area the same fraction of HBM's tokens at HBM's bytes per token
+        (`TierConfig.bytes_per_token`); HBM counts max(the reads' blocks, the area). Returns the area in blocks (0:
+        off)."""
         fraction = self.cfg.loading_area
         if not fraction:
             return 0
@@ -89,6 +94,9 @@ class BalancedKVPool:
             raise ValueError(f"tiers.loading_area {fraction}: must be in (0, 0.5)")
         area = int(kv.capacity * fraction)
         kv.area = area
+        kv.area_bytes = int(kv.capacity * BLOCK_TOKENS * fraction) * self.cfg.bytes_per_token
+        bpt, sb = self.cfg.slot_bytes / BLOCK_TOKENS, self.state_bytes
+        kv.read_bytes = lambda tokens: int(tokens * bpt) + sb
         self.manager.set_dram_area(fraction)
         reserve = area + blocks_for(mb_tokens)
         if self.hbm is not None and self.hbm.wb is not None:

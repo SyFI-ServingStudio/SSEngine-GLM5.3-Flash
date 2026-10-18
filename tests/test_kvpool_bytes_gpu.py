@@ -99,7 +99,7 @@ def _worker(rank: int, port: int, out_dir: str):
     m = StageModel(bench_config(CHUNK), rank, dev, num_blocks=1 + 5 * (N_KV + N_ST), max_model_len=P + A + B,
                    cuda_graphs=False, ipc_kv=True)
     mine = m.tier_ranges()
-    slot_bytes, state_slots = eng.attach(mine)
+    slot_bytes, state_slots, _ = eng.attach(mine)
     res = {"rank": rank, "slot_bytes": slot_bytes, "state_slots": state_slots,
            "register_s": eng.dram.register_s, "touch_s": eng.dram.touch_s}
     blocks = iter(range(1, m.num_blocks))

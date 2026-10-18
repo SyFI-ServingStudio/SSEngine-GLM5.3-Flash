@@ -24,9 +24,14 @@ def cfg(area=14, blocks=60, dram=0.020, ssd=0.100, **kw):
 
 
 def sched(blocks=60, force_ms=None, **kw):
+    """The byte gate counts what HBM holds here (a block per 8,576 tokens and 6 state blocks, a slot each), so the
+    tests below reason in blocks; `test_area_is_a_fraction_of_hbm` checks the gate's real sizing."""
     kv = KvManager(blocks, keep_sessions=True)
     pool = BalancedKVPool(cfg(blocks=blocks, **kw))
     s = Scheduler(kv, SchedulerConfig(mb_tokens=MB, force_after_ms=force_ms), pool, dispatch_ahead=0)
+    if s.staged:
+        kv.area_bytes = kv.area * SLOT
+        kv.read_bytes = lambda tokens: -(-tokens // B) * SLOT + 6 * SLOT
     return s, kv, pool, pool.manager
 
 
@@ -89,6 +94,26 @@ def test_area_is_a_fraction_of_hbm():
     off = Scheduler(KvManager(60, keep_sessions=True), SchedulerConfig(mb_tokens=MB),
                     BalancedKVPool(TierConfig(dram_gb=0.02, ssd_gb=None, slot_bytes=SLOT)))
     assert not off.staged and off.kv.area == 0
+
+
+def test_area_gates_reads_by_tier_bytes_as_the_simulator():
+    """Reads start while their bytes as a tier holds them (KV per token + one state) fit the area's bytes (the
+    area's tokens at HBM's bytes per token); HBM counts max(blocks held, area), so more reads fit than the area's
+    blocks when a state costs fewer bytes in a tier than its blocks in HBM."""
+    kv = KvManager(60, keep_sessions=True)
+    c = cfg(area=14, bytes_per_token=200, dram=None, ssd=0.1)
+    pool = BalancedKVPool(c)
+    pool.state_bytes = 2 * SLOT
+    s = Scheduler(kv, SchedulerConfig(mb_tokens=MB), pool, dispatch_ahead=0)
+    assert kv.area == 14 and kv.area_bytes == int(60 * B * c.loading_area) * 200
+    assert kv.read_bytes(B) == int(B * SLOT / B) + 2 * SLOT
+    tok = B                                              # 3 slots of tier bytes, 7 HBM blocks
+    n = 0
+    while kv.area_fits(tok):
+        assert kv.hold_read(rnd(n, 0, tok), tok) is not None
+        n += 1
+    assert n == kv.area_bytes // (3 * SLOT)            # 8 reads of 3 slots in 24.5 MB, not 14 // 7 = 2
+    assert kv.area_held == 7 * n and kv.area_charge() == 7 * n > kv.area
 
 
 # --- 1: the area is deducted; write-back stays ahead so admission does not wait ------------------------------------

@@ -798,6 +798,12 @@ hbm-evictions-exclusive`), k = 1 (one KDA state per entry).
     and the same fraction of DRAM's slots when an SSD is behind it. The runs use 0.10 (st10, user 2026-10-18; the
     simulator's held rule at 0.10). A smaller area fills with landed rounds waiting for admission and starves the
     pipeline (sim: 5% at k4 cut compute 139k to 121-130k tok/s; 10% recovered).
+  - **Byte gate** (as the simulator's held area): reads start while their bytes as a tier slot holds them (KV at
+    slot_bytes / 8,576 per token plus one state, 36.9 MB per GPU) fit the area's bytes (its tokens at HBM's
+    `bytes_per_token`); their blocks are held physically and HBM counts max(blocks held, area). A state costs 6 HBM
+    blocks (vLLM's hybrid groups: 5 KDA groups + the kpool tail, ~84 MB at stage 0) but 36.9 MB in a tier, so the
+    10% area takes ~8.8 average v3 reads (as the simulator) instead of 6.6 by blocks; the excess over the area's
+    blocks comes out of the kept contexts.
   - Reads move only states that survive (k > 1, not yet in the engine, which keeps one state per entry):
     `manager.states_to_move` - the state the read resumes from plus the earlier ones that stay among the latest k
     after the round adds its own (prefill end, decode end); exclusive DRAM drops the others with the entry.

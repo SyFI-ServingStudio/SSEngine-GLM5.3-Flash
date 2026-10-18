@@ -38,7 +38,7 @@ def members(nslots: int | None = 40, ssd_slots: int | None = None, staging_slots
     mems = []
     for q in range(4):
         e = PoolMember(cfg, q, torch.device("cpu"), None)
-        assert e.attach(ranges) == (L.slot_bytes, L.state_slots)
+        assert e.attach(ranges) == (L.slot_bytes, L.state_slots, L.state_bytes)
         assert nslots is None or e.dram.nbytes >= nslots * L.slot_bytes
         mems.append(e)
     return views, ranges, mems, tc
@@ -264,7 +264,7 @@ def test_fake_member_reports_after_bandwidth_time():
     tc = TierConfig(dram_gb=1.0, ssd_gb=None, slot_bytes=10_000_000, dram_read_gb_s=1.0)
     cfg = NS(tiers=tc, num_stages=4, model="fake", report_addr=lambda: f"tcp://127.0.0.1:{port}")
     e = PoolMember(cfg, 2, torch.device("cpu"), ctx)
-    assert e.attach(None) == (10_000_000, 3)
+    assert e.attach(None) == (10_000_000, 3, 30_000_000)
     for name in ("read", "write"):
         import threading
         th = threading.Thread(target=e._done_loop, args=(name,), daemon=True)
