@@ -24,7 +24,8 @@ The scheduler of 6_scheduler.md §2, built on the plain one (`SchedulerConfig`; 
   A read that would wait more than the bound (`TierConfig.max_read_wait_ms`) for its tier (`Hit.wait_ns`) is not
   started: the round is passed over and stays queued. Landed rounds are admitted before every queued request, in
   landing order. Writes are not the scheduler's: the pool is the KV manager's lower level (`pool.hbm_level`), which
-  writes kept contexts before HBM evicts them (a request that fits only once such a write lands waits, as for room).
+  writes kept contexts before HBM evicts them (a request that fits only once such a write lands waits, as for room;
+  when a write lands, that round's read starts at once if it fits then).
   A round whose kept context is still being written waits to take it over (`busy_waits`).
 
 The microbatch-forming procedure follows the reference implementation of the same design (ServingStudioSim
@@ -225,6 +226,7 @@ class Scheduler:
         self._mb_tokens: deque[int] = deque()
         self._seq = 0
         self._chunks: list[ChunkSpec] = []
+        self._room_blocked: Request | None = None   # the waiting round whose footprint did not fit at the last check
         self.stats = dict(microbatches=0, passed_over=0, reads=0, blocked_reads=0, busy_waits=0)
         if pool is not None:
             if not kv.keep_sessions:
@@ -268,6 +270,19 @@ class Scheduler:
         _, h = self.pool.complete(op_id, now_ns)
         if h is not None and h.kind == "load":
             self.read_landed(h.req_id, now_ns)
+        elif h is not None and h.kind == "store" and self._room_blocked is not None:
+            self._retry_read(now_ns)
+
+    def _retry_read(self, now_ns: int):
+        """A write-back landed (HBM may evict more now): the round that did not fit at the head of the order starts its
+        tier read at once, not at the next microbatch's forming. A round with no read to start waits for the forming
+        (it computes only then)."""
+        src, r = self._peek(False)
+        if r is not self._room_blocked or src == LANDED or self.kv.busy(r):
+            return
+        if self._at_head(r, now_ns) == "read":
+            self._take(src)
+            self._room_blocked = None
 
     def read_landed(self, req_id: str, now_ns: int):
         """Every worker reported the read done: the round is admitted before every queued request."""
@@ -428,6 +443,7 @@ class Scheduler:
             if src != LANDED and not self.kv.fits(r):
                 if r.room_wait_ns is None:
                     r.room_wait_ns = now_ns
+                self._room_blocked = r
                 break
             self._take(src)
             if src != LANDED:
@@ -458,6 +474,7 @@ class Scheduler:
             self.stats["blocked_reads"] += 1
             if r.room_wait_ns is None:
                 r.room_wait_ns = now_ns
+            self._room_blocked = r
             return "blocked"
         r.hbm_tokens = self.kv.allocate(r)
         r.alloc = self.kv.held[r.req_id]
