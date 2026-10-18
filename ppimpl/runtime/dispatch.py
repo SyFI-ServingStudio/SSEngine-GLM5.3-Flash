@@ -52,27 +52,11 @@ class StagePredictor:
 
 
 class HostPredictor(StagePredictor):
-    """EWMA of a time (not a rate) per size bucket, and of its absolute deviation (`bound_ns`)."""
-
-    def __init__(self, alpha: float = 0.25):
-        super().__init__(alpha)
-        self.dev: dict[int, float] = {}
+    """EWMA of a time (not a rate) per size bucket."""
 
     def observe(self, tokens: int, ns: int):
         b = self.bucket(tokens)
-        if b in self.rate:
-            d = abs(ns - self.rate[b])
-            self.dev[b] = (1 - self.alpha) * self.dev.get(b, d) + self.alpha * d
         self.rate[b] = ns if b not in self.rate else (1 - self.alpha) * self.rate[b] + self.alpha * ns
-
-    def bound_ns(self, tokens: int) -> float | None:
-        """The mean plus two deviations: what forming must allow so a plan is rarely late (8283 minutes 5-8: host
-        time p50 ~20 ms with a long tail, 0.9-1.75 s/min of stage-0 idle with the plan formed in time by the mean)."""
-        if not self.rate:
-            return None
-        b = self.bucket(tokens)
-        k = min(self.rate, key=lambda x: (abs(x - b), x))
-        return self.rate[k] + 2 * self.dev.get(k, 0.0)
 
     def predict_ns(self, tokens: int) -> float | None:
         if not self.rate:
@@ -97,8 +81,6 @@ class DispatchRule:
         self.last_end_ns: int | None = None         # stage-0 end of the last plan stage 0 reported
         self.stage_end = [0] * num_stages            # each stage's last reported end
         self.last_tokens = 0
-        self.recent_tokens: list[int] = []          # the last few plans' sizes: the next one's host time is bounded
-                                                    # at the largest (`form_host_ns`)
         self.next_mb = 0
         self.projected: dict | None = None          # the last decision's projection (for the plan log)
 
@@ -120,7 +102,6 @@ class DispatchRule:
         self.on_stage0[mb_id] = None
         self.flight[mb_id] = [now_ns, tokens, [None] * self.num_stages]
         self.last_tokens = tokens
-        self.recent_tokens = (self.recent_tokens + [tokens])[-4:]
         self.next_mb = mb_id + 1
 
     def stage_done(self, stage: int, mb_id: int, start_ns: int, end_ns: int, host_ns: tuple | None = None):
@@ -189,12 +170,6 @@ class DispatchRule:
         h = self.host.predict_ns(tokens)
         return self.DEFAULT_HOST_NS if h is None else h
 
-    def form_host_ns(self) -> float:
-        """How long before the projected start a plan forms (besides `lead_ns`): the host time's bound at the largest
-        of the last few plans' sizes (the next one's size is not known yet)."""
-        h = self.host.bound_ns(max(self.recent_tokens, default=self.last_tokens))
-        return self.DEFAULT_HOST_NS if h is None else h
-
     def project(self) -> dict | None:
         """Projected stage ends of the in-flight plans (reported where known), and the next microbatch's start:
         {"ends": {mb_id: [end per stage]}, "start": ns, "exiting": n}. None: a stage has no sample yet."""
@@ -245,7 +220,7 @@ class DispatchRule:
         if in_flight - p["exiting"] >= self.max_in_flight:
             return NO, None
         self.projected = {"start": p["start"], "exiting": p["exiting"]}
-        at = int(p["start"] - self.form_host_ns() - self.lead_ns)
+        at = int(p["start"] - self.host_ns(self.last_tokens) - self.lead_ns)
         return (NOW, None) if now_ns >= at else (WAIT, at)
 
     @property
