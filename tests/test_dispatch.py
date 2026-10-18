@@ -269,3 +269,18 @@ def test_host_time_from_worker_stamps_on_every_microbatch():
     r.stage_done(0, 1, int(102 * MS), int(180 * MS), (int(51 * MS), int(51 * MS), int(70 * MS), int(70 * MS), 0))
     # sample 1 + 19 + 2 (start - previous end) = 22 ms, not the 52 ms from forming to start
     assert r.host.predict_ns(8192) == pytest.approx(0.75 * 20 * MS + 0.25 * 22 * MS)
+
+
+def test_plans_form_by_the_host_time_bound_at_the_recent_largest_size():
+    """Forming allows the host time's mean plus two deviations, at the largest of the last few plans' sizes."""
+    from ppimpl.runtime.dispatch import DispatchRule, HostPredictor
+    h = HostPredictor()
+    for ns in (10 * MS, 20 * MS, 10 * MS, 20 * MS):
+        h.observe(32768, ns)
+    assert h.bound_ns(32768) > h.predict_ns(32768) + 5 * MS
+    r = DispatchRule()
+    r.host.observe(32768, 20 * MS)
+    r.host.observe(512, 1 * MS)
+    for i, t in enumerate((32768, 512, 512)):
+        r.dispatched(i, 0, t)
+    assert r.form_host_ns() == pytest.approx(20 * MS)
