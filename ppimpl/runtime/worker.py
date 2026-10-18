@@ -79,10 +79,8 @@ class RunAhead:
     against a graph replay's ~16 graphs + 15 eager breaks. Rules, before microbatch k is launched:
     - k-2 has ended (depth 2): k-1 stays queued while k is launched, so the GPU idles only if launching k takes longer
       than computing k-1 (a replay's host side ~5 ms vs >= 12 ms of compute; eager ~20 ms vs >= 70 ms).
-    - an eager k waits until every eager microbatch queued has run its first half of layers (`mid_event`, recorded
-      by the model after half its layers; its end if it has none): two whole eager forwards fill the queue, half of
-      one plus k fit (~250 + ~500 kernels). Waiting for the whole of k-1 left stage 0 idle for k's wake-up and first
-      launches, ~11 ms per eager microbatch (8283 minutes 5-8: 258 gaps > 5 ms, ~1.4 s/min).
+    - an eager k waits until no other eager microbatch is queued: two eager forwards fill the queue. Back to back,
+      the GPU then waits for the wake-up and k's first launch only (eager host time < its GPU time after that).
     The waits are on blocking-sync events (`Clock.mark`): the thread sleeps with the GIL released and holds no driver
     lock. `waits` / `wait_s`: how often and how long the main thread waited (printed at shutdown)."""
 
@@ -90,31 +88,25 @@ class RunAhead:
 
     def __init__(self, cuda: bool):
         self.cuda = cuda
-        self.q: deque = deque()            # (end event, eager, mid event) of the microbatches launched, not known done
+        self.q: deque = deque()            # (end event, eager) of the microbatches launched and not known to be done
         self.waits, self.wait_s = 0, 0.0
 
     def before(self, eager: bool):
         if not self.cuda:
             return
         t = None
-        while self.q and len(self.q) >= self.DEPTH:
-            ev, _, _ = self.q.popleft()
+        while self.q and (len(self.q) >= self.DEPTH or (eager and any(e for _, e in self.q))):
+            ev, _ = self.q.popleft()
             if not ev.query():
                 t = time.perf_counter() if t is None else t
                 ev.synchronize()
-        if eager:
-            for ev, e, mid in self.q:
-                w = mid if mid is not None else ev
-                if e and not w.query():
-                    t = time.perf_counter() if t is None else t
-                    w.synchronize()
         if t is not None:
             self.waits += 1
             self.wait_s += time.perf_counter() - t
 
-    def after(self, end, eager: bool, mid=None):
+    def after(self, end, eager: bool):
         if self.cuda:
-            self.q.append((end, eager, mid))
+            self.q.append((end, eager))
 
 
 class ProfileWindow:
@@ -344,9 +336,7 @@ def run_worker(cfg: RunConfig, stage: int):   # makes inference tensors, which a
             stamps.after()
             hostprof.after(plan.mb_id)
             end = clock.mark()
-            ahead.after(end, eager, getattr(model, "mid_event", None) if eager else None)
-            if eager:
-                model.mid_event = None
+            ahead.after(end, eager)
             if last:
                 pipe.exited(mbs)
             host = (plan_ns, fwd_ns, prep_ns, ready_ns, time.time_ns())

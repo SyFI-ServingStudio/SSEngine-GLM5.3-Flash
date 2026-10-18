@@ -640,11 +640,7 @@ class StageModel:
         if b.bucket is not None:
             return self._run_graph(b, hidden_in)
         with set_forward_context(b.attn, self.vc, num_tokens=b.num_tokens, slot_mapping=b.slots):
-            self._mark_mid = True                     # eager: `mid_event` after half the layers (worker RunAhead)
-            try:
-                x, residual, post, comb = self.run_layers(b, hidden_in)
-            finally:
-                self._mark_mid = False
+            x, residual, post, comb = self.run_layers(b, hidden_in)
             if not self.last:
                 return pp_patch.edge_send(self.layers[-1], x, residual, post, comb)
             return self.output_head(b, x, residual, post, comb)
@@ -655,11 +651,7 @@ class StageModel:
         else:
             x = pp_patch.edge_recv(hidden_in)
         residual = post = comb = None
-        half = len(self.layers) // 2 if getattr(self, "_mark_mid", False) else -1
-        for i, layer in enumerate(self.layers):
-            if i == half:
-                self.mid_event = torch.cuda.Event(blocking=True)
-                self.mid_event.record()
+        for layer in self.layers:
             x, residual, post, comb = layer(b.positions, x, residual, post, comb)
         return x, residual, post, comb
 
