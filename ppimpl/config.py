@@ -69,9 +69,11 @@ class TierConfig(msgspec.Struct, forbid_unknown_fields=True):
     dram_writes: str = "hbm-evictions"
     # Staged loading (simulator `prefix_tier_loading_area`, ServingStudioSim pp-staged; engine/scheduler.py): reads
     # land in a loading area of HBM's KV pool that admission and kept contexts never use, and SSD reads first in the
-    # same fraction of DRAM. Little's law sizes it: area = the tiers' read rate into HBM x one batch period
-    # (scheduler mb_tokens / prefill tokens/s), both measured on the setting (bench/loading_area.py). None: off.
+    # same fraction of DRAM. Little's law sizes it: area = the tiers' read rate into HBM x how long a read holds it,
+    # its read time plus its wait for admission, one batch period (scheduler mb_tokens / prefill tokens/s); all
+    # measured on the setting (bench/loading_area.py). None: off.
     loading_read_gb_s: float | None = None      # reads into HBM per GPU, GB/s of the HBM blocks they hold
+    loading_read_s: float = 0.0                 # mean read time, start -> landed in HBM
     loading_prefill_tok_s: float | None = None  # computed (prefill) tokens/s
     bytes_per_token: int = 1635           # own stage (stage 0); balanced storage: 1,499
     state_bytes: int = 39_100_000         # one KDA state per context, own stage (stage 0); balanced: 36.9 MB

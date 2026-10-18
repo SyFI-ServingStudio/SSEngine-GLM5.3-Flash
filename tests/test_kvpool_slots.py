@@ -437,3 +437,13 @@ def test_exclusive_hbm_hit_releases_the_write_ahead_copy():
         s.add(r, 0)
         assert s.next_microbatch(0) is not None and r.cached == 100
         assert (1 in pool.manager.tiers[0].entries) == kept
+
+
+def test_a_read_moves_only_the_states_that_survive():
+    from ppimpl.kvpool.manager import states_to_move
+    assert states_to_move([100], 100, 1, 2) == [100]                       # the engine: k = 1
+    s = [10, 20, 30, 40]
+    assert states_to_move(s, 30, 1, 2) == [30]
+    assert states_to_move(s, 30, 3, 2) == [30]                             # 2 new + the resume state fill k = 3
+    assert states_to_move(s, 30, 4, 2) == [20, 30]
+    assert states_to_move(s, 40, 8, 2) == [10, 20, 30, 40]

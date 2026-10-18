@@ -78,11 +78,14 @@ def run_mb(s, now=0):
 
 # --- 6: the area by Little's law -----------------------------------------------------------------------------------
 
-def test_area_is_read_rate_times_one_batch_period():
+def test_area_is_read_rate_times_the_hold_time():
+    """Little's law: read rate x (read time + one batch period until admission)."""
     s, kv, pool, t = sched(area=14)
     assert s.staged and kv.area == 14
     c = pool.cfg
     assert kv.area == math.ceil(c.loading_read_gb_s * 1e9 * MB / c.loading_prefill_tok_s / SLOT)
+    s2, kv2, *_ = sched(area=14, loading_read_s=0.5)                       # reads take half a batch period
+    assert kv2.area == 21
     assert t.tiers[0].area == math.ceil(14 / 60 * t.tiers[0].num_slots)     # the same fraction of DRAM
     assert pool.hbm.wb.reserve == 14 + blocks_for(MB)                      # write-ahead: one batch period's room
     with pytest.raises(ValueError):

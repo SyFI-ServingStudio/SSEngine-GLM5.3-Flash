@@ -45,6 +45,17 @@ from ppimpl.kvpool.writeback import WriteBack
 
 NS = 1_000_000_000
 
+def states_to_move(states: list[int], resume: int, k: int, added: int) -> list[int]:
+    """Which of an entry's round-end states (token positions, ascending) a read moves into HBM: the state it resumes
+    from (`resume`) plus only the earlier ones that stay among the latest `k` once the round adds its own `added`
+    (its prefill end and decode end, after `resume`). The engine keeps one state per entry (k = 1: the resume state
+    only); with exclusive DRAM the states not moved are dropped with the released entry."""
+    assert resume in states and k >= 1
+    keep = max(k - added - 1, 0)
+    earlier = [x for x in states if x < resume]
+    return (earlier[-keep:] if keep else []) + [resume]
+
+
 @dataclass
 class KVViews:
     """A context's blocks in the KV caches the members registered: KV block ids from block 0 and the state blocks.

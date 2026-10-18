@@ -1,10 +1,12 @@
-"""The staged-loading area's inputs (TierConfig.loading_read_gb_s, loading_prefill_tok_s; ppimpl/engine/scheduler.py)
-from a measured run of the same setting: Little's law, area = the tiers' read rate into HBM x one batch period
-(scheduler mb_tokens / prefill tokens/s).
+"""The staged-loading area's inputs (TierConfig.loading_read_gb_s, loading_read_s, loading_prefill_tok_s; ppimpl/engine/scheduler.py)
+from a measured run of the same setting: Little's law, area = the tiers' read rate into HBM x how long a read holds
+the area: its read time plus its wait for admission, one batch period (scheduler mb_tokens / prefill tokens/s).
 
 - read rate: every read into HBM in tier_ops.jsonl (one per round served from a tier; a staged SSD read's hop, not
   its fetch), at the HBM blocks it holds (its context's KV blocks plus the state's blocks) x slot bytes, per GPU,
   over the run's span of tier ops;
+- read time: the mean over rounds served from a tier (server_requests.jsonl) of read start -> landed in HBM (a staged
+  SSD read: fetch and hop);
 - prefill tokens/s: metrics.json computed_tokens_per_s.
 
     .venv/bin/python -m bench.loading_area measured/runs_m6/<run>   # prints the --tier flags and the area
@@ -31,10 +33,14 @@ def inputs(run: Path) -> dict:
     mb = cfg["scheduler"]["mb_tokens"]
     tok_s = json.loads((run / "metrics.json").read_text())["computed_tokens_per_s"]
     blocks = json.loads((run / "pool.json").read_text())["num_blocks"]
+    rows = [json.loads(x) for x in (run / "server_requests.jsonl").read_text().splitlines()]
+    times = [r["read_land_ms"] - r["read_start_ms"] for r in rows if r.get("read_start_ms") is not None]
+    read_s = sum(times) / len(times) / 1e3
     gb_s = held / span_s / 1e9
-    area = math.ceil(gb_s * 1e9 * mb / tok_s / slot)
-    return {"loading_read_gb_s": round(gb_s, 4), "loading_prefill_tok_s": round(tok_s), "reads": len(reads),
-            "span_s": round(span_s, 1), "batch_period_s": round(mb / tok_s, 4), "area_blocks": area,
+    area = math.ceil(gb_s * 1e9 * (read_s + mb / tok_s) / slot)
+    return {"loading_read_gb_s": round(gb_s, 4), "loading_read_s": round(read_s, 4),
+            "loading_prefill_tok_s": round(tok_s), "reads": len(reads), "span_s": round(span_s, 1),
+            "batch_period_s": round(mb / tok_s, 4), "area_blocks": area,
             "hbm_blocks": blocks, "area_fraction": round(area / blocks, 4)}
 
 
@@ -43,7 +49,8 @@ def main():
     ap.add_argument("run", type=Path)
     x = inputs(ap.parse_args().run)
     print(json.dumps(x))
-    print(f"--tier loading_read_gb_s={x['loading_read_gb_s']} --tier loading_prefill_tok_s={x['loading_prefill_tok_s']}")
+    print(f"--tier loading_read_gb_s={x['loading_read_gb_s']} --tier loading_read_s={x['loading_read_s']} "
+          f"--tier loading_prefill_tok_s={x['loading_prefill_tok_s']}")
 
 
 if __name__ == "__main__":

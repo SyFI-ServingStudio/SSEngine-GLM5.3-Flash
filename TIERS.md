@@ -794,9 +794,15 @@ hbm-evictions-exclusive`), k = 1 (one KDA state per entry).
     does not fit (a read larger than the area starts when it is empty). Admission takes landed reads first (overdue
     ones also in the force-schedule pass), then the queues, passing over rounds that still need a read. Rounds found
     ready in HBM and later read are counted (`rereads`).
-  - Size (Little's law, `BalancedKVPool.loading_area_blocks`): area = read rate into HBM x one batch period
-    (mb_tokens / prefill tokens/s). `bench/loading_area.py` measures both on a run of the setting: Fix C runs give
-    ssd_heavy 3.30 GB/s x 0.306 s = 79 blocks (8.9% of 890), Tiers 2.47 GB/s x 0.314 s = 61 blocks (4.3% of 1,425).
+  - Size (Little's law, `BalancedKVPool.loading_area_blocks`): area = read rate into HBM x how long a read holds
+    the area: its read time plus its wait for admission, one batch period (mb_tokens / prefill tokens/s). A smaller
+    area fills with landed rounds waiting for admission and starves the pipeline (sim: 5% at k4 cut compute 139k to
+    121-130k tok/s; 10% recovered). `bench/loading_area.py` measures the inputs on a run of the setting; Fix C runs
+    give ssd_heavy 3.30 GB/s x (0.030 + 0.306 s) = 87 blocks (9.8% of 890), Tiers 2.47 GB/s x (0.030 + 0.314 s) =
+    66 blocks (4.6% of 1,425).
+  - Reads move only states that survive (k > 1, not yet in the engine, which keeps one state per entry):
+    `manager.states_to_move` - the state the read resumes from plus the earlier ones that stay among the latest k
+    after the round adds its own (prefill end, decode end); exclusive DRAM drops the others with the entry.
   - **Eviction stays ahead** (the lesson of Fix D, where every eviction waited for its write: blocked_by_write
     44k): each level's write-back keeps the LRU entries holding `reserve` written (`WriteBack.reserve`, replacing the
     0.9 watermark): fixed + dirty <= capacity - reserve, fixed counting the loading area. The reserve is what one

@@ -77,14 +77,16 @@ class BalancedKVPool:
     # --- staged loading -------------------------------------------------------------------------------------------
 
     def loading_area_blocks(self, mb_tokens: int) -> int:
-        """HBM's loading area in blocks by Little's law (`TierConfig.loading_read_gb_s`): what the tiers read into
-        HBM in one batch period, mb_tokens / prefill tokens/s; 0 when staged loading is off."""
+        """HBM's loading area in blocks by Little's law (`TierConfig.loading_read_gb_s`): the tiers' read rate into
+        HBM x how long a read holds the area, its read time plus its wait for admission (one batch period, mb_tokens /
+        prefill tokens/s); 0 when staged loading is off."""
         c = self.cfg
         if c.loading_read_gb_s is None:
             return 0
         if not self.manager.slot_mode or not c.loading_prefill_tok_s:
             raise ValueError("staged loading needs slot mode and tiers.loading_prefill_tok_s")
-        return math.ceil(c.loading_read_gb_s * 1e9 * mb_tokens / c.loading_prefill_tok_s / c.slot_bytes)
+        hold_s = c.loading_read_s + mb_tokens / c.loading_prefill_tok_s
+        return math.ceil(c.loading_read_gb_s * 1e9 * hold_s / c.slot_bytes)
 
     def set_loading_area(self, kv, mb_tokens: int) -> int:
         """Stage loads (engine/scheduler.py): HBM's loading area in `kv` (`KvManager.area`), the same fraction of DRAM
