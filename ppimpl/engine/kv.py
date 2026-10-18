@@ -31,6 +31,9 @@ area is empty, once kept contexts make the room. When it lands (`read_landed`) i
 ordinary pinned HBM (`landed_held`, counted like running requests, never evicted) until its request is admitted,
 which takes them over (`allocate`). A read whose room is held only by kept contexts not yet written below waits
 (`area_waits`), never an admission.
+Landed bound (`landed_fits`): a read starts only while the HBM blocks of landed reads not yet admitted plus those
+of reads in flight, with it, stay within the area (or none are held: a read larger than the area), so landed data
+never holds more than one batch period's reads and never flushes the kept contexts (`landed_waits`).
 Liveness (`hold_read`): a read starts only if, once every read in flight has landed and running requests and kept
 contexts are gone, any landed round can still be admitted: landed + in flight + this read + the area + the largest
 admission extra of those rounds (footprint minus read blocks) <= capacity. Otherwise landed data alone could fill HBM
@@ -183,7 +186,8 @@ class KvManager:
                           blocked_by_write=0,   # fits() checks turned down only because kept contexts are not yet
                                                 # written to the tier below (an HBM eviction waits for its write)
                           area_waits=0,         # hold_read turned down only for that reason (a read waits)
-                          live_waits=0)         # hold_read turned down by the liveness bound
+                          live_waits=0,         # hold_read turned down by the liveness bound
+                          landed_waits=0)       # reads turned down by the landed bound
         self.evicted: dict[object, int] = {}           # key -> tokens of a kept context evicted and not replaced since
         self.pinned: Counter = Counter()               # kept contexts a tier write still copies from (not evictable;
                                                        # their next round waits to take them over, `busy`)
@@ -225,6 +229,14 @@ class KvManager:
         c = self.kept_cost(tokens)
         return self.area_held == 0 or self.area_held + c <= self.area
 
+    def landed_fits(self, tokens: int) -> bool:
+        """Whether a read of a `tokens`-long context keeps landed plus in-flight reads within the area (module docs)."""
+        c = self.kept_cost(tokens)
+        if self.landed_held + self.area_held == 0 or self.landed_held + self.area_held + c <= self.area:
+            return True
+        self.stats["landed_waits"] += 1
+        return False
+
     def fits(self, req) -> bool:
         """Whether the request's whole footprint fits now, kept sessions evicted as needed (only those the lower level
         lets go: written there). If it fits only by evicting ones not yet written, the lower level starts their
@@ -254,6 +266,8 @@ class KvManager:
         caller checked `area_fits`), kept sessions evicted as needed. None if that needs kept contexts not yet written
         below: their writes start (`make_room`) and the read waits."""
         assert self.accounting == "blocks" and req.req_id not in self.reads
+        if not self.landed_fits(tokens):
+            return None
         c = self.kept_cost(tokens)
         extra = max(self.footprint(req.num_tokens) - c, 0)
         if self.landed_held + self.area_held + c + self.area \

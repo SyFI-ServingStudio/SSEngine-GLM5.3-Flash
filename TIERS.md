@@ -795,6 +795,11 @@ hbm-evictions-exclusive`), k = 1 (one KDA state per entry).
     lands. A full DRAM area stops the SSD queue (no direct SSD -> HBM bypass).
   - Ready bound: new reads (and fetches) start only while the landed rounds' fresh tokens (`ready_fresh`) are below
     pp_size x max_batch_tokens (`ready_bound`, 4 x 32,768); hops of started SSD reads go on.
+  - Landed bound (`KvManager.landed_fits`, `landed_waits`): a read or SSD fetch starts only while landed reads not
+    yet admitted plus reads in flight, with it, stay within HBM's area (a read larger than the area starts when none
+    are held). The fresh-token ready bound never fires for tier hits (a few hundred new tokens on 100k+ of KV), so
+    without this landed data reached 93% of HBM (job 8175) and flushed the kept contexts. Plans log `landed_held`
+    and `area_held` per microbatch.
   - Liveness (`KvManager.hold_read`, `live_waits`): a read starts only if, with every read in flight landed and
     running requests and kept contexts gone, any landed round could still be admitted: landed + in flight + the read
     + the area + the largest admission extra (footprint minus read blocks) <= capacity. Without it job 8175 hung at

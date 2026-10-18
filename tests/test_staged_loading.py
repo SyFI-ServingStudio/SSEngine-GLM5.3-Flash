@@ -148,11 +148,12 @@ def test_reads_start_in_order_and_stop_at_the_first_that_does_not_fit():
     reads = sent(pool)
     assert [o.req_id for o in reads] == [rs[0].req_id] and kv.area_held == 7
     assert rs[1].load_phase is None and rs[2].load_phase is None
-    done(s, reads)                                      # 1 lands: the area is free at once; 2 starts, 3 does not fit
+    done(s, reads)                                      # 1 lands: out of the area, but landed + 2 > the area
     s.load(0)
+    assert not sent(pool) and rs[0] in s.landed and kv.landed_held == 7 and kv.stats["landed_waits"] >= 1
+    assert run_mb(s) is not None and rs[0].req_id in kv.held   # 1 admitted: 2 starts, 3 does not fit beside it
     reads = sent(pool)
     assert [o.req_id for o in reads] == [rs[1].req_id] and rs[2].load_phase is None and kv.area_held == 8
-    assert rs[0] in s.landed and rs[0].req_id not in kv.held
 
 
 def test_read_larger_than_the_area_starts_when_it_is_empty():
@@ -168,9 +169,11 @@ def test_read_larger_than_the_area_starts_when_it_is_empty():
     s._load_dirty = True
     s.load(0)
     assert not sent(pool)                               # the area is not empty: b waits
-    s.op_done(next(iter(t.in_flight)), 0)               # a lands: the area is empty; b starts
+    s.op_done(next(iter(t.in_flight)), 0)               # a lands: b waits until nothing is landed or in flight
     s.load(0)
-    assert [o.req_id for o in sent(pool)] == [b.req_id] and kv.area_held == 18 and a in s.landed
+    assert not sent(pool) and a in s.landed
+    run_mb(s)                                           # a admitted: b starts
+    assert [o.req_id for o in sent(pool)] == [b.req_id] and kv.area_held == 18
 
 
 # --- 3: only rounds whose context is all in HBM join a batch; rereads ----------------------------------------------
@@ -246,11 +249,15 @@ def test_a_full_dram_area_stalls_the_ssd_queue_without_bypass():
     assert b.load_phase is None                         # waits for DRAM's area; not read straight into HBM
     done(s, [ops[0]])                                   # a's fetch lands; its hop (11 blocks) waits for c's 7
     assert not sent(pool) and a.load_phase == "hop_wait"
-    done(s, [ops[1]])                                   # c lands: HBM's area empty, a hops
+    done(s, [ops[1]])                                   # c lands: a's hop waits for c's admission (landed bound)
+    assert not sent(pool)
+    run_mb(s)                                           # c admitted: a hops
     (h,) = sent(pool)
     assert h.req_id == a.req_id and t.tiers[0].area_used == 6
-    done(s, [h])                                        # DRAM's area back: b's fetch starts
+    done(s, [h])                                        # DRAM's area back; b's fetch waits for a's admission
     s.load(0)
+    assert not sent(pool) and b.load_phase is None and t.tiers[0].area_used == 0
+    run_mb(s)
     assert [o.op for o in sent(pool)] == ["fetch"] and b.load_phase == "fetch"
 
 
@@ -318,12 +325,15 @@ def test_overdue_rounds_read_first_and_landed_overdue_rounds_go_first():
 
 # --- liveness: landed data never fills HBM so that no landed round can be admitted ---------------------------------
 
-def test_landed_reads_never_block_every_admission():
+@pytest.mark.parametrize("landed_bound", [True, False])
+def test_landed_reads_never_block_every_admission(landed_bound, monkeypatch):
     """Job 8175's hang: reads land faster than rounds are admitted (many reads per batch period), each landing moves
     its blocks out of the area into pinned HBM while the area stays reserved, until landed data plus the area leave
     no landed round room and nothing runs to free any. Liveness: whenever nothing is in flight, a microbatch forms
     (or no work is left), and every round finishes."""
     s, kv, pool, t = sched(blocks=60, area=8, dram=0.200, ssd=None)
+    if not landed_bound:                                # the liveness bound alone keeps it live
+        monkeypatch.setattr(kv, "landed_fits", lambda tokens: True)
     rs = []
     for k in range(1, 21):
         put(t, k, 2 * B)                                # 8 HBM blocks each; admission adds one (2 x B + 11 tokens)
@@ -340,6 +350,8 @@ def test_landed_reads_never_block_every_admission():
                 break
             done(s, ops)
             assert kv.hard + kv.landed_held + kv.area_held <= kv.capacity
+            if landed_bound:                            # landed + in flight within the area (one oversize read)
+                assert kv.landed_held + kv.area_held <= kv.area or len(kv.reads) == 1
         mb = s.next_microbatch(0)
         if mb is None:
             assert not s.has_work(), s.state()          # nothing in flight: a stall is a hang
@@ -349,4 +361,5 @@ def test_landed_reads_never_block_every_admission():
         for c in mb:
             if c.is_last:
                 s.finish(c.req)
-    assert not s.has_work() and kv.landed_held == 0 and kv.stats["live_waits"] > 0
+    assert not s.has_work() and kv.landed_held == 0
+    assert kv.stats["landed_waits" if landed_bound else "live_waits"] > 0

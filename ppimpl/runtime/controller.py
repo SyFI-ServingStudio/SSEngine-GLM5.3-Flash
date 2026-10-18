@@ -329,7 +329,8 @@ class Controller:
                 "kept_tokens": sum(k.tokens for k in kv.kept.values()), "used_tokens": kv.used_tokens,
                 "free_blocks": kv.pool.num_free, "time_ms": self._ms(time.time_ns()) if self.t0_ns else None,
                 "scheduler": dict(self.sched.stats),
-                "loading_area": {"blocks": kv.area, "held": kv.area_held, "reads": len(kv.reads)}}    # busy_waits: rounds that waited for a tier write (TIERS.md §5)
+                "loading_area": {"blocks": kv.area, "held": kv.area_held, "landed_held": kv.landed_held,
+                                 "reads": len(kv.reads)}}    # busy_waits: rounds that waited for a tier write (TIERS.md §5)
         if self.sched.pool is not None:
             m = self.sched.pool.manager
             info["tiers"] = m.summary()
@@ -572,6 +573,8 @@ class Controller:
         log = {"index": mb_id, "tokens": sum(c.num_tokens for c in specs), "dispatch_ms": round(self._ms(now), 4),
                "queued": queued, "in_flight": self.sched.in_flight, "exiting": self.rule.exiting,
                "predicted_start_ms": round(self._ms(start), 4) if start else None}
+        if self.sched.staged:                            # HBM blocks of landed reads and of reads in flight
+            log.update(landed_held=self.sched.kv.landed_held, area_held=self.sched.kv.area_held)
         self.rule.dispatched(mb_id, now, log["tokens"])
         chunks = []
         for c in specs:

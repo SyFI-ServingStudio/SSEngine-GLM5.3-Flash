@@ -38,7 +38,9 @@ The scheduler of 6_scheduler.md §2, built on the plain one (`SchedulerConfig`; 
   order). Each queue stops at the first read that does not fit (a read larger than the whole area starts when the
   area is empty): later reads never jump it. A read holds its area until it lands (DRAM's until its hop lands); its
   blocks then stay pinned in HBM, counted in occupancy, until its round is admitted. New reads start only while the
-  landed rounds' fresh tokens are below `ready_bound` (pp_size x max_batch_tokens). Admission takes only rounds whose context is all in HBM: landed reads first (overdue ones in the
+  landed rounds' fresh tokens are below `ready_bound` (pp_size x max_batch_tokens), and (reads and fetches) only
+  while landed plus in-flight reads, with it, stay within HBM's area (`KvManager.landed_fits`; a read larger than
+  the area when none are held). `KvManager.hold_read` also keeps any landed round admissible (liveness). Admission takes only rounds whose context is all in HBM: landed reads first (overdue ones in the
   force-schedule pass too), then the queues, passing over rounds that still need a read; a round found ready in HBM
   that needs a read again later (its context evicted before admission) is read again (`rereads`). The read-wait
   bound is not used.
@@ -398,7 +400,8 @@ class Scheduler:
                 if via_dram:
                     if not dram_open:
                         continue
-                    if not self.pool.dram_area_fits(hit.tokens) or not self._start_fetch(r, hit, now_ns):
+                    if not self.pool.dram_area_fits(hit.tokens) or not self.kv.landed_fits(hit.tokens) \
+                            or not self._start_fetch(r, hit, now_ns):
                         dram_open = False
                         continue
                 else:
@@ -424,7 +427,7 @@ class Scheduler:
                  overdue=len(self.overdue.q) if self.overdue is not None else 0, reading=len(self.reading),
                  landed=len(self.landed), hard=kv.hard, kept=kv.kept_charge, capacity=kv.capacity,
                  held_back=kv.lower.held_back() if kv.lower is not None else 0,
-                 kv_stats={k: kv.stats[k] for k in ("blocked_by_write", "area_waits", "live_waits")})
+                 kv_stats={k: kv.stats[k] for k in ("blocked_by_write", "area_waits", "live_waits", "landed_waits")})
         if self.staged:
             d = self.pool.manager.dram_area
             x.update(area=kv.area, area_held=kv.area_held, landed_held=kv.landed_held,

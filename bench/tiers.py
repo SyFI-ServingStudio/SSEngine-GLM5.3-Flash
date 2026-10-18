@@ -159,7 +159,12 @@ def session_vs_target(run_dir: Path, setting: str, n: int) -> dict:
     read_stats |= {f"{t} rounds": {"reads": len(v), "read_ms": {f"p{q}": round(float(np.percentile(v, q)), 3)
                                                               for q in (50, 90, 99)}, "parts_ms": None}
                    for t, v in rounds.items()}
-    return {"run": run_dir.name, "reads": read_stats, "trace": trace_summary(run_dir), "setting": setting, "n": n, "metrics": s["metrics"], "stage_busy": s["stage_busy"],
+    landed = [p["landed_held"] for p in read_jsonl(run_dir / "plans.jsonl") if "landed_held" in p] \
+        if (run_dir / "plans.jsonl").exists() else []
+    staged = {"landed_held_blocks": {"mean": round(float(np.mean(landed)), 1),
+                                     "p90": round(float(np.percentile(landed, 90)), 1), "max": int(max(landed))},
+              **{k: cache.get(k) for k in ("live_waits", "landed_waits", "area_waits")}} if landed else None
+    return {"run": run_dir.name, "reads": read_stats, "staged": staged, "trace": trace_summary(run_dir), "setting": setting, "n": n, "metrics": s["metrics"], "stage_busy": s["stage_busy"],
             "server_ttft_s": s["server_ttft_s"], "hit_share_by_tier": share, "target_hit_share_by_tier": want,
             "scheduler": cache.get("scheduler"), "blocked_by_write": cache.get("blocked_by_write"),
             "write_back": cache.get("write_back"), "tiers": cache.get("tiers"), "target": tgt,
@@ -192,6 +197,8 @@ def print_session(x: dict):
             f"{f} {v['p50']} / {v['mean']}" for f, v in t.items() if f != "ops"))
     print(f"  scheduler {x['scheduler']}, blocked_by_write {x['blocked_by_write']}, failed {x['rounds_failed']}"
           + (f", loading area {x['loading_area']}" if x.get("loading_area") else ""))
+    if x.get("staged"):
+        print(f"  staged (per microbatch): {x['staged']}")
     for lvl, w in (x.get("write_back") or {}).items():
         print(f"  {lvl} write-back: " + ", ".join(f"{k} {v}" for k, v in w.items()))
 
