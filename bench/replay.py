@@ -24,6 +24,9 @@ usage:
   python -m bench.replay check-force [--steps ...]                    force check vs force_check_targets.json
   python -m bench.replay sessions --step good --n 500 [--minutes 20] [--pool-tokens T] [--tiers full|tiers|ssd_heavy]
                                  [--accounting blocks|tokens] [--partial-hits] --out <run dir>
+  python -m bench.replay writeback --run <server run dir> [--json]   the victim chain's write-back (slot mode, the
+                                 real KvManager + BalancedKVPool) on a server run's logged admissions, ops timed
+                                 by the measured write rates: waits for writes and write volume (TIERS.md §5)
 """
 
 import argparse
@@ -36,11 +39,14 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import numpy as np
+import yaml
+
 from bench.common import HANDOFF
 from ppimpl.config import BLOCK_TOKENS, SCHEDULER_STEPS, SchedulerConfig, TierConfig
 from ppimpl.engine.kv import KvManager
 from ppimpl.engine.scheduler import Request, Scheduler
-from ppimpl.kvpool import BalancedKVPool
+from ppimpl.kvpool import BalancedKVPool, KVViews
 
 NUM_STAGES = 4
 POOL_TOKENS = 61_258_368
@@ -500,6 +506,90 @@ def run_bringup(kind: str, variant: str = "dram", handoff: Path = HANDOFF) -> li
     return rows
 
 
+# --- write-back model on a server run's admissions (TIERS.md §5) ----------------------------------------------------
+
+WRITE_MS = (3.0, 1.0)       # HBM -> DRAM write: ms + ms per slot, ops in parallel (job 8094 ssd_heavy: p50 10.5 ms
+                            # for 8 slots, sent to landed)
+SSD_WRITE_GB_S = 4.6        # one member's SSD write rate while it writes (job 8094: demote service time); demotes
+                            # share it in order
+
+
+def run_writeback(run: Path) -> dict:
+    """The server's pool policy (slot mode: `KvManager` with `BalancedKVPool.hbm_level`, the DRAM/SSD index) driven by
+    a server run's logged rounds: each is admitted at its logged admission (read start or first dispatch) if it fits
+    then, else as soon as it fits (re-checked at every op landing and release; a later round waits behind it), and
+    releases its context at its logged token time plus that wait. HBM writes take WRITE_MS, demotes share
+    SSD_WRITE_GB_S, reads land at the index's channel time. Returns the waits and the write volume."""
+    cfg = json.loads((run / "tiers.json").read_text())
+    srv = yaml.safe_load((run / "server_config.yaml").read_text())
+    t = srv["tiers"]
+    sb = cfg["slot_bytes"]
+    tc = TierConfig(dram_gb=t["dram_gb"], ssd_gb=t["ssd_gb"], slot_bytes=sb, state_slots=cfg["state_slots"],
+                    staging_gb=t.get("staging_gb", 8.0), dram_read_gb_s=t["dram_read_gb_s"],
+                    ssd_read_gb_s=t["ssd_read_gb_s"], max_read_wait_ms=None)
+    now = [0]
+    pool = BalancedKVPool(tc, clock=lambda: now[0])
+    kv = KvManager(json.loads((run / "pool.json").read_text())["num_blocks"], keep_sessions=True)
+    kv.lower = pool.hbm_level(kv)
+    rows = [json.loads(x) for x in (run / "server_requests.jsonl").read_text().splitlines()]
+    rows = [r for r in rows if r["id"].startswith("session_") and "first_dispatch_ms" in r]
+    ev, seq, last = [], 0, {}
+    for r in sorted(rows, key=lambda r: r["seq"]):
+        s = int(r["id"].split("_")[1])
+        resumes = r["hit_kind"] in ("full", "partial", "evicted") and s in last
+        req = Request(r["id"], r["prompt_tokens"], session=s, prefix_tokens=last[s] + 1 if resumes else 0)
+        last[s] = r["prompt_tokens"]
+        at = int((r.get("read_start_ms") or r["first_dispatch_ms"]) * MS)
+        ev.append((at, seq, "arrive", (req, int(r["token_ms"] * MS) - at)))
+        seq += 1
+    heapq.heapify(ev)
+    pending, waits, late_at, ssd_free = [], [], [], 0
+
+    def admit():
+        nonlocal seq
+        while pending and kv.fits(pending[0][0]):
+            req, hold, at = pending.pop(0)
+            hbm = kv.allocate(req)
+            hit = pool.lookup(req.session, req, now[0])
+            if hit is not None and hit.tokens > hbm:
+                a = kv.held[req.req_id]
+                pool.load(req.session, hit, KVViews(a.kv_blocks, a.state_blocks, hit.tokens, hbm), now[0], req.req_id)
+            waits.append((now[0] - at) / MS)
+            if now[0] > at:
+                late_at.append(round(at / 1e9, 1))
+            heapq.heappush(ev, (now[0] + hold, seq, "release", req))
+            seq += 1
+
+    while ev:
+        now[0], _, kind, x = heapq.heappop(ev)
+        if kind == "arrive":
+            pending.append((*x, now[0]))
+        elif kind == "release":
+            kv.release(x)
+        else:
+            pool.complete(x, now[0])
+        admit()
+        for o in pool.ready_ops():
+            n = len(o.slots) + len(o.state_slots)
+            if o.op == "read":
+                done = o.land_ns
+            elif o.op == "demote" or o.tier == "ssd":
+                ssd_free = max(now[0], ssd_free) + int(n * sb / SSD_WRITE_GB_S)
+                done = ssd_free
+            else:
+                done = now[0] + int((WRITE_MS[0] + WRITE_MS[1] * n) * MS)
+            heapq.heappush(ev, (max(done, now[0]), seq, "op", o.op_id))
+            seq += 1
+    w = np.array(waits)
+    late = w[w > 0]
+    tiers = {x["tier"]: x for x in pool.summary()}
+    return dict(run=run.name, rounds=len(w), waits=int(len(late)), wait_s=round(float(late.sum()) / 1e3, 3),
+                wait_ms_p99=round(float(np.percentile(late, 99)), 1) if len(late) else 0.0,
+                wait_ms_max=round(float(late.max()), 1) if len(late) else 0.0, waits_at_s=late_at[:20],
+                write_gb={k: round(v["written_bytes"] / 1e9) for k, v in tiers.items()},
+                write_back=pool.write_back_stats(), blocked_by_write=kv.stats["blocked_by_write"])
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -529,6 +619,8 @@ def main():
     p.add_argument("--pace-margin-ms", type=float, help="pace microbatch formation to the later stages (default off)")
     p.add_argument("--host-ms", type=float, default=0.0, help="a formed plan reaches stage 0 this much later")
     p.add_argument("--out", type=Path, required=True)
+    p = sub.add_parser("writeback")
+    p.add_argument("--run", type=Path, required=True, action="append", help="a server run dir (repeatable)")
     a = ap.parse_args()
     if a.cmd == "check-sched":
         for step in a.steps.split(","):
@@ -539,6 +631,9 @@ def main():
         for step in a.steps.split(","):
             diffs, got = check_force(step)
             print(f"{step:7} {'PASS' if not diffs else 'FAIL'} {json.dumps(got)}", *diffs, sep="\n  ")
+    elif a.cmd == "writeback":
+        for run in a.run:
+            print(json.dumps(run_writeback(run)), flush=True)
     elif a.cmd == "bringup":
         for row in run_bringup(a.kind, a.variant):
             print(json.dumps(row))
