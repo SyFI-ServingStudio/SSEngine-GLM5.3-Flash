@@ -474,14 +474,14 @@ Computed by the coordinator with the realistic-input profile (ServingStudioSim w
 The read times do not depend on the compute profile and equal the handoff's.
 
 **Sessions, victim chain, SSD 128 GB per GPU** (user, 2026-10-17; simulator wt-pp-dram-victim
-`logs/20261017_5_victim_tier_sizes/rows.jsonl`, `bench.tiers --setting full|tiers|ssd_heavy`): r/s, new tok/s, TTFT
+`logs/20261017_7_victim_chain/rows.jsonl`, SSD written only by DRAM evictions, `bench.tiers --setting full|tiers|ssd_heavy`): r/s, new tok/s, TTFT
 p50/p90/p99 (s), rounds over 60 s; prompt tokens hit in HBM / DRAM / SSD, minutes 10-20, N = 400.
 
 | Setting (HBM / DRAM GB per GPU) | `--pool-tokens` | N = 400 | N = 500 | Hit tokens N = 400 |
 |---|---|---|---|---|
-| full (100.18 / 50) | (full pool) | 26.10, 90.8k, 0.16/0.75/6.45, 125 | 28.53, 101.4k, 0.30/2.26/60.89, 729 | 98 / 0.6 / 0.1% |
-| tiers (20 / 20) | 12,220,800 | 26.09, 90.8k, 0.19/0.78/6.79, 112 | 28.04, 99.7k, 0.37/2.93/60.93, 735 | 37 / 33 / 28% |
-| ssd_heavy (12.5 / 12.5) | 7,632,640 | 26.03, 90.6k, 0.20/0.84/6.12, 124 | 27.86, 99.2k, 0.39/3.28/60.92, 720 | 19 / 29 / 50% |
+| full (100.18 / 50) | (full pool) | 26.15, 91.0k, 0.16/0.76/6.91, 121 | 28.82, 102.3k, 0.30/2.03/60.84, 708 | 98 / 0.6 / 0.1% |
+| tiers (20 / 20) | 12,220,800 | 26.61, 92.2k, 0.19/0.66/4.83, 73 | 28.63, 101.8k, 0.37/2.56/60.86, 682 | 38 / 33 / 28% |
+| ssd_heavy (12.5 / 12.5) | 7,632,640 | 26.34, 91.6k, 0.20/0.80/5.06, 89 | 28.04, 100.0k, 0.38/3.16/60.88, 708 | 19 / 29 / 50% |
 
 Step 1 (DRAM only, `tiers/*_dram`): full N = 400 is the same as full_ssd128 (26.10, 90.8k, 0.16/0.76/6.72, 127),
 since at full memory an SSD no larger than DRAM holds nothing DRAM does not.
