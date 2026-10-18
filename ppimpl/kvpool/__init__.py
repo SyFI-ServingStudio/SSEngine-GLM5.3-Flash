@@ -213,6 +213,12 @@ class HbmLevel:
     def lru(self):
         return iter(self.kv.kept)
 
+    def urge(self, h: Handle):
+        """An eviction waits for the write `h`: its ops not yet sent go urgent (they do not yield to reads)."""
+        for op_id in h.ops or ():
+            if (o := self.pool.manager.waiting.get(op_id)) is not None:
+                o.urgent = True
+
     def write(self, key, entry=None):
         k = self.kv.kept[key]
         h = self.pool.write_back(key, k.tokens, k.content, KVViews(k.alloc.kv_blocks, k.alloc.state_blocks, k.tokens))

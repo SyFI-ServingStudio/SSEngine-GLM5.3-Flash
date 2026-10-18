@@ -112,6 +112,7 @@ class TierOp:
     host_slots: list[int] = field(default_factory=list)
     host_state: list[int] = field(default_factory=list)
     deps: list[int] = field(default_factory=list)
+    urgent: bool = False       # a write an HBM eviction waits for: it does not yield to reads (member.py)
 
     @property
     def moves_bytes(self) -> bool:

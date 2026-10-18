@@ -125,12 +125,14 @@ class Mover:
         return ev
 
     def transfer_async(self, direction: str, segments: list[Segment], ready=None, tr: list | None = None,
-                       owned: list | None = None):
+                       owned: list | None = None, gate=None):
         """"read" host -> HBM or "write" HBM -> host of every segment's pieces. Two hops: the segments' slots, in
         order, are cut into ring chunks; direct: one batch of all pieces. `ready(i, k)`: called before the host side
         of segment i's slots below k is read (an SSD read waits for its file reads there). `tr`: per-batch trace
         (`_batch`). `owned`: gets every pooled event the transfer took (CUDA; `release` them once its last copy
-        completed). Returns (the transfer's end event, None on CPU or with nothing to move; bytes of HBM pieces)."""
+        completed). `gate()`: called before each ring chunk (two hops), after the previous chunk's first hop completed
+        (the host does not run ahead of the copies), e.g. a write yielding to reads. Returns (the transfer's end
+        event, None on CPU or with nothing to move; bytes of HBM pieces)."""
         sb = self.sb
         nslots = [len(s.host_ptrs) for s in segments]
         first = np.cumsum([0] + nslots)            # global slot index of each segment's first slot
@@ -159,8 +161,13 @@ class Mover:
         cuts = np.searchsorted(gslot, np.arange(0, n + C, C))   # pieces of chunk j: cuts[j]:cuts[j + 1]
         s1, s2 = HOPS[direction]
         end = None
+        prev = None                                # the previous chunk's first hop done (gated transfers)
         for j, a in enumerate(range(0, n, C)):
             b = min(a + C, n)
+            if gate is not None:
+                if prev is not None:
+                    prev.synchronize()
+                gate()
             if ready is not None:                  # each segment's slots below this chunk's end
                 for i in range(len(segments)):
                     if first[i] < b and first[i + 1] > a:
@@ -172,11 +179,15 @@ class Mover:
                 rbase = self._ring_base[direction] + pos * C * sb
                 ev1, ev2 = self._chunk_ev[direction][pos] if self.cuda else (None, None)
                 rslots, rpieces = rbase + rel[a:b], rbase + prel[lo:hi]
+                if gate is not None and self.cuda:
+                    prev = self.event(owned)
                 if direction == "read":            # host -> ring (PCIe), then ring -> the stages (NVLink)
                     self._batch(s1, hosts[a:b], rslots, hlen[a:b], ev2, ev1, tr, owned)
                     self._batch(s2, rpieces, dev[lo:hi], lens[lo:hi], ev1, ev2, tr, owned)
                 else:                              # the stages -> ring, then ring -> host
                     self._batch(s1, dev[lo:hi], rpieces, lens[lo:hi], ev2, ev1, tr, owned)
+                    if prev is not None:
+                        prev.record(self.streams[s1])
                     self._batch(s2, rslots, hosts[a:b], hlen[a:b], ev1, ev2, tr, owned)
                 if b == n:
                     end = self._end(s2, owned)

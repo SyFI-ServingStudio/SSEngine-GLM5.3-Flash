@@ -56,6 +56,7 @@ class TierMove(msgspec.Struct, array_like=True):
     state_slots: list[int]
     host_slots: list[int]
     host_state: list[int]
+    urgent: bool = False          # a write an HBM eviction waits for: no yielding to reads (kvpool/member.py)
 
 
 class TierBatch(msgspec.Struct, tag=True):

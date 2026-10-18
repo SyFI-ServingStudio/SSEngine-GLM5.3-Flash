@@ -322,6 +322,7 @@ def test_ssd_reads_are_copied_in_landing_order():
 
     e = PoolMember.__new__(PoolMember)
     e.ssd_copy_q, e._ssd_writes, e._ssd_cv = queue.Queue(), 0, threading.Condition()
+    e._read_cv, e._reads_in, e._reads_out, e._gated = threading.Condition(), 0, 0, set()
     a, b = [Future(), Future()], [Future(), Future()]
     e._copy_when_landed(NS(op_id=1, op="read"), a, 0)       # the earlier read
     e._copy_when_landed(NS(op_id=2, op="read"), b, 0)
@@ -331,3 +332,58 @@ def test_ssd_reads_are_copied_in_landing_order():
     assert e.ssd_copy_q.get_nowait()[0].op_id == 2 and e.ssd_copy_q.empty() and e._ssd_writes == 1
     a[1].set_result(None)
     assert e.ssd_copy_q.get_nowait()[0].op_id == 1 and e._ssd_writes == 0
+    assert e._reads_in == 2 and e._gated == {1, 2}           # counted as reads to HBM once queued for the copy
+
+
+def test_write_chunks_yield_to_reads_queued_then_not_later_ones():
+    """A write's ring chunk waits for the reads queued or in flight when it is due, not for reads queued after."""
+    import threading
+    e = PoolMember.__new__(PoolMember)
+    e._read_cv, e._reads_in, e._reads_out, e._gated = threading.Condition(), 0, 0, set()
+    e.yields, e.stop = dict(waits=0, wait_ms=0.0), threading.Event()
+    e._yield_to_reads()                                  # no reads: no wait
+    assert e.yields["waits"] == 0
+    e._read_queued(1)
+    e._read_queued(2)
+    passed = threading.Event()
+    t = threading.Thread(target=lambda: (e._yield_to_reads(), passed.set()))
+    t.start()
+    time.sleep(0.05)
+    e._read_queued(3)                                    # later: does not hold the chunk back
+    e._read_done(1)
+    e._read_done(99)                                     # not a counted read (a fetch report)
+    assert not passed.wait(0.05)
+    e._read_done(2)
+    assert passed.wait(1.0)
+    t.join()
+    assert e.yields["waits"] == 1
+
+
+def test_eviction_waiting_for_writes_makes_them_urgent():
+    """make_room urges the writes in flight and the evict writes it starts; ahead writes stay yielding."""
+    from ppimpl.kvpool.writeback import WriteBack
+
+    class Lvl:
+        capacity = 10.0
+        urged: list = []
+
+        def fixed(self):
+            return 0.0
+
+        def lru(self):
+            return iter(["a", "b", "c"])
+
+        def write(self, key, entry=None):
+            return f"tok-{key}"
+
+        def urge(self, token):
+            self.urged.append(token)
+
+    lvl = Lvl()
+    wb = WriteBack("hbm", lvl, 0.5)
+    for k in "abc":
+        wb.add(k, 3.0)
+    wb.step()                                            # 9 > 5: ahead writes of a, b
+    assert set(wb.writing) == {"a", "b"} and lvl.urged == []
+    wb.make_room(8.0)                                    # needs c too: urges a, b and writes c urgent
+    assert sorted(lvl.urged) == ["tok-a", "tok-b", "tok-c"] and wb.stats["evict_writes"] == 1

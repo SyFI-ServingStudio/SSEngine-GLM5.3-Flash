@@ -14,7 +14,8 @@ flight, then **clean**; only a clean entry may be evicted without waiting.
   the level must free in one batch period (the scheduler sets it from the loading area and the microbatch budget),
   so admission evicts clean entries and does not wait for a write.
 - **Demand** (`make_room`): a level that must evict `short` more charge than its clean entries hold starts the
-  writes of its least recently used dirty entries (`evict_writes`) and counts a wait (`evict_waits`). HBM's caller
+  writes of its least recently used dirty entries (`evict_writes`) and counts a wait (`evict_waits`). Those writes,
+  and the level's writes already in flight, are urgent (`Level.urge`): they do not yield to reads (kvpool/member.py). HBM's caller
   then waits (the request is admitted later); DRAM evicts at once and the op that reuses its slots waits for the
   demote (`SlotGuard`), counted by `evicting`.
 - The level below reports a write done (`done`) or that it no longer holds an entry (`lost`: dirty again).
@@ -39,6 +40,9 @@ class Level(Protocol):
     def write(self, key, entry=None) -> object | None:
         """Start writing `key`'s entry (or `entry`, one the level just let go of) to the level below: a token that
         `done` will be called with, or None if nothing had to move."""
+
+    def urge(self, token):
+        """An eviction waits for the write `token`: it must not yield to reads (optional)."""
 
 
 class WriteBack:
@@ -85,13 +89,19 @@ class WriteBack:
 
     # --- writes ---------------------------------------------------------------------------------------------------
 
-    def _write(self, key, entry=None) -> bool:
+    def _write(self, key, entry=None, urgent: bool = False) -> bool:
         charge = self.dirty.pop(key)
         self.dirty_charge -= charge
         token = self.level.write(key, entry)
         if token is not None:
             self.writing[key] = (token, charge)
+            if urgent:
+                self._urge(token)
         return token is not None
+
+    def _urge(self, token):
+        if (urge := getattr(self.level, "urge", None)) is not None:
+            urge(token)
 
     def _write_lru(self, over: float, kind: str):
         """Write the least recently used dirty entries until `over` charge of them is written or writing."""
@@ -99,7 +109,7 @@ class WriteBack:
             if over <= 0:
                 break
             over -= self.dirty[key]
-            if self._write(key):
+            if self._write(key, urgent=kind == "evict_writes"):
                 self.stats[kind] += 1
 
     def step(self):
@@ -117,6 +127,8 @@ class WriteBack:
     def make_room(self, short: float):
         """An eviction lacks `short` charge of clean entries: start the writes that make it up; the caller waits."""
         self.stats["evict_waits"] += 1
+        for token, _ in self.writing.values():
+            self._urge(token)
         self._write_lru(short - sum(c for k, (_, c) in self.writing.items() if k not in self.dirty), "evict_writes")
 
     def evicting(self, key, entry) -> str:

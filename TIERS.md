@@ -801,6 +801,12 @@ hbm-evictions-exclusive`), k = 1 (one KDA state per entry).
   - Reads move only states that survive (k > 1, not yet in the engine, which keeps one state per entry):
     `manager.states_to_move` - the state the read resumes from plus the earlier ones that stay among the latest k
     after the round adds its own (prefill end, decode end); exclusive DRAM drops the others with the entry.
+  - **Reads first on the host link** (kvpool/member.py): H2D and D2H of the four GPUs on one socket share ~48 GB/s
+    per GPU (§2.3), so on v3 (reads 7.6 + writes 8.0 GB/s per GPU, job 8202) a read beside a write ran at 25 GB/s
+    instead of 47 and reads queued (4 in flight at p50; recv / notify were that queue). A write's ring chunk waits
+    for the reads queued or in flight when it is due (not later ones) and does not run ahead of its previous chunk;
+    writes an HBM eviction waits for (`make_room`: `evict_writes` and the writes in flight) are `urgent` and do not
+    wait.
   - **Eviction stays ahead** (the lesson of Fix D, where every eviction waited for its write: blocked_by_write
     44k): each level's write-back keeps the LRU entries holding `reserve` written (`WriteBack.reserve`, replacing the
     0.9 watermark): fixed + dirty <= capacity - reserve, fixed counting the loading area. The reserve is what one
