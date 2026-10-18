@@ -120,3 +120,22 @@ def test_partial_range_moves_only_its_blocks():
     assert len(dev) == 2 * nkv + len(L.st_len)
     assert set((host[:2 * nkv] // L.slot_bytes).tolist()) == {10, 11}
     assert dev[0] == L.kv_dev[0] + 3 * L.kv_stride[0]                    # block 2 -> HBM block 3
+
+
+def test_local_marks_the_pieces_in_the_stage_s_own_views():
+    """`local(stage, blocks, state)` is true exactly for the pieces whose device address is in that stage's views,
+    in `pieces`' order (blocks, then the state)."""
+    views, ranges = stages()
+    L = BalancedPlacement(ranges, 4, 2)
+    sslots = list(range(20, 20 + L.state_slots))
+    dev, _, lens = L.pieces([1, 2, 3, 4], [1, 2, 3, 4, 5, 6], [10, 11, 12], sslots, 1, 4, 1)
+    owner = {}
+    for v, r in zip(views, ranges):
+        lo = v.data_ptr()
+        owner[(lo, lo + v.numel() * v.element_size())] = r.stage
+    for stage in range(4):
+        mask = L.local(stage, 3, True)
+        assert len(mask) == len(dev)
+        want = [next(s for (a, b), s in owner.items() if a <= d and d + n <= b) == stage
+                for d, n in zip(dev.tolist(), lens.tolist())]
+        assert mask.tolist() == want

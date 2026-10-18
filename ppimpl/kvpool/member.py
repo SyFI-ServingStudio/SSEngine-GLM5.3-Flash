@@ -493,10 +493,11 @@ class PoolMember:
         P, b_lo, b_hi = self.placement, op.b_lo, op.b_hi
         dev, off, lens = P.pieces(op.kv_blocks, op.state_blocks, list(range(b_hi - b_lo)), [], b_lo, b_hi, b_lo)
         segs = [Segment([host.ptr(s) for s in slots[b_lo - block_start:b_hi - block_start]], P.kv_slot_bytes, dev,
-                        off, lens)]
+                        off, lens, P.local(self.stage, b_hi - b_lo, False))]
         if len(sslots):
             segs.append(Segment([host.ptr(s) for s in sslots], self.slot_bytes,
-                                *P.pieces(op.kv_blocks, op.state_blocks, [], list(range(len(sslots))), 0, 0, 0)))
+                                *P.pieces(op.kv_blocks, op.state_blocks, [], list(range(len(sslots))), 0, 0, 0),
+                                P.local(self.stage, 0, True)))
         wait = None if ready is None else lambda i, k: ready(b_lo + k if i == 0 else None)
         return self.mover.transfer_async(d, segs, wait, tr, owned, gate, marks)
 

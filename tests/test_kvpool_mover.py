@@ -11,31 +11,38 @@ from ppimpl.kvpool.mover import Mover, Segment
 SB = 4096
 
 
-def segments(dev, host, rng):
+def segments(dev, host, rng, local: bool = False):
     """Two segments over `host`'s slots: 5 KV slots of 3 pieces (2,816 B used of each), 2 state slots of pieces
-    split at the slot boundary; device pieces anywhere in `dev`, 16-byte aligned."""
+    split at the slot boundary; device pieces anywhere in `dev`, 16-byte aligned. `local`: each KV slot's middle
+    piece and the second state piece are in this GPU's own HBM (straight between host and HBM, not via the ring)."""
     base, hbase = dev.ctypes.data, host.ctypes.data + (-host.ctypes.data) % SB
     kv_len = np.array([1024, 768, 1024] * 5, dtype=np.int64)
     kv_off = (np.repeat(np.arange(5), 3) * SB + np.tile([0, 1024, 1792], 5)).astype(np.int64)
     st_len = np.array([3000, 1096, 2000], dtype=np.int64)
     st_off = np.array([0, 3000, SB], dtype=np.int64)
     pos = rng.permutation(len(dev) // 4096)[:18] * 4096 + base
-    return [Segment([hbase + s * SB for s in (6, 2, 0, 4, 8)], 2816, pos[:15], kv_off, kv_len),
-            Segment([hbase + s * SB for s in (1, 9)], SB, pos[15:], st_off, st_len)]
+    kv_loc, st_loc = (np.tile([False, True, False], 5), np.array([False, True, False])) if local else (None, None)
+    return [Segment([hbase + s * SB for s in (6, 2, 0, 4, 8)], 2816, pos[:15], kv_off, kv_len, kv_loc),
+            Segment([hbase + s * SB for s in (1, 9)], SB, pos[15:], st_off, st_len, st_loc)]
 
 
+@pytest.mark.parametrize("local", [False, True], ids=["all_peer", "some_local"])
 @pytest.mark.parametrize("ring", [dict(hops="direct"), dict(), dict(ring_depth=1, ring_chunk_slots=1),
                                   dict(ring_depth=2, ring_chunk_slots=3)], ids=lambda r: str(r) or "default")
-def test_write_then_read_is_byte_equal(ring):
+def test_write_then_read_is_byte_equal(ring, local):
     rng = np.random.default_rng(0)
     dev = rng.integers(0, 255, 64 * 4096, dtype=np.uint8)
     host = np.zeros(11 * SB, dtype=np.uint8)
-    segs = segments(dev, host, rng)
+    segs = segments(dev, host, rng, local)
     want = dev.copy()
     m = Mover(torch.device("cpu"), SB, **ring)
     assert (m.ring is None) == (ring.get("hops") == "direct")
     ev, nbytes = m.transfer_async("write", segs)
     assert ev is None and nbytes == sum(int(s.lens.sum()) for s in segs)
+    hb = host.ctypes.data
+    assert all(np.array_equal(host[h - hb:h - hb + n], dev[p - dev.ctypes.data:p - dev.ctypes.data + n])
+               for s in segs for p, o, n in zip(s.dev.tolist(), s.off.tolist(), s.lens.tolist())
+               for h in [s.host_ptrs[o // SB] + o % SB])          # each piece at its host place
     dev[:] = 0
     calls = []
     m.transfer_async("read", segs, ready=lambda i, k: calls.append((i, k)))
@@ -87,3 +94,15 @@ def test_a_transfer_holds_its_direction_unless_it_yields(gated):
         assert firsts[:3] == ["a", "a", "b"]              # b went between a's chunks
     else:
         assert firsts == ["a"] * 7 + ["b"] * 2            # a's 7 chunks, then b's
+
+
+def test_runs_merge_contiguous_pieces_within_a_slot_only():
+    """`_runs`: pieces contiguous on both sides merge, but never across slots (adjacent host slots may sit in two
+    registered allocations: one copy must not span them)."""
+    from ppimpl.kvpool.mover import _runs
+    src = np.array([0, 100, 300, 400, 500], dtype=np.int64)
+    dst = np.array([1000, 1100, 1300, 1400, 1500], dtype=np.int64)
+    lens = np.array([100, 100, 100, 100, 100], dtype=np.int64)
+    slot = np.array([0, 0, 0, 0, 1], dtype=np.int64)
+    s, d, n = _runs(src, dst, lens, slot)
+    assert s.tolist() == [0, 300, 500] and d.tolist() == [1000, 1300, 1500] and n.tolist() == [200, 200, 100]

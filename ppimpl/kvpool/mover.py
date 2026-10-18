@@ -7,9 +7,12 @@ in each call), so a transfer's host work is the driver's own (job 8202: 4.3 ms p
 `swap_blocks_batch`, of it 1.7 ms CPU in the driver).
 
 Two hops (`TierConfig.hops`, default; §2.3: a copy engine writing host data straight into the other GPUs' HBM runs at
-31.7 GB/s against 47.6 into its own): the host side of a slot is contiguous, so a read copies each slot whole into a
-ring of chunks in this GPU's own HBM (one copy per slot, its own PCIe link), then one batch scatters the chunk's
-pieces from the ring to the stages' KV over NVLink. Writes gather into the ring, then copy each slot to host. Each
+31.7 GB/s against 47.6 into its own): a read copies the other stages' part of each slot (contiguous runs: a slot
+packs its pieces by stage) into a ring of chunks in this GPU's own HBM (its own PCIe link), then one batch scatters
+them from the ring to the other stages' KV over NVLink. Writes gather into the ring, then copy the runs to host. This
+GPU's own pieces (`Segment.local`) go straight between host and its KV in the same PCIe batch: a same-GPU
+device-to-device copy waits behind the stage's kernels (job 8248's nsys: 4-7 s per 37 s of the NVLink batches were
+gaps before own-GPU pieces, 0.1-0.3 s before peer pieces). Each
 direction has its ring (`ring_depth` chunks of `ring_chunk_slots` slots), two streams (host side, NVLink side) and a
 lock, which a transfer holds from its first chunk to its last unless it yields per chunk (a write, `gate`): reads
 complete in the order they were submitted, each at the link's rate; chunk k+1's host copy overlaps chunk k's scatter. A transfer's slots (all its segments in order) are cut into
@@ -78,6 +81,17 @@ class Driver:
         self._ok(self._record(ev.cuda_event, stream), "cuEventRecord")
 
 
+def _runs(src: np.ndarray, dst: np.ndarray, lens: np.ndarray, slot: np.ndarray):
+    """Pieces in order merged into contiguous runs (each piece starting where the previous ended on both sides),
+    within a slot: adjacent host slots may sit in different registered host allocations, and a copy must not span
+    two (cuMemcpyBatchAsync: CUDA_ERROR_INVALID_VALUE)."""
+    if len(lens) < 2:
+        return src, dst, lens
+    cut = np.flatnonzero(np.r_[True, (src[1:] != src[:-1] + lens[:-1]) | (dst[1:] != dst[:-1] + lens[:-1])
+                               | (slot[1:] != slot[:-1])])
+    return src[cut], dst[cut], np.add.reduceat(lens, cut)
+
+
 def runq_ns() -> int:
     """This thread's time runnable but waiting for a CPU so far (/proc/thread-self/schedstat; 0 if unavailable)."""
     try:
@@ -95,6 +109,7 @@ class Segment(NamedTuple):
     dev: np.ndarray
     off: np.ndarray
     lens: np.ndarray
+    local: np.ndarray | None = None     # pieces in this GPU's own HBM (two hops: copied straight, never via the ring)
 
 
 class Mover:
@@ -213,11 +228,12 @@ class Mover:
         nslots = [len(s.host_ptrs) for s in segments]
         first = np.cumsum([0] + nslots)            # global slot index of each segment's first slot
         hosts = np.fromiter((p for s in segments for p in s.host_ptrs), dtype=np.int64, count=int(first[-1]))
-        hlen = np.repeat(np.array([s.host_len for s in segments], dtype=np.int64), nslots)
         gslot = np.concatenate([s.off // sb + f for s, f in zip(segments, first)]).astype(np.int64)
         inslot = np.concatenate([s.off % sb for s in segments]).astype(np.int64)
         dev = np.concatenate([s.dev for s in segments]).astype(np.int64)
         lens = np.concatenate([s.lens for s in segments]).astype(np.int64)
+        local = np.concatenate([np.zeros(len(s.lens), bool) if s.local is None else np.asarray(s.local, bool)
+                                for s in segments])
         nbytes = int(lens.sum())
         n = int(first[-1])
         if self.ring is None:
@@ -232,8 +248,8 @@ class Mover:
                 self._batch(direction, src, dst, lens, tr=tr, owned=owned)
                 return self._end(direction, owned), nbytes
         C = self.chunk
-        rel = (np.arange(n, dtype=np.int64) % C) * sb       # a slot's place in its ring chunk
         prel = (gslot % C) * sb + inslot                    # a piece's place in its ring chunk
+        hpiece = hosts[gslot] + inslot                      # a piece's host address
         cuts = np.searchsorted(gslot, np.arange(0, n + C, C))   # pieces of chunk j: cuts[j]:cuts[j + 1]
         s1, s2 = HOPS[direction]
         end = None
@@ -254,17 +270,21 @@ class Mover:
                 self._ring_next[direction] = (pos + 1) % self.depth
                 rbase = self._ring_base[direction] + pos * C * sb
                 ev1, ev2 = self._chunk_ev[direction][pos] if self.cuda else (None, None)
-                rslots, rpieces = rbase + rel[a:b], rbase + prel[lo:hi]
+                loc = local[lo:hi]
+                peer = ~loc
+                rp, dp, lp = rbase + prel[lo:hi][peer], dev[lo:hi][peer], lens[lo:hi][peer]   # via the ring
+                hr, rr, lr = _runs(hpiece[lo:hi][peer], rp, lp, gslot[lo:hi][peer])   # host side, runs per slot
+                hl, dl, ll = hpiece[lo:hi][loc], dev[lo:hi][loc], lens[lo:hi][loc]          # straight
                 if gate is not None and self.cuda:
                     prev = self.event(owned)
-                if direction == "read":            # host -> ring (PCIe), then ring -> the stages (NVLink)
-                    self._batch(s1, hosts[a:b], rslots, hlen[a:b], ev2, ev1, tr, owned)
-                    self._batch(s2, rpieces, dev[lo:hi], lens[lo:hi], ev1, ev2, tr, owned)
-                else:                              # the stages -> ring, then ring -> host
-                    self._batch(s1, dev[lo:hi], rpieces, lens[lo:hi], ev2, ev1, tr, owned)
+                if direction == "read":            # host -> ring and own pieces (PCIe), then ring -> the peers (NVLink)
+                    self._batch(s1, np.r_[hr, hl], np.r_[rr, dl], np.r_[lr, ll], ev2, ev1, tr, owned)
+                    self._batch(s2, rp, dp, lp, ev1, ev2, tr, owned)
+                else:                              # the peers -> ring, then ring and own pieces -> host
+                    self._batch(s1, dp, rp, lp, ev2, ev1, tr, owned)
                     if prev is not None:
                         self.drv.record(prev, self._st[s1])
-                    self._batch(s2, rslots, hosts[a:b], hlen[a:b], ev1, ev2, tr, owned)
+                    self._batch(s2, np.r_[rr, dl], np.r_[hr, hl], np.r_[lr, ll], ev1, ev2, tr, owned)
                 if b == n:
                     end = self._end(s2, owned)
         return end, nbytes
@@ -289,6 +309,10 @@ class Mover:
         st, drv = self._st[stream], self.drv
         if wait is not None:
             drv.wait(st, wait)
+        if not len(lens):
+            if done is not None:
+                drv.record(done, st)
+            return
         if tr is not None:
             ev0 = self.event(owned)
             drv.record(ev0, st)

@@ -103,3 +103,7 @@ class BalancedPlacement:
             z = np.zeros(0, dtype=np.int64)
             return z, z, z
         return np.concatenate(devs), np.concatenate(hosts), np.concatenate(lens)
+
+    def local(self, stage: int, blocks: int, state: bool) -> np.ndarray:
+        """Which of `pieces`' pieces (`blocks` blocks, then the state if `state`) are in stage `stage`'s KV."""
+        return np.r_[np.tile(self.kv_stage == stage, blocks), (self.st_stage == stage) if state else []].astype(bool)

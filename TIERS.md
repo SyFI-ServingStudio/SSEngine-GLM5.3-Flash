@@ -827,6 +827,13 @@ hbm-evictions-exclusive`), k = 1 (one KDA state per entry).
     stream contexts and tensor wrapping), so ops queued at the submit thread whenever the link drained faster. The
     copies (`cuMemcpyBatchAsync`, CUDA 12.8 ABI as vLLM's `swap_blocks_batch`), stream waits and event records now go
     through ctypes on libcuda; each call releases the GIL.
+  - **Own pieces skip the ring** (kvpool/mover.py `Segment.local`, placement.py `local`): in the running server
+    the NVLink hop's batches were mostly idle (job 8248's nsys, per GPU over 37 s: 4-7 s of gaps inside the batches
+    before same-GPU device-to-device pieces, 0.1-0.3 s before peer pieces; per batch the copies were busy 16-50% of
+    its span), so a 180 MB read took 7.7-9.5 ms on the GPU (19-24 GB/s) while its PCIe copies ran at 54 GB/s. A
+    same-GPU D2D copy waits behind the stage's kernels; the bench without kernels (job 8263) never showed it. The
+    GPU's own pieces now go straight between host and its KV in the PCIe batch, and only the other stages' runs of a
+    slot go through the ring (no PCIe bytes for own pieces twice).
   - **Eviction stays ahead** (the lesson of Fix D, where every eviction waited for its write: blocked_by_write
     44k): each level's write-back keeps the LRU entries holding `reserve` written (`WriteBack.reserve`, replacing the
     0.9 watermark): fixed + dirty <= capacity - reserve, fixed counting the loading area. The reserve is what one
