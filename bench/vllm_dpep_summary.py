@@ -3,7 +3,7 @@
 and from vLLM's /metrics snapshots (prom/*.prom, one a minute) the counter deltas over the client's minutes 10-20:
 local prefix cache and connector (CPU offload) hits, preemptions, offload transfer bytes, plus the peak queue.
 
-    python -m bench.vllm_dpep_summary measured/vllm_dpep/<run>     # writes <run>/dpep_summary.json and prints it
+    python -m bench.vllm_dpep_summary measured/vllm_dpep/<run> [--trace CSV]    # writes <run>/dpep_summary.json and prints it
 """
 
 from __future__ import annotations
@@ -11,14 +11,13 @@ from __future__ import annotations
 import csv
 import json
 import re
-import sys
 from collections import defaultdict
 from pathlib import Path
 
 
 from bench.prefix import real_arrays, window_metrics
 
-TRACE = Path("/raid/kanzhu/ServingStudio/wt-pp-hitrule/doc/handoff/glm53_flash_pp4_b200_v2/data/sessions_2ps.csv")
+TRACE = Path("/raid/kanzhu/ServingStudio/data/tracelab-v3/m6/sessions_2ps_v3.csv")
 LINE = re.compile(r'^([a-zA-Z_:][a-zA-Z0-9_:]*)(\{[^}]*\})?\s+([-+0-9.eEinfNa]+)$')
 
 
@@ -98,7 +97,7 @@ def inside_rounds(run: Path, trace: Path = TRACE) -> dict:
             "extending_recompute_over_new": out["extending"]["recompute_tokens"] / max(new, 1)}
 
 
-def main(run: Path) -> dict:
+def main(run: Path, trace: Path = TRACE) -> dict:
     rows = real_arrays(run / "requests.jsonl")
     arr = rows[0]
     late = tuple(a[(arr >= 600e3)] for a in rows)            # rounds arriving in minutes 10-20, first token < 20 min
@@ -111,11 +110,17 @@ def main(run: Path) -> dict:
         sent += 1
         failed += str(o.get("status")).upper() != "SUCCESS"
     out = {"run": run.name, "metrics_0_20": json.loads((run / "metrics.json").read_text()),
-           "metrics_arrival_10_20": m1020, "rounds_sent": sent, "rounds_failed": failed, "inside_rounds": inside_rounds(run),
+           "metrics_arrival_10_20": m1020, "rounds_sent": sent, "rounds_failed": failed, "inside_rounds": inside_rounds(run, trace),
            "prom": counters(run)}
     (run / "dpep_summary.json").write_text(json.dumps(out, indent=1))
     return out
 
 
 if __name__ == "__main__":
-    print(json.dumps(main(Path(sys.argv[1])), indent=1))
+    import argparse
+
+    ap = argparse.ArgumentParser()
+    ap.add_argument("run", type=Path)
+    ap.add_argument("--trace", type=Path, default=TRACE, help="the run's session trace (inside-round classification)")
+    a = ap.parse_args()
+    print(json.dumps(main(a.run, a.trace), indent=1))

@@ -6,7 +6,7 @@
 #       bench/slurm/vllm_dpep.sbatch                       # A: HBM only
 #   N=400 OFFLOAD_GB=50 sbatch ... --mem=450G ...         # B: native CPU offload, 50 GB (1e9 B) per GPU
 #   SMOKE=1 N=8 sbatch -p priority --time=00:30:00 ...    # smoke: 3 min of client
-# Variables: N (client --max-concurrency), OFFLOAD_GB (per GPU; --kv-offloading-size is per DP engine in GiB, since
+# Variables: N (client --max-concurrency), TRACE (default the v3 trace data/tracelab-v3/m6/sessions_2ps_v3.csv), OFFLOAD_GB (per GPU; --kv-offloading-size is per DP engine in GiB, since
 # CPUOffloadingSpec divides by the engine's world size = TP x PP = 1), CLIENT_TIMEOUT (default 22m; SMOKE 3m),
 # OUT (default <main tree>/measured/vllm_dpep), RUN (run name), VLLM_EXTRA (extra server args).
 # Memory: refuses to start unless MemAvailable > need + 100 GB (need = 150 GB + 4 x OFFLOAD_GB); a watchdog stops the
@@ -26,6 +26,7 @@ H=/raid/kanzhu/ServingStudio/wt-pp-hitrule/doc/handoff/glm53_flash_pp4_b200_v2/d
 # (job 8191). The workload path is unchanged. Build: clone third_party/req-frontend at 8723d90, apply the patch,
 # cargo build --release --features runtime --bin session_runner (CARGO_TARGET_DIR below).
 CLIENT=${CLIENT:-$MAIN/tmp/vllm_dpep_client/build/release/session_runner}
+TRACE=${TRACE:-/raid/kanzhu/ServingStudio/data/tracelab-v3/m6/sessions_2ps_v3.csv}   # v3 new-model trace (A/B)
 N=${N:?N (client max concurrency)}
 OFF=${OFFLOAD_GB:-}
 TAG=$([ -n "$OFF" ] && echo "off${OFF}" || echo hbm)
@@ -90,7 +91,7 @@ curl -s "http://127.0.0.1:$P/metrics" > "$RD/prom/ready.prom"
 
 # --- client: exactly the M6 command (client_command.txt of runs_m6/st_tiers_n400) but base URL and paths
 CT=${CLIENT_TIMEOUT:-$([ -n "${SMOKE:-}" ] && echo 3m || echo 22m)}
-CMD=(timeout "$CT" "$CLIENT" --trace "$H/sessions_2ps.csv" --input-file-format text-generation-session-execution-v2
+CMD=(timeout "$CT" "$CLIENT" --trace "$TRACE" --input-file-format text-generation-session-execution-v2
      --text-file /raid/kanzhu/ServingStudio/data/corpus/enwik9 --tokenizer "$CKPT/tokenizer.json"
      --model glm53-flash-pp4 --backend vllm-tokens --base-url "http://127.0.0.1:$P" --temperature 0
      --arrival-mode trace-timed --stream-idle-timeout-secs 600 --stop-session-on-error true --timeline true
@@ -111,7 +112,7 @@ echo "== client rc=$rc after $(( $(date +%s) - C0 )) s"
 curl -s -m 10 "http://127.0.0.1:$P/metrics" > "$RD/prom/end.prom"
 kill $WD 2>/dev/null
 $PY "$H/metrics.py" "$RD/requests.jsonl" > "$RD/metrics.json" && cat "$RD/metrics.json"
-$PY -m bench.vllm_dpep_summary "$RD" || true
+$PY -m bench.vllm_dpep_summary "$RD" --trace "$TRACE" || true
 [ -f "$RD/INVALID.txt" ] && echo "== run invalid: $(cat "$RD/INVALID.txt")"
 uptime
 echo "== done $(date -Is)"
