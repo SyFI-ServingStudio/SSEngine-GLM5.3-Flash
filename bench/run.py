@@ -341,7 +341,8 @@ def execute(run_dir: Path, server_cfg: dict, client_cfg: dict, *, port: int, met
         # uvicorn re-raises the SIGTERM it handled once it has shut down: -15 (143 through nsys) is a clean stop
         meta["server_returncode"] = 0 if server.returncode in (-signal.SIGTERM, 128 + signal.SIGTERM) \
             else server.returncode
-    if nsys and (run_dir / "trace.nsys-rep").exists():
+    windows = len(server_cfg.get("profile_mbs") or []) // 2
+    if nsys and (run_dir / "trace.nsys-rep").exists() and windows <= 1:   # several windows: export after the job
         t = time.time()
         for rep in sorted(run_dir.glob("trace*.nsys-rep")):        # one report per capture window
             subprocess.run([NSYS, "export", "--type", "sqlite", "--force-overwrite", "true", "-o",
