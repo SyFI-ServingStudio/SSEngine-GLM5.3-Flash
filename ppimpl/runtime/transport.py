@@ -90,7 +90,9 @@ class TierDone(msgspec.Struct, tag=True):
     end_ns: int                   # host clock: seen complete
     nbytes: int                   # moved by this GPU
     submit_ns: int = 0            # host clock: all of the op's copies submitted
-    gpu_ns: int | None = None     # GPU time from a mark recorded as submission began to the op's last copy's end
+    gpu_ns: int | None = None     # GPU time from the op's start mark (as its first chunk is submitted) to its last copy's end
+    mark_ns: int | None = None    # host clock: the GPU ran the op's start mark (its copies began; `Mover.host_ns`)
+    recv_ns: int | None = None    # host clock: the member's receive thread decoded the op's batch
 
 
 class WorkerError(msgspec.Struct, tag=True):

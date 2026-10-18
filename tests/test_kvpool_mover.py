@@ -50,3 +50,40 @@ def test_write_then_read_is_byte_equal(ring):
             b = min(a + c, 7)
             want += ([(0, min(b, 5))] if a < 5 else []) + ([(1, b - 5)] if b > 5 else [])
         assert calls == want
+
+
+@pytest.mark.parametrize("gated", [False, True])
+def test_a_transfer_holds_its_direction_unless_it_yields(gated):
+    """A transfer without a gate holds its direction from its first ring chunk to its last: a second one submitted
+    meanwhile from another thread starts only after it (reads complete in order, not chunk by chunk interleaved). A
+    gated transfer (a write yielding to reads) takes the direction per chunk, so another can go between its chunks."""
+    import threading
+
+    rng = np.random.default_rng(1)
+    dev = rng.integers(0, 255, 64 * 4096, dtype=np.uint8)
+    host = np.zeros(11 * SB, dtype=np.uint8)
+    segs = segments(dev, host, rng)
+    m = Mover(torch.device("cpu"), SB, ring_depth=2, ring_chunk_slots=1)
+    order, between, go = [], threading.Event(), threading.Event()
+
+    def first_ready(i, k):
+        order.append(("a", i, k))
+        if len(order) == 2:                  # mid-transfer: let the other one try, then go on
+            between.set()
+            go.wait(0.5)
+
+    gate = (lambda: None) if gated else None
+    t = threading.Thread(target=m.transfer_async, args=("read", segs, first_ready), kwargs=dict(gate=gate))
+    t.start()
+    assert between.wait(5)
+    u = threading.Thread(target=m.transfer_async, args=("read", segs[1:], lambda i, k: order.append(("b", i, k))))
+    u.start()
+    u.join(0.2)
+    go.set()
+    t.join(5)
+    u.join(5)
+    firsts = [o[0] for o in order]
+    if gated:
+        assert firsts[:3] == ["a", "a", "b"]              # b went between a's chunks
+    else:
+        assert firsts == ["a"] * 7 + ["b"] * 2            # a's 7 chunks, then b's

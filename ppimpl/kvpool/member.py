@@ -5,8 +5,10 @@ leader sends a `TierBatch` of ops whose dependencies are done to all n members' 
 member's receive thread hands each DRAM op to its direction's submit thread (reads never wait behind writes' host
 work), which maps the op's slots to host addresses (`backends.py`), asks the placement for the pieces of its share
 over all stages' KV (the other stages' KV opened by CUDA IPC at start-up, `share_ranges`), hands them to its
-`mover.Mover` (read streams host -> HBM, write streams HBM -> host), and a done thread per direction reports
-`TierDone` when the copies completed. Reads go first on the host link: H2D and D2H of four GPUs on one socket share
+`mover.Mover` (read streams host -> HBM, write streams HBM -> host; a read takes the read streams from its first
+chunk to its last, so reads complete in order, each at the link's rate), and a done thread per direction reports
+`TierDone` when the copies completed, with when the GPU began them (`Mover.host_ns`); a trace thread then writes the
+op's trace and returns its events, so no report waits for an earlier op's bookkeeping. Reads go first on the host link: H2D and D2H of four GPUs on one socket share
 ~48 GB/s per GPU (TIERS.md §2.3), so a write copy running beside a read halves it. A write (not `urgent`, i.e. no HBM
 eviction waits for it) yields at each ring chunk to the reads queued or in flight then (`_yield_to_reads`), and
 does not run ahead of its previous chunk. No wait on the compute stream: a write's blocks are final and pinned until it
@@ -126,6 +128,8 @@ class PoolMember:
         self.threads: list[threading.Thread] = []
         self.stop = threading.Event()
         self.q = {"read": queue.Queue(), "write": queue.Queue()}       # done threads: (op id, wait, start, bytes)
+        self.trace_q: queue.Queue = queue.Queue()  # done ops' traces and pooled events, off the done threads
+        self._recv_ns: dict[int, int] = {}         # op id -> when the receive thread decoded it (TierDone.recv_ns)
         self.ssd_q = {"read": queue.Queue(), "write": queue.Queue()}   # SSD threads: (op, start)
         self.sub_q = {"read": queue.Queue(), "write": queue.Queue()}   # DRAM ops' submit threads: op
         self.ssd_copy_q: queue.Queue = queue.Queue()   # SSD reads whose file reads are queued: (op, start, futures)
@@ -220,6 +224,9 @@ class PoolMember:
         t = threading.Thread(target=self._recv_loop, name="tier-recv", daemon=True)
         t.start()
         self.threads.append(t)
+        t = threading.Thread(target=self._trace_loop, name="tier-trace", daemon=True)
+        t.start()
+        self.threads.append(t)
         if self.trace:
             t = threading.Thread(target=self._probe_loop, name="tier-probe", daemon=True)
             t.start()
@@ -279,6 +286,9 @@ class PoolMember:
                 msg = decode_tier(sock.recv())
                 if isinstance(msg, Shutdown):
                     break
+                now = time.time_ns()
+                for op in msg.ops:
+                    self._recv_ns[op.op_id] = now
                 for op in sorted(msg.ops, key=lambda o: o.op != "read"):    # reads first
                     if self.real and op.tier == "dram" and op.op == "read":
                         self._read_queued(op.op_id)
@@ -357,7 +367,7 @@ class PoolMember:
                     push.send(encode(item))
                     break
                 op_id, wait, start_ns, nbytes, submit_ns, mark = item
-                gpu_ns = None
+                gpu_ns = mark_ns = None
                 if isinstance(wait, float):     # fake member: due time (monotonic)
                     d = wait - time.monotonic()
                     if d > 0:
@@ -366,19 +376,36 @@ class PoolMember:
                     wait.synchronize()
                     if mark is not None:
                         gpu_ns = int(mark.elapsed_time(wait) * 1e6)
-                push.send(encode(TierDone(self.stage, op_id, start_ns, time.time_ns(), nbytes, submit_ns, gpu_ns)))
+                        mark_ns = self.mover.host_ns(mark)
+                push.send(encode(TierDone(self.stage, op_id, start_ns, time.time_ns(), nbytes, submit_ns, gpu_ns,
+                                          mark_ns, self._recv_ns.pop(op_id, None))))
                 if direction == "read":
                     self._read_done(op_id)
-                if (tr := self._traces.pop(op_id, None)) is not None:
-                    try:                        # instrumentation: a failure turns the trace off, not the run
-                        self._write_trace(op_id, start_ns, mark, *tr)
-                    except Exception:           # noqa: BLE001
-                        print(f"stage {self.stage} tier trace off:\n{traceback.format_exc()}", flush=True)
-                        self.trace = False
-                if (owned := self._owned.pop(op_id, None)) is not None:
-                    self.mover.release(owned)   # its copies completed (wait), its trace is read
+                tr, owned = self._traces.pop(op_id, None), self._owned.pop(op_id, None)
+                if tr is not None or owned is not None:     # its copies completed (wait): the trace thread reads
+                    self.trace_q.put((op_id, start_ns, mark, tr, owned))   # its trace and releases its events
         finally:
+            self.trace_q.put(direction)         # this done thread's end
             push.close()
+
+    def _trace_loop(self):
+        """Done ops' per-batch traces (`_write_trace`) and pooled events (back to the mover), after their TierDone:
+        a report never waits for an earlier op's trace. Ends after both done threads did."""
+        ended = set()
+        while len(ended) < 2:
+            item = self.trace_q.get()
+            if isinstance(item, str):
+                ended.add(item)
+                continue
+            op_id, start_ns, mark, tr, owned = item
+            if tr is not None and self.trace:
+                try:                            # instrumentation: a failure turns the trace off, not the run
+                    self._write_trace(op_id, start_ns, mark, *tr)
+                except Exception:               # noqa: BLE001
+                    print(f"stage {self.stage} tier trace off:\n{traceback.format_exc()}", flush=True)
+                    self.trace = False
+            if owned is not None:
+                self.mover.release(owned)
 
     def _write_trace(self, op_id: int, start_ns: int, mark, kind: str, t0: int, tr: list):
         """One line per traced op (done thread, after its last copy completed): us from the op's submit start (host)
@@ -440,26 +467,26 @@ class PoolMember:
             return
         if op.tier != "dram" or op.host_tier is not None or op.op not in ("read", "write"):
             raise ValueError(f"tier op {op.op} {op.tier} via {op.host_tier}")
-        # GPU time of the op (TierDone.gpu_ns), from the stream its first copy is on
+        # GPU time of the op (TierDone.gpu_ns, mark_ns), from its start mark on the stream its first copy is on
         owned: list = []
-        mark = self.mover.mark(d, owned)
+        marks: list = []
         tr = [] if self.trace else None
         t0 = time.perf_counter_ns()
         ev, nbytes = self._move(d, self.dram, op, op.slots, op.state_slots, op.block_start, tr=tr, owned=owned,
-                                gate=None if d == "read" or op.urgent else self._yield_to_reads)
+                                gate=None if d == "read" or op.urgent else self._yield_to_reads, marks=marks)
         if tr is not None:
             self._traces[op.op_id] = (op.op, t0, tr)
         if owned:
             self._owned[op.op_id] = owned
-        self.q[d].put((op.op_id, ev, start_ns, nbytes, time.time_ns(), mark))
+        self.q[d].put((op.op_id, ev, start_ns, nbytes, time.time_ns(), marks[0] if marks else None))
 
     def _move(self, d: str, host: HostTier, op: TierMove, slots: list[int], sslots: list[int], block_start: int,
-              ready=None, tr: list | None = None, owned: list | None = None, gate=None):
+              ready=None, tr: list | None = None, owned: list | None = None, gate=None, marks: list | None = None):
         """The op's blocks [b_lo, b_hi) and (if `sslots`) the state between HBM and `host`'s slots (block i in slot
         slots[i - block_start]), "read" host -> HBM or "write" HBM -> host. `ready(i)`: called before the host side of
         blocks below i (None: the state) is read (an SSD read waits for its file reads there). Returns (the last
         copy's event, bytes of HBM pieces moved). `owned`: gets the mover's pooled events the copies took. `gate`: a write's
-        wait before each ring chunk (`Mover.transfer_async`)."""
+        wait before each ring chunk; `marks`: gets the start mark (`Mover.transfer_async`)."""
         P, b_lo, b_hi = self.placement, op.b_lo, op.b_hi
         dev, off, lens = P.pieces(op.kv_blocks, op.state_blocks, list(range(b_hi - b_lo)), [], b_lo, b_hi, b_lo)
         segs = [Segment([host.ptr(s) for s in slots[b_lo - block_start:b_hi - block_start]], P.kv_slot_bytes, dev,
@@ -468,7 +495,7 @@ class PoolMember:
             segs.append(Segment([host.ptr(s) for s in sslots], self.slot_bytes,
                                 *P.pieces(op.kv_blocks, op.state_blocks, [], list(range(len(sslots))), 0, 0, 0)))
         wait = None if ready is None else lambda i, k: ready(b_lo + k if i == 0 else None)
-        return self.mover.transfer_async(d, segs, wait, tr, owned, gate)
+        return self.mover.transfer_async(d, segs, wait, tr, owned, gate, marks)
 
     def _ssd_op(self, op: TierMove, start_ns: int):
         """An SSD op, on this direction's SSD thread: its file I/O on the SSD pool, its copies on the mover."""
@@ -526,10 +553,12 @@ class PoolMember:
         for f in futs:
             f.result()
         owned: list = []
-        ev, _ = self._move("read", host, op, op.host_slots, op.host_state, 0, owned=owned)
+        marks: list = []
+        ev, _ = self._move("read", host, op, op.host_slots, op.host_state, 0, owned=owned, marks=marks)
         if owned:
             self._owned[op.op_id] = owned
-        self.q["read"].put((op.op_id, ev, start_ns, len(futs) * self.slot_bytes, time.time_ns(), None))
+        self.q["read"].put((op.op_id, ev, start_ns, len(futs) * self.slot_bytes, time.time_ns(),
+                            marks[0] if marks else None))
 
     def _report_when_done(self, op: TierMove, futs: list, start_ns: int, nbytes: int, d: str):
         """Report an SSD write, demote or fetch once its last file I/O completed (on the io_uring's thread), without

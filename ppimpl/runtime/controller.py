@@ -667,6 +667,10 @@ class Controller:
                        for x in (done[s] for s in range(self.n))],
             "submit_ms": [round((done[s].submit_ns - done[s].start_ns) / 1e6, 4) for s in range(self.n)],
             "gpu_span_ms": [None if done[s].gpu_ns is None else round(done[s].gpu_ns / 1e6, 4) for s in range(self.n)],
+            "mark_ms": [None if done[s].mark_ns is None else round((done[s].mark_ns - t0) / 1e6, 4)
+                        for s in range(self.n)],
+            "recv_ms": [None if done[s].recv_ns is None else round((done[s].recv_ns - t0) / 1e6, 4)
+                        for s in range(self.n)],
             "bytes": [done[s].nbytes for s in range(self.n)]}) + "\n")
 
     def _own(self, req_id: str):

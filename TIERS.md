@@ -813,6 +813,15 @@ hbm-evictions-exclusive`), k = 1 (one KDA state per entry).
     for the reads queued or in flight when it is due (not later ones) and does not run ahead of its previous chunk;
     writes an HBM eviction waits for (`make_room`: `evict_writes` and the writes in flight) are `urgent` and do not
     wait.
+  - **Reads in order, reports at once** (kvpool/mover.py, member.py): a read holds the read streams from its first
+    ring chunk to its last, so a DRAM read and an SSD read's copy (two threads) do not interleave chunk by chunk and
+    both end late; a gated write takes the write streams per chunk. Its start mark is recorded as its first chunk is
+    submitted, and the done thread sends `TierDone` as soon as the end event completed, with `mark_ns` (when the GPU
+    began the copies, through a per-thread anchor event, `Mover.host_ns`); the trace and the pooled events go to a
+    trace thread after. tier_ops.jsonl `recv_ms` (the receive thread decoded the batch) and `mark_ms` split a read's
+    latency into recv (sent -> decoded: the one receive thread), queue (decoded -> submit start: the submit thread
+    busy with earlier ops), submit, wait (submit start -> mark: the link busy with earlier copies), GPU (mark -> end)
+    and notify (end -> TierDone).
   - **Eviction stays ahead** (the lesson of Fix D, where every eviction waited for its write: blocked_by_write
     44k): each level's write-back keeps the LRU entries holding `reserve` written (`WriteBack.reserve`, replacing the
     0.9 watermark): fixed + dirty <= capacity - reserve, fixed counting the loading area. The reserve is what one

@@ -8,7 +8,8 @@ Two hops (`TierConfig.hops`, default; §2.3: a copy engine writing host data str
 ring of chunks in this GPU's own HBM (one copy per slot, its own PCIe link), then one batch scatters the chunk's
 pieces from the ring to the stages' KV over NVLink. Writes gather into the ring, then copy each slot to host. Each
 direction has its ring (`ring_depth` chunks of `ring_chunk_slots` slots), two streams (host side, NVLink side) and a
-lock; chunk k+1's host copy overlaps chunk k's scatter. A transfer's slots (all its segments in order) are cut into
+lock, which a transfer holds from its first chunk to its last unless it yields per chunk (a write, `gate`): reads
+complete in the order they were submitted, each at the link's rate; chunk k+1's host copy overlaps chunk k's scatter. A transfer's slots (all its segments in order) are cut into
 chunks together, so per chunk there are two batch calls, their pointer arrays sliced from arrays built once per
 transfer. Each ring chunk has two events, recorded again at each use (no event per batch): its first hop done (the
 second hop waits for it) and its second hop done (the next first hop into the chunk waits for it). A transfer takes
@@ -19,6 +20,7 @@ straight between host and the stages' KV (one batch per transfer). Nothing above
 
 from __future__ import annotations
 
+import contextlib
 import ctypes
 import threading
 import time
@@ -27,6 +29,7 @@ from typing import NamedTuple
 import numpy as np
 
 EVENT_POOL = 1024  # pooled CUDA events per mover: an op takes 2 (start mark, end), + 2 per batch with the trace on
+ANCHOR_S = 1.0     # a thread's GPU-to-host clock anchor is taken again after this long (`Mover.host_ns`)
 
 # per direction: (first hop's stream, second hop's stream); the ring sits between them
 HOPS = {"read": ("read", "read_nvl"), "write": ("write_nvl", "write")}
@@ -58,7 +61,11 @@ class Mover:
         self.device, self.cuda, self.sb = device, device.type == "cuda", slot_bytes
         self.ring = None
         self.info = "direct"
-        self._lock = {"read": threading.Lock(), "write": threading.Lock()}   # a direction's ring and streams
+        # a direction's ring and streams: a transfer that does not yield (`gate`) holds it from its first chunk to its
+        # last, so transfers in one direction (a DRAM read and an SSD read's copy) run one after another on the link,
+        # not chunk by chunk interleaved (which would make both end late)
+        self._lock = {"read": threading.RLock(), "write": threading.RLock()}
+        self._anchor = threading.local()
         self._ev_lock = threading.Lock()           # the event pool (taken inside a direction's lock, never around it)
         if self.cuda:
             import torch
@@ -124,15 +131,40 @@ class Mover:
         ev.record(self.streams[HOPS[direction][0] if self.ring is not None else direction])
         return ev
 
+    def host_ns(self, ev) -> int | None:
+        """The host time (time_ns) at which the completed event `ev` ran on the GPU, through this thread's anchor: an
+        event of its own recorded on an idle stream of its own and waited for (so it ran, to the wake-up latency, just
+        before the host read its clock), taken again every ANCHOR_S (clock drift). None on CPU."""
+        if not self.cuda or ev is None:
+            return None
+        a, now = self._anchor, time.monotonic()
+        if getattr(a, "at", None) is None or now - a.at > ANCHOR_S:
+            import torch
+            if getattr(a, "ev", None) is None:
+                a.stream, a.ev = torch.cuda.Stream(self.device), torch.cuda.Event(enable_timing=True)
+            a.ev.record(a.stream)
+            a.ev.synchronize()
+            a.ns, a.at = time.time_ns(), now
+        return a.ns + int(a.ev.elapsed_time(ev) * 1e6)
+
     def transfer_async(self, direction: str, segments: list[Segment], ready=None, tr: list | None = None,
-                       owned: list | None = None, gate=None):
+                       owned: list | None = None, gate=None, marks: list | None = None):
         """"read" host -> HBM or "write" HBM -> host of every segment's pieces. Two hops: the segments' slots, in
         order, are cut into ring chunks; direct: one batch of all pieces. `ready(i, k)`: called before the host side
         of segment i's slots below k is read (an SSD read waits for its file reads there). `tr`: per-batch trace
         (`_batch`). `owned`: gets every pooled event the transfer took (CUDA; `release` them once its last copy
         completed). `gate()`: called before each ring chunk (two hops), after the previous chunk's first hop completed
-        (the host does not run ahead of the copies), e.g. a write yielding to reads. Returns (the transfer's end
-        event, None on CPU or with nothing to move; bytes of HBM pieces)."""
+        (the host does not run ahead of the copies), e.g. a write yielding to reads; without it the transfer holds its
+        direction from its first chunk to its last. `marks`: gets the transfer's start mark (`mark`, recorded as its
+        first chunk is submitted, in the direction). Returns (the transfer's end event, None on CPU or with nothing to
+        move; bytes of HBM pieces)."""
+        with self._lock[direction] if gate is None else contextlib.nullcontext():
+            if marks is not None:
+                with self._lock[direction]:
+                    marks.append(self.mark(direction, owned))
+            return self._transfer(direction, segments, ready, tr, owned, gate)
+
+    def _transfer(self, direction: str, segments: list[Segment], ready, tr: list | None, owned: list | None, gate):
         sb = self.sb
         nslots = [len(s.host_ptrs) for s in segments]
         first = np.cumsum([0] + nslots)            # global slot index of each segment's first slot
