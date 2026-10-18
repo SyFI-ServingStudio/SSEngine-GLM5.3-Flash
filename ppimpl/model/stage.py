@@ -38,7 +38,7 @@ os.environ.setdefault("VLLM_USE_BREAKABLE_CUDAGRAPH", "1")
 
 from ppimpl import kernels  # noqa: E402
 from ppimpl.config import CHECKPOINT  # noqa: E402
-from ppimpl.model import kv_tensors, pp_patch  # noqa: E402
+from ppimpl.model import kv_tensors, pp_patch, sm_h2d  # noqa: E402
 from ppimpl.model.metadata import StageMetadata  # noqa: E402
 
 HIDDEN_WIDTH = 4 * 4096
@@ -612,9 +612,16 @@ class StageModel:
         copies of the first T rows (tests)."""
         e = self.graphs[b.bucket]
         T = b.num_tokens
-        e.rows.copy_(b.graph_rows)
+        # into the static buffers by a kernel (`sm_h2d.kernel_copy_`): a same-GPU copy goes to a copy engine and
+        # waited there behind the tier reads' NVLink scatters (job 8384 nsys: p99 12-32 ms, 1.6-3.7 s per 35 s on
+        # stages 1-3)
+        sm_h2d.kernel_copy_(e.rows, b.graph_rows)
         if not self.first:
-            e.hidden[:T].copy_(hidden_in)
+            dst = e.hidden[:T]
+            if hidden_in.is_contiguous() and hidden_in.dtype == dst.dtype and hidden_in.device == dst.device:
+                sm_h2d.kernel_copy_(dst, hidden_in)
+            else:
+                dst.copy_(hidden_in)
         with self._graph_context(b, e):
             if replay:
                 e.capture.replay()

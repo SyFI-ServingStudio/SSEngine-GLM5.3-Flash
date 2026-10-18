@@ -46,6 +46,29 @@ def _words(t: torch.Tensor) -> torch.Tensor:
     return b
 
 
+def kernel_copy_(dst: torch.Tensor, src: torch.Tensor) -> torch.Tensor:
+    """dst <- src (both contiguous, same byte count; src on dst's device or pinned host memory) by `_copy_kernel` on
+    the current stream: no copy engine. A same-GPU device-to-device copy also goes to a copy engine, where it waits
+    behind the tier reads' NVLink scatters (the graph-row copy before each replay, job 8384: p99 11.6 ms)."""
+    nbytes = src.numel() * src.element_size()
+    assert src.is_contiguous() and dst.is_contiguous() and nbytes == dst.numel() * dst.element_size(), \
+        (src.shape, src.dtype, dst.shape, dst.dtype)
+    if nbytes == 0:
+        return dst
+    s, d = _words(src), _words(dst)
+    if s.dtype != d.dtype:                     # alignments differ: copy bytes
+        s, d = s.view(torch.uint8), d.view(torch.uint8)
+    n = s.numel()
+    full = n // BLOCK
+    with torch.cuda.device(dst.device):
+        if full:
+            _copy_kernel[(full,)](s, d, n, BLOCK=BLOCK, MASK=False, num_warps=4)
+        if n > full * BLOCK:
+            k = full * BLOCK
+            _copy_kernel[(1,)](s[k:], d[k:], n - k, BLOCK=BLOCK, MASK=True, num_warps=4)
+    return dst
+
+
 class SmH2D:
     """Kernel copies from pinned host tensors to device tensors on the current stream of `device`."""
 
@@ -64,21 +87,8 @@ class SmH2D:
         `src` is kept alive until the copy has run; like a non-blocking copy, the caller must not change it before."""
         assert src.is_pinned() and src.is_contiguous() and dst.is_contiguous() and dst.device == self.device, \
             (src.is_pinned(), src.is_contiguous(), dst.is_contiguous(), dst.device)
-        nbytes = src.numel() * src.element_size()
-        assert nbytes == dst.numel() * dst.element_size(), (nbytes, dst.shape, dst.dtype)
-        if nbytes == 0:
-            return dst
-        s, d = _words(src), _words(dst)
-        if s.dtype != d.dtype:                     # alignments differ: copy bytes
-            s, d = s.view(torch.uint8), d.view(torch.uint8)
-        n = s.numel()
-        full = n // BLOCK
+        kernel_copy_(dst, src)
         with torch.cuda.device(self.device):
-            if full:
-                _copy_kernel[(full,)](s, d, n, BLOCK=BLOCK, MASK=False, num_warps=4)
-            if n > full * BLOCK:
-                k = full * BLOCK
-                _copy_kernel[(1,)](s[k:], d[k:], n - k, BLOCK=BLOCK, MASK=True, num_warps=4)
             self._release()
             ev = self._free.pop() if self._free else torch.cuda.Event()
             ev.record()
