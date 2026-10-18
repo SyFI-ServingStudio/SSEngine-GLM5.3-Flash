@@ -48,6 +48,7 @@ from ppimpl.kvpool.mover import EVENT_POOL, Mover, Segment
 from ppimpl.kvpool.placement import BalancedPlacement
 from ppimpl.runtime.transport import Shutdown, TierDone, TierMove, WorkerError, decode_tier, encode
 
+TRACE_EVERY = 8                          # the per-batch trace: 1 DRAM op in this many (PPIMPL_TIER_TRACE)
 PROBE_S, PROBE_LATE_S = 0.005, 0.020   # the GIL / CPU probe (`PoolMember._probe_loop`, with the trace)
 FAKE_BLOCK_BYTES = 8576 * 5996  # one block over all stages (GLM-5.3 PP4: 4 x 1,499 B/token); a GPU's slot is 1/n of
                                 # it rounded up to 4 KiB (PP4: 12,857,344 B, the real balanced slot, TIERS.md §3)
@@ -111,9 +112,13 @@ class PoolMember:
         self._touch_cpus = touch_cpus
         self.touch_wait_s = 0.0
         self.device, self.cuda = device, device.type == "cuda"
-        # PPIMPL_TIER_TRACE=0 turns off the per-batch trace of DRAM ops (tier_trace_s<stage>.jsonl in the run dir: host
-        # time before / in each batch call, the calling thread's CPU time in it, each batch's GPU start / end)
-        self.trace = self.cuda and os.environ.get("PPIMPL_TIER_TRACE", "1") != "0"
+        # PPIMPL_TIER_TRACE=N: the per-batch trace of every N-th DRAM op (tier_trace_s<stage>.jsonl in the run dir:
+        # host time before / in each batch call, the calling thread's CPU time in it, each batch's GPU start / end);
+        # 0 off. A traced batch records two timing events no copy waits for (and the trace thread reads them), so by
+        # default 1 op in TRACE_EVERY is traced, enough for the per-op and per-batch distributions
+        every = int(os.environ.get("PPIMPL_TIER_TRACE", str(TRACE_EVERY)))
+        self.trace = self.cuda and every > 0
+        self.trace_every = max(every, 1)
         self._traces: dict[int, tuple] = {}
         self._owned: dict[int, list] = {}          # op id -> the mover's pooled events it took (released when done)
         self._trace_log = None
@@ -472,7 +477,7 @@ class PoolMember:
         # GPU time of the op (TierDone.gpu_ns, mark_ns), from its start mark on the stream its first copy is on
         owned: list = []
         marks: list = []
-        tr = [] if self.trace else None
+        tr = [] if self.trace and op.op_id % self.trace_every == 0 else None
         t0 = time.perf_counter_ns()
         with nvtx_range(f"tier {op.op} {op.op_id}"):
             ev, nbytes = self._move(d, self.dram, op, op.slots, op.state_slots, op.block_start, tr=tr, owned=owned,

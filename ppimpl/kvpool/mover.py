@@ -149,8 +149,9 @@ class Mover:
                 self.info = (f"two hops: ring 2 x {self.depth} x {self.chunk} slots = {2 * half / 1e9:.3f} GB "
                              f"of {free / 1e9:.2f} GB free HBM after the model and KV pool")
                 # per direction and ring chunk: (first hop done, second hop done)
-                self._chunk_ev = {d: [(torch.cuda.Event(), torch.cuda.Event()) for _ in range(self.depth)]
-                                  for d in HOPS}
+                # (blocking: a gated write's host waits for its previous chunk's first hop on that chunk's event)
+                self._chunk_ev = {d: [(torch.cuda.Event(blocking=True), torch.cuda.Event(blocking=True))
+                                      for _ in range(self.depth)] for d in HOPS}
                 self._made([e for evs in self._chunk_ev.values() for pair in evs for e in pair])
             else:
                 self.ring = np.zeros(2 * half + 4096, dtype=np.uint8)
@@ -278,15 +279,14 @@ class Mover:
                 rp, dp, lp = rbase + prel[lo:hi][peer], dev[lo:hi][peer], lens[lo:hi][peer]   # via the ring
                 hr, rr, lr = _runs(hpiece[lo:hi][peer], rp, lp, gslot[lo:hi][peer])   # host side, runs per slot
                 hl, dl, ll = hpiece[lo:hi][loc], dev[lo:hi][loc], lens[lo:hi][loc]          # straight
-                if gate is not None and self.cuda:
-                    prev = self.event(owned)
                 if direction == "read":            # host -> ring and own pieces (PCIe), then ring -> the peers (NVLink)
                     self._batch(s1, np.r_[hr, hl], np.r_[rr, dl], np.r_[lr, ll], ev2, ev1, tr, owned)
                     self._batch(s2, rp, dp, lp, ev1, ev2, tr, owned)
                 else:                              # the peers -> ring, then ring and own pieces -> host
                     self._batch(s1, dp, rp, lp, ev2, ev1, tr, owned)
-                    if prev is not None:
-                        self.drv.record(prev, self._st[s1])
+                    if gate is not None:
+                        prev = ev1                 # its first hop done (recorded again depth chunks on, or by
+                                                   # another write in between: a wait for that chunk too)
                     self._batch(s2, np.r_[rr, dl], np.r_[hr, hl], np.r_[lr, ll], ev1, ev2, tr, owned)
                 if b == n:
                     end = self._end(s2, owned)
