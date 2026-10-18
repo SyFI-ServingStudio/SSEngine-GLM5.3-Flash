@@ -31,7 +31,7 @@ VICTIM_SETTINGS = {"full": ("full_d50", 100.18, None, 50.0),
                    "tiers": ("h20_d20", 20.0, 12_220_800, 20.0),
                    "ssd_heavy": ("h12p5_d12p5", 12.5, 7_632_640, 12.5)}
 VICTIM_TARGETS = Path(os.environ.get("PPIMPL_VICTIM_TARGETS") or "/raid/kanzhu/ServingStudio/wt-pp-dram-victim/logs/"
-                      "20261017_5_victim_tier_sizes/rows.jsonl")
+                      "20261017_7_victim_chain/rows.jsonl")
 
 
 def victim_target(setting: str, n: int, rows: Path = VICTIM_TARGETS) -> dict | None:
