@@ -115,4 +115,7 @@ $PY -m bench.vllm_dpep_summary "$RD" || true
 [ -f "$RD/INVALID.txt" ] && echo "== run invalid: $(cat "$RD/INVALID.txt")"
 uptime
 echo "== done $(date -Is)"
+[ -f "$RD/INVALID.txt" ] && exit 4
+(( rc == 0 || rc == 124 )) || exit $rc        # 124: the client stopped by its timeout, the normal end
+exit 0
 }
