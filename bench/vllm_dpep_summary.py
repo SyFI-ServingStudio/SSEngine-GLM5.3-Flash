@@ -8,6 +8,7 @@ local prefix cache and connector (CPU offload) hits, preemptions, offload transf
 
 from __future__ import annotations
 
+import csv
 import json
 import re
 import sys
@@ -17,6 +18,7 @@ from pathlib import Path
 
 from bench.prefix import real_arrays, window_metrics
 
+TRACE = Path("/raid/kanzhu/ServingStudio/wt-pp-hitrule/doc/handoff/glm53_flash_pp4_b200_v2/data/sessions_2ps.csv")
 LINE = re.compile(r'^([a-zA-Z_:][a-zA-Z0-9_:]*)(\{[^}]*\})?\s+([-+0-9.eEinfNa]+)$')
 
 
@@ -60,6 +62,42 @@ def counters(run: Path) -> dict:
     return {"from_s": t, "to": "end", "delta": {k: v for k, v in delta.items() if v}, "peak_sum_over_engines": peaks}
 
 
+def inside_rounds(run: Path, trace: Path = TRACE) -> dict:
+    """Rounds arriving in minutes 10-20 (successful, first token < 20 min) split into "inside" rounds (round > 0 whose
+    declared 0 < prefix_len < the previous round's prefix + input + output: a context cutoff, resumable only from a
+    state inside the old context) and the rest ("extending"; includes prefix 0). Per class: rounds, prefix tokens,
+    tokens the server hit (cached_prompt_tokens), new tokens (input_len) and recompute = prompt - cached - new;
+    recompute shares are over all new tokens."""
+    ctx = {(r["session_id"], int(r["round_idx"])): int(r["prefix_len"]) + int(r["input_len"]) + int(r["output_len"])
+           for r in csv.DictReader(trace.open())}
+    recs = [json.loads(x) for x in (run / "requests.jsonl").read_text().splitlines()]
+    t0 = min(r["outcome"]["submit_timestamp"] for r in recs)
+    out = {k: {"rounds": 0, "prefix_tokens": 0, "hit_tokens": 0, "new_tokens": 0, "recompute_tokens": 0}
+           for k in ("inside", "extending")}
+    inside_hit_rounds = 0
+    for r in recs:
+        o, d = r["outcome"], r["source"]["data"]
+        if not (600e3 <= (o["submit_timestamp"] - t0) * 1e3 < 1200e3 and str(o.get("status")).upper() == "SUCCESS"
+                and o.get("first_token_id_ms") is not None
+                and (o["post_timestamp"] - t0) * 1e3 + o["first_token_id_ms"] < 1200e3):
+            continue
+        u = o.get("server_usage") or {}
+        k, p, c = int(d["round_idx"]), d.get("prefix_len") or 0, u.get("cached_prompt_tokens") or 0
+        cls = "inside" if k > 0 and 0 < p < ctx[(str(d["session_id"]), k - 1)] else "extending"
+        inside_hit_rounds += cls == "inside" and c > 0
+        b = out[cls]
+        b["rounds"] += 1
+        b["prefix_tokens"] += p
+        b["hit_tokens"] += c
+        b["new_tokens"] += d["input_len"]
+        b["recompute_tokens"] += (u.get("prompt_tokens") or 0) - c - d["input_len"]
+    new = sum(b["new_tokens"] for b in out.values())
+    return {**out, "inside_rounds_with_hit": inside_hit_rounds,
+            "recompute_over_new": sum(b["recompute_tokens"] for b in out.values()) / max(new, 1),
+            "inside_recompute_over_new": out["inside"]["recompute_tokens"] / max(new, 1),
+            "extending_recompute_over_new": out["extending"]["recompute_tokens"] / max(new, 1)}
+
+
 def main(run: Path) -> dict:
     rows = real_arrays(run / "requests.jsonl")
     arr = rows[0]
@@ -73,7 +111,8 @@ def main(run: Path) -> dict:
         sent += 1
         failed += str(o.get("status")).upper() != "SUCCESS"
     out = {"run": run.name, "metrics_0_20": json.loads((run / "metrics.json").read_text()),
-           "metrics_arrival_10_20": m1020, "rounds_sent": sent, "rounds_failed": failed, "prom": counters(run)}
+           "metrics_arrival_10_20": m1020, "rounds_sent": sent, "rounds_failed": failed, "inside_rounds": inside_rounds(run),
+           "prom": counters(run)}
     (run / "dpep_summary.json").write_text(json.dumps(out, indent=1))
     return out
 

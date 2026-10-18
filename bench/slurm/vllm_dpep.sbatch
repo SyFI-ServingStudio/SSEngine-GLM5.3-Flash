@@ -20,7 +20,12 @@ export CUDA_DEVICE_ORDER=PCI_BUS_ID PATH=/usr/bin:$PATH   # /usr/bin/ninja first
 export HF_HOME=/raid/hf
 CKPT=/raid/hf/hub/models--nvidia--GLM-5.3-Flash-NVFP4/snapshots/da920bb0b9f4a06727223a349e55468e38352348
 H=/raid/kanzhu/ServingStudio/wt-pp-hitrule/doc/handoff/glm53_flash_pp4_b200_v2/data
-CLIENT=$MAIN/lanes/m6-staged-run/build/req-frontend/release/session_runner   # the M6 runs' binary (8723d90)
+# The M6 runs' req-frontend (8723d90) with one change, bench/vllm_dpep_client_preflight.patch: the prefix-cache
+# preflight probe is 32768 tokens, not 8192. vLLM's hybrid KV for this model at TP1 has an 8576-token block (attention
+# page padded to the KDA state page), so an 8192-token probe can never hit and the unpatched client refuses to start
+# (job 8191). The workload path is unchanged. Build: clone third_party/req-frontend at 8723d90, apply the patch,
+# cargo build --release --features runtime --bin session_runner (CARGO_TARGET_DIR below).
+CLIENT=${CLIENT:-$MAIN/tmp/vllm_dpep_client/build/release/session_runner}
 N=${N:?N (client max concurrency)}
 OFF=${OFFLOAD_GB:-}
 TAG=$([ -n "$OFF" ] && echo "off${OFF}" || echo hbm)
@@ -92,6 +97,7 @@ CMD=(timeout "$CT" "$CLIENT" --trace "$H/sessions_2ps.csv" --input-file-format t
      --log-path "$RD/requests.jsonl" --summary-path "$RD/summary.json" --timeline-path "$RD/timeline.parquet"
      --max-concurrency "$N" --max-model-len 1048576)
 echo "${CMD[*]}" > "$RD/client_command.txt"
+sha256sum "$CLIENT" >> "$RD/client_command.txt"
 C0=$(date +%s)
 "${CMD[@]}" > "$RD/client.log" 2>&1 &
 CL=$!
