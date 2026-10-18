@@ -35,7 +35,7 @@ import torch
 
 from ppimpl.model import kda_conv, kv_tensors, sm_h2d
 from ppimpl.model.pp_patch import (KPOOL_HEADS, TOPK_SEGMENTS, KdaPrefillMeta, KpoolHeads, kpool_heads_all,
-                                   kpool_heads_suffix, make_kda_plan)
+                                   kpool_heads_suffix, make_kda_plan_host)
 
 DECODE_THRESHOLD = 256
 KERNEL_BLOCK = 64
@@ -151,7 +151,7 @@ class StageMetadata:
         self.num_kda_heads = num_kda_heads
         self._plans: collections.OrderedDict = collections.OrderedDict()
         self.h2d = sm_h2d.for_device(device)
-        self._side = torch.cuda.Stream(device)
+        self._sms = torch.cuda.get_device_properties(device).multi_processor_count
 
     def table_width(self, blocks: int) -> int:
         """The g0 table width (kernel blocks) for a microbatch whose longest request spans `blocks` blocks: the next
@@ -163,18 +163,18 @@ class StageMetadata:
             w = min(w, self.table_cap)
         return w
 
-    # -- KDA work plan (FlashInfer persistent KDA): built once per distinct sequence offsets, on a side stream so
-    #    its small synchronous H2D copies never wait for queued compute.
+    # -- KDA work plan (FlashInfer persistent KDA `make_plan`): its schedule is built on the host once per distinct
+    #    sequence offsets and its int32 arrays travel in the microbatch's Pack (FlashInfer's own make_plan copies 7
+    #    pageable tensors and the caller synchronized: those copies queued behind tier reads on the copy engine,
+    #    job 8367); the device scratch (handoff state, flags) is kept with the cached schedule.
     def _kda_plan(self, offsets: tuple[int, ...]):
+        """(host plan of `make_kda_plan_host`, device handoff state, device flags), cached per offsets."""
         plan = self._plans.get(offsets)
         if plan is None:
-            with torch.cuda.stream(self._side):
-                plan = make_kda_plan(list(offsets), self.num_kda_heads, self.device)
-            self._side.synchronize()
-            compute = torch.cuda.current_stream(self.device)
-            for t in plan:
-                if isinstance(t, torch.Tensor):
-                    t.record_stream(compute)
+            arrays, G, nbuf, has_split, full = make_kda_plan_host(list(offsets), self.num_kda_heads, self._sms)
+            mid = torch.empty(max(nbuf, 1), 128, 128, dtype=torch.float32, device=self.device)
+            flags = torch.zeros(max(nbuf, 1), dtype=torch.int32, device=self.device)
+            plan = (arrays, G, mid, flags, has_split, full)
             self._plans[offsets] = plan
             if len(self._plans) > 512:
                 self._plans.popitem(last=False)
@@ -235,6 +235,9 @@ class StageMetadata:
         h_graph = None if bucket is None else pk.add(graph_rows(positions, slots, tok, bucket), torch.int64)
         row_end = {i: int(qsl[r + 1]) - 1 for r, i in enumerate(order)}
         h_last = pk.add([row_end[i] for i, c in enumerate(chunks) if c.is_last], torch.int64)
+        # KDA work plan: host schedule (cached), arrays staged with the rest
+        kda_host = self._kda_plan(tuple(int(v) for v in qsl))
+        h_plan = [pk.add(x, torch.int32) for x in kda_host[0]]
         # kpool pools a chunk starts inside (pp_patch "kpool indexer": prefix hits, odd chunk ends), for every
         # request, staged with the rest; the indexer's prefill requests are cut out once its metadata is built
         hk, hk_req = (kpool_heads_all(starts, q_lens, qsl[:-1], tail_table[:, 0], self.kpool) if self.kpool > 1
@@ -279,8 +282,8 @@ class StageMetadata:
                     KPOOL_HEADS[md.slot_mapping[int(md.num_decode_tokens):].data_ptr()] = heads[nd]
 
         # KDA: one meta per state group (the sequences and plan are shared, the state blocks differ)
-        offsets = tuple(int(v) for v in qsl)
-        kda_plan = self._kda_plan(offsets)
+        _, G, mid, flags, has_split, full = kda_host
+        kda_plan = (*(pk.dev(h) for h in h_plan), G, mid, flags, has_split, full)
         for g, names in enumerate(self.kv.kda_groups):
             meta = KdaPrefillMeta(
                 num_tokens=T, seqs=kda_seqs[g], slots=pk.dev(h_kda[g]), plan=kda_plan,

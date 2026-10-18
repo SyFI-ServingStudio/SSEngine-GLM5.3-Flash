@@ -68,3 +68,26 @@ def test_installed_plan_equals_python_plan(monkeypatch):
             assert torch.equal(a, b) if isinstance(a, torch.Tensor) else a == b
         splits += w[7] > 0
     assert splits >= 10
+
+
+def test_host_plan_equals_flashinfer_make_plan(monkeypatch):
+    """pp_patch `make_kda_plan_host` (the schedule StageMetadata stages in its Pack) equals FlashInfer's `make_plan`
+    (device tensors) array for array, with the same G, scratch sizes, has_split and full_chunks."""
+    from ppimpl.model.pp_patch import make_kda_plan_host
+
+    monkeypatch.setattr(fw, "_sm_count", lambda dev: SMS)
+    rng = random.Random(1)
+    split = 0
+    for _ in range(200):
+        lens = microbatch(rng)
+        offsets = [0]
+        for n in lens:
+            offsets.append(offsets[-1] + n)
+        want = fw.make_plan(offsets, H, torch.device("cpu"))
+        arrays, G, nbuf, has_split, full = make_kda_plan_host(offsets, H, SMS)
+        for a, w in zip(arrays, want[:7]):
+            assert a.dtype.name == "int32" and a.tolist() == w.tolist()
+        assert (G, has_split, full) == (want[7], want[10], want[11])
+        assert max(nbuf, 1) == want[8].shape[0] == want[9].shape[0]
+        split += has_split
+    assert split > 0

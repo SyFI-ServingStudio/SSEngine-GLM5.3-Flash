@@ -46,6 +46,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
 import torch
 from torch import nn
 
@@ -195,10 +196,19 @@ class KdaPrefillMeta:
     inits: torch.Tensor          # int32 [N] has initial state, on device
 
 
-def make_kda_plan(offsets: list[int], num_heads: int, device: torch.device) -> tuple:
-    from flashinfer.kda_kernels.persistent.forward import make_plan
+def make_kda_plan_host(offsets: list[int], num_heads: int, num_sms: int) -> tuple:
+    """FlashInfer persistent KDA `make_plan`'s schedule, on the host: ((cu32, soff, schain, spt0, sptn, ssrc, sdst)
+    as int32 numpy arrays, G, nbuf, has_split, full_chunks). The plan `fwd` takes is these arrays on the device,
+    then G, an FP32 [max(nbuf, 1), 128, 128] handoff buffer, int32 [max(nbuf, 1)] flags, has_split, full_chunks
+    (`make_plan` builds the same tuple with device tensors; tests/test_kda_schedule_cpu.py)."""
+    from flashinfer.kda_kernels.persistent import forward as fw
 
-    return make_plan(offsets, num_heads, device)
+    lens = [end - start for start, end in zip(offsets, offsets[1:])]
+    soff, schain, spt0, sptn, ssrc, sdst, G, nbuf = fw._piece_schedule(lens, num_heads, num_sms,
+                                                                      torch.device("cpu"))
+    arrays = tuple(np.asarray(x, dtype=np.int32) for x in
+                   (offsets, soff.numpy(), schain.numpy(), spt0.numpy(), sptn.numpy(), ssrc.numpy(), sdst.numpy()))
+    return arrays, G, nbuf, nbuf > 0, all(n % fw.C_TOK == 0 for n in lens)
 
 
 def kda_prefill_forward(self, qkv_proj_states, g1, beta, core_attn_out) -> None:
