@@ -45,6 +45,7 @@ POLICY=${POLICY:-cache_aware}
 MNBT=${MNBT:-32768}
 TAG=$([ -n "$OFF" ] && echo "off${OFF}" || echo hbm)
 [ "$POLICY" != none ] && TAG=${TAG}_${POLICY}
+[ "$MNBT" != 32768 ] && TAG=${TAG}_mnbt${MNBT}
 [ -n "${SMOKE:-}" ] && TAG=smoke_$TAG
 RUN=${RUN:-${TAG}_n${N}}_$JOB
 RD=${OUT:-$MAIN/measured/vllm_dpep}/$RUN
