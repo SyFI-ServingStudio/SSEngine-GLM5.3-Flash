@@ -97,3 +97,33 @@ movers issue for the same transfer, and bytes end to end.
 `.venv/bin/maturin develop --release -m ppimpl/native/tier_rs/Cargo.toml` with `VIRTUAL_ENV=<pp-impl>/.venv`
 (see `ppimpl/native/tier_rs/README` comment in Cargo.toml). libcuda is loaded at run time (dlopen), so the module
 imports on CPU-only hosts; zmq is the vendored libzmq (no system libzmq here).
+
+## What the Python engine puts on the GIL today (stage 0, minutes 10-20)
+
+Rates from job 8356 (combo tree, `tier_ops.jsonl`: 32 DRAM reads, 33 DRAM writes, 20 SSD fetches, 21 demotes per s
+per worker) with the call counts of the 78d94af mover per op; the nsys count of 8349 (27 s window, before the GIL
+fixes) in brackets. Every line runs Python bytecode on a tier thread, so it needs the GIL whether or not the C call
+inside releases it; "releases" marks the calls that also hand the GIL over and take it back.
+
+| Tier-thread work | Thread | Per s | GIL |
+|---|---|---|---|
+| op submit: `placement.pieces`, `_transfer` numpy (segments, chunks, runs), per DRAM op 1.96 ms p50 | submit r/w | 65 ops, **180 ms of host time per s** | held throughout, except inside the batch calls |
+| `cuMemcpyBatchAsync` (ctypes CFUNCTYPE) | submit, SSD, copy | ~800 [480] | releases |
+| `cuEventRecord` (PyDLL since 14bf48b) | submit, done | ~1,100 [1,600] | held (was: releases) |
+| `cuStreamWaitEvent` (PyDLL since 14bf48b) | submit | ~800 [480] | held (was: releases) |
+| `cuEventElapsedTime` (driver, since ab0099a; torch `elapsed_time` before: 2 queries each) | done, trace | ~330 [2,000 queries] | held |
+| event `synchronize` (torch) | done, SSD write, gated write | ~65 + one per gated chunk | releases (blocks) |
+| `queue.Queue` put / get between recv, submit, SSD, copy, done, trace | all | ~400 | each get wakes a thread: GIL taken |
+| zmq PULL poll (200 ms) / recv + msgspec decode | recv | 5 + ~50 | releases in poll / recv |
+| zmq PUSH `TierDone` + msgspec encode | done | ~110 | releases in send |
+| io_uring: per slot request (`Future`, piece list, `eventfd_write`), `submit_and_wait`, per completion `set_result` and the op's callback | SSD r/w, uring | ~600 slot requests | wait releases; the rest held |
+| per-batch trace (1 op in 8): 2 extra records per batch, json line | submit, trace | ~50 records, ~8 lines | held |
+| probe (trace on): wake every 5 ms | probe | 200 | taken each wake |
+
+Measured effect: stage 0's main thread waited for the GIL 10.8 / 6.5 / 2.6 ms of 27.4 / 20.3 / 10.9 ms per prepare
+(8349 windows), 13.4 of 35.7 ms in 8350 (HBM-only 0.08 of 8.0), in waits of 20-30 us p50: ping-pong with the threads
+above, not the 5 ms switch interval. The PyDLL / fewer-records fixes (8358) remove the hand-overs of the record and
+wait calls but not the ~180 ms/s of submit-thread bytecode and numpy nor the per-op queue and io_uring wake-ups.
+
+With `engine = "rust"` none of these rows runs Python: the only tier-related Python left in the worker process is the
+probe thread (with the trace on) and `Engine.close()` at exit.
