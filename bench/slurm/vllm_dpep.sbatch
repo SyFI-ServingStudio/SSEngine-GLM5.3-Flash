@@ -44,7 +44,11 @@ echo "== PSI $(head -2 /proc/pressure/memory | tr '\n' ' '); /dev/shm $(df -h /d
 ARGS=(serve "$CKPT" --served-model-name glm53-flash-pp4 --host 127.0.0.1 --port $P
       --data-parallel-size 4 --tensor-parallel-size 1 --enable-expert-parallel --data-parallel-rpc-port $((P + 10))
       --kv-cache-dtype fp8_e4m3 --enable-prefix-caching --mamba-cache-mode align
-      --max-model-len 1048576 --language-model-only --tokens-only --enable-prompt-tokens-details)
+      --max-model-len 1048576 --language-model-only --tokens-only --enable-prompt-tokens-details
+      --max-num-seqs 1016)
+# --max-num-seqs 1016, not the default 1024: the fork's KDA decode kernel (fused_recurrent_kda) launches grid
+# z = seqs x 64 KDA heads (TP1), and 1024 x 64 = 65536 exceeds CUDA's 65535 limit (job 8189: Triton "invalid argument"
+# during the CUDA-graph memory profile at capture size 1024). 1016 is the largest multiple of 8 below 1024.
 [ -n "$OFF" ] && ARGS+=(--kv-offloading-size "$(python3 -c "print(round($OFF * 1e9 / 2**30, 4))")"
                         --kv-offloading-backend native)
 ARGS+=(${VLLM_EXTRA:-})
