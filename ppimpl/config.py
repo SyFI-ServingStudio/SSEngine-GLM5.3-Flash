@@ -117,7 +117,7 @@ class RunConfig(msgspec.Struct, forbid_unknown_fields=True):
     intake_procs: int = 16            # HTTP in N intake processes on the port (SO_REUSEPORT) that parse requests and
                                       # pass them on over zmq (ppimpl/serve/intake.py); 0: HTTP in the controller.
                                       # 16: first TTFT at 8k 0.25 s vs 0.42 s with 4 (measured/runs_intake)
-    profile_mbs: list[int] | None = None  # [a, b): cudaProfilerStart at mb a, Stop after mb b-1 (bench/run.py --nsys)
+    profile_mbs: list[int] | None = None  # [a, b, ...]: profiler start at mb a, stop after b-1, per pair (run.py --nsys)
     keep_sessions: bool = False       # phase B: exact prefix cache (kept sessions, LRU eviction of whole sessions)
     hold_requests: int = 0            # form no microbatch before this many requests have arrived (6_scheduler.md §6:
                                       # the scheduling check's 26 requests at t = 0 are all queued before the first)

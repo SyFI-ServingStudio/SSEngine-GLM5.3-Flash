@@ -110,17 +110,19 @@ class RunAhead:
 
 
 class ProfileWindow:
-    """cudaProfilerStart/Stop around microbatches [a, b), for `nsys --capture-range=cudaProfilerApi`."""
+    """cudaProfilerStart/Stop around microbatches [a, b), for `nsys --capture-range=cudaProfilerApi`; several windows
+    as a flat list [a1, b1, a2, b2, ...] (nsys `--capture-range-end=repeat`, one report per window)."""
 
     def __init__(self, mbs: list[int] | None):
-        self.a, self.b = mbs if mbs else (None, None)
+        mbs = mbs or []
+        self.starts, self.stops = set(mbs[0::2]), {b - 1 for b in mbs[1::2]}
 
     def before(self, mb_id: int):
-        if mb_id == self.a:
+        if mb_id in self.starts:
             torch.cuda.profiler.start()
 
     def after(self, mb_id: int):
-        if self.b is not None and mb_id == self.b - 1:
+        if mb_id in self.stops:
             torch.cuda.profiler.stop()
 
 

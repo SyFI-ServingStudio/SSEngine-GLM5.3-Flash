@@ -2,7 +2,7 @@
 
   python -m bench.run one_8k saturated_8k [--fake] --time 00:20:00 [--partition main]   submit one Slurm job
   python -m bench.run one_8k --fake --inline                                                 run here (no Slurm)
-  ... --nsys [--nsys-mbs a:b|all]     the server under Nsight Systems -> trace.nsys-rep, trace.sqlite, trace.json
+  ... --nsys [--nsys-mbs a:b[,c:d]|all]     the server under Nsight Systems -> trace.nsys-rep, trace.sqlite, trace.json
 
 Names: one_<L>, saturated_<L> (4_iteration.md), L in 1k..128k; tier_bringup (7_offloading.md, pool 1,234,944 tokens;
 tiers from --dram-gb/--ssd-gb); prefix_bringup and prefix_n<N> (5_prefix_cache.md,
@@ -247,13 +247,15 @@ def stop(proc: subprocess.Popen, port: int, timeout_s: float = 90):
             proc.wait()
 
 
-def nsys_prefix(run_dir: Path, window: bool) -> list[str]:
+def nsys_prefix(run_dir: Path, window: int) -> list[str]:
     """Nsight Systems around the server; it follows the worker processes it spawns. With `window`, collection runs
-    only between the workers' cudaProfilerStart/Stop (server config `profile_mbs`)."""
+    only between the workers' cudaProfilerStart/Stop (server config `profile_mbs`), `window` ranges (one report each:
+    trace.nsys-rep, then nsys numbers the next ones)."""
     argv = [NSYS, "profile", "-o", str(run_dir / "trace"), "--force-overwrite", "true", "-t", "cuda,nvtx,osrt",
             "--cuda-graph-trace=node", "--sample=none", "--cpuctxsw=none"]
     if window:
-        argv += ["--capture-range=cudaProfilerApi", "--capture-range-end=stop"]
+        argv += ["--capture-range=cudaProfilerApi",
+                 "--capture-range-end=stop" if window == 1 else f"--capture-range-end=repeat:{window}"]
     return argv
 
 
@@ -309,7 +311,7 @@ def execute(run_dir: Path, server_cfg: dict, client_cfg: dict, *, port: int, met
 
     serve = [PYTHON, "-m", "ppimpl", "serve", "--config", str(run_dir / "server.yaml")]
     if nsys:
-        serve = nsys_prefix(run_dir, server_cfg.get("profile_mbs") is not None) + serve
+        serve = nsys_prefix(run_dir, len(server_cfg.get("profile_mbs") or []) // 2) + serve
         meta["nsys"] = {"command": shlex.join(serve), "profile_mbs": server_cfg.get("profile_mbs")}
     with open(run_dir / "server.log", "w") as slog:
         server = subprocess.Popen(step(serve, gpus), cwd=ROOT, stdout=slog, stderr=subprocess.STDOUT)
@@ -336,9 +338,10 @@ def execute(run_dir: Path, server_cfg: dict, client_cfg: dict, *, port: int, met
             else server.returncode
     if nsys and (run_dir / "trace.nsys-rep").exists():
         t = time.time()
-        subprocess.run([NSYS, "export", "--type", "sqlite", "--force-overwrite", "true", "-o",
-                        str(run_dir / "trace.sqlite"), str(run_dir / "trace.nsys-rep")],
-                       stdout=subprocess.DEVNULL, stderr=open(run_dir / "nsys_export.log", "w"), check=False)
+        for rep in sorted(run_dir.glob("trace*.nsys-rep")):        # one report per capture window
+            subprocess.run([NSYS, "export", "--type", "sqlite", "--force-overwrite", "true", "-o",
+                            str(rep.with_suffix(".sqlite")), str(rep)],
+                           stdout=subprocess.DEVNULL, stderr=open(run_dir / "nsys_export.log", "a"), check=False)
         tr = subprocess.run([PYTHON, "-m", "bench.nsys_trace", str(run_dir)], cwd=ROOT, capture_output=True,
                             text=True)
         (run_dir / "trace.log").write_text(tr.stdout + tr.stderr)
@@ -499,7 +502,7 @@ def run_named(name: str, fake: bool, port: int, out_root: Path, args) -> dict:
     if args.cpu:
         extra["fake"] = {**extra.get("fake", {}), "hidden_width": 64}
     if args.nsys and args.nsys_mbs and args.nsys_mbs != "all":
-        extra["profile_mbs"] = [int(x) for x in args.nsys_mbs.split(":")]
+        extra["profile_mbs"] = [int(x) for w in args.nsys_mbs.split(",") for x in w.split(":")]   # a:b[,c:d...]
     if args.pool_tokens or (kind == "tier_bringup" and args.pool_tokens is None):   # 0: the full pool
         extra["pool_tokens"] = args.pool_tokens or TIER_BRINGUP_POOL
     if args.dram_gb is not None or args.ssd_gb is not None:   # lanes/m6 TIERS.md; SSD files in $PPIMPL_SSD_DIR
@@ -599,7 +602,8 @@ def main():
                     help="stop the client after this many s (prefix/session runs: at least 25 min); a run stopped "
                          "this way fails (fail_fast in run.json, exit 1)")
     ap.add_argument("--nsys", action="store_true", help="run the server under Nsight Systems (bench/nsys_trace.py parses it)")
-    ap.add_argument("--nsys-mbs", help="microbatches to trace, a:b or all (default: one-request all, saturated the "
+    ap.add_argument("--nsys-mbs", help="microbatches to trace, a:b[,c:d...] (a report per window) or all (default: "
+                    "one-request all, saturated the "
                     "middle 80%% of the expected microbatches)")
     ap.add_argument("--out-root", help="runs root (default measured/runs, or measured/runs/fake[_cpu])")
     ap.add_argument("--cpu", action="store_true", help="with --fake --inline: stages on CPU (gloo), to check the harness")
