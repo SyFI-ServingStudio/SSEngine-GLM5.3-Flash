@@ -16,6 +16,7 @@ import sys
 import threading
 import time
 import traceback
+from collections import deque
 from pathlib import Path
 
 import torch
@@ -66,6 +67,46 @@ class Clock:
             return mark
         ev, host_ns = anchor
         return host_ns + int(ev.elapsed_time(mark) * 1e6)
+
+
+class RunAhead:
+    """Bounds how far the host launches ahead of the GPU, so the main thread never blocks inside a launch.
+
+    CUDA's launch queue holds ~1,024 kernels (measured/issues.md: the host got at most ~1.7 eager forwards ahead). A
+    launch into a full queue blocks the main thread inside model.run, and a tier thread's next CUDA call (event
+    create / record, cuMemcpyBatchAsync) waits behind it: 100-370 ms late starts of tier ops on stages 2/3 (job 8095,
+    minutes 2-5) with eager microbatches (> 8,192 tokens, no CUDA graph; ~400-600 kernels each) queued back to back,
+    against a graph replay's ~16 graphs + 15 eager breaks. Rules, before microbatch k is launched:
+    - k-2 has ended (depth 2): k-1 stays queued while k is launched, so the GPU idles only if launching k takes longer
+      than computing k-1 (a replay's host side ~5 ms vs >= 12 ms of compute; eager ~20 ms vs >= 70 ms).
+    - an eager k waits until no other eager microbatch is queued: two eager forwards fill the queue. Back to back,
+      the GPU then waits for the wake-up and k's first launch only (eager host time < its GPU time after that).
+    The waits are on blocking-sync events (`Clock.mark`): the thread sleeps with the GIL released and holds no driver
+    lock. `waits` / `wait_s`: how often and how long the main thread waited (printed at shutdown)."""
+
+    DEPTH = 2
+
+    def __init__(self, cuda: bool):
+        self.cuda = cuda
+        self.q: deque = deque()            # (end event, eager) of the microbatches launched and not known to be done
+        self.waits, self.wait_s = 0, 0.0
+
+    def before(self, eager: bool):
+        if not self.cuda:
+            return
+        t = None
+        while self.q and (len(self.q) >= self.DEPTH or (eager and any(e for _, e in self.q))):
+            ev, _ = self.q.popleft()
+            if not ev.query():
+                t = time.perf_counter() if t is None else t
+                ev.synchronize()
+        if t is not None:
+            self.waits += 1
+            self.wait_s += time.perf_counter() - t
+
+    def after(self, end, eager: bool):
+        if self.cuda:
+            self.q.append((end, eager))
 
 
 class ProfileWindow:
@@ -239,6 +280,7 @@ def run_worker(cfg: RunConfig, stage: int):   # makes inference tensors, which a
         (Path(cfg.run_dir) / f"stage{stage}.json").write_text(json.dumps(info) + "\n")
         clock = Clock(device)
         window = ProfileWindow(cfg.profile_mbs if cuda else None)
+        ahead = RunAhead(cuda)
         hostprof = HostProfile(stage, cfg.run_dir)
         stamps = WorkerStamps(stage, cfg.run_dir, model)
         print(f"stage {stage} cpus: {cpu_list(cpus) if cpus else 'not pinned'}, threads {threads()}", flush=True)
@@ -263,7 +305,8 @@ def run_worker(cfg: RunConfig, stage: int):   # makes inference tensors, which a
                     print(f"stage {stage} allocator: " + json.dumps({k: m.get(k) for k in (
                         "num_alloc_retries", "num_device_alloc", "num_device_free", "num_ooms")}
                         | {"peak_reserved_gb": round(m.get("reserved_bytes.all.peak", 0) / 1e9, 2),
-                           "threads": threads()}), flush=True)
+                           "threads": threads(), "run_ahead_waits": ahead.waits,
+                           "run_ahead_wait_s": round(ahead.wait_s, 1)}), flush=True)
                 break
             plan: Plan = msg
             plan_ns = time.time_ns()
@@ -283,6 +326,8 @@ def run_worker(cfg: RunConfig, stage: int):   # makes inference tensors, which a
             hidden_in = pipe.recv(plan.num_tokens, model.hidden_width) if stage > 0 else None
             if stage == 0:
                 pipe.gate(mbs)                        # at most max_in_flight in flight (ppimpl/runtime/dispatch.py)
+            eager = getattr(batch, "bucket", 0) is None   # StageModel: no CUDA graph for this size
+            ahead.before(eager)                       # bounded run-ahead (RunAhead): never block inside a launch
             ready_ns = time.time_ns()                 # prepared, stream waits queued: the GPU may start from here
             start = clock.mark()
             out = model.run(batch, hidden_in)
@@ -290,6 +335,7 @@ def run_worker(cfg: RunConfig, stage: int):   # makes inference tensors, which a
             stamps.after()
             hostprof.after(plan.mb_id)
             end = clock.mark()
+            ahead.after(end, eager)
             if last:
                 pipe.exited(mbs)
             host = (plan_ns, fwd_ns, ready_ns, time.time_ns())

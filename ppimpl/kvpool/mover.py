@@ -23,6 +23,7 @@ from typing import NamedTuple
 
 import numpy as np
 
+EVENT_POOL = 512   # CUDA events per mover made at start-up: an op takes ~2 per ring chunk + 1 (+ 1 per batch traced)
 
 def runq_ns() -> int:
     """This thread's time runnable but waiting for a CPU so far (/proc/thread-self/schedstat; 0 if unavailable)."""
@@ -51,6 +52,7 @@ class Mover:
         self.ring = None
         self.info = "direct"
         self._lock = threading.Lock()              # ring chunks and their order, across the submitting threads
+        self._ev_lock = threading.Lock()           # the event pool (taken inside _lock, never around it)
         if hops == "two":                          # per direction: `depth` chunks of `chunk` slots, after the KV pool
             self.depth, self.chunk = ring_depth, ring_chunk_slots
             half = self.depth * self.chunk * slot_bytes
@@ -73,21 +75,57 @@ class Mover:
             from vllm import _custom_ops
             self.swap = _custom_ops.swap_blocks_batch
             self.streams = {k: torch.cuda.Stream(device) for k in ("read", "write", "read_nvl", "write_nvl")}
+            # Pooled events: torch creates a CUDA event at its first record, so each is recorded once here; an op
+            # then only records (no cudaEventCreate on its path, which waits for the driver behind the launch thread)
+            self._events = [torch.cuda.Event(blocking=True, enable_timing=True) for _ in range(EVENT_POOL)]
+            for ev in self._events:
+                ev.record(self.streams["read"])
+            self.streams["read"].synchronize()
+        self.events_made = EVENT_POOL if self.cuda else 0   # the pool's events, and those made when it ran empty
 
-    def mark(self, direction: str):
+    def event(self, owned: list | None):
+        """A pooled event (blocking sync, timing), appended to `owned` (the op's events, `release`d once it is done)."""
+        with self._ev_lock:
+            ev = self._events.pop() if self._events else None
+            if ev is None:
+                self.events_made += 1
+        if ev is None:
+            import torch
+            ev = torch.cuda.Event(blocking=True, enable_timing=True)
+        if owned is not None:
+            owned.append(ev)
+        return ev
+
+    def release(self, owned: list):
+        """Back to the pool: the events of an op whose last copy completed (and whose trace was read). A ring chunk
+        whose last copy was one of them is free."""
+        if not owned:
+            return
+        ids = {id(e) for e in owned}
+        with self._lock:
+            if self.ring is not None:
+                for free in self._ring_free.values():
+                    for i, e in enumerate(free):
+                        if e is not None and id(e) in ids:
+                            free[i] = None
+            with self._ev_lock:
+                self._events.extend(owned)
+
+    def mark(self, direction: str, owned: list | None = None):
         """A timing event on the stream a transfer's first copy goes on (CUDA; None on CPU)."""
         if not self.cuda:
             return None
-        import torch
-        ev = torch.cuda.Event(enable_timing=True)
+        ev = self.event(owned)
         ev.record(self.streams["write_nvl" if direction == "write" and self.ring is not None else direction])
         return ev
 
-    def transfer_async(self, direction: str, segments: list[Segment], ready=None, tr: list | None = None):
+    def transfer_async(self, direction: str, segments: list[Segment], ready=None, tr: list | None = None,
+                       owned: list | None = None):
         """"read" host -> HBM or "write" HBM -> host of every segment's pieces. Two hops: each segment is cut into ring
         chunks of its own; direct: one batch of all pieces. `ready(i, k)`: called before the host side of segment i's
         slots below k is read (an SSD read waits for its file reads there). `tr`: per-batch trace (`_batch`). Returns
-        (the last copy's event, None on CPU; bytes of HBM pieces moved)."""
+        (the last copy's event, None on CPU; bytes of HBM pieces moved). `owned`: gets every event the transfer
+        took from the pool (CUDA; `release` them once the last copy completed); None: the events are not returned."""
         sb = self.sb
         if self.ring is None:
             if ready is not None:
@@ -98,7 +136,7 @@ class Mover:
             dev = np.concatenate([s.dev for s in segments])
             lens = np.concatenate([s.lens for s in segments])
             src, dst = (host, dev) if direction == "read" else (dev, host)
-            return self._batch(direction, src, dst, lens, tr=tr), int(lens.sum())
+            return self._batch(direction, src, dst, lens, tr=tr, owned=owned), int(lens.sum())
         C = self.chunk
         ev, nbytes = None, 0
         for i, s in enumerate(segments):
@@ -118,15 +156,17 @@ class Mover:
                     rings = [rbase + k * sb for k in range(n)]
                     hl = np.full(n, s.host_len, dtype=np.int64)
                     if direction == "read":         # host -> ring (PCIe), then ring -> the stages (NVLink)
-                        h = self._batch("read", s.host_ptrs[a:b], rings, hl, (self._ring_free[direction][pos],), tr)
-                        ev = self._batch("read_nvl", roff + rbase, dev, lens, (h,), tr)
+                        h = self._batch("read", s.host_ptrs[a:b], rings, hl, (self._ring_free[direction][pos],), tr,
+                                        owned)
+                        ev = self._batch("read_nvl", roff + rbase, dev, lens, (h,), tr, owned)
                     else:                           # the stages -> ring, then ring -> host
-                        g = self._batch("write_nvl", dev, roff + rbase, lens, (self._ring_free[direction][pos],), tr)
-                        ev = self._batch("write", rings, s.host_ptrs[a:b], hl, (g,), tr)
+                        g = self._batch("write_nvl", dev, roff + rbase, lens, (self._ring_free[direction][pos],), tr,
+                                        owned)
+                        ev = self._batch("write", rings, s.host_ptrs[a:b], hl, (g,), tr, owned)
                     self._ring_free[direction][pos] = ev
         return ev, nbytes
 
-    def _batch(self, stream: str, src, dst, lens, wait=(), tr: list | None = None):
+    def _batch(self, stream: str, src, dst, lens, wait=(), tr: list | None = None, owned: list | None = None):
         """One `cuMemcpyBatchAsync` on `stream` after the events `wait`; its end event (None on CPU, done). `tr`: append
         (stream, pieces, bytes, host ns before the call, host ns after it, thread CPU ns in it, ns runnable without a
         CPU in it, GPU start event, end event): the rest of the call is a wait for a lock (GIL or driver)."""
@@ -141,14 +181,14 @@ class Mover:
                 st.wait_event(ev)
         args = [torch.from_numpy(np.ascontiguousarray(x, dtype=np.int64)) for x in (src, dst, lens)]
         if tr is not None:
-            ev0 = torch.cuda.Event(enable_timing=True)
+            ev0 = self.event(owned)
             ev0.record(st)
             h0, c0, q0 = time.perf_counter_ns(), time.thread_time_ns(), runq_ns()
         with torch.cuda.stream(st):
             self.swap(*args)
         if tr is not None:
             h1, c1, q1 = time.perf_counter_ns(), time.thread_time_ns(), runq_ns()
-        ev = torch.cuda.Event(blocking=True, enable_timing=True)   # timing: TierDone.gpu_ns
+        ev = self.event(owned)                     # timing: TierDone.gpu_ns
         ev.record(st)
         if tr is not None:
             tr.append((stream, len(args[2]), int(args[2].sum()), h0, h1, c1 - c0, q1 - q0, ev0, ev))

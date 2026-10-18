@@ -34,7 +34,7 @@ from ppimpl.kvpool.backends import HostTier, SsdTier, _ok, cgroup_peak_gb, node_
 from ppimpl.kvpool.shards import shard_bytes, shard_path
 from ppimpl.kvpool.layout import ViewRange
 from ppimpl.kvpool.manager import TierOp
-from ppimpl.kvpool.mover import Mover, Segment
+from ppimpl.kvpool.mover import EVENT_POOL, Mover, Segment
 from ppimpl.kvpool.placement import BalancedPlacement
 from ppimpl.runtime.transport import Shutdown, TierDone, TierMove, WorkerError, decode_tier, encode
 
@@ -105,6 +105,7 @@ class PoolMember:
         # time before / in each batch call, the calling thread's CPU time in it, each batch's GPU start / end)
         self.trace = self.cuda and os.environ.get("PPIMPL_TIER_TRACE", "1") != "0"
         self._traces: dict[int, tuple] = {}
+        self._owned: dict[int, list] = {}          # op id -> the mover's pooled events it took (released when done)
         self._trace_log = None
         self.ctx = zmq_ctx
         self.placement: BalancedPlacement | None = None
@@ -221,6 +222,9 @@ class PoolMember:
         self.stop.set()
         for t in self.threads:
             t.join(timeout=10)
+        if self.mover is not None and self.cuda:
+            print(f"stage {self.stage} tier events: {self.mover.events_made} made, {EVENT_POOL} of them at start",
+                  flush=True)
         if self.cuda:
             import torch
             torch.cuda.synchronize(self.device)
@@ -310,6 +314,8 @@ class PoolMember:
                     except Exception:           # noqa: BLE001
                         print(f"stage {self.stage} tier trace off:\n{traceback.format_exc()}", flush=True)
                         self.trace = False
+                if (owned := self._owned.pop(op_id, None)) is not None:
+                    self.mover.release(owned)   # its copies completed (wait), its trace is read
         finally:
             push.close()
 
@@ -348,20 +354,23 @@ class PoolMember:
         if op.tier != "dram" or op.host_tier is not None or op.op not in ("read", "write"):
             raise ValueError(f"tier op {op.op} {op.tier} via {op.host_tier}")
         # GPU time of the op (TierDone.gpu_ns), from the stream its first copy is on
-        mark = self.mover.mark(d)
+        owned: list = []
+        mark = self.mover.mark(d, owned)
         tr = [] if self.trace else None
         t0 = time.perf_counter_ns()
-        ev, nbytes = self._move(d, self.dram, op, op.slots, op.state_slots, op.block_start, tr=tr)
+        ev, nbytes = self._move(d, self.dram, op, op.slots, op.state_slots, op.block_start, tr=tr, owned=owned)
         if tr is not None:
             self._traces[op.op_id] = (op.op, t0, tr)
+        if owned:
+            self._owned[op.op_id] = owned
         self.q[d].put((op.op_id, ev, start_ns, nbytes, time.time_ns(), mark))
 
     def _move(self, d: str, host: HostTier, op: TierMove, slots: list[int], sslots: list[int], block_start: int,
-              ready=None, tr: list | None = None):
+              ready=None, tr: list | None = None, owned: list | None = None):
         """The op's blocks [b_lo, b_hi) and (if `sslots`) the state between HBM and `host`'s slots (block i in slot
         slots[i - block_start]), "read" host -> HBM or "write" HBM -> host. `ready(i)`: called before the host side of
         blocks below i (None: the state) is read (an SSD read waits for its file reads there). Returns (the last
-        copy's event, bytes of HBM pieces moved)."""
+        copy's event, bytes of HBM pieces moved). `owned`: gets the mover's pooled events the copies took."""
         P, b_lo, b_hi = self.placement, op.b_lo, op.b_hi
         dev, off, lens = P.pieces(op.kv_blocks, op.state_blocks, list(range(b_hi - b_lo)), [], b_lo, b_hi, b_lo)
         segs = [Segment([host.ptr(s) for s in slots[b_lo - block_start:b_hi - block_start]], P.kv_slot_bytes, dev,
@@ -370,7 +379,7 @@ class PoolMember:
             segs.append(Segment([host.ptr(s) for s in sslots], self.slot_bytes,
                                 *P.pieces(op.kv_blocks, op.state_blocks, [], list(range(len(sslots))), 0, 0, 0)))
         wait = None if ready is None else lambda i, k: ready(b_lo + k if i == 0 else None)
-        return self.mover.transfer_async(d, segs, wait, tr)
+        return self.mover.transfer_async(d, segs, wait, tr, owned)
 
     def _ssd_op(self, op: TierMove, start_ns: int):
         """An SSD op, on this direction's SSD thread: its file I/O on the SSD pool, its copies on the mover."""
@@ -386,14 +395,19 @@ class PoolMember:
             def ready(i):
                 for f in (futs[:i] if i is not None else futs[n:]):
                     f.result()
-            ev, _ = self._move("read", host, op, op.host_slots, op.host_state, 0, ready)
+            owned: list = []
+            ev, _ = self._move("read", host, op, op.host_slots, op.host_state, 0, ready, owned=owned)
             for f in futs:
                 f.result()
+            if owned:
+                self._owned[op.op_id] = owned
         else:
             if op.op == "write":            # HBM -> staging, then the file
-                ev, _ = self._move("write", host, op, op.host_slots, op.host_state, op.block_start)
+                owned = []
+                ev, _ = self._move("write", host, op, op.host_slots, op.host_state, op.block_start, owned=owned)
                 if ev is not None:
                     ev.synchronize()
+                self.mover.release(owned)
             elif op.op != "demote":
                 raise ValueError(f"SSD op {op.op}")
             self._report_when_written(op, self.ssd.write(files, hosts), start_ns, len(files) * sb)
