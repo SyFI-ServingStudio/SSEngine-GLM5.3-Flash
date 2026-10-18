@@ -97,6 +97,70 @@ def inside_rounds(run: Path, trace: Path = TRACE) -> dict:
             "extending_recompute_over_new": out["extending"]["recompute_tokens"] / max(new, 1)}
 
 
+def per_engine(path: Path) -> dict[str, dict[str, float]]:
+    """engine -> {requests, prompt tokens, prompt tokens by source (local_cache_hit = HBM, external_kv_transfer =
+    CPU offload, local_compute)} from one vLLM /metrics snapshot."""
+    out: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
+    for line in path.read_text().splitlines():
+        m = LINE.match(line)
+        if not m or line.startswith("#"):
+            continue
+        lab = dict(x.split("=", 1) for x in (m.group(2) or "").strip("{}").split(",") if "=" in x)
+        eng = lab.get("engine", "").strip('"')
+        name, v = m.group(1), float(m.group(3))
+        if name == "vllm:request_success_total":
+            out[eng]["requests"] += v
+        elif name == "vllm:prompt_tokens_total":
+            out[eng]["prompt_tokens"] += v
+        elif name == "vllm:prompt_tokens_by_source_total":
+            out[eng][lab.get("source", "").strip('"')] += v
+    return {k: dict(v) for k, v in sorted(out.items())}
+
+
+def engines(run: Path) -> dict:
+    """Per-engine totals over the run and over the client's minutes 10-20 (snapshot nearest 600 s -> end)."""
+    end = run / "prom" / "end.prom"
+    a = snapshot(run, 600)
+    if not end.exists():
+        return {}
+    tot = per_engine(end)
+    out = {"run": tot}
+    if a is not None:
+        t, _ = a
+        x = per_engine(run / "prom" / f"t{t:04d}.prom")
+        out["from_t"] = t
+        out["late"] = {e: {k: v - x.get(e, {}).get(k, 0.0) for k, v in d.items()} for e, d in tot.items()}
+    for key in ("run", "late"):
+        if key in out:
+            d = out[key]
+            src = {s: sum(e.get(s, 0.0) for e in d.values()) for s in ("local_cache_hit", "external_kv_transfer",
+                                                                        "local_compute")}
+            tot_p = max(sum(src.values()), 1.0)
+            out[f"{key}_source_share"] = {s: v / tot_p for s, v in src.items()}
+            r = [e.get("requests", 0.0) for e in d.values()]
+            out[f"{key}_request_imbalance_max_over_mean"] = max(r) / max(sum(r) / len(r), 1e-9) if r else None
+    return out
+
+
+def router(run: Path) -> dict:
+    """vllm-router counters: cache_aware decisions by prefix match (cache_hits) vs by load (cache_misses: match below
+    threshold -> least-loaded worker; load_balancing_events: imbalance override), per worker decisions."""
+    end = run / "prom" / "router_end.prom"
+    if not end.exists():
+        return {}
+    y = prom(end)
+    snaps = sorted((int(p.stem.split("_t")[1]), p) for p in (run / "prom").glob("router_t*.prom"))
+    late = None
+    if snaps:
+        t, p = min(snaps, key=lambda z: abs(z[0] - 600))
+        x = prom(p)
+        late = {"from_t": t, **{k: y[k] - x.get(k, 0.0) for k in y if re.search(r"cache_hits|cache_misses|"
+                                                                                r"load_balancing_events|policy_decisions", k)}}
+    return {"run": {k: v for k, v in y.items() if re.search(r"cache_hits|cache_misses|load_balancing_events|"
+                                                            r"policy_decisions|processed_requests", k)},
+            "late": late}
+
+
 def main(run: Path, trace: Path = TRACE) -> dict:
     rows = real_arrays(run / "requests.jsonl")
     arr = rows[0]
@@ -111,7 +175,7 @@ def main(run: Path, trace: Path = TRACE) -> dict:
         failed += str(o.get("status")).upper() != "SUCCESS"
     out = {"run": run.name, "metrics_0_20": json.loads((run / "metrics.json").read_text()),
            "metrics_arrival_10_20": m1020, "rounds_sent": sent, "rounds_failed": failed, "inside_rounds": inside_rounds(run, trace),
-           "prom": counters(run)}
+           "prom": counters(run), "engines": engines(run), "router": router(run)}
     (run / "dpep_summary.json").write_text(json.dumps(out, indent=1))
     return out
 
