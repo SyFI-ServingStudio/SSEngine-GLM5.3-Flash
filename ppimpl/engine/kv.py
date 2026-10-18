@@ -31,6 +31,11 @@ area is empty, once kept contexts make the room. When it lands (`read_landed`) i
 ordinary pinned HBM (`landed_held`, counted like running requests, never evicted) until its request is admitted,
 which takes them over (`allocate`). A read whose room is held only by kept contexts not yet written below waits
 (`area_waits`), never an admission.
+Liveness (`hold_read`): a read starts only if, once every read in flight has landed and running requests and kept
+contexts are gone, any landed round can still be admitted: landed + in flight + this read + the area + the largest
+admission extra of those rounds (footprint minus read blocks) <= capacity. Otherwise landed data alone could fill HBM
+so that no landed round fits and nothing runs to free it (job 8175: 832 of 890 blocks pinned). Turned down:
+`live_waits`; the read starts after admissions.
 
 Accounting. `blocks` (the real pool): a request costs blocks_for(prompt), a kept session the same. `tokens` (replay
 only, to reproduce the targets): the simulator's token ledger, a running request costs prompt + 1 + 51,456 tokens and
@@ -177,7 +182,8 @@ class KvManager:
                           peak_hard=0, preemptions=0, repeats=0,    # no preemption: the count stays 0
                           blocked_by_write=0,   # fits() checks turned down only because kept contexts are not yet
                                                 # written to the tier below (an HBM eviction waits for its write)
-                          area_waits=0)         # hold_read turned down only for that reason (a read waits)
+                          area_waits=0,         # hold_read turned down only for that reason (a read waits)
+                          live_waits=0)         # hold_read turned down by the liveness bound
         self.evicted: dict[object, int] = {}           # key -> tokens of a kept context evicted and not replaced since
         self.pinned: Counter = Counter()               # kept contexts a tier write still copies from (not evictable;
                                                        # their next round waits to take them over, `busy`)
@@ -189,6 +195,7 @@ class KvManager:
         self.landed_held = 0                           # blocks of landed reads, pinned until admitted
         self.reads: dict[str, Allocation] = {}         # req id -> the blocks its read holds, until admitted
         self.landed: set[str] = set()                  # req ids of landed reads
+        self.read_extra: dict[str, int] = {}           # req id -> its admission footprint beyond its read's blocks
 
     @property
     def num_blocks(self) -> int:
@@ -248,6 +255,11 @@ class KvManager:
         below: their writes start (`make_room`) and the read waits."""
         assert self.accounting == "blocks" and req.req_id not in self.reads
         c = self.kept_cost(tokens)
+        extra = max(self.footprint(req.num_tokens) - c, 0)
+        if self.landed_held + self.area_held + c + self.area \
+                + max(extra, max(self.read_extra.values(), default=0)) > self.capacity:
+            self.stats["live_waits"] += 1
+            return None
         base = self.hard + self.landed_held + self.area_charge(self.area_held + c)
         if base + self.kept_charge > self.capacity:
             held = 0 if self.lower is None else self.lower.held_back()
@@ -260,6 +272,7 @@ class KvManager:
         self._make_room(c)
         alloc = Allocation(self.pool.take(kv_blocks_for(tokens)), self.pool.take(STATE_BLOCKS))
         self.reads[req.req_id] = alloc
+        self.read_extra[req.req_id] = extra
         return alloc
 
     def read_landed(self, req):
@@ -274,6 +287,7 @@ class KvManager:
     def drop_read(self, req):
         """Give back what the request's read holds (a read that could not start)."""
         alloc = self.reads.pop(req.req_id)
+        self.read_extra.pop(req.req_id, None)
         if req.req_id in self.landed:
             self.landed.discard(req.req_id)
             self.landed_held -= alloc.num_blocks
@@ -384,6 +398,7 @@ class KvManager:
         evicted_before = self.stats["evicted_sessions"]
         info = {"hit_kind": "none_first_round", "kept_tokens": 0, "common_prefix_tokens": None}
         rd = self.reads.pop(req.req_id, None)
+        self.read_extra.pop(req.req_id, None)
         if rd is not None:                              # its read landed: it takes the blocks
             if req.req_id in self.landed:
                 self.landed.discard(req.req_id)

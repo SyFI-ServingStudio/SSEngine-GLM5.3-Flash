@@ -314,3 +314,39 @@ def test_overdue_rounds_read_first_and_landed_overdue_rounds_go_first():
     done(s, [o], 5_000_000)
     mb = s.next_microbatch(5_000_000)
     assert mb[0].req is old                             # landed and overdue: before every other round
+
+
+# --- liveness: landed data never fills HBM so that no landed round can be admitted ---------------------------------
+
+def test_landed_reads_never_block_every_admission():
+    """Job 8175's hang: reads land faster than rounds are admitted (many reads per batch period), each landing moves
+    its blocks out of the area into pinned HBM while the area stays reserved, until landed data plus the area leave
+    no landed round room and nothing runs to free any. Liveness: whenever nothing is in flight, a microbatch forms
+    (or no work is left), and every round finishes."""
+    s, kv, pool, t = sched(blocks=60, area=8, dram=0.200, ssd=None)
+    rs = []
+    for k in range(1, 21):
+        put(t, k, 2 * B)                                # 8 HBM blocks each; admission adds one (2 x B + 11 tokens)
+        rs.append(rnd(k, 2 * B + 1, 10, arrival=k))
+    s.cfg.order = "fifo"
+    for r in rs:
+        s.add(r, 0)
+    for _ in range(500):
+        while True:                                     # every read lands before the next microbatch forms
+            s._load_dirty = True
+            s.load(0)
+            ops = sent(pool)
+            if not ops:
+                break
+            done(s, ops)
+            assert kv.hard + kv.landed_held + kv.area_held <= kv.capacity
+        mb = s.next_microbatch(0)
+        if mb is None:
+            assert not s.has_work(), s.state()          # nothing in flight: a stall is a hang
+            break
+        s.stage_done(0, 3)
+        s.stage_done(3, 3)
+        for c in mb:
+            if c.is_last:
+                s.finish(c.req)
+    assert not s.has_work() and kv.landed_held == 0 and kv.stats["live_waits"] > 0

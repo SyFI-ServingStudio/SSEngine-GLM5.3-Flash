@@ -70,6 +70,7 @@ from ppimpl.serve.slab import SlabReader
 READY_TIMEOUT_S = 1800   # a real stage loads its weights and captures graphs before Ready
 WAKE_ADDR = "inproc://ppimpl-control-wake"
 ADMIT_BATCH = 64   # requests the control thread takes in before it looks at the reports again
+WATCHDOG_S = 30.0  # no stage or tier op done for this long while requests wait: log the scheduler's state
 
 
 class Remote(NamedTuple):
@@ -387,6 +388,7 @@ class Controller:
         if self.intake is not None:
             poller.register(self.intake, zmq.POLLIN)
         next_check = time.monotonic() + 1.0
+        self.last_done = next_watch = time.monotonic()
         next_cache = time.monotonic() + 10.0
         try:
             more = False   # requests left in the inbox after this round's batch
@@ -437,6 +439,11 @@ class Controller:
                 if time.monotonic() >= next_check:
                     next_check = time.monotonic() + 1.0
                     self._check_procs()
+                    if time.monotonic() - self.last_done >= WATCHDOG_S and time.monotonic() >= next_watch \
+                            and self.sched.has_work():
+                        next_watch = time.monotonic() + WATCHDOG_S
+                        print(f"watchdog: no completion for {time.monotonic() - self.last_done:.0f} s: "
+                              + json.dumps(self.sched.state()), flush=True)
                     for f in (self.mb_log, self.host_log, self.plan_log, self.req_log, self.tier_log):
                         if f is not None:
                             f.flush()
@@ -598,6 +605,7 @@ class Controller:
                                        for c in specs], self.n)
 
     def _on_stage_done(self, d: StageDone):
+        self.last_done = time.monotonic()
         reqs, left = self.inflight_plans[d.mb_id]
         self.mb_log.write(json.dumps({"stage": d.stage, "index": d.mb_id, "start_ms": round(self._ms(d.start_ns), 4),
                                       "compute_ms": round((d.end_ns - d.start_ns) / 1e6, 4),
@@ -638,6 +646,7 @@ class Controller:
             self.tier_sent[o.op_id] = (o, now, {})
 
     def _on_tier_done(self, d: TierDone):
+        self.last_done = time.monotonic()
         o, sent, done = self.tier_sent[d.op_id]
         done[d.stage] = d
         if len(done) < self.n:

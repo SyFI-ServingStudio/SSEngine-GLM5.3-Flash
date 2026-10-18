@@ -795,6 +795,13 @@ hbm-evictions-exclusive`), k = 1 (one KDA state per entry).
     lands. A full DRAM area stops the SSD queue (no direct SSD -> HBM bypass).
   - Ready bound: new reads (and fetches) start only while the landed rounds' fresh tokens (`ready_fresh`) are below
     pp_size x max_batch_tokens (`ready_bound`, 4 x 32,768); hops of started SSD reads go on.
+  - Liveness (`KvManager.hold_read`, `live_waits`): a read starts only if, with every read in flight landed and
+    running requests and kept contexts gone, any landed round could still be admitted: landed + in flight + the read
+    + the area + the largest admission extra (footprint minus read blocks) <= capacity. Without it job 8175 hung at
+    872 s: 55 landed reads pinned 832 of 890 blocks, the 79-block area stayed reserved, no landed round fit and
+    nothing ran to free one (each had a few hundred fresh tokens, far under the ready bound). The controller logs
+    `watchdog: no completion for N s` with `Scheduler.state()` (area, landed, ready, pinned, waits) every 30 s of no
+    stage or tier completion while requests wait.
   - `Scheduler.load` walks the overdue queue, then the policy order; each area's queue stops at its first read that
     does not fit (a read larger than the area starts when it is empty). Admission takes landed reads first (overdue
     ones also in the force-schedule pass), then the queues, passing over rounds that still need a read. Rounds found

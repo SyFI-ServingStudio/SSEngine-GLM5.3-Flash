@@ -417,6 +417,22 @@ class Scheduler:
         self.stats["load_passes"] += 1
         self.stats["load_pass_ns"] += time.perf_counter_ns() - t0
 
+    def state(self) -> dict:
+        """Counters for a hang report (the controller's watchdog)."""
+        kv = self.kv
+        x = dict(in_flight=self.in_flight, started=len(self.started), pending=len(self.policy),
+                 overdue=len(self.overdue.q) if self.overdue is not None else 0, reading=len(self.reading),
+                 landed=len(self.landed), hard=kv.hard, kept=kv.kept_charge, capacity=kv.capacity,
+                 held_back=kv.lower.held_back() if kv.lower is not None else 0,
+                 kv_stats={k: kv.stats[k] for k in ("blocked_by_write", "area_waits", "live_waits")})
+        if self.staged:
+            d = self.pool.manager.dram_area
+            x.update(area=kv.area, area_held=kv.area_held, landed_held=kv.landed_held,
+                     ready_fresh=self.ready_fresh(), ready_bound=self.ready_bound, waiting_hop=len(self.waiting_hop),
+                     dram_area=None if d is None else [d.area_used, d.area], load_dirty=self._load_dirty,
+                     tier_ops_in_flight=len(self.pool.manager.in_flight))
+        return x
+
     def ready_fresh(self) -> int:
         """New tokens of the landed rounds not yet admitted (the ready set)."""
         return sum(r.fresh for r in self.landed)
