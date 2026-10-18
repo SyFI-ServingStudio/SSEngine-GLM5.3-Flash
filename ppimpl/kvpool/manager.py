@@ -367,10 +367,13 @@ class TierManager:
         """(written, read) slot keys of a byte-moving op."""
         t = [(o.tier, s) for s in o.slots + o.state_slots]
         h = [(o.host_tier, s) for s in o.host_slots + o.host_state]
+        b_lo, b_hi = o.blocks           # HBM blocks: a write copies from them, a read fills them
+        hbm = {("hbm", b) for bl in o.kv_blocks for b in bl[b_lo:b_hi]} | {("hbm", b) for bl in o.state_blocks
+                                                                           for b in bl}
         if o.op == "write":
-            return t + h, []            # SSD write through staging: staging written, then read, by this op
+            return t + h, list(hbm)     # SSD write through staging: staging written, then read, by this op
         if o.op in ("read", "fetch"):
-            return h, t
+            return h + list(hbm), t
         if o.op == "demote":
             return t, h
         return [], []
@@ -573,16 +576,30 @@ class TierManager:
         self._store_in(0, key, tokens, content, "write", views)
         return self._take()
 
-    def hbm_evicted(self, key, tokens: int, content) -> list[TierOp]:
-        """HBM evicted its kept context of `key`. A tier holding it all is refreshed. Slot mode: HBM evicts only
-        contexts already written back, so nothing moves (one no tier could hold is lost); byte mode (replay, writes
-        take no time) writes it now, as the simulator does."""
+    def hbm_evicted(self, key, tokens: int, content, views=None) -> list[TierOp]:
+        """HBM evicted its kept context of `key`. A tier holding it all is refreshed. Otherwise it is written now, as
+        the simulator does, when `views` (its blocks) are given: write at eviction (exclusive DRAM, `HbmLevel`), the
+        write urgent, and the blocks' next users wait for it (`hbm_busy`, `_touches`); byte mode writes take no time.
+        Slot mode with write-ahead: HBM evicts only contexts already written back, so nothing moves (one no tier
+        could hold is lost)."""
         for t in self.tiers:
             e = t.entries.get(key)
             if e is not None and e.tokens >= tokens:
                 t.touch(key)
                 return []
-        return [] if self.slot_mode else self.prepare_write_back(key, tokens, content)
+        if not self.slot_mode:
+            return self.prepare_write_back(key, tokens, content)
+        if views is None:
+            return []
+        ops = self.prepare_write_back(key, tokens, content, views)
+        for o in ops:
+            o.urgent = True
+        return ops
+
+    def hbm_busy(self, blocks) -> bool:
+        """Whether a write not yet done still copies from any of these HBM blocks (freed by an eviction)."""
+        readers = self.guard.readers
+        return bool(readers) and any(("hbm", b) in readers for b in blocks)
 
     def drop_stale(self, key, req) -> list[TierOp]:
         """The session's next round `req` was admitted: an entry it does not resume from is dropped (byte mode with

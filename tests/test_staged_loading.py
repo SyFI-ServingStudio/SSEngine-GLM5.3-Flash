@@ -88,7 +88,8 @@ def test_area_is_a_fraction_of_hbm():
     s, kv, pool, t = sched(area=14)
     assert s.staged and kv.area == 14 == int(60 * pool.cfg.loading_area)
     assert t.tiers[0].area == int(pool.cfg.loading_area * t.tiers[0].num_slots)
-    assert pool.hbm.wb.reserve == 14 + blocks_for(MB)                      # write-ahead: one batch period's room
+    assert pool.hbm.at_eviction and pool.hbm.wb is None                   # exclusive DRAM: HBM writes at eviction
+    assert t.wb[0].reserve == (14 + blocks_for(MB)) * SLOT                 # DRAM -> SSD: one batch period's room
     with pytest.raises(ValueError):
         sched(area=30)                                                     # half of HBM: not a loading area
     off = Scheduler(KvManager(60, keep_sessions=True), SchedulerConfig(mb_tokens=MB),
@@ -137,18 +138,19 @@ def test_area_is_never_used_by_admission_or_kept_contexts():
         assert kv.hard + kv.kept_charge + kv.area <= kv.capacity
 
 
-def test_write_back_runs_ahead_so_admission_never_waits_for_a_write():
-    """Sessions finish and new ones arrive: kept contexts are written while HBM still has room (the reserve), so
-    every admission evicts written contexts: no blocked_by_write, every eviction clean."""
+def test_hbm_writes_at_eviction_so_admission_never_waits_for_a_write():
+    """Sessions finish and new ones arrive (exclusive DRAM, the simulator's rule): nothing is written ahead; each
+    admission evicts at once and the evicted context's write starts then, so DRAM holds only what HBM evicted. No
+    admission or read hold waits for a write."""
     s, kv, pool, t = sched(blocks=60, area=14)
     for i in range(30):
         s.add(r := rnd(i, 0, 100), 0)
         assert run_mb(s) is not None, i                 # admitted at once every time
         s.finish(r)
-        done(s, sent(pool))                             # writes ahead land before the next arrival
-        assert pool.hbm.wb.held_back() + kv.hard + kv.area <= kv.capacity - pool.hbm.wb.reserve + 7
-    assert kv.stats["blocked_by_write"] == 0 and pool.hbm.wb.stats["evict_waits"] == 0
-    assert pool.hbm.wb.stats["ahead_writes"] > 20 and kv.stats["evicted_sessions"] > 20
+        assert set(t.tiers[0].entries) <= set(range(i)) and not set(t.tiers[0].entries) & set(kv.kept)
+        done(s, sent(pool))
+    assert kv.stats["blocked_by_write"] == 0 and kv.stats["area_waits"] == 0
+    assert kv.stats["evicted_sessions"] > 20 and t.tiers[0].stats["stored"] == kv.stats["evicted_sessions"]
 
 
 # --- 2: reads start in FIFO admission order; no jumping; a read larger than the area when it is empty ---------------

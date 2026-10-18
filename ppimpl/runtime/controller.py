@@ -122,6 +122,8 @@ class Controller:
         # order (simultaneous submits reach us in a random order; the trace orders them by id)
         self.held: list[Request] | None = [] if cfg.hold_requests else None
         self.timer_at: int | None = None     # host ns at which the dispatch rule wants to be asked again
+        self.gated: tuple | None = None      # (chunks, formed ns): a formed microbatch whose blocks an eviction's
+                                             # write still copies from (`_write_gate`)
         # intake processes (cfg.intake_procs): all their messages go through the control thread
         self.intake = None
         # sockets made by start(); None/empty until then, so stop() after a failed start() closes what exists and
@@ -556,6 +558,15 @@ class Controller:
             for req in sorted(self.held, key=lambda r: id_order(r.req_id)):
                 self.sched.add(req)
             self.held = None
+        if self.gated is not None:
+            chunks, formed = self.gated
+            if self._write_gate(chunks):
+                return
+            self.gated = None
+            now = time.time_ns()
+            st = self.sched.stats
+            st["write_gate_ms"] = st.get("write_gate_ms", 0.0) + (now - formed) / 1e6
+            self._dispatch(chunks, now)
         while True:
             now = time.time_ns()
             verdict, at = self.rule.decide(now)
@@ -567,7 +578,24 @@ class Controller:
             chunks = self.sched.next_microbatch(now, self.rule.exiting)
             if chunks is None:
                 return
+            if self._write_gate(chunks):
+                self.gated = (chunks, now)
+                self.sched.stats["write_gates"] = self.sched.stats.get("write_gates", 0) + 1
+                return
             self._dispatch(chunks, now)
+
+    def _write_gate(self, chunks: list[ChunkSpec]) -> bool:
+        """Whether a write at eviction (exclusive DRAM writes when HBM evicts, as the simulator) still copies from
+        blocks this microbatch writes: it is sent once those writes are done (`_on_tier_done` pumps)."""
+        pool = self.sched.pool
+        if pool is None or pool.hbm is None or not pool.hbm.at_eviction:
+            return False
+        for c in chunks:
+            a = c.req.alloc
+            end = c.start + c.num_tokens
+            if pool.hbm_busy(a.kv_blocks[c.start // BLOCK_TOKENS:kv_blocks_for(end)]) or pool.hbm_busy(a.state_blocks):
+                return True
+        return False
 
     def _dispatch(self, specs: list[ChunkSpec], now: int):
         mb_id, self.next_mb = self.next_mb, self.next_mb + 1
@@ -663,6 +691,8 @@ class Controller:
         del self.tier_sent[d.op_id]
         now = time.time_ns()
         self.sched.op_done(d.op_id, now)
+        if self.gated is not None:
+            self._pump()
         t0 = self.t0_ns or sent
         self.tier_log.write(json.dumps({
             "op": d.op_id, "kind": o.op, "tier": o.tier, "host_tier": o.host_tier, "entry": o.entry,

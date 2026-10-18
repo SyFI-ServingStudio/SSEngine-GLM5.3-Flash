@@ -133,6 +133,10 @@ class BalancedKVPool:
         self._track(h, [o for o in ops if o.op == "read"])
         return h
 
+    def hbm_busy(self, blocks) -> bool:
+        """Whether a write at eviction still copies from any of these HBM blocks (their new user waits)."""
+        return self.manager.slot_mode and self.manager.hbm_busy(blocks)
+
     def release_dram_area(self, area: list[int]):
         self.manager.dram_area.area_give(area)
 
@@ -206,7 +210,12 @@ class HbmLevel:
 
     def __init__(self, pool: BalancedKVPool, kv):
         self.pool, self.kv = pool, kv
-        self.wb = WriteBack("hbm", self, pool.cfg.hbm_write_ahead) if pool.manager.slot_mode else None
+        m = pool.manager
+        # exclusive DRAM writes at eviction, as the simulator: DRAM then holds only what HBM evicted, in eviction
+        # order (written ahead, it would also hold contexts still in HBM). Every kept context is evictable; its
+        # write starts at the eviction and its blocks' next users wait for it (`TierManager.hbm_busy`).
+        self.at_eviction = m.slot_mode and m.exclusive
+        self.wb = WriteBack("hbm", self, pool.cfg.hbm_write_ahead) if m.slot_mode and not self.at_eviction else None
         self._writes: dict[Handle, object] = {}
 
     # --- WriteBack's level --------------------------------------------------------------------------------------
@@ -258,7 +267,8 @@ class HbmLevel:
 
     def evicted(self, key, k):
         self.unkept(key)
-        self.pool.manager.hbm_evicted(key, k.tokens, k.content)
+        views = KVViews(k.alloc.kv_blocks, k.alloc.state_blocks, k.tokens) if self.at_eviction else None
+        self.pool.manager.hbm_evicted(key, k.tokens, k.content, views)
 
     def admitted(self, key, req, hit: int = 0):
         """`req` was admitted, `hit` tokens of it taken over from HBM's kept context."""

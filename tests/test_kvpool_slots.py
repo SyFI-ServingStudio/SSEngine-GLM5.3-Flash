@@ -423,20 +423,44 @@ def test_dram_entry_the_ssd_holds_whole_is_clean():
     assert [o.op for o in ops if o.moves_bytes] == ["write"] and t.wb[0].stats == before
 
 
-def test_exclusive_hbm_hit_releases_the_write_ahead_copy():
-    """A kept context written ahead to DRAM and then taken over by its next round (an HBM hit) leaves DRAM."""
-    for writes, kept in (("hbm-evictions", True), (EXCL, False)):
-        kv = KvManager(21, keep_sessions=True)
-        pool = BalancedKVPool(cfg(dram=1.0, ssd=None, hbm_write_ahead=0.0, dram_writes=writes))
-        s = Scheduler(kv, SchedulerConfig(mb_tokens=8192), pool, dispatch_ahead=0)
-        finish(s, rnd(1, 0, 100))
-        (w,) = pool.ready_ops()
-        s.op_done(w.op_id, 0)
-        assert 1 in pool.manager.tiers[0].entries
-        r = rnd(1, 101, 10)
-        s.add(r, 0)
-        assert s.next_microbatch(0) is not None and r.cached == 100
-        assert (1 in pool.manager.tiers[0].entries) == kept
+def test_inclusive_hbm_hit_keeps_the_write_ahead_copy():
+    """Inclusive DRAM writes ahead: a kept context taken over by its next round (an HBM hit) stays in DRAM."""
+    kv = KvManager(21, keep_sessions=True)
+    pool = BalancedKVPool(cfg(dram=1.0, ssd=None, hbm_write_ahead=0.0))
+    s = Scheduler(kv, SchedulerConfig(mb_tokens=8192), pool, dispatch_ahead=0)
+    finish(s, rnd(1, 0, 100))
+    (w,) = pool.ready_ops()
+    s.op_done(w.op_id, 0)
+    assert 1 in pool.manager.tiers[0].entries
+    r = rnd(1, 101, 10)
+    s.add(r, 0)
+    assert s.next_microbatch(0) is not None and r.cached == 100
+    assert 1 in pool.manager.tiers[0].entries
+
+
+def test_exclusive_writes_at_eviction_and_the_blocks_wait_for_it():
+    """Exclusive DRAM (the simulator's rule): nothing is written ahead, an HBM eviction writes the context at once
+    (urgent), the eviction does not wait, and the evicted blocks are busy until the write is done; a read into them
+    depends on it."""
+    kv = KvManager(21, keep_sessions=True)
+    pool = BalancedKVPool(cfg(dram=1.0, ssd=None, hbm_write_ahead=0.0, dram_writes=EXCL))
+    s = Scheduler(kv, SchedulerConfig(mb_tokens=8192), pool, dispatch_ahead=0)
+    finish(s, rnd(1, 0, 100))
+    assert pool.ready_ops() == [] and 1 not in pool.manager.tiers[0].entries      # not written ahead
+    k = kv.kept[1]
+    blocks = k.alloc.kv_blocks + k.alloc.state_blocks
+    big = rnd(2, 0, 9 * B - 100)                    # 9 + 6 blocks: fits only by evicting session 1 (7 blocks)
+    s.add(big, 0)
+    assert s.next_microbatch(0) is not None and 1 not in kv.kept and kv.stats["blocked_by_write"] == 0
+    assert 1 in pool.manager.tiers[0].entries and pool.hbm_busy(blocks)
+    (w,) = pool.ready_ops()
+    assert w.op == "write" and w.urgent and sorted(w.kv_blocks[0] + w.state_blocks[0]) == sorted(blocks)
+    o = pool.manager._emit("read", "dram", 9, token_start=0, token_end=B, kv_blocks=[blocks[:1]], state_blocks=[[]])
+    assert w.op_id in o.deps
+    s.op_done(w.op_id, 0)
+    assert not pool.hbm_busy(blocks)
+    r = rnd(1, 101, 10)                              # its next round reads it back from DRAM
+    assert pool.lookup(1, r).tier == "dram"
 
 
 def test_a_read_moves_only_the_states_that_survive():

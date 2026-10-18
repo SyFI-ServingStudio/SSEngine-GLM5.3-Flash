@@ -778,9 +778,17 @@ The real-engine counterpart of ServingStudioSim pp-staged (`prefix_fetch.rs`, `p
 hbm-evictions-exclusive`), k = 1 (one KDA state per entry).
 
 - **Exclusive DRAM** (`tiers.dram_writes: hbm-evictions-exclusive`): a DRAM read releases its entry (`_release_read`;
-  the slots' next writer waits for the read by `deps`); a round admitted on HBM's kept context releases the copy
-  write-ahead made of it (`taken_over`). SSD stays inclusive (a read leaves its entry). An entry stored where the tier
-  below holds it whole is clean.
+  the slots' next writer waits for the read by `deps`). SSD stays inclusive (a read leaves its entry). An entry stored
+  where the tier below holds it whole is clean.
+  - **HBM writes at eviction**, as the simulator (`HbmLevel.at_eviction`; no HBM write-ahead, no reserve): DRAM holds
+    only what HBM evicted, in eviction order. Written ahead, DRAM also held contexts still in HBM (up to the reserve,
+    ~10% of DRAM) and they aged in its LRU from the early write: run 8277 read 3,018 rounds from DRAM in 8.8 min vs
+    the simulator's 6,506, and DRAM evicted 7,820 entries vs 5,890 with the same stores. Every kept context is
+    evictable; the eviction emits the write (`hbm_evicted` with the blocks, urgent) and frees the blocks at once, so
+    neither admission nor a read hold waits for a write (`blocked_by_write`, `area_waits` stay 0). The blocks' next
+    users wait for the copy instead: a read into them by `SlotGuard` deps on ("hbm", block), a microbatch that
+    writes them is sent when the write is done (`Controller._write_gate`; counters `write_gates`,
+    `write_gate_ms` in `cache.json` `scheduler`).
 - **Staged loading** (`tiers.loading_area`, simulator `prefix_tier_loading: held`): pending -> loading -> ready -> batch
   (`engine/scheduler.py` "Staged loading").
   - HBM's loading area lives in `KvManager` (`area`, `area_held`, `reads`): a set number of blocks counted held

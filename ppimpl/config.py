@@ -64,8 +64,9 @@ class TierConfig(msgspec.Struct, forbid_unknown_fields=True):
     hbm_write_ahead: float | None = 0.9
     dram_write_ahead: float | None = 0.9
     # "hbm-evictions": DRAM keeps a clean copy of what a read moves into HBM (inclusive after reads).
-    # "hbm-evictions-exclusive" (simulator `dram_tier_writes`, d17027cf): a DRAM read releases the entry and an HBM hit
-    # releases the DRAM copy its write-ahead made, so DRAM holds only what HBM lacks. SSD stays inclusive.
+    # "hbm-evictions-exclusive" (simulator `dram_tier_writes`, d17027cf): a DRAM read releases the entry and HBM
+    # writes a context when it evicts it (no write-ahead, as the simulator), so DRAM holds only what HBM evicted.
+    # SSD stays inclusive.
     dram_writes: str = "hbm-evictions"
     # Staged loading (simulator `prefix_tier_loading: held`, `prefix_tier_loading_area`, ServingStudioSim pp-staged;
     # engine/scheduler.py): reads land in a loading area of this fraction of HBM's KV pool, which admission and kept

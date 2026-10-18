@@ -116,7 +116,7 @@ def test_staged_loading_end_to_end(tmp_path):
     assert pool["loading_area_blocks"] == 7 and pool["dram_area_slots"] == 2
     sr = sreq_of(srv.run_dir)
     assert sr["A_r1"]["tier"] == "ssd" and sr["A_r1"]["fetch_land_ms"] <= sr["A_r1"]["hop_start_ms"]
-    assert sr["B_r1"]["tier"] in ("dram", "ssd")    # DRAM's one context: B's or a later one written ahead
+    assert sr["B_r1"]["tier"] in ("dram", "ssd")    # DRAM's one context: B's or one evicted later
     ch = chunks_of(srv.run_dir)
     assert ch["A_r1"] == [(n, 100)] and ch["B_r1"] == [(n, 100)]
     ops = [json.loads(x) for x in (srv.run_dir / "tier_ops.jsonl").read_text().splitlines()]
@@ -126,3 +126,5 @@ def test_staged_loading_end_to_end(tmp_path):
     cache = json.loads((srv.run_dir / "cache.json").read_text())
     assert cache["loading_area"]["held"] == 0 and cache["loading_area"]["reads"] == 0
     assert cache["tiers"][0]["hops"] == sum(o["kind"] == "fetch" for o in ops) >= 1
+    assert "hbm" not in cache["write_back"]           # exclusive DRAM: HBM writes at eviction, never ahead
+    assert cache["tiers"][0]["stored"] == cache["evicted_sessions"] >= 2

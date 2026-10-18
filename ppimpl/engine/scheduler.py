@@ -30,8 +30,8 @@ The scheduler of 6_scheduler.md §2, built on the plain one (`SchedulerConfig`; 
 - **Staged loading** (`TierConfig.loading_area`; ServingStudioSim pp-staged `prefix_tier_loading: held`,
   `prefix_tier_loading_area`, not vLLM): pending -> loading -> ready -> batch. A loading area of HBM (`KvManager.area`,
   a fixed fraction of the pool, `BalancedKVPool.set_loading_area`) is always counted held, so admission and kept
-  contexts leave it free, and the pool writes kept contexts back ahead by what one batch period frees
-  (`WriteBack.reserve`), so admission evicts written contexts and never waits for a write. `load` walks the pending queues in admission order (overdue, then
+  contexts leave it free; with exclusive DRAM, HBM writes a kept context when it evicts it (kvpool `HbmLevel`), so
+  admission and read holds never wait for a write. `load` walks the pending queues in admission order (overdue, then
   the policy order) and starts the read of every round a tier holds more of than HBM while its area has room: a
   DRAM read (or an SSD read without a DRAM area) into HBM's area; an SSD read into DRAM's area (the same fraction of
   DRAM, `fetch`), which moves on to HBM's area over DRAM's channel once that has room (`hop`, in fetch landing
