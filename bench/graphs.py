@@ -28,18 +28,23 @@ from pathlib import Path
 from types import SimpleNamespace as NS
 
 from bench import common as lb
+from ppimpl.config import BLOCK_TOKENS
 
 
 def plans_for(Tb: int, tokens: list[int], prev: int | None = None):
     """The bucket exactly, and a padded plan of two requests between the next smaller bucket `prev` and Tb (not
-    divisible by 16)."""
-    def chunk(rid, n, kv, base_tok):
-        return NS(req_id=rid, start=0, num_tokens=n, kv_blocks=[kv], is_last=True,
-                  state_blocks=list(range(kv + 1, kv + 7)), token_ids=tokens[base_tok:base_tok + n])
-    exact = NS(mb_id=0, chunks=[chunk("a", Tb, 1, 0)])
+    divisible by 16). A request holds ceil(n / 8576) KV blocks and 6 state blocks, numbered from 1 per plan."""
+    nxt = iter(range(1, 1 << 20))
+
+    def chunk(rid, n, base_tok):
+        kv = [next(nxt) for _ in range(-(-n // BLOCK_TOKENS))]
+        return NS(req_id=rid, start=0, num_tokens=n, kv_blocks=kv, is_last=True,
+                  state_blocks=[next(nxt) for _ in range(6)], token_ids=tokens[base_tok:base_tok + n])
+    exact = NS(mb_id=0, chunks=[chunk("a", Tb, 0)])
+    nxt = iter(range(1, 1 << 20))
     T = Tb - (Tb - prev) // 8 - 3 if prev else Tb - 21
     n1 = T // 3
-    padded = NS(mb_id=1, chunks=[chunk("b", T - n1, 1, 100), chunk("c", n1, 8, 7000)])
+    padded = NS(mb_id=1, chunks=[chunk("b", T - n1, 100), chunk("c", n1, 7000)])
     return {"exact": exact, "padded": padded}
 
 
@@ -48,7 +53,7 @@ def main() -> None:
     from vllm.forward_context import set_forward_context
 
     from ppimpl.model import pp_patch
-    from ppimpl.model.stage import CHECKPOINT, StageModel, bench_config
+    from ppimpl.model.stage import CHECKPOINT, GRAPH_BUCKETS, StageModel, bench_config
 
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--stage", type=int, required=True)
@@ -60,8 +65,9 @@ def main() -> None:
     free0 = torch.cuda.mem_get_info(dev)[0]
     if a.memory:
         return memory_check(a, dev, free0)
-    model = StageModel(bench_config(8192, cuda_graphs=True), a.stage, dev, num_blocks=64, max_model_len=8192 + 8576)
-    tokens = lb.enwik9_tokens(CHECKPOINT, 16384)
+    top = max(GRAPH_BUCKETS)
+    model = StageModel(bench_config(top, cuda_graphs=True), a.stage, dev, num_blocks=64, max_model_len=top + 8576)
+    tokens = lb.enwik9_tokens(CHECKPOINT, top + 8192)
     res = {"stage": a.stage, "graph_info": model.graph_info, "cases": []}
     print(f"[graphs] stage {a.stage}: {model.graph_info}", flush=True)
 
