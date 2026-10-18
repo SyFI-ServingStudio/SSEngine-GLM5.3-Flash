@@ -112,7 +112,9 @@ class Driver:
         for k, v in self.host_ns.items():
             if v:
                 a = np.asarray(v) / 1e3
-                out.append(f"{k} n {len(a)} p50 {np.median(a):.1f} p99 {np.percentile(a, 99):.1f} max {a.max():.0f} us")
+                big = a[a > 1000]
+                out.append(f"{k} n {len(a)} p50 {np.median(a):.1f} p99 {np.percentile(a, 99):.1f} max {a.max():.0f} us, "
+                           f">1 ms {len(big)} sum {big.sum() / 1e3:.0f} ms")
         return "; ".join(out)
 
 
