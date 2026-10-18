@@ -144,18 +144,26 @@ def session_vs_target(run_dir: Path, setting: str, n: int) -> dict:
         w = tgt["prefix_read_share"]
         want = {k: w[k] / max(sum(w.values()), 1e-12) for k in w}
     cache = json.loads((run_dir / "cache.json").read_text())
-    reads = [o for o in read_jsonl(run_dir / "tier_ops.jsonl") if o["kind"] == "read"] \
+    reads = [o for o in read_jsonl(run_dir / "tier_ops.jsonl") if o["kind"] in ("read", "fetch")] \
         if (run_dir / "tier_ops.jsonl").exists() else []
     by_tier = {}
-    for o in reads:
-        by_tier.setdefault(o["tier"], []).append(o)
+    for o in reads:                     # staged loading: an SSD read is a fetch, then a hop (a DRAM read)
+        by_tier.setdefault(o["tier"] if o["kind"] == "read" else "ssd fetch", []).append(o)
+    rounds = {}                         # a tier round's whole read, start -> landed in HBM (staged: fetch + hop)
+    for r in server_rows(run_dir).values():
+        if r.get("read_start_ms") is not None:
+            rounds.setdefault(r["tier"], []).append(r["read_land_ms"] - r["read_start_ms"])
     read_stats = {t: {"reads": len(os_), "read_ms": {f"p{q}": round(float(np.percentile(
                       [o["landed_ms"] - o["sent_ms"] for o in os_], q)), 3) for q in (50, 90, 99)},
                       "parts_ms": mean_parts([read_parts(o) for o in os_])} for t, os_ in by_tier.items()}
+    read_stats |= {f"{t} rounds": {"reads": len(v), "read_ms": {f"p{q}": round(float(np.percentile(v, q)), 3)
+                                                              for q in (50, 90, 99)}, "parts_ms": None}
+                   for t, v in rounds.items()}
     return {"run": run_dir.name, "reads": read_stats, "trace": trace_summary(run_dir), "setting": setting, "n": n, "metrics": s["metrics"], "stage_busy": s["stage_busy"],
             "server_ttft_s": s["server_ttft_s"], "hit_share_by_tier": share, "target_hit_share_by_tier": want,
             "scheduler": cache.get("scheduler"), "blocked_by_write": cache.get("blocked_by_write"),
-            "write_back": cache.get("write_back"), "tiers": cache.get("tiers"), "target": tgt, "rounds_failed": s["rounds_failed"],
+            "write_back": cache.get("write_back"), "tiers": cache.get("tiers"), "target": tgt,
+            "loading_area": cache.get("loading_area"), "rounds_failed": s["rounds_failed"],
             "in_run_jit": s["in_run_jit"]}
 
 
@@ -182,7 +190,8 @@ def print_session(x: dict):
             continue
         print(f"  {k} trace ({t['ops']} ops x GPUs), p50 / mean: " + ", ".join(
             f"{f} {v['p50']} / {v['mean']}" for f, v in t.items() if f != "ops"))
-    print(f"  scheduler {x['scheduler']}, blocked_by_write {x['blocked_by_write']}, failed {x['rounds_failed']}")
+    print(f"  scheduler {x['scheduler']}, blocked_by_write {x['blocked_by_write']}, failed {x['rounds_failed']}"
+          + (f", loading area {x['loading_area']}" if x.get("loading_area") else ""))
     for lvl, w in (x.get("write_back") or {}).items():
         print(f"  {lvl} write-back: " + ", ".join(f"{k} {v}" for k, v in w.items()))
 
