@@ -25,6 +25,7 @@ kernel a stage launches must be the manifest's for its position, with no fallbac
 | `install_indexer_split` | `DeepseekV32IndexerMetadataBuilder._split_indexer_prefill_chunks` (vLLM), process-wide | the indexer logits of one prefill go out in calls of at most 2 GiB, query rows in multiples of 512: DeepGEMM's `fp8_mqa_logits` costs the same per 512 query rows at long context, so the fork's greedy split (1,022 + 2 rows at 512k + 1k) paid a whole second call for 2 rows (issues.md, "Long context") | `test_indexer_split_cpu.py`; nsys at 512k |
 | `install_sparse_mla_split` | `flashinfer.decode.trtllm_batch_decode_with_kv_cache_mla`, process-wide | a launch over 32,768 rows returns without doing the work on B200; split as the target does (issues.md, "M2 results") | M2 `dsa_moe` at 64k/128k |
 | `install_moe_buckets` | `flashinfer.fused_moe.shared.tuning` bucket functions, process-wide | the MoE's tactic buckets are the serving shapes (the CUDA-graph buckets to 8,192), not FlashInfer's hybrid ones, which served 4,097-8,191 tokens with 8,192's tactic (`moe_tuning.py`) | `test_moe_tuning_cpu.py`; `bench.tune_tactics verify` (0 misses) |
+| `install_sm_h2d` | `vllm.utils.torch_utils.async_tensor_h2d` and every module binding of it (vLLM), process-wide | GPU time: the builders' host -> device copies (MLA chunked-context tables, up to MBs per microbatch with long cached prefixes) by a kernel reading mapped pinned memory (`sm_h2d`), not the copy engine the KV tier reads keep busy: copies queued behind them started up to tens of ms late (job 8367); same bytes | `test_sm_h2d_gpu.py`; GPU tests b, c, e |
 | `install_autotune_memo` | FlashInfer `AutoTuner.choose_one`, process-wide | host time: memoize the tactic lookup outside tuning (same answer) | `test_host_trims_cpu.py::test_autotune_memo_matches_and_returns_callers_runner` |
 | `install_mm_fp4_skip_check` | `flashinfer.mm_fp4`, process-wide | host time: `skip_check=True` after the warm-up ran the checks | GPU tests c, d (same kernels, same token) |
 | `plain_parameters` | vLLM parameter subclasses on the loaded weights | host time: no `__torch_function__` round trip per op | `test_host_trims_cpu.py::test_plain_parameters_same_storage_and_attrs` |
@@ -545,6 +546,14 @@ def install_kda_split_heads() -> None:
     from ppimpl.model import kda_schedule
 
     kda_schedule.install()
+
+
+def install_sm_h2d() -> None:
+    """`sm_h2d.install_vllm`: vLLM's `async_tensor_h2d` copies by an SM kernel from mapped pinned memory
+    (process-wide)."""
+    from ppimpl.model import sm_h2d
+
+    sm_h2d.install_vllm()
 
 
 def install_kpool_expand() -> None:

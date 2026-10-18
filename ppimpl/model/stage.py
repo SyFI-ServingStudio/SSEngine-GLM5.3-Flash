@@ -270,6 +270,7 @@ class StageModel:
         pp_patch.install_sparse_mla_split()
         pp_patch.install_indexer_split()
         pp_patch.install_moe_buckets()
+        pp_patch.install_sm_h2d()
         # host trims (no kernel or argument changes): env cache, FlashInfer tactic memo / mm_fp4 skip_check, plain
         # parameters
         self.host_trims = self.install_host_trims() if host_trims else None
