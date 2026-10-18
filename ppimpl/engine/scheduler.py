@@ -76,6 +76,8 @@ class Request:
     tier: str | None = None
     tier_tokens: int = 0
     read_start_ns: int | None = None
+    arrival_tier: str | None = None    # staged: the tier holding more of its context than HBM at arrival (wait split)
+    wait_seen: bool = False            # staged: a loading pass has seen it (wait split)
     read_land_ns: int | None = None
     admit_ns: int | None = None
     hit_memo: tuple | None = None      # (kept context, hit): KvManager's comparison of the prompt with it
@@ -258,7 +260,10 @@ class Scheduler:
             kv.lower = pool.hbm_level(kv)
             if pool.set_loading_area(kv, cfg.mb_tokens):
                 self.staged = True
-                self.stats.update(fetches=0, hops=0, rereads=0, load_passes=0, load_pass_ns=0)
+                self.stats.update(fetches=0, hops=0, rereads=0, load_passes=0, load_pass_ns=0,
+                                  read_wait_ms={})
+                self._wait_snap: dict[str, int] = {}   # waiting rounds needing a read, by why, at the last pass
+                self._wait_pass_ns: int | None = None
 
     # --- events ---------------------------------------------------------------------------------------------------
 
@@ -273,6 +278,8 @@ class Scheduler:
         if self.pool is not None and req.session is not None:
             hit = self.pool.lookup(req.session, req)
             if hit is not None:
+                if hit.tokens > rank:
+                    req.arrival_tier = hit.tier
                 rank = max(rank, hit.tokens)
         req.size = req.num_tokens - rank
         if req.token_ids is not None and not req.prefix_tokens:     # server: no declared prefix
@@ -374,6 +381,7 @@ class Scheduler:
         if self.overdue is not None:
             self.overdue.promote(self.policy, now_ns)
         hbm_open, dram_open = True, True
+        why = {}                                    # a closed queue: why it stopped (the wait split, `_wait_split`)
         queues = ([(OVERDUE, list(self.overdue.q))] if self.overdue is not None else []) \
             + [(POLICY, list(self.policy))]
         for src, rs in queues:
@@ -389,22 +397,56 @@ class Scheduler:
                 if via_dram:
                     if not dram_open:
                         continue
-                    if not self.pool.dram_area_fits(hit.tokens) or not self._start_fetch(r, hit, now_ns):
-                        dram_open = False
+                    if not self.pool.dram_area_fits(hit.tokens):
+                        dram_open, why["dram"] = False, "dram_area"
+                        continue
+                    if not self._start_fetch(r, hit, now_ns):
+                        dram_open, why["dram"] = False, "dram_fetch"
                         continue
                 else:
                     if not hbm_open:
                         continue
-                    if not self.kv.area_fits(hit.tokens) or not self._start_read(r, hit, now_ns):
-                        hbm_open = False
+                    if not self.kv.area_fits(hit.tokens):
+                        hbm_open, why["hbm"] = False, "hbm_area"
+                        continue
+                    if not self._start_read(r, hit, now_ns):
+                        hbm_open, why["hbm"] = False, "hbm_hold"
                         continue
                 if src == OVERDUE:
                     self.overdue.q.remove(r)
                     self.overdue.tokens -= r.fresh
                 else:
                     self.policy.remove(r)
+        self._wait_split(now_ns, why, queues)
         self.stats["load_passes"] += 1
         self.stats["load_pass_ns"] += time.perf_counter_ns() - t0
+
+    def _wait_split(self, now_ns: int, why: dict, queues):
+        """Request-ms the rounds needing a read waited, by why (stats `read_wait_ms`): the interval since the last
+        pass goes to what held each such round then ("hbm_area": HBM's queue stopped on the byte gate, "hbm_hold": on
+        HBM blocks for the hold (kept contexts not yet written), "dram_area" / "dram_fetch" the same for DRAM's queue,
+        "busy": its kept context still being written, "open": its queue was open, e.g. HBM caught up with it), and
+        "turn": arrival to the first pass that saw it. A round's queue is the one its tier at arrival uses."""
+        w = self.stats["read_wait_ms"]
+        if self._wait_pass_ns is not None:
+            dt = (now_ns - self._wait_pass_ns) / 1e6
+            for k, n in self._wait_snap.items():
+                w[k] = w.get(k, 0.0) + n * dt
+        snap: dict[str, int] = {}
+        for _, rs in queues:
+            for r in rs:
+                if r.arrival_tier is None or r.req_id in self.reading:
+                    continue
+                if not r.wait_seen:
+                    r.wait_seen = True
+                    if r.arrival_ns:
+                        w["turn"] = w.get("turn", 0.0) + max(now_ns - r.arrival_ns, 0) / 1e6
+                if self.kv.busy(r):
+                    k = "busy"
+                else:
+                    k = why.get("dram" if r.arrival_tier == "ssd" else "hbm", "open")
+                snap[k] = snap.get(k, 0) + 1
+        self._wait_snap, self._wait_pass_ns = snap, now_ns
 
     def state(self) -> dict:
         """Counters for a hang report (the controller's watchdog)."""

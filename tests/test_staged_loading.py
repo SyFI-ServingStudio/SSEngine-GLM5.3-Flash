@@ -303,3 +303,22 @@ def test_overdue_rounds_read_first_and_landed_overdue_rounds_go_first():
     done(s, [o], 5_000_000)
     mb = s.next_microbatch(5_000_000)
     assert mb[0].req is old                             # landed and overdue: before every other round
+
+
+def test_wait_split_counts_request_ms_by_what_held_the_round():
+    """`read_wait_ms`: between two loading passes, a round needing a read is counted under what stopped its queue at
+    the first (here DRAM's area full for the SSD round b), and its arrival -> first pass as "turn"."""
+    s, kv, pool, t = sched(blocks=60, area=14, dram=0.030)
+    put(t, 1, 5 * B, "ssd")
+    put(t, 2, 2 * B, "ssd")
+    s.cfg.order = "fifo"
+    a, b = rnd(1, 5 * B + 1, 10), rnd(2, 2 * B + 1, 10)
+    for r in (a, b):
+        s.add(r, 500_000)
+    assert b.arrival_tier == "ssd"
+    s.load(1_000_000)                                  # a fetches; b's fetch does not fit: DRAM's queue stops
+    s._load_dirty = True
+    s.load(3_000_000)
+    w = s.stats["read_wait_ms"]
+    assert w["turn"] == pytest.approx(0.5)             # b (a's read started): arrival to the first pass
+    assert w["dram_area"] == pytest.approx(2.0)        # b, 2 ms between the passes
