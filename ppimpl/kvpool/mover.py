@@ -108,12 +108,17 @@ class Driver:
 
     def summary(self) -> str:
         """Host time of the GIL-holding calls (a blocked one stalls every Python thread), us p50 / p99 / max."""
-        out = []
-        for k, v in self.host_ns.items():
-            if v:
-                a = np.asarray(v) / 1e3
-                out.append(f"{k} n {len(a)} p50 {np.median(a):.1f} p99 {np.percentile(a, 99):.1f} max {a.max():.0f} us")
-        return "; ".join(out)
+        return host_us_summary(self.host_ns)
+
+
+def host_us_summary(host_ns: dict) -> str:
+    """Host time per driver call kind, us p50 / p99 / max (`Driver.summary`, and the Rust engine's at close)."""
+    out = []
+    for k, v in host_ns.items():
+        if len(v):
+            a = np.asarray(v) / 1e3
+            out.append(f"{k} n {len(a)} p50 {np.median(a):.1f} p99 {np.percentile(a, 99):.1f} max {a.max():.0f} us")
+    return "; ".join(out)
 
 
 def _runs(src: np.ndarray, dst: np.ndarray, lens: np.ndarray, slot: np.ndarray):

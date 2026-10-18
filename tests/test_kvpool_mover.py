@@ -106,3 +106,59 @@ def test_runs_merge_contiguous_pieces_within_a_slot_only():
     slot = np.array([0, 0, 0, 0, 1], dtype=np.int64)
     s, d, n = _runs(src, dst, lens, slot)
     assert s.tolist() == [0, 300, 500] and d.tolist() == [1000, 1300, 1500] and n.tolist() == [200, 200, 100]
+
+
+def _random_segments(rng, base: int, hbase: int):
+    """2-3 segments of 1-9 slots, 1-5 pieces per slot (some contiguous on both sides, so runs merge), random own-GPU
+    flags; device pieces anywhere."""
+    segs, nxt = [], 0
+    for _ in range(rng.integers(2, 4)):
+        nslots = int(rng.integers(1, 10))
+        hosts = [hbase + int(s) * SB for s in rng.permutation(64)[:nslots]]
+        dev, off, lens = [], [], []
+        for k in range(nslots):
+            at = 0
+            for _ in range(int(rng.integers(1, 6))):
+                n = int(rng.integers(1, 6)) * 64
+                if at + n > SB:
+                    break
+                dev.append(base + nxt if rng.random() < 0.5 else base + int(rng.integers(0, 1 << 20)) * 16)
+                nxt += n
+                off.append(k * SB + at)
+                lens.append(n)
+                at += n + (0 if rng.random() < 0.5 else 64)
+        local = rng.random(len(lens)) < 0.3 if rng.random() < 0.7 else None
+        segs.append(Segment(hosts, SB, np.array(dev, np.int64), np.array(off, np.int64), np.array(lens, np.int64),
+                            local))
+    return segs
+
+
+@pytest.mark.parametrize("ring", [dict(hops="direct"), dict(), dict(ring_depth=1, ring_chunk_slots=1),
+                                  dict(ring_depth=2, ring_chunk_slots=3), dict(ring_depth=3, ring_chunk_slots=2)],
+                         ids=lambda r: str(r) or "default")
+def test_rust_mover_issues_the_same_batches(ring):
+    """tier_rs's mover (the Rust engine) issues the same batches as this one for the same transfer: stream, and
+    every copy's source, destination and length in order (ring chunks, runs per slot, own-GPU pieces), both
+    directions, gated or not, over several transfers sharing the ring's chunk positions."""
+    tier_rs = pytest.importorskip("tier_rs")
+    rng = np.random.default_rng(3)
+    m = Mover(torch.device("cpu"), SB, **ring)
+    ring_ptr = None if m.ring is None else m.ring.ctypes.data
+    recs: list = []
+    m._batch = lambda stream, src, dst, lens, *a, **k: recs.append(
+        (stream, np.asarray(src).tolist(), np.asarray(dst).tolist(), np.asarray(lens).tolist()))
+    rust_pos = {"read": 0, "write": 0}
+    for trial in range(40):
+        segs = _random_segments(rng, 1 << 40, 1 << 30)
+        d = "read" if trial % 2 else "write"
+        gated = bool(trial % 3 == 0)
+        recs.clear()
+        m.transfer_async(d, segs, gate=(lambda: None) if gated else None)
+        # the Rust mover starts at ring chunk 0: replay the Python ring position by leading transfers of one slot
+        seg_args = [(list(s.host_ptrs), s.dev.tolist(), s.off.tolist(), s.lens.tolist(),
+                     None if s.local is None else [bool(x) for x in s.local]) for s in segs]
+        got = tier_rs.plan_transfer(d, seg_args, SB, ring.get("hops", "two"), ring.get("ring_depth", 2),
+                                    ring.get("ring_chunk_slots", 4), ring_ptr, gated, rust_pos[d])
+        assert [tuple(g) for g in got] == recs, (trial, d, gated)
+        if m.ring is not None:
+            rust_pos[d] = m._ring_next[d]

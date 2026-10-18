@@ -26,6 +26,10 @@ ops that share slots, `TierOp.deps`), and each is reported when its last slot is
 
 The fake model has no KV: its member moves nothing and reports each op after the time the configured bandwidth
 gives its bytes, one op after another per direction (CPU tests, fake runs).
+
+`TierConfig.engine = "rust"` (lanes/m6-rust TIER_RS.md): the same threads and rules in Rust (`tier_rs.Engine`, built
+in `attach` from the arenas, placement, ring and streams made here), none of which takes the GIL; this class then
+only sets up and closes.
 """
 
 from __future__ import annotations
@@ -41,11 +45,12 @@ import traceback
 import numpy as np
 from torch.cuda.nvtx import range as nvtx_range   # host ranges for Nsight Systems
 
-from ppimpl.kvpool.backends import HostTier, SsdTier, _ok, cgroup_peak_gb, node_cpus, num_slots
+from ppimpl.kvpool.backends import (SSD_READ_DEPTH, SSD_WRITE_DEPTH, HostTier, SsdTier, _ok, cgroup_peak_gb,
+                                    node_cpus, num_slots)
 from ppimpl.kvpool.shards import shard_bytes, shard_path
 from ppimpl.kvpool.layout import ViewRange
 from ppimpl.kvpool.manager import TierOp
-from ppimpl.kvpool.mover import EVENT_POOL, Mover, Segment
+from ppimpl.kvpool.mover import EVENT_POOL, Mover, Segment, host_us_summary
 from ppimpl.kvpool.placement import BalancedPlacement
 from ppimpl.runtime.transport import Shutdown, TierDone, TierMove, WorkerError, decode_tier, encode
 
@@ -150,6 +155,10 @@ class PoolMember:
         self._reads_in = self._reads_out = 0
         self._gated: set[int] = set()
         self.yields = dict(waits=0, wait_ms=0.0)
+        self.native = None                         # engine "rust": tier_rs.Engine (built in attach)
+        self._ring = self._streams = None          # the Rust engine's device ring and streams (owned here)
+        if tc.engine not in ("python", "rust"):
+            raise ValueError(f"tiers.engine: {tc.engine!r} (python | rust)")
         if tc.hops not in ("two", "direct"):
             raise ValueError(f"tiers.hops: {tc.hops!r} (two | direct)")
         if tc.ring_depth < 1 or tc.ring_chunk_slots < 1:
@@ -168,6 +177,9 @@ class PoolMember:
         slot bytes, a state's slots and its bytes."""
         if ranges is None:
             self.slot_bytes = self.slot_bytes or -(-FAKE_BLOCK_BYTES // self.n // 4096) * 4096
+            if self.tc.engine == "rust":
+                import tier_rs
+                self.native = tier_rs.Engine(self._native_cfg(False))
             return self.slot_bytes, self.tc.state_slots, self.tc.state_slots * self.slot_bytes
         self.real = True
         allr, self.opened = share_ranges(self.stage, self.n, ranges) if self.cuda else (ranges, [])
@@ -199,21 +211,78 @@ class PoolMember:
                 raise ValueError("SSD tier: tiers.ssd_dir is the shard set the leader took (shards.ShardSet)")
             assert num_slots(self.tc.ssd_gb, sb) * sb <= shard_bytes(self.tc.ssd_gb)
             self.ssd = SsdTier(shard_path(self.tc.ssd_dir, self.stage), shard_bytes(self.tc.ssd_gb), sb,
-                               [(a.base, a.nbytes) for a in (self.dram, self.staging) if a is not None])
-        self.mover = Mover(self.device, sb, self.tc.hops, self.tc.ring_depth, self.tc.ring_chunk_slots)
+                               [(a.base, a.nbytes) for a in (self.dram, self.staging) if a is not None],
+                               ring=self.tc.engine == "python")
+        if self.tc.engine == "rust":
+            mover_info = self._native_attach(P)
+            ssd_info = self.ssd.ring_info(*self.native.ssd_info) if self.ssd else ""
+        else:
+            self.mover = Mover(self.device, sb, self.tc.hops, self.tc.ring_depth, self.tc.ring_chunk_slots)
+            mover_info = self.mover.info
+            ssd_info = self.ssd.info if self.ssd else ""
         print(f"stage {self.stage} tiers: slot {self.slot_bytes} B, state {P.state_slots} slots, "
               f"{len(P.kv_len)} kv + {len(P.st_len)} state pieces per block/context, "
               + (f"dram {self.dram.nbytes / 1e9:.1f} GB on node {self.dram.node} (touch {self.dram.touch_s:.1f} s, "
                  f"of it after the model {self.touch_wait_s:.1f} s, register {self.dram.register_s:.1f} s, {self.dram.placement()}), "
                  if self.dram else "")
-              + (f"{self.ssd.info}, staging {self.staging.nbytes / 1e9:.1f} GB "
+              + (f"{ssd_info}, staging {self.staging.nbytes / 1e9:.1f} GB "
                  f"({self.staging.placement()}), " if self.ssd else "")
               + f"{len(self.opened)} peer allocations, "
-              + self.mover.info
+              + mover_info
               + (f", cgroup memory.peak {pk:.0f} GB" if (pk := cgroup_peak_gb()) is not None else ""), flush=True)
         return self.slot_bytes, P.state_slots, P.state_bytes
 
-    def start(self):
+    def _native_cfg(self, real: bool) -> dict:
+        """The Rust engine's start-up values (TIER_RS.md): raw handles and numbers only."""
+        tc = self.tc
+        return dict(stage=self.stage, real=real, cuda=self.cuda and real, device=(self.device.index or 0) if self.cuda
+                    else 0, slot_bytes=self.slot_bytes, dram_base=self.dram.base if self.dram else None,
+                    staging_base=self.staging.base if self.staging else None,
+                    trace_every=self.trace_every if self.trace else 0, run_dir=str(getattr(self.cfg, "run_dir", ".")),
+                    dram_read_gb_s=tc.dram_read_gb_s, ssd_read_gb_s=tc.ssd_read_gb_s, hops=tc.hops,
+                    ring_depth=tc.ring_depth, ring_chunk_slots=tc.ring_chunk_slots)
+
+    def _native_attach(self, P: BalancedPlacement) -> str:
+        """The Rust engine over this member's placement, arenas, SSD file, device ring and streams (made here, as
+        `Mover` makes them, and kept until close). Returns the mover's start-up info."""
+        import tier_rs
+        tc, sb = self.tc, self.slot_bytes
+        cfg = self._native_cfg(True)
+        for k in ("kv_stage", "kv_dev", "kv_stride", "kv_len", "kv_host",
+                  "st_stage", "st_dev", "st_stride", "st_group", "st_slot", "st_off", "st_len"):
+            cfg[k] = getattr(P, k).tolist()
+        info = "direct"
+        if tc.hops == "two":
+            half = tc.ring_depth * tc.ring_chunk_slots * sb
+            info = f"two hops: ring 2 x {tc.ring_depth} x {tc.ring_chunk_slots} slots"
+        if self.cuda:
+            import torch
+            self._streams = {k: torch.cuda.Stream(self.device) for k in ("read", "write", "read_nvl", "write_nvl")}
+            cfg["streams"] = [self._streams[k].cuda_stream for k in ("read", "write", "read_nvl", "write_nvl")]
+            if tc.hops == "two":
+                free = torch.cuda.mem_get_info(self.device)[0]
+                self._ring = torch.empty(2 * half, dtype=torch.uint8, device=self.device)
+                cfg["ring_ptr"] = self._ring.data_ptr()
+                info += f" = {2 * half / 1e9:.3f} GB of {free / 1e9:.2f} GB free HBM after the model and KV pool"
+        if self.ssd is not None:
+            cfg.update(ssd_fd=self.ssd.fd, ssd_buffers=self.ssd.buffers, ssd_piece_bytes=self.ssd.piece_bytes,
+                       ssd_read_depth=SSD_READ_DEPTH, ssd_write_depth=SSD_WRITE_DEPTH)
+        self.native = tier_rs.Engine(cfg)
+        return info + ", rust engine"
+
+    def start(self, local: bool = False):
+        """Serve ops. `local` (Rust engine, tests): no tier socket and no report socket; ops come from
+        `native.dispatch` and completions go to `native.poll_done`."""
+        if self.native is not None:
+            if local:
+                self.native.start(None, None)
+            else:
+                self.native.start(self.cfg.tier_addr(self.stage), self.cfg.report_addr())
+            if self.trace:
+                t = threading.Thread(target=self._probe_loop, name="tier-probe", daemon=True)
+                t.start()
+                self.threads.append(t)
+            return
         for name in ("read", "write"):
             t = threading.Thread(target=self._done_loop, args=(name,), name=f"tier-{name}", daemon=True)
             t.start()
@@ -259,6 +328,19 @@ class PoolMember:
         self.stop.set()
         for t in self.threads:
             t.join(timeout=10)
+        if self.native is not None:
+            st = self.native.close()
+            if not st["joined"]:
+                print(f"stage {self.stage} tier threads (rust): not all ended within 10 s", flush=True)
+            if self.cuda and self.real:
+                print(f"stage {self.stage} tier events: {st['events_made']} made, {EVENT_POOL} of them at start; "
+                      f"write chunks that yielded to reads {st['yield_waits']}, {st['yield_wait_ms']:.0f} ms",
+                      flush=True)
+                g = np.asarray(st["gate_wait_ns"]) / 1e3
+                print(f"stage {self.stage} tier driver calls: "
+                      f"{host_us_summary({'record': st['record_ns'], 'wait': st['wait_ns']})}; gated-write chunk waits "
+                      f"n {len(g)}" + (f" p50 {np.median(g):.0f} p99 {np.percentile(g, 99):.0f} max {g.max():.0f} us, "
+                                       f"sum {g.sum() / 1e6:.1f} s" if len(g) else ""), flush=True)
         if self.mover is not None and self.cuda:
             print(f"stage {self.stage} tier events: {self.mover.events_made} made, {EVENT_POOL} of them at start; "
                   f"write chunks that yielded to reads {self.yields['waits']}, {self.yields['wait_ms']:.0f} ms",

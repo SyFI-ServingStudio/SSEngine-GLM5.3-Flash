@@ -8,7 +8,8 @@ read (blocks 2.. and the state, as when HBM holds the first blocks) into K2 like
 is demoted to the SSD file (O_DIRECT) and read back through the staging arena into K3; staged loading: fetched from
 the file into other DRAM slots (a loading area) and moved on from there into K4 by a DRAM read. Then round 1 (A = 1,000) on K0
 (an HBM hit) and on K1 (after the tier read): the logits are bitwise equal. The workers run with expandable segments,
-as the server's do (the KV is allocated IPC-shareable regardless). Run through Slurm:
+as the server's do (the KV is allocated IPC-shareable regardless). Both engines (`TierConfig.engine`): the Python
+member's own queues, and the Rust engine's (tier_rs) threads, fed by `Engine.dispatch`. Run through Slurm:
 
     sbatch -p main --gres=gpu:4 --time=00:20:00 -o measured/logs/%j.out bench/slurm/gtest.sbatch kvpool_bytes
 """
@@ -78,7 +79,7 @@ def _views(ranges, dev, kv, st, b_lo=0):
     return out
 
 
-def _worker(rank: int, port: int, out_dir: str):
+def _worker(rank: int, port: int, out_dir: str, engine: str = "python"):
     import os
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"   # as the controller starts its workers
 
@@ -89,17 +90,27 @@ def _worker(rank: int, port: int, out_dir: str):
     from ppimpl.config import HIDDEN_WIDTH, RunConfig, SchedulerConfig, TierConfig
     from ppimpl.model.stage import StageModel, bench_config
     from ppimpl.kvpool.member import PoolMember
-    from ppimpl.runtime.transport import TierMove, open_pipe
+    from ppimpl.runtime.transport import TierBatch, TierMove, encode, open_pipe
 
     dev = torch.device("cuda", rank)
     torch.cuda.set_device(dev)
     pipe = open_pipe(RunConfig(port=port, scheduler=SchedulerConfig(mb_tokens=CHUNK)), rank, dev, HIDDEN_WIDTH)
-    tc = TierConfig(dram_gb=2.0, ssd_gb=1.0, staging_gb=0.5, ssd_dir=f"{out_dir}/set0")   # the shard set, made below
+    tc = TierConfig(dram_gb=2.0, ssd_gb=1.0, staging_gb=0.5, ssd_dir=f"{out_dir}/set0",   # the shard set, made below
+                    engine=engine)
     eng = PoolMember(NS(tiers=tc, num_stages=4, model="glm53", run_dir=out_dir), rank, dev, zmq.Context())
     m = StageModel(bench_config(CHUNK), rank, dev, num_blocks=1 + 5 * (N_KV + N_ST), max_model_len=P + A + B,
                    cuda_graphs=False, ipc_kv=True)
     mine = m.tier_ranges()
     slot_bytes, state_slots, _ = eng.attach(mine)
+    if engine == "rust":
+        eng.start(local=True)
+
+    def native(mv):
+        """The Rust engine: the op as received; its TierDone (the done thread synchronized its copies)."""
+        eng.native.dispatch(encode(TierBatch([mv])))
+        d = eng.native.poll_done(120)
+        assert d is not None and d["type"] == "TierDone" and d["op_id"] == mv.op_id, d
+        return d
     res = {"rank": rank, "slot_bytes": slot_bytes, "state_slots": state_slots,
            "register_s": eng.dram.register_s, "touch_s": eng.dram.touch_s}
     blocks = iter(range(1, m.num_blocks))
@@ -120,6 +131,11 @@ def _worker(rank: int, port: int, out_dir: str):
                 mv = TierMove(op_id, op, tier, None, b_lo, n0, 0, [kv], [st], slots, sslots, [], [])
             else:                           # SSD: file slots = the DRAM ones' ids; host side DRAM or staging
                 mv = TierMove(op_id, op, tier, host, b_lo, n0, 0, [kv], [st], slots, sslots, slots, sslots)
+            if engine == "rust":
+                nbytes = native(mv)["nbytes"]
+                torch.cuda.synchronize()
+                dist.barrier()
+                return nbytes
             eng.submit(mv)
             if tier == "ssd":
                 eng._ssd_op(*eng.ssd_q[eng.direction(mv)].get())
@@ -153,14 +169,21 @@ def _worker(rank: int, port: int, out_dir: str):
         res["ssd_read_equal"] = all(torch.equal(a, b) for a, b in zip(want, _views(mine, dev, K3[:n0], S3)))
         area = list(range(n0 + state_slots, 2 * (n0 + state_slots)))     # DRAM slots of a loading area
         fetch = TierMove(5, "fetch", "ssd", "dram", 0, 0, 0, [[]], [[]], slots, sslots, area[:n0], area[n0:])
-        eng.submit(fetch)
-        eng._ssd_op(*eng.ssd_q["read"].get())
-        res["fetch_bytes"] = eng.q["read"].get()[3]
+        if engine == "rust":
+            res["fetch_bytes"] = native(fetch)["nbytes"]
+        else:
+            eng.submit(fetch)
+            eng._ssd_op(*eng.ssd_q["read"].get())
+            res["fetch_bytes"] = eng.q["read"].get()[3]
         dist.barrier()
         hop = TierMove(6, "read", "dram", None, 0, n0, 0, [K4], [S4], area[:n0], area[n0:], [], [])
-        eng.submit(hop)
-        _, ev, _, res["hop_bytes"], _, _ = eng.q["read"].get()
-        ev.synchronize()
+        if engine == "rust":
+            d = native(hop)
+            res["hop_bytes"], res["hop_gpu_ns"] = d["nbytes"], d["gpu_ns"]
+        else:
+            eng.submit(hop)
+            _, ev, _, res["hop_bytes"], _, _ = eng.q["read"].get()
+            ev.synchronize()
         torch.cuda.synchronize()
         dist.barrier()
         res["staged_read_equal"] = all(torch.equal(a, b) for a, b in zip(want, _views(mine, dev, K4[:n0], S4)))
@@ -176,7 +199,8 @@ def _worker(rank: int, port: int, out_dir: str):
     pipe.close()
 
 
-def test_tier_round_trip_is_bitwise(tmp_path):
+@pytest.mark.parametrize("engine", ["python", "rust"])
+def test_tier_round_trip_is_bitwise(tmp_path, engine):
     torch = pytest.importorskip("torch")
     if torch.cuda.device_count() < 4:
         pytest.skip("needs 4 GPUs")
@@ -184,7 +208,7 @@ def test_tier_round_trip_is_bitwise(tmp_path):
 
     from ppimpl.kvpool.shards import create
     create(str(tmp_path), 1, 4, 1.0)
-    mp.start_processes(_worker, args=(free_port_block(), str(tmp_path)), nprocs=4, start_method="spawn")
+    mp.start_processes(_worker, args=(free_port_block(), str(tmp_path), engine), nprocs=4, start_method="spawn")
     res = [json.loads((tmp_path / f"rank{r}.json").read_text()) for r in range(4)]
     print(json.dumps(res))
     assert len({(r["slot_bytes"], r["state_slots"]) for r in res}) == 1
@@ -193,4 +217,5 @@ def test_tier_round_trip_is_bitwise(tmp_path):
         assert r["write_bytes"] == r["read_bytes"] > r["partial_read_bytes"] > 0
         assert r["ssd_read_equal"] and r["ssd_direct"] and r["demote_bytes"] == r["ssd_read_bytes"] > 0, r
         assert r["staged_read_equal"] and r["fetch_bytes"] == r["demote_bytes"] and r["hop_bytes"] > 0, r
+        assert engine == "python" or r["hop_gpu_ns"] > 0, r
     assert res[3]["round1_logits_equal"], res[3]

@@ -315,24 +315,31 @@ class SsdTier:
     The file must exist with `nbytes` (written in full once by `shards.py create`); it is kept at close. Its contents
     are never trusted: the slot index (`TierManager`) starts empty every run, so only slots this run wrote are read."""
 
-    def __init__(self, path: str, nbytes: int, slot_bytes: int, buffers: list[tuple[int, int]]):
-        self.path, self.slot_bytes, self.fd = path, slot_bytes, None
+    def __init__(self, path: str, nbytes: int, slot_bytes: int, buffers: list[tuple[int, int]], ring: bool = True):
+        """`ring` False: the file only (the Rust engine runs its own io_uring on `fd`, `buffers` and `piece_bytes`)."""
+        self.path, self.slot_bytes, self.fd, self.io = path, slot_bytes, None, None
+        self.buffers = buffers
+        self.piece_bytes = -(-slot_bytes // 4096) * 4096       # a whole slot (cut only at a fixed buffer's end)
         if not os.path.exists(path) or os.path.getsize(path) != nbytes:
             raise RuntimeError(f"SSD shard {path}: " + (f"{os.path.getsize(path)} B" if os.path.exists(path) else
                                "missing") + f", the run needs {nbytes} B; create the set with "
                                "`python -m ppimpl.kvpool.shards create` (TIERS.md §5)")
         self.fd, self.direct = open_direct(path)
+        if not ring:
+            return
         try:
-            piece = -(-slot_bytes // 4096) * 4096              # a whole slot (cut only at a fixed buffer's end)
-            self.io = UringFile(self.fd, buffers, piece, SSD_READ_DEPTH, SSD_WRITE_DEPTH, "tier-uring")
+            self.io = UringFile(self.fd, buffers, self.piece_bytes, SSD_READ_DEPTH, SSD_WRITE_DEPTH, "tier-uring")
         except BaseException:
             os.close(self.fd)
             raise
 
+    def ring_info(self, registered_bytes: int, register_s: float) -> str:
+        return (f"ssd shard {self.path} (O_DIRECT {self.direct}, io_uring {registered_bytes / 1e9:.1f} GB "
+                f"registered in {register_s:.1f} s, depth read {SSD_READ_DEPTH} / write {SSD_WRITE_DEPTH})")
+
     @property
     def info(self) -> str:
-        return (f"ssd shard {self.path} (O_DIRECT {self.direct}, io_uring {self.io.registered_bytes / 1e9:.1f} GB "
-                f"registered in {self.io.register_s:.1f} s, depth read {SSD_READ_DEPTH} / write {SSD_WRITE_DEPTH})")
+        return self.ring_info(self.io.registered_bytes, self.io.register_s)
 
     def read(self, slots: list[int], host_ptrs: list[int]) -> list[Future]:
         """File slots -> host addresses, one future per slot, queued in order."""
@@ -346,7 +353,8 @@ class SsdTier:
         """Stop the ring and close the file (kept for the next run)."""
         if self.fd is None:
             return
-        self.io.close()
+        if self.io is not None:
+            self.io.close()
         os.close(self.fd)
         self.fd = None
 

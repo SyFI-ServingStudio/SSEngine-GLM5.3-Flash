@@ -1,7 +1,9 @@
 """The pool's members on CPU (ppimpl/kvpool/member.py): the leader (slot mode) decides the ops and `tier_move` turns
 them into what the members get, four members (one per quarter, all four fake stages' views in this process) run them
 into their own DRAM arenas. A context written at the end of round 0, evicted from HBM and read back into other blocks
-is byte-equal; growth rewrites only the new blocks; the fake member reports ops after their bandwidth time."""
+is byte-equal; growth rewrites only the new blocks; the fake member reports ops after their bandwidth time. The
+end-to-end tests run on both engines (`TierConfig.engine`: the Python threads, and the Rust ones of tier_rs, whose
+ops come in through `Engine.dispatch` and go out through `Engine.poll_done` here)."""
 
 import os
 import time
@@ -20,16 +22,22 @@ from ppimpl.runtime.transport import TierBatch, decode_tier, encode
 from test_kvpool_placement import block_bytes, stages
 
 
-def members(nslots: int | None = 40, ssd_slots: int | None = None, staging_slots: int = 0, ssd_dir=None, **ring):
+ENGINES = ["python", "rust"]
+
+
+def members(nslots: int | None = 40, ssd_slots: int | None = None, staging_slots: int = 0, ssd_dir=None,
+            engine: str = "python", start: bool = True, **ring):
     """Four members over the fake stages, with DRAM arenas of `nslots` slots (SSD files of `ssd_slots`), and the
-    leader's config. `ring`: TierConfig's hops / ring_depth / ring_chunk_slots."""
+    leader's config. `ring`: TierConfig's hops / ring_depth / ring_chunk_slots. Rust members are started (`start`)
+    without sockets: `run` dispatches to them."""
     views, ranges = stages()
     L = BalancedPlacement(ranges, 4, 0)
 
     def gb(n):
         return None if n is None else (n + 0.5) * L.slot_bytes / 1e9
     tc = TierConfig(dram_gb=gb(nslots), ssd_gb=gb(ssd_slots), staging_gb=gb(staging_slots), slot_bytes=L.slot_bytes,
-                    state_slots=L.state_slots, ssd_dir=None if ssd_dir is None else str(ssd_dir), **ring)
+                    state_slots=L.state_slots, ssd_dir=None if ssd_dir is None else str(ssd_dir), engine=engine,
+                    **ring)
     cfg = NS(tiers=tc, num_stages=4, model="glm53", run_dir=str(ssd_dir))
     if ssd_slots is not None:                   # the shard set (kept across runs: made once)
         shards.create(str(ssd_dir), 1, 4, ssd_slots and gb(ssd_slots))
@@ -40,14 +48,25 @@ def members(nslots: int | None = 40, ssd_slots: int | None = None, staging_slots
         e = PoolMember(cfg, q, torch.device("cpu"), None)
         assert e.attach(ranges) == (L.slot_bytes, L.state_slots, L.state_bytes)
         assert nslots is None or e.dram.nbytes >= nslots * L.slot_bytes
+        if engine == "rust" and start:
+            e.start(local=True)
         mems.append(e)
     return views, ranges, mems, tc
 
 
 def run(mems, ops):
     """Every member runs the batch (as received over the wire); returns the bytes each moved per op."""
-    msg = decode_tier(encode(TierBatch([tier_move(o) for o in ops])))
+    buf = encode(TierBatch([tier_move(o) for o in ops]))
     moved = {}
+    if mems[0].native is not None:             # Rust: the batch as the receive thread hands it on; every op reported
+        for e in mems:
+            e.native.dispatch(buf)
+            for _ in ops:
+                d = e.native.poll_done(30)
+                assert d is not None and d["type"] == "TierDone", d
+                moved.setdefault(d["op_id"], []).append(d["nbytes"])
+        return moved
+    msg = decode_tier(buf)
     for e in mems:
         for m in msg.ops:
             e.submit(m)
@@ -70,10 +89,12 @@ RINGS = [dict(hops="direct"), dict(), dict(ring_depth=2, ring_chunk_slots=1), di
          dict(ring_depth=4, ring_chunk_slots=1)]
 
 
+@pytest.mark.parametrize("engine", ENGINES)
 @pytest.mark.parametrize("ring", RINGS, ids=lambda r: "-".join(f"{k}={v}" for k, v in r.items()) or "default")
-def test_write_evict_read_back_is_byte_equal_and_growth_moves_only_new_blocks(ring):
-    views, ranges, mems, tc = members(**ring)
-    assert (mems[0].mover.ring is None) == (ring.get("hops") == "direct")
+def test_write_evict_read_back_is_byte_equal_and_growth_moves_only_new_blocks(ring, engine):
+    views, ranges, mems, tc = members(engine=engine, **ring)
+    if engine == "python":
+        assert (mems[0].mover.ring is None) == (ring.get("hops") == "direct")
     pool = BalancedKVPool(tc)
     assert pool.manager.tiers[0].num_slots == 40
     tokens = 2 * B + 77
@@ -130,8 +151,9 @@ def drive(pool, mems):
     return done
 
 
+@pytest.mark.parametrize("engine", ENGINES)
 @pytest.mark.parametrize("ring", [dict(), dict(ring_depth=2, ring_chunk_slots=1)], ids=["default", "chunk1"])
-def test_ssd_demote_and_staging_are_byte_equal(tmp_path, ring):
+def test_ssd_demote_and_staging_are_byte_equal(tmp_path, ring, engine):
     """DRAM holds one 2-block context: Y's write-back demotes X to SSD (DRAM slots -> file, io_uring); X's read comes
     back through the staging arena into other HBM blocks, Y's from DRAM. SSD only: writes and reads through the
     staging arena. Every context byte-equal; the files are deleted at close."""
@@ -141,7 +163,7 @@ def test_ssd_demote_and_staging_are_byte_equal(tmp_path, ring):
         d = tmp_path / str(dram)
         ss = BalancedPlacement(stages()[1], 4, 0).state_slots
         views, ranges, mems, tc = members(None if dram is None else 2 + ss, 60, 30, d, dram_write_ahead=None,
-                                          **ring)   # DRAM: one context, demoted when evicted
+                                          engine=engine, **ring)   # DRAM: one context, demoted when evicted
         pool = BalancedKVPool(tc)
         want = {}
         for name, a in (("x", X), ("y", Y)):
@@ -167,18 +189,19 @@ def test_ssd_demote_and_staging_are_byte_equal(tmp_path, ring):
         assert all(os.path.exists(x) for x in paths)                 # kept for the next run
 
 
-def test_kept_ssd_file_is_never_served_stale(tmp_path):
+@pytest.mark.parametrize("engine", ENGINES)
+def test_kept_ssd_file_is_never_served_stale(tmp_path, engine):
     """A second run over the first run's shard set (same files, x's bytes still in them) starts with an empty index:
     x is found nowhere (computed again), and what it reads back is only what it wrote itself."""
     T = 2 * B - 5
     X, Y = KVViews([1, 2], [3, 4, 5, 6, 7, 8], T), KVViews([9, 10], [0, 9, 10, 11, 1, 2], T)
-    views, ranges, mems, tc = members(None, 60, 30, tmp_path)
+    views, ranges, mems, tc = members(None, 60, 30, tmp_path, engine=engine)
     pool = BalancedKVPool(tc)
     pool.write_back("x", T, None, X)
     drive(pool, mems)
     for e in mems:
         e.close()
-    views, ranges, mems, tc = members(None, 60, 30, tmp_path)         # the next run: same files
+    views, ranges, mems, tc = members(None, 60, 30, tmp_path, engine=engine)   # the next run: same files
     pool = BalancedKVPool(tc)
     assert pool.lookup("x", Request("x1", T + 9, session="x", prefix_tokens=T)) is None
     want = block_bytes(views, ranges, Y.kv_blocks, Y.state_blocks)
@@ -194,7 +217,8 @@ def test_kept_ssd_file_is_never_served_stale(tmp_path):
         e.close()
 
 
-def test_member_threads_route_dram_ops_by_direction(tmp_path):
+@pytest.mark.parametrize("engine", ENGINES)
+def test_member_threads_route_dram_ops_by_direction(tmp_path, engine):
     """The real members' threads end to end (CPU): the receive thread hands DRAM ops to their direction's submit
     thread, the done threads report every op over the report socket, a context written and read back through them is
     byte-equal, and Shutdown ends every thread."""
@@ -202,7 +226,7 @@ def test_member_threads_route_dram_ops_by_direction(tmp_path):
 
     from ppimpl.runtime.transport import Shutdown, TierDone, decode_to_controller
 
-    views, ranges, mems, tc = members()
+    views, ranges, mems, tc = members(engine=engine, start=False)
     ctx = zmq.Context()
     pull = ctx.socket(zmq.PULL)
     port = pull.bind_to_random_port("tcp://127.0.0.1")
@@ -247,6 +271,8 @@ def test_member_threads_route_dram_ops_by_direction(tmp_path):
         for th in e.threads:
             th.join(10)
             assert not th.is_alive(), th.name
+        if e.native is not None:                 # every Rust thread ended (Shutdown) and joined
+            assert e.native.close()["joined"]
     pull.close(linger=0)
     ctx.term()
 
@@ -387,3 +413,65 @@ def test_eviction_waiting_for_writes_makes_them_urgent():
     assert set(wb.writing) == {"a", "b"} and lvl.urged == []
     wb.make_room(8.0)                                    # needs c too: urges a, b and writes c urgent
     assert sorted(lvl.urged) == ["tok-a", "tok-b", "tok-c"] and wb.stats["evict_writes"] == 1
+
+
+def test_rust_fake_member_reports_after_bandwidth_time():
+    """The Rust engine's fake member (no KV): each op done after its bytes at the configured bandwidth, one after
+    another per direction; TierDone goes out over the report socket and decodes as the Python one."""
+    import zmq
+
+    from ppimpl.runtime.transport import TierDone, TierMove, decode_to_controller
+
+    ctx = zmq.Context()
+    pull = ctx.socket(zmq.PULL)
+    port = pull.bind_to_random_port("tcp://127.0.0.1")
+    tc = TierConfig(dram_gb=1.0, ssd_gb=None, slot_bytes=10_000_000, dram_read_gb_s=1.0, engine="rust")
+    cfg = NS(tiers=tc, num_stages=4, model="fake", report_addr=lambda: f"tcp://127.0.0.1:{port}")
+    e = PoolMember(cfg, 2, torch.device("cpu"), ctx)
+    assert e.attach(None) == (10_000_000, 3, 30_000_000)
+    e.native.start(None, f"tcp://127.0.0.1:{port}")
+    t0 = time.monotonic()
+    e.native.dispatch(encode(TierBatch([TierMove(i, "read", "dram", None, 0, 2, 0, [[1, 2]], [[1] * 6], [0, 1],
+                                                 [2, 3, 4], [], []) for i in range(2)])))
+    got = [decode_to_controller(pull.recv()) for _ in range(2)]
+    dt = time.monotonic() - t0
+    assert all(isinstance(g, TierDone) and g.stage == 2 and g.nbytes == 50_000_000 for g in got)
+    assert [g.op_id for g in got] == [0, 1] and 0.09 < dt < 0.5
+    assert all(g.start_ns <= g.submit_ns <= g.end_ns and g.gpu_ns is None and g.recv_ns <= g.start_ns for g in got)
+    assert e.native.close()["joined"]
+    pull.close(linger=0)
+    ctx.term()
+
+
+def test_rust_worker_error_reaches_the_controller():
+    """A bad op (a DRAM op of an unknown kind) fails the Rust member's submit thread: a WorkerError goes out over
+    the report socket, as from the Python member."""
+    from ppimpl.runtime.transport import TierMove
+
+    views, ranges, mems, tc = members(engine="rust")
+    e = mems[0]
+    e.native.dispatch(encode(TierBatch([TierMove(7, "demote", "dram", None, 0, 1, 0, [[1]], [[1] * 6], [0], [], [],
+                                                 [])])))
+    d = e.native.poll_done(10)
+    assert d["type"] == "WorkerError" and "tier write submit thread" in d["error"] and "demote" in d["error"], d
+    for m in mems:
+        m.native.close()
+
+
+def test_rust_wire_round_trip():
+    """The Rust side decodes TierMove as msgspec encodes it (both list forms of the block lists, urgent) and its
+    TierDone decodes on the controller with every field."""
+    import tier_rs
+
+    from ppimpl.runtime.transport import Shutdown, TierDone, TierMove, decode_to_controller
+
+    ops = [TierMove(5, "write", "ssd", "staging", 2, 4, 1, [[1, 2, 3, 4]], [[9] * 6], [3, 4, 5], [6], [7, 8, 9], [10],
+                    True),
+           TierMove(6, "read", "dram", None, 0, 2, 0, [[1, 2], [3, 4], [5, 6], [7, 8]], [[1] * 6] * 4, [0, 1], [], [],
+                    [])]
+    out = tier_rs.wire_echo(encode(TierBatch(ops)))
+    got = [decode_to_controller(b) for b in out]
+    assert all(isinstance(g, TierDone) for g in got)
+    assert [(g.stage, g.op_id, g.start_ns, g.end_ns, g.nbytes, g.submit_ns, g.gpu_ns, g.mark_ns, g.recv_ns)
+            for g in got] == [(2, 5, 4, 1, 12, 1, 7, None, 4), (0, 6, 2, 0, 1, 0, None, None, 8)]
+    assert tier_rs.wire_echo(encode(Shutdown())) is None

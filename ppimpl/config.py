@@ -86,6 +86,10 @@ class TierConfig(msgspec.Struct, forbid_unknown_fields=True):
     ring_depth: int = 2                   # two hops: chunks per direction's device ring (2: double buffering)
     ring_chunk_slots: int = 4             # slots per ring chunk (job 7961 sweep: 4 best or tied at 32k-512k). The ring
                                           # is 2 directions x depth x chunk x slot bytes, from the HBM left after the KV
+    # The worker's tier execution (lanes/m6-rust TIER_RS.md): "python" (kvpool/member.py's threads) or "rust" (the
+    # same rules on Rust threads that never take the GIL, ppimpl/native/tier_rs). PPIMPL_TIER_ENGINE sets the default
+    # (CPU test runs of the whole suite on either engine).
+    engine: str = os.environ.get("PPIMPL_TIER_ENGINE", "python")
     ssd_dir: str | None = None            # the SSD shard sets (kvpool/shards.py: set<k>/shard<q>.bin, kept across runs,
                                           # created once, contents never trusted); default $PPIMPL_SSD_DIR. The
                                           # workers get the set the leader took.
