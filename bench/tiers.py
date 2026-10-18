@@ -177,6 +177,9 @@ def print_session(x: dict):
         print(f"  {t} reads {r['reads']}: sent -> landed ms p50/p90/p99 " + " / ".join(str(v) for v in r["read_ms"].values())
               + (", parts " + ", ".join(f"{k} {v}" for k, v in r["parts_ms"].items()) if r["parts_ms"] else ""))
     for k, t in (x.get("trace") or {}).items():
+        if k == "probe":     # the member's GIL / CPU probe: counts, not per-op stats
+            print("  probe (> 20 ms late): " + ", ".join(f"{f} {v}" for f, v in t.items()))
+            continue
         print(f"  {k} trace ({t['ops']} ops x GPUs), p50 / mean: " + ", ".join(
             f"{f} {v['p50']} / {v['mean']}" for f, v in t.items() if f != "ops"))
     print(f"  scheduler {x['scheduler']}, blocked_by_write {x['blocked_by_write']}, failed {x['rounds_failed']}")
