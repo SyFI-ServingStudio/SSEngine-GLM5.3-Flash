@@ -10,6 +10,8 @@
 # before and after.
 # Memory guards: bench/slurm/memguard.py (start only with MemAvailable > pinned + 100 GB and memory PSI < 5%; a timed
 # part that thrashes is stopped and marked INVALID.txt).
+# GPU samples (SM clock, power, temperature, throttle reasons) every 200 ms go to the run dir's gpu_samples.csv (as
+# m4.sbatch SAMPLE=1; bench.prefix gpu_samples); SAMPLE=0 turns them off. A session run on another trace: --trace PATH.
 # HOP2=1 runs bench/tier_hop2.py (two-hop rates, GEMM and stage-edge interference) before the run.
 #SBATCH --gres=gpu:4
 set -uo pipefail
@@ -34,12 +36,21 @@ fi
 # (marked INVALID.txt) if it starts thrashing
 $PY bench/slurm/memguard.py precheck -- "$@" || { echo "== not started: host memory (see memguard line)"; exit 0; }
 RUN=$WHAT; for ((i = 1; i <= $#; i++)); do [ "${!i}" = --run-name ] && { j=$((i + 1)); RUN=${!j}; }; done
+if [ "${SAMPLE:-1}" != 0 ]; then
+  nvidia-smi -i "$G" --query-gpu=timestamp,index,clocks.sm,clocks.max.sm,power.draw,power.limit,temperature.gpu,utilization.gpu,clocks_throttle_reasons.active \
+    --format=csv,nounits -lms 200 > "$R/slurm/gpu_samples_${SLURM_JOB_ID:-local}.csv" 2>&1 &
+  SAMPLER=$!
+fi
 setsid $PY -m bench.run "$WHAT" --inline --gpus "$G" --port "$P" --out-root "$R" "$@" &
 RUNPID=$!
 $PY bench/slurm/memguard.py watch --pid $RUNPID --run-dir "$R/$RUN" &
 WD=$!
 wait $RUNPID; rc=$?
 kill $WD 2>/dev/null; wait $WD 2>/dev/null
+if [ -n "${SAMPLER:-}" ]; then
+  kill $SAMPLER 2>/dev/null; wait $SAMPLER 2>/dev/null
+  [ -d "$R/$RUN" ] && cp "$R/slurm/gpu_samples_${SLURM_JOB_ID:-local}.csv" "$R/$RUN/gpu_samples.csv"
+fi
 [ -f "$R/$RUN/INVALID.txt" ] && { echo "== run invalid: $(cat "$R/$RUN/INVALID.txt")"; rc=4; }
 uptime
 echo "== done $(date -Is) rc=$rc"

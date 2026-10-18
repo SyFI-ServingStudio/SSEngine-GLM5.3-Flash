@@ -781,49 +781,31 @@ hbm-evictions-exclusive`), k = 1 (one KDA state per entry).
   the slots' next writer waits for the read by `deps`); a round admitted on HBM's kept context releases the copy
   write-ahead made of it (`taken_over`). SSD stays inclusive (a read leaves its entry). An entry stored where the tier
   below holds it whole is clean.
-- **Staged loading, rule B** (`tiers.loading_read_gb_s`, `loading_ssd_read_gb_s`, `loading_prefill_tok_s`):
-  pending -> loading -> ready -> batch (`engine/scheduler.py` "Staged loading").
-  - In-flight areas bound the bytes of reads in progress and are released when the read lands. HBM's lives in
-    `KvManager` (`area`, `area_held`, `reads`): a set number of blocks counted held whether used or not
-    (`hard + landed + kept + max(area_held, area) <= capacity`, in `fits` and `_make_room`). A read holds its
-    context's blocks there (`hold_read`); when it lands (`read_landed`) they leave the area and become pinned HBM
-    (`landed_held`, counted in occupancy like a running request, never evicted) until admission takes them over
-    (`allocate`).
-  - DRAM's area lives in the DRAM `TierStore` (`area`, `area_used`), out of what entries may use. An SSD read is a
-    `fetch` op (file -> area slots, reported when its last slot is in DRAM), then a `hop` (a DRAM read from those
-    slots into HBM's area) once HBM's area has room, in fetch landing order; DRAM's area goes back when the hop
-    lands. A full DRAM area stops the SSD queue (no direct SSD -> HBM bypass).
-  - Ready bound: new reads (and fetches) start only while the landed rounds' fresh tokens (`ready_fresh`) are below
-    pp_size x max_batch_tokens (`ready_bound`, 4 x 32,768); hops of started SSD reads go on.
-  - Landed bound (`KvManager.landed_fits`, `landed_waits`): a read or SSD fetch starts only while landed reads not
-    yet admitted plus reads in flight, with it, stay within HBM's area (a read larger than the area starts when none
-    are held). The fresh-token ready bound never fires for tier hits (a few hundred new tokens on 100k+ of KV), so
-    without this landed data reached 93% of HBM (job 8175) and flushed the kept contexts. Plans log `landed_held`
-    and `area_held` per microbatch.
-  - Liveness (`KvManager.hold_read`, `live_waits`): a read starts only if, with every read in flight landed and
-    running requests and kept contexts gone, any landed round could still be admitted: landed + in flight + the read
-    + the area + the largest admission extra (footprint minus read blocks) <= capacity. Without it job 8175 hung at
-    872 s: 55 landed reads pinned 832 of 890 blocks, the 79-block area stayed reserved, no landed round fit and
-    nothing ran to free one (each had a few hundred fresh tokens, far under the ready bound). The controller logs
-    `watchdog: no completion for N s` with `Scheduler.state()` (area, landed, ready, pinned, waits) every 30 s of no
-    stage or tier completion while requests wait.
+- **Staged loading** (`tiers.loading_area`, simulator `prefix_tier_loading: held`): pending -> loading -> ready -> batch
+  (`engine/scheduler.py` "Staged loading").
+  - HBM's loading area lives in `KvManager` (`area`, `area_held`, `reads`): a set number of blocks counted held
+    whether used or not (`hard + kept + max(area_held, area) <= capacity`, in `fits` and `_make_room`). A read holds
+    its context's blocks there (`hold_read`) until admission takes them over (`allocate`).
+  - DRAM's area lives in the DRAM `TierStore` (`area`, `area_used`): the same fraction of its slots, out of what
+    entries may use. An SSD read is a `fetch` op (file -> area slots, reported when its last slot is in DRAM), then a
+    `hop` (a DRAM read from those slots into HBM's area) once HBM's area has room, in fetch landing order; DRAM's
+    area goes back when the hop lands. A full DRAM area stops the SSD queue (no direct SSD -> HBM bypass).
   - `Scheduler.load` walks the overdue queue, then the policy order; each area's queue stops at its first read that
     does not fit (a read larger than the area starts when it is empty). Admission takes landed reads first (overdue
     ones also in the force-schedule pass), then the queues, passing over rounds that still need a read. Rounds found
     ready in HBM and later read are counted (`rereads`).
-  - Size (Little's law, `BalancedKVPool.loading_area_blocks`): each area = its channel's read rate x one batch period
-    (mb_tokens / prefill tokens/s): HBM's at the reads into HBM (DRAM reads and hops), DRAM's at the SSD reads.
-    `bench/loading_area.py` measures the rates on a run of the setting; Fix C runs give ssd_heavy 3.30 GB/s x 0.306 s
-    = 79 blocks (8.9% of 890) and SSD 1.61 GB/s -> 39 DRAM slots; Tiers 2.47 GB/s x 0.314 s = 61 blocks (4.3% of
-    1,425) and SSD 0.94 GB/s -> 23 DRAM slots.
+  - Size: `tiers.loading_area` x HBM's KV pool blocks (rounded down, as the simulator's `prefix_tier_loading_area`),
+    and the same fraction of DRAM's slots when an SSD is behind it. The runs use 0.10 (st10, user 2026-10-18; the
+    simulator's held rule at 0.10). A smaller area fills with landed rounds waiting for admission and starves the
+    pipeline (sim: 5% at k4 cut compute 139k to 121-130k tok/s; 10% recovered).
   - Reads move only states that survive (k > 1, not yet in the engine, which keeps one state per entry):
     `manager.states_to_move` - the state the read resumes from plus the earlier ones that stay among the latest k
     after the round adds its own (prefill end, decode end); exclusive DRAM drops the others with the entry.
   - **Eviction stays ahead** (the lesson of Fix D, where every eviction waited for its write: blocked_by_write
     44k): each level's write-back keeps the LRU entries holding `reserve` written (`WriteBack.reserve`, replacing the
-    0.9 watermark): fixed + dirty <= capacity - reserve, fixed counting the in-flight area and landed reads. The
-    reserve is what one batch period takes: the area (the reads that land) plus one microbatch's footprint
-    (`blocks_for(mb_tokens)`); DRAM's its own area plus one microbatch, in slot bytes. Admission evicts written contexts and does not wait for
+    0.9 watermark): fixed + dirty <= capacity - reserve, fixed counting the loading area. The reserve is what one
+    batch period frees: the area (the reads admission takes over) plus one microbatch's footprint
+    (`blocks_for(mb_tokens)`); DRAM's the same in slot bytes. Admission evicts written contexts and does not wait for
     a write as long as a write lands within one batch period.
 
 ## 14. Hand-off (2026-10-17)

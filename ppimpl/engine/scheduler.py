@@ -27,20 +27,17 @@ The scheduler of 6_scheduler.md §2, built on the plain one (`SchedulerConfig`; 
   writes kept contexts before HBM evicts them (a request that fits only once such a write lands waits, as for room;
   when a write lands, that round's read starts at once if it fits then).
   A round whose kept context is still being written waits to take it over (`busy_waits`).
-- **Staged loading** (`TierConfig.loading_read_gb_s`; ServingStudioSim pp-staged `prefix_tier_loading_area`, rule
-  B, not vLLM): pending -> loading -> ready -> batch. An in-flight area of HBM (`KvManager.area`, Little's law:
-  channel read rate x one batch period, `BalancedKVPool.loading_area_blocks`) is always counted held, so admission
-  and kept contexts leave it free, and the pool writes kept contexts back ahead by what one batch period takes
+- **Staged loading** (`TierConfig.loading_area`; ServingStudioSim pp-staged `prefix_tier_loading: held`,
+  `prefix_tier_loading_area`, not vLLM): pending -> loading -> ready -> batch. A loading area of HBM (`KvManager.area`,
+  a fixed fraction of the pool, `BalancedKVPool.set_loading_area`) is always counted held, so admission and kept
+  contexts leave it free, and the pool writes kept contexts back ahead by what one batch period frees
   (`WriteBack.reserve`), so admission evicts written contexts and never waits for a write. `load` walks the pending queues in admission order (overdue, then
   the policy order) and starts the read of every round a tier holds more of than HBM while its area has room: a
   DRAM read (or an SSD read without a DRAM area) into HBM's area; an SSD read into DRAM's area (the same fraction of
   DRAM, `fetch`), which moves on to HBM's area over DRAM's channel once that has room (`hop`, in fetch landing
   order). Each queue stops at the first read that does not fit (a read larger than the whole area starts when the
-  area is empty): later reads never jump it. A read holds its area until it lands (DRAM's until its hop lands); its
-  blocks then stay pinned in HBM, counted in occupancy, until its round is admitted. New reads start only while the
-  landed rounds' fresh tokens are below `ready_bound` (pp_size x max_batch_tokens), and (reads and fetches) only
-  while landed plus in-flight reads, with it, stay within HBM's area (`KvManager.landed_fits`; a read larger than
-  the area when none are held). `KvManager.hold_read` also keeps any landed round admissible (liveness). Admission takes only rounds whose context is all in HBM: landed reads first (overdue ones in the
+  area is empty): later reads never jump it. A read holds its area until its round is admitted (DRAM's area until
+  its hop lands). Admission takes only rounds whose context is all in HBM: landed reads first (overdue ones in the
   force-schedule pass too), then the queues, passing over rounds that still need a read; a round found ready in HBM
   that needs a read again later (its context evicted before admission) is read again (`rereads`). The read-wait
   bound is not used.
@@ -261,8 +258,7 @@ class Scheduler:
             kv.lower = pool.hbm_level(kv)
             if pool.set_loading_area(kv, cfg.mb_tokens):
                 self.staged = True
-                self.stats.update(fetches=0, hops=0, rereads=0, ready_stops=0, load_passes=0, load_pass_ns=0)
-        self.ready_bound = max_in_flight * cfg.mb_tokens   # staged: pp_size x max_batch_tokens of landed fresh work
+                self.stats.update(fetches=0, hops=0, rereads=0, load_passes=0, load_pass_ns=0)
 
     # --- events ---------------------------------------------------------------------------------------------------
 
@@ -343,9 +339,7 @@ class Scheduler:
             self.pool.release_dram_area(r.dram_area)
             r.dram_area = None
         r.load_phase = None
-        self.kv.read_landed(r)                       # HBM's in-flight area is free again; the blocks stay pinned
         self.read_landed(r.req_id, now_ns)
-        self._start_hops(now_ns)
 
     def _start_hops(self, now_ns: int):
         """Fetched SSD reads move on to HBM's area in fetch landing order while it has room."""
@@ -379,11 +373,6 @@ class Scheduler:
         self._start_hops(now_ns)
         if self.overdue is not None:
             self.overdue.promote(self.policy, now_ns)
-        if self.ready_fresh() >= self.ready_bound:     # enough landed work to fill the pipeline: no new reads
-            self.stats["ready_stops"] += 1
-            self.stats["load_passes"] += 1
-            self.stats["load_pass_ns"] += time.perf_counter_ns() - t0
-            return
         hbm_open, dram_open = True, True
         queues = ([(OVERDUE, list(self.overdue.q))] if self.overdue is not None else []) \
             + [(POLICY, list(self.policy))]
@@ -400,8 +389,7 @@ class Scheduler:
                 if via_dram:
                     if not dram_open:
                         continue
-                    if not self.pool.dram_area_fits(hit.tokens) or not self.kv.landed_fits(hit.tokens) \
-                            or not self._start_fetch(r, hit, now_ns):
+                    if not self.pool.dram_area_fits(hit.tokens) or not self._start_fetch(r, hit, now_ns):
                         dram_open = False
                         continue
                 else:
@@ -415,8 +403,6 @@ class Scheduler:
                     self.overdue.tokens -= r.fresh
                 else:
                     self.policy.remove(r)
-                if self.ready_fresh() >= self.ready_bound:
-                    break
         self.stats["load_passes"] += 1
         self.stats["load_pass_ns"] += time.perf_counter_ns() - t0
 
@@ -427,18 +413,13 @@ class Scheduler:
                  overdue=len(self.overdue.q) if self.overdue is not None else 0, reading=len(self.reading),
                  landed=len(self.landed), hard=kv.hard, kept=kv.kept_charge, capacity=kv.capacity,
                  held_back=kv.lower.held_back() if kv.lower is not None else 0,
-                 kv_stats={k: kv.stats[k] for k in ("blocked_by_write", "area_waits", "live_waits", "landed_waits")})
+                 kv_stats={k: kv.stats[k] for k in ("blocked_by_write", "area_waits")})
         if self.staged:
             d = self.pool.manager.dram_area
-            x.update(area=kv.area, area_held=kv.area_held, landed_held=kv.landed_held,
-                     ready_fresh=self.ready_fresh(), ready_bound=self.ready_bound, waiting_hop=len(self.waiting_hop),
+            x.update(area=kv.area, area_held=kv.area_held, waiting_hop=len(self.waiting_hop),
                      dram_area=None if d is None else [d.area_used, d.area], load_dirty=self._load_dirty,
                      tier_ops_in_flight=len(self.pool.manager.in_flight))
         return x
-
-    def ready_fresh(self) -> int:
-        """New tokens of the landed rounds not yet admitted (the ready set)."""
-        return sum(r.fresh for r in self.landed)
 
     def _reading(self, r: Request, hit, now_ns: int, phase: str):
         if r.hbm_ready or r.read_land_ns is not None:

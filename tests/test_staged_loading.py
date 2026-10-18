@@ -1,5 +1,5 @@
-"""Staged loading (ppimpl/engine/scheduler.py "Staged loading", loading rule B; ServingStudioSim pp-staged): pending
--> loading -> ready -> batch, one test per invariant. HBM is a KvManager of a few dozen blocks; a context of one block costs 7
+"""Staged loading (ppimpl/engine/scheduler.py "Staged loading"; ServingStudioSim pp-staged): pending -> loading ->
+ready -> batch, one test per invariant. HBM is a KvManager of a few dozen blocks; a context of one block costs 7
 (1 KV + 6 state blocks), in DRAM/SSD 2 slots (1 KV + 1 state). Ops are completed by hand (`op_done`)."""
 
 import math
@@ -16,18 +16,16 @@ MB = 8192
 EXCL = "hbm-evictions-exclusive"
 
 
-def cfg(area=14, dram_area=7, dram=0.030, ssd=0.100, **kw):
-    """In-flight areas of `area` HBM blocks and `dram_area` DRAM slots: the read rates are that many slots per batch
-    period (mb_tokens at mb_tokens/s: 1 s)."""
+def cfg(area=14, blocks=60, dram=0.020, ssd=0.100, **kw):
+    """`area` HBM blocks of a `blocks`-block HBM (`tiers.loading_area` = (area + 0.5) / blocks, rounded down)."""
     return TierConfig(dram_gb=dram, ssd_gb=ssd, slot_bytes=SLOT, state_slots=1, staging_gb=0.010,
                       dram_read_gb_s=10.0, ssd_read_gb_s=1.0, dram_writes=EXCL,
-                      loading_read_gb_s=area * SLOT / 1e9, loading_ssd_read_gb_s=None if dram_area is None else dram_area * SLOT / 1e9,
-                      loading_prefill_tok_s=MB, **kw)
+                      loading_area=(area + 0.5) / blocks, **kw)
 
 
 def sched(blocks=60, force_ms=None, **kw):
     kv = KvManager(blocks, keep_sessions=True)
-    pool = BalancedKVPool(cfg(**kw))
+    pool = BalancedKVPool(cfg(blocks=blocks, **kw))
     s = Scheduler(kv, SchedulerConfig(mb_tokens=MB, force_after_ms=force_ms), pool, dispatch_ahead=0)
     return s, kv, pool, pool.manager
 
@@ -78,21 +76,16 @@ def run_mb(s, now=0):
     return mb
 
 
-# --- 6: the area by Little's law -----------------------------------------------------------------------------------
+# --- 6: the area is a fixed fraction of HBM (simulator `prefix_tier_loading_area`) ---------------------------------
 
-def test_area_is_channel_read_rate_times_one_batch_period():
-    """Little's law: each in-flight area is its channel's read rate x one batch period."""
-    s, kv, pool, t = sched(area=14, dram_area=7)
-    assert s.staged and kv.area == 14 and t.tiers[0].area == 7
-    c = pool.cfg
-    assert kv.area == math.ceil(c.loading_read_gb_s * 1e9 * MB / c.loading_prefill_tok_s / SLOT)
-    assert t.tiers[0].area == math.ceil(c.loading_ssd_read_gb_s * 1e9 * MB / c.loading_prefill_tok_s / SLOT)
+def test_area_is_a_fraction_of_hbm():
+    """HBM's area is `tiers.loading_area` of its blocks, rounded down; DRAM's the same fraction of its slots."""
+    s, kv, pool, t = sched(area=14)
+    assert s.staged and kv.area == 14 == int(60 * pool.cfg.loading_area)
+    assert t.tiers[0].area == int(pool.cfg.loading_area * t.tiers[0].num_slots)
     assert pool.hbm.wb.reserve == 14 + blocks_for(MB)                      # write-ahead: one batch period's room
-    assert s.ready_bound == 4 * MB                                         # pp_size x max_batch_tokens
     with pytest.raises(ValueError):
         sched(area=30)                                                     # half of HBM: not a loading area
-    with pytest.raises(ValueError):
-        sched(dram_area=None)                                            # DRAM + SSD: DRAM's rate is needed
     off = Scheduler(KvManager(60, keep_sessions=True), SchedulerConfig(mb_tokens=MB),
                     BalancedKVPool(TierConfig(dram_gb=0.02, ssd_gb=None, slot_bytes=SLOT)))
     assert not off.staged and off.kv.area == 0
@@ -148,10 +141,8 @@ def test_reads_start_in_order_and_stop_at_the_first_that_does_not_fit():
     reads = sent(pool)
     assert [o.req_id for o in reads] == [rs[0].req_id] and kv.area_held == 7
     assert rs[1].load_phase is None and rs[2].load_phase is None
-    done(s, reads)                                      # 1 lands: out of the area, but landed + 2 > the area
-    s.load(0)
-    assert not sent(pool) and rs[0] in s.landed and kv.landed_held == 7 and kv.stats["landed_waits"] >= 1
-    assert run_mb(s) is not None and rs[0].req_id in kv.held   # 1 admitted: 2 starts, 3 does not fit beside it
+    done(s, reads)
+    assert run_mb(s) is not None and rs[0].req_id in kv.held   # 1 admitted: area free; 2 starts, 3 does not fit
     reads = sent(pool)
     assert [o.req_id for o in reads] == [rs[1].req_id] and rs[2].load_phase is None and kv.area_held == 8
 
@@ -169,10 +160,8 @@ def test_read_larger_than_the_area_starts_when_it_is_empty():
     s._load_dirty = True
     s.load(0)
     assert not sent(pool)                               # the area is not empty: b waits
-    s.op_done(next(iter(t.in_flight)), 0)               # a lands: b waits until nothing is landed or in flight
-    s.load(0)
-    assert not sent(pool) and a in s.landed
-    run_mb(s)                                           # a admitted: b starts
+    s.op_done(next(iter(t.in_flight)), 0)
+    run_mb(s)                                           # a admitted: the area is empty; b starts
     assert [o.req_id for o in sent(pool)] == [b.req_id] and kv.area_held == 18
 
 
@@ -213,9 +202,9 @@ def test_a_round_ready_in_hbm_whose_context_is_evicted_is_read_again():
 # --- 4: SSD reads land in DRAM's area, hop to HBM's; a full DRAM area stalls the SSD queue -------------------------
 
 def test_ssd_read_lands_in_the_dram_area_then_hops_to_hbm():
-    s, kv, pool, t = sched(blocks=60, area=14, dram_area=7)
+    s, kv, pool, t = sched(blocks=60, area=14, dram=0.030)
     d = t.tiers[0]
-    assert d.area == 7
+    assert d.area == 7                                  # 14/60 of 30 slots
     put(t, 1, 2 * B, "ssd")
     s.add(r := rnd(1, 2 * B + 1, 10), 0)
     s.load(0)
@@ -228,14 +217,14 @@ def test_ssd_read_lands_in_the_dram_area_then_hops_to_hbm():
     assert kv.area_held == 8 and r.load_phase == "hop" and r.fetch_land_ns == 10
     assert 1 in t.tiers[1].entries                     # SSD stays inclusive
     done(s, [h], 20)
-    assert d.area_used == 0 and kv.area_held == 0 and kv.landed_held == 8   # both areas back at landing
+    assert d.area_used == 0 and kv.area_held == 8       # DRAM's area back; HBM's held until admission (5)
     mb = run_mb(s)
-    assert mb[0].req is r and mb[0].start == 2 * B and kv.landed_held == 0
+    assert mb[0].req is r and mb[0].start == 2 * B and kv.area_held == 0
     assert t.tiers[0].stats["hops"] == 1
 
 
 def test_a_full_dram_area_stalls_the_ssd_queue_without_bypass():
-    s, kv, pool, t = sched(blocks=60, area=14, dram_area=7)
+    s, kv, pool, t = sched(blocks=60, area=14, dram=0.030)    # DRAM area 7 slots
     put(t, 1, 5 * B, "ssd")                             # 6 slots
     put(t, 2, 2 * B, "ssd")                             # 3 slots: does not fit beside 1's
     put(t, 3, B)                                        # a DRAM read: HBM's area has room
@@ -249,61 +238,29 @@ def test_a_full_dram_area_stalls_the_ssd_queue_without_bypass():
     assert b.load_phase is None                         # waits for DRAM's area; not read straight into HBM
     done(s, [ops[0]])                                   # a's fetch lands; its hop (11 blocks) waits for c's 7
     assert not sent(pool) and a.load_phase == "hop_wait"
-    done(s, [ops[1]])                                   # c lands: a's hop waits for c's admission (landed bound)
-    assert not sent(pool)
-    run_mb(s)                                           # c admitted: a hops
+    done(s, [ops[1]])
+    run_mb(s)                                           # c admitted: HBM's area empty, a hops
     (h,) = sent(pool)
     assert h.req_id == a.req_id and t.tiers[0].area_used == 6
-    done(s, [h])                                        # DRAM's area back; b's fetch waits for a's admission
+    done(s, [h])                                        # DRAM's area back: b's fetch starts
     s.load(0)
-    assert not sent(pool) and b.load_phase is None and t.tiers[0].area_used == 0
-    run_mb(s)
     assert [o.op for o in sent(pool)] == ["fetch"] and b.load_phase == "fetch"
 
 
-# --- 5: the area is released at landing; landed data is pinned HBM until admission; the ready bound -----------------
+# --- 5: the area is held until admission -----------------------------------------------------------------------------
 
-def test_landed_read_leaves_the_area_and_stays_pinned_until_admission():
+def test_area_is_held_until_the_round_is_admitted():
     s, kv, pool, t = sched(blocks=60, area=14)
     put(t, 1, B)
     s.add(r := rnd(1, B + 1, 10), 0)
     s.load(0)
     done(s, sent(pool))
-    assert r in s.landed and kv.area_held == 0 and kv.landed_held == 7 and r.req_id in kv.reads
-    assert pool.hbm.fixed() == kv.landed_held + kv.area     # counted in HBM's occupancy
-    s.add(c := rnd(5, 0, 100), 0)                       # kept contexts are evicted around it, never it
+    assert r in s.landed and kv.area_held == 7 and r.req_id in kv.reads
     s.on_stage0 = 5                                     # stage 0 busy: nothing forms
-    assert s.next_microbatch(0) is None and kv.landed_held == 7
+    assert s.next_microbatch(0) is None and kv.area_held == 7
     s.on_stage0 = 0
     run_mb(s)
-    assert kv.landed_held == 0 and r.req_id in kv.held and not kv.reads
-
-
-def test_reads_stop_while_the_ready_set_holds_a_pipeline_of_work():
-    """New reads start only while the landed rounds' fresh tokens are below pp_size x max_batch_tokens."""
-    s, kv, pool, t = sched(blocks=200, area=40, dram=0.100)
-    s.cfg.order = "fifo"
-    rs = []
-    for k in range(1, 4):
-        put(t, k, B)
-        rs.append(rnd(k, B + 1, 2 * MB, arrival=k))     # 2 x MB fresh tokens each
-    for r in rs:
-        s.add(r, 0)
-    s.load(0)
-    first = sent(pool)
-    assert [o.req_id for o in first] == [r.req_id for r in rs]   # ready set empty: all start (area 21 of 40)
-    done(s, first[:2])                                  # 2 land: 4 x MB of fresh work ready
-    assert s.ready_fresh() == 4 * MB
-    put(t, 9, B)
-    s.add(late := rnd(9, B + 1, 10, arrival=9), 0)
-    s.load(0)
-    assert late.load_phase is None and s.stats["ready_stops"] >= 1   # the bound stops it, the area has room
-    done(s, first[2:])
-    while s.ready_fresh() >= 4 * MB:                    # admission drains the ready set below the bound
-        assert late.load_phase is None
-        run_mb(s)
-    s.load(0)
-    assert late.load_phase == "read"
+    assert kv.area_held == 0 and r.req_id in kv.held and not kv.reads
 
 
 # --- 7: force-schedule covers loading rounds -------------------------------------------------------------------------
@@ -321,45 +278,3 @@ def test_overdue_rounds_read_first_and_landed_overdue_rounds_go_first():
     done(s, [o], 5_000_000)
     mb = s.next_microbatch(5_000_000)
     assert mb[0].req is old                             # landed and overdue: before every other round
-
-
-# --- liveness: landed data never fills HBM so that no landed round can be admitted ---------------------------------
-
-@pytest.mark.parametrize("landed_bound", [True, False])
-def test_landed_reads_never_block_every_admission(landed_bound, monkeypatch):
-    """Job 8175's hang: reads land faster than rounds are admitted (many reads per batch period), each landing moves
-    its blocks out of the area into pinned HBM while the area stays reserved, until landed data plus the area leave
-    no landed round room and nothing runs to free any. Liveness: whenever nothing is in flight, a microbatch forms
-    (or no work is left), and every round finishes."""
-    s, kv, pool, t = sched(blocks=60, area=8, dram=0.200, ssd=None)
-    if not landed_bound:                                # the liveness bound alone keeps it live
-        monkeypatch.setattr(kv, "landed_fits", lambda tokens: True)
-    rs = []
-    for k in range(1, 21):
-        put(t, k, 2 * B)                                # 8 HBM blocks each; admission adds one (2 x B + 11 tokens)
-        rs.append(rnd(k, 2 * B + 1, 10, arrival=k))
-    s.cfg.order = "fifo"
-    for r in rs:
-        s.add(r, 0)
-    for _ in range(500):
-        while True:                                     # every read lands before the next microbatch forms
-            s._load_dirty = True
-            s.load(0)
-            ops = sent(pool)
-            if not ops:
-                break
-            done(s, ops)
-            assert kv.hard + kv.landed_held + kv.area_held <= kv.capacity
-            if landed_bound:                            # landed + in flight within the area (one oversize read)
-                assert kv.landed_held + kv.area_held <= kv.area or len(kv.reads) == 1
-        mb = s.next_microbatch(0)
-        if mb is None:
-            assert not s.has_work(), s.state()          # nothing in flight: a stall is a hang
-            break
-        s.stage_done(0, 3)
-        s.stage_done(3, 3)
-        for c in mb:
-            if c.is_last:
-                s.finish(c.req)
-    assert not s.has_work() and kv.landed_held == 0
-    assert kv.stats["landed_waits" if landed_bound else "live_waits"] > 0

@@ -67,13 +67,11 @@ class TierConfig(msgspec.Struct, forbid_unknown_fields=True):
     # "hbm-evictions-exclusive" (simulator `dram_tier_writes`, d17027cf): a DRAM read releases the entry and an HBM hit
     # releases the DRAM copy its write-ahead made, so DRAM holds only what HBM lacks. SSD stays inclusive.
     dram_writes: str = "hbm-evictions"
-    # Staged loading (simulator `prefix_tier_loading_area`, ServingStudioSim pp-staged; engine/scheduler.py): reads in
-    # flight hold an in-flight area of HBM's KV pool that admission and kept contexts never use (SSD reads first one
-    # of DRAM), released when they land. Little's law sizes each: the channel's read rate into it x one batch period
-    # (scheduler mb_tokens / prefill tokens/s); all measured on the setting (bench/loading_area.py). None: off.
-    loading_read_gb_s: float | None = None      # reads into HBM per GPU, GB/s of the HBM blocks they hold
-    loading_ssd_read_gb_s: float | None = None  # SSD reads per GPU, GB/s of slots (DRAM's area; needed with DRAM+SSD)
-    loading_prefill_tok_s: float | None = None  # computed (prefill) tokens/s
+    # Staged loading (simulator `prefix_tier_loading: held`, `prefix_tier_loading_area`, ServingStudioSim pp-staged;
+    # engine/scheduler.py): reads land in a loading area of this fraction of HBM's KV pool, which admission and kept
+    # contexts never use, and SSD reads first in the same fraction of DRAM. A read holds its area from its start until
+    # its round is admitted. None: off.
+    loading_area: float | None = None
     bytes_per_token: int = 1635           # own stage (stage 0); balanced storage: 1,499
     state_bytes: int = 39_100_000         # one KDA state per context, own stage (stage 0); balanced: 36.9 MB
     max_read_wait_ms: float | None = 1000.0   # a read that would wait longer for its tier is passed over

@@ -500,17 +500,13 @@ class TierManager:
 
     # --- staged loading: SSD reads through DRAM's loading area -------------------------------------------------------
 
-    def has_dram_area_tier(self) -> bool:
-        """DRAM with an SSD behind it (slot mode): SSD reads land in DRAM's in-flight area first."""
-        return self.slot_mode and len(self.tiers) == 2 and self.tiers[0].name == "dram"
-
-    def set_dram_area(self, slots: int):
-        """Carve `slots` of DRAM's slots out as its in-flight area for SSD reads."""
-        assert self.has_dram_area_tier()
+    def set_dram_area(self, fraction: float):
+        """Carve `fraction` of DRAM's slots (rounded down, as the simulator) out as its loading area (slot mode, an SSD
+        behind DRAM)."""
+        if not (self.slot_mode and len(self.tiers) == 2 and self.tiers[0].name == "dram"):
+            return
         d = self.tiers[0]
-        if not 0 < slots < 0.5 * d.num_slots:
-            raise ValueError(f"DRAM area {slots} slots of {d.num_slots}: must be in (0, 50%)")
-        d.area = slots
+        d.area = int(fraction * d.num_slots)
 
     @property
     def dram_area(self) -> TierStore | None:

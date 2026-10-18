@@ -91,17 +91,16 @@ def test_dram_evictions_go_to_ssd_and_resume_from_there(tmp_path):
 
 
 def test_staged_loading_end_to_end(tmp_path):
-    """Staged loading (exclusive DRAM, loading areas): HBM's 29 blocks keep a 7-block area (one 5,000-token context),
-    so 3 contexts stay kept; DRAM (7 slots) keeps a 2-slot area and one context. A..E: A and B leave HBM and DRAM.
+    """Staged loading (exclusive DRAM, loading areas of 0.25): HBM's 29 blocks keep a 7-block area (one 5,000-token
+    context), so 3 contexts stay kept; DRAM (8 slots) keeps a 2-slot area, the rest for contexts. A..E: A and B leave HBM and DRAM.
     A's next round is fetched from SSD into DRAM's area (larger than the area: it starts with the area empty) and
     hops to HBM's."""
     from ppimpl.kvpool.member import FAKE_BLOCK_BYTES
     slot = -(-FAKE_BLOCK_BYTES // 4 // 4096) * 4096
     port = free_port_block()
-    cfg = {**CPU, "tiers": {"dram_gb": 7 * slot / 1e9, "ssd_gb": 1.0, "dram_read_gb_s": 5.0, "ssd_read_gb_s": 2.0,
+    cfg = {**CPU, "tiers": {"dram_gb": 8 * slot / 1e9, "ssd_gb": 1.0, "dram_read_gb_s": 5.0, "ssd_read_gb_s": 2.0,
                             "staging_gb": 0.1, "dram_writes": "hbm-evictions-exclusive",
-                            "loading_read_gb_s": 6.5 * slot / 1e9, "loading_ssd_read_gb_s": 1.5 * slot / 1e9,
-                            "loading_prefill_tok_s": 8192}}
+                            "loading_area": 0.25}}
     srv = Server(tmp_path / "run", port, intake_procs=0, **cfg)
     try:
         srv.wait_ready()
