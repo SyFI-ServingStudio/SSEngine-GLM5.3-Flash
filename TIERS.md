@@ -12,7 +12,7 @@ refactor into them. Branch lane-m6 from m5-done (a167593).
 | Copy mechanism | Copy engine only (no SMs): one `cuMemcpyBatchAsync` per tier op per GPU (vLLM `ops.swap_blocks_batch`), source and destination lists built from a per-GPU pointer table of all 4 stages' KV views (CUDA IPC, opened once at start-up). |
 | DRAM | Pinned host memory per GPU on that GPU's NUMA node (libnuma + `cudaHostRegister`, not torch's power-of-2 pinned allocator), cut into fixed slots of one KV block's quarter; same slot ids on all 4 GPUs, owned by the controller's index. |
 | SSD | One shard file per pool member, kept across runs: `$PPIMPL_SSD_DIR/set<k>/shard<q>.bin` (default `/raid/kanzhu/ServingStudio/pp-impl/tmp/ssd_tier`, md RAID0 of 8 NVMe; shard q = member q's quarter of every slot, §5), same slot layout; O_DIRECT, one io_uring per worker (fixed file, the host arenas as fixed buffers, one request per slot, 8 reads / 4 writes in the kernel, reads first; §2.5). Written only with DRAM's victims (§5); read SSD -> staging slots -> HBM, pipelined per slot. No GDS (nvidia-fs is not loaded on this node). |
-| Writes | The victim chain HBM -> DRAM -> SSD (§5): a tier takes only what the level above lets go of. One write-back policy (`kvpool/writeback.py`) for both levels: each writes its least recently used entries ahead of eviction above a watermark (0.9), so eviction finds them clean. Background, never waited on by compute; only what the tier below lacks. HBM cannot evict a kept context (and its next round cannot take over its blocks) until all 4 GPUs reported its write done. |
+| Writes | The victim chain HBM -> DRAM -> SSD (§5): a tier takes only what the level above lets go of. One write-back class (`kvpool/writeback.py`) for both levels: HBM writes its least recently used kept contexts ahead of need, keeping free + clean HBM above the largest demand of two write times (measured, no knob), so eviction finds them clean; DRAM demotes to SSD only at eviction. Background, never waited on by compute; only what the tier below lacks. HBM cannot evict a kept context (and its next round cannot take over its blocks) until all 4 GPUs reported its write done. |
 | Reads | As `7_offloading.md` §2 and the scheduler already does: HBM footprint reserved at read start, read-wait bound 1 s, one read at a time per tier per GPU, landed rounds admitted first in landing order. A read lands when all 4 GPUs report it. |
 | Eviction | LRU whole sessions per tier; a level evicts only entries the level below holds whole (else it waits, counted); DRAM slots of a session being demoted to SSD are reused only when the demote is done. |
 | New code (estimate) | worker tier executor ~250 lines, controller wiring ~80, index slot accounting ~60, pinned arena + SSD file ~120, tests ~250. |
@@ -282,28 +282,59 @@ reaches DRAM only on its way out of HBM.
 - **One write-back policy for both levels** (`kvpool/writeback.py`, `WriteBack`). A level keeps whole entries in LRU
   order, each with a charge, and holds a fixed charge outside them. An entry is dirty until the level below holds it
   whole, writing while its write is in flight, then clean; only a clean entry is evicted without waiting.
-  - Write-ahead (`step`, each scheduler step): once fixed + dirty charge passes `watermark x capacity`, the least
-    recently used dirty entries are written until it is back under; LRU evicts the tail first, so eviction finds it
-    clean.
-  - On demand (`make_room`): an eviction that lacks clean charge starts the writes of the least recently used dirty
-    entries and counts a wait (`evict_waits`, `evict_writes`).
+  - Ahead of need (HBM; `step`, each scheduler step; user-approved option B, 2026-10-17). Invariant: demand never
+    waits for a write. With C capacity, F fixed, D dirty and W writing charge, free + clean = C - F - D - W. A write
+    lands within T after it starts (T: the longest write seen, from its start to landing); the writes in flight then
+    answer demand of the last T, so free + clean covers the next T's demand if C - F - D >= R, R the largest demand
+    seen in any window of 2T. Demand = growth of F + D + W from one step to the next (admissions; contexts the tier
+    lost); a landing is not counted as supply. After each step the LRU dirty entries are written until
+    C - F - D >= R. T and R are running maxima of what the run measured: no knob (`hbm_write_ahead` /
+    `dram_write_ahead` are gone). T starts when the write is sent, after the demotes of the DRAM slots it reuses:
+    counted from the issue, a burst of write-backs queued behind demotes raised T to 125-143 ms, R to 760-840 blocks
+    and DRAM writes by 60% (`bench.replay writeback`, ssd_heavy); a write that does wait for a demote is the rare
+    residual wait.
+  - At eviction only (DRAM): SSD takes only what DRAM evicts; a demote of what SSD already holds whole moves
+    nothing.
+  - On demand (`make_room`): an eviction that lacks clean charge starts the writes of the LRU dirty entries beyond
+    those in flight and counts a wait (`evict_waits`, `evict_writes`). When a write lands, the round that did not fit
+    at the head of the order starts its tier read at once (`Scheduler.op_done`), not at the next forming.
   - The level below reports a write done (`done`) or that it lost the entry (`lost`: dirty again).
 - **HBM level** (`BalancedKVPool.HbmLevel`): entries = the KV manager's kept contexts (charge: their blocks or
-  tokens), fixed = running and held requests, watermark `TierConfig.hbm_write_ahead`. A write is `write_back` ->
-  `write` ops of what the tier lacks (from the block holding its last token, plus state); the kept context is pinned
-  until all 4 GPUs reported it (its next round waits to take it over, `busy_waits`). A request that fits only by
-  evicting contexts not yet written waits (`blocked_by_write`) while `make_room` writes them.
-- **DRAM level** (`TierManager`, `_TierLevel`): entries = DRAM's entries (charge: slots), fixed 0, watermark
-  `dram_write_ahead`. A write is a `demote` (DRAM slots -> SSD slots, one io_uring write per slot). DRAM evicts at
-  once when it needs slots: a dirty victim's demote is emitted then, a writing one's is already out, and the op that
-  reuses the slots waits for it through `SlotGuard` (`evict_waits`).
+  tokens), fixed = running and held requests. A write is `write_back` -> `write` ops of what the tier lacks (from
+  the block holding its last token, plus state); the kept context is pinned until all 4 GPUs reported it (its next
+  round waits to take it over, `busy_waits`). A request that fits only by evicting contexts not yet written waits
+  (`blocked_by_write`) while `make_room` writes them. `fits` does not count a resuming round's own kept context twice
+  (in its footprint and as held back).
+- **DRAM level** (`TierManager`, `_TierLevel`): entries = DRAM's entries (charge: slots), fixed 0, at eviction only.
+  A write is a `demote` (DRAM slots -> SSD slots, one io_uring write per slot). DRAM evicts at once when it needs
+  slots: a dirty victim's demote is emitted then, and the op that reuses the slots waits for it through `SlotGuard`
+  (`evict_waits`). A member's SSD write thread does not wait for a write's or demote's file writes: many are in
+  flight in the io_uring at once (reads first), each reported when its last slot is written.
 - **What moves.** Only what the tier below lacks: a context that the tier holds whole (same content) is only
   refreshed there (`hbm_evicted`), a longer one keeps its full blocks' slots. A read back into HBM leaves the tier's
   copy in place (clean). When a session's next round is admitted, its entries that the round does not resume from
   are dropped (`drop_stale`).
-- **Counters**, every run: `cache.json` `write_back` = {hbm: {ahead_writes, evict_writes, evict_waits}, dram: {...}}
-  and `blocked_by_write`, `busy_waits`; `tiers.json` `write_ahead` = the two watermarks.
-- **Byte mode** (replay): writes take no time, so each level writes at eviction (no watermark).
+- **Counters**, every run: `cache.json` `write_back` = {hbm: {ahead_writes, evict_writes, evict_waits, headroom (R),
+  write_ms (T)}, dram: {...}} and `blocked_by_write`, `busy_waits`.
+- **Byte mode** (replay): writes take no time, so each level writes at eviction (no write-ahead).
+- **Why (2026-10-17, runs tiers_victim_*_n400 with the 0.9 watermarks).** Every admission wait was write-back, none
+  real HBM pressure: ssd_heavy 848 rounds waited 202.7 s (p50 130 ms, p99 1.87 s), tiers 195 / 55 s, while the
+  HBM -> DRAM path was busy 13% of the time. The watermark bounds F + D only, so free + clean was at most 10% of HBM
+  minus the writes in flight (89 blocks in ssd_heavy) against up to 122-149 blocks of demand in one scheduling step;
+  the round was then checked again only at the next forming (p50 48 ms later). 537 HBM writes also waited for a
+  demote (p50 19 ms). `bench.replay writeback` (the real `KvManager` + `BalancedKVPool` on a run's logged
+  admissions, ops timed by the measured write rates; old policy reproduces the measured DRAM / SSD write volume
+  within 1%): waits old -> new, write GB per GPU DRAM / SSD:
+
+  | run (N=400) | waits old | waits new | DRAM old -> new | SSD old -> new |
+  |---|---|---|---|---|
+  | full | 0 | 1 (14 ms) | 226 -> 187 | 154 -> 126 |
+  | tiers | 127 (1.0 s) | 13 (0.6 s) | 2127 -> 2184 | 752 -> 702 |
+  | ssd_heavy | 284 (2.5 s) | 4 (0.05 s) | 3029 -> 3188 | 1055 -> 1024 |
+
+  The model has no feedback (a wait does not delay later rounds) and no forming delay, so the old policy's waits
+  are far shorter there than measured. The new policy's waits all fall while R is still growing (R in tiers 31 ->
+  68 -> 357 blocks, ssd_heavy 39 -> 95 -> 326, T 46 ms): a burst larger than any before.
 - **SSD shard files, kept across runs** (user, 2026-10-17; `kvpool/shards.py`). Balanced storage gives member q a
   quarter of every slot, so an SSD file is a shard, not a GPU's KV cache: `$PPIMPL_SSD_DIR/set<k>/shard<q>.bin`, q =
   0..n-1, default `PPIMPL_SSD_DIR` = `/raid/kanzhu/ServingStudio/pp-impl/tmp/ssd_tier` (`bench/slurm/m6.sbatch`).
@@ -455,8 +486,8 @@ ssd`):
 - 512k misses by +50 ms, all before the read starts: its admission has to evict one kept context that is not yet
   written (`blocked_by_write` 313, HBM `evict_waits` 313, `ahead_writes` 44, `evict_writes` 60). The HBM
   watermark (0.9) keeps ~10% of this small pool clean, and a 512k round needs ~45% of it; in the session settings
-  (pool 7.6-61M tokens) a 512k round is under 7% of the pool. Not changed: the sessions decide whether the
-  watermark needs to move.
+  (pool 7.6-61M tokens) a 512k round is under 7% of the pool. (The watermarks were replaced by the measured
+  headroom rule, §5.)
 
 ## 10. Targets (v2-realistic, replace the handoff's numbers)
 
@@ -712,7 +743,7 @@ lower.make_room(short: float)        # a request fits only by evicting unwritten
 # BalancedKVPool (leader)
 pool.hbm_level(kv) -> HbmLevel
 pool.write_back(key, tokens, content, views: KVViews) -> Handle   # HbmLevel.write: ops to the fastest tier
-pool.ready_ops() -> list[TierOp]     # HBM write-ahead, DRAM write-ahead, then ops whose deps are done
+pool.ready_ops() -> list[TierOp]     # HBM write-ahead, then ops whose deps are done (a write's start: T's start)
 pool.complete(op_id, now_ns) -> (TierOp, Handle | None)           # a write's landing unpins and marks it clean
 pool.write_back_stats() -> {"hbm": {...}, "dram": {...}}          # into cache.json
 
@@ -720,7 +751,6 @@ pool.write_back_stats() -> {"hbm": {...}, "dram": {...}}          # into cache.j
 prepare_write_back(key, tokens, content, views=None) -> list[TierOp]
 hbm_evicted(key, tokens, content) -> list[TierOp]
 drop_stale(key, req) -> list[TierOp]
-step() -> list[TierOp]               # DRAM write-ahead (demotes)
 take_gone() -> list                  # keys the fastest tier lost -> HbmLevel.lost (dirty again)
 
 # writeback.py: one class, two levels
@@ -729,12 +759,13 @@ class Level(Protocol):               # HbmLevel (HBM's kept contexts), _TierLeve
     def fixed(self) -> float: ...    # HBM: running requests; DRAM: 0
     def lru(self) -> Iterable: ...   # keys, least recently used first
     def write(self, key, entry=None) -> object | None: ...   # start the write below: a token, None if nothing moved
-WriteBack(name, level, watermark)    # add, remove, done, lost, evictable, held_back, step, make_room, evicting
+WriteBack(name, level, ahead, clock) # add, remove, done, lost, evictable, held_back, step, make_room, evicting
+                                     # ahead: HBM True (headroom R(2T)), DRAM False (at eviction); clock: replay's
 ```
 
 `HbmLevel` and `_TierLevel` are the only per-level code: what an entry is and how a write is issued (HBM: `write`
-ops from the KV blocks, pinned until they land; DRAM: a `demote`). The dirty / writing / clean state, write-ahead and
-the wait counters are `WriteBack`'s. HBM waits by not admitting the request; DRAM evicts at once and orders the slot
+ops from the KV blocks, pinned until they land; DRAM: a `demote`, nothing if SSD holds the entry whole). The dirty /
+writing / clean state, the headroom rule and the wait counters are `WriteBack`'s. HBM waits by not admitting the request; DRAM evicts at once and orders the slot
 reuse after the demote (`evicting`).
 
 cudaHostRegister stays in `attach` (`HostTier.register`: ~1 GiB chunks of whole slots from 4 threads): its chunks
