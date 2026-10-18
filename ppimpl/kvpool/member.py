@@ -11,12 +11,11 @@ is done, a read's blocks are held by a request that computes only after all n `T
 
 SSD ops run on two threads, their file I/O on `SsdTier`'s io_uring (reads first in the kernel), into and out of host
 slots: DRAM's (a demote) or a staging arena's (every SSD read; a write-back to SSD without
-DRAM, or of a context larger than DRAM). An SSD read lands slot by slot and each KV block's H2D is enqueued as soon as its slot is
-in, the state after its slots: read time ~ SSD time + one block. The file is shard q (this member's quarter of every
+DRAM, or of a context larger than DRAM). The file is shard q (this member's quarter of every
 slot) of the set the leader took (`shards.py`), kept for the next run; its contents are never trusted. A read's
 file reads are queued as it arrives, behind the earlier reads' (as many reads in flight as the leader gave staging
-slots; the ring keeps `SSD_READ_DEPTH` in the kernel), and a copy thread moves each read to HBM in order as its slots
-land. A fetch (staged loading: SSD -> DRAM's loading area, no HBM copy) is reported when its last slot is in DRAM; the
+slots; the ring keeps `SSD_READ_DEPTH` in the kernel), and a copy thread moves each read to HBM once all its slots
+landed, in landing order: a read never waits behind an earlier one still on the SSD. A fetch (staged loading: SSD -> DRAM's loading area, no HBM copy) is reported when its last slot is in DRAM; the
 leader then moves it on with a DRAM read. Writes and demotes do not wait for their file writes: many are in flight at once (the leader orders
 ops that share slots, `TierOp.deps`), and each is reported when its last slot is on the SSD.
 
@@ -127,7 +126,7 @@ class PoolMember:
         self.ssd_q = {"read": queue.Queue(), "write": queue.Queue()}   # SSD threads: (op, start)
         self.sub_q = {"read": queue.Queue(), "write": queue.Queue()}   # DRAM ops' submit threads: op
         self.ssd_copy_q: queue.Queue = queue.Queue()   # SSD reads whose file reads are queued: (op, start, futures)
-        self._ssd_writes = 0                       # SSD writes / demotes whose file writes are in flight
+        self._ssd_writes = 0                       # SSD ops whose file I/O is in flight (reads: until queued for copy)
         self._ssd_cv = threading.Condition()
         self._due: dict[str, float] = {}           # fake member: when each direction's last op is done
         if tc.hops not in ("two", "direct"):
@@ -318,7 +317,7 @@ class PoolMember:
             (self.ssd_copy_q if direction == "read" else self.q[direction]).put(err)
 
     def _ssd_copy_loop(self):
-        """SSD reads in arrival order: each one's blocks to HBM as its slots land, then its report."""
+        """SSD reads in landing order: each one's blocks to HBM, then its report."""
         err = None
         try:
             if self.cuda:
@@ -436,7 +435,7 @@ class PoolMember:
         hosts = [host.ptr(h) for h in op.host_slots + op.host_state]
         assert len(files) == len(hosts), (op.op_id, len(files), len(hosts))
         if op.op == "read":                 # file -> host slots (all blocks); the copy thread moves them to HBM
-            self.ssd_copy_q.put((op, start_ns, self.ssd.read(files, hosts)))
+            self._copy_when_landed(op, self.ssd.read(files, hosts), start_ns)
             return
         if op.op == "fetch":                # file -> DRAM's loading area, reported as its last slot lands
             self._report_when_done(op, self.ssd.read(files, hosts), start_ns, len(files) * sb, "read")
@@ -451,18 +450,37 @@ class PoolMember:
             raise ValueError(f"SSD op {op.op}")
         self._report_when_done(op, self.ssd.write(files, hosts), start_ns, len(files) * sb, "write")
 
-    def _ssd_read_copy(self, op: TierMove, start_ns: int, futs: list):
-        """An SSD read whose file reads are queued: HBM [b_lo, b_hi) as its slots land, the state after them."""
-        host = self.dram if op.host_tier == "dram" else self.staging
-        n = len(op.slots)
+    def _copy_when_landed(self, op: TierMove, futs: list, start_ns: int):
+        """Queue an SSD read for the copy thread once its last file read completed (on the io_uring's thread): reads
+        reach HBM in landing order. A failed read is queued too; the copy thread raises its error."""
+        item = (op, start_ns, futs)
+        if not futs:
+            self.ssd_copy_q.put(item)
+            return
+        left, lock = [len(futs)], threading.Lock()
+        with self._ssd_cv:
+            self._ssd_writes += 1
 
-        def ready(i):
-            for f in (futs[:i] if i is not None else futs[n:]):
-                f.result()
-        owned: list = []
-        ev, _ = self._move("read", host, op, op.host_slots, op.host_state, 0, ready, owned=owned)
+        def one(_f):
+            with lock:
+                left[0] -= 1
+                last = left[0] == 0
+            if last:
+                self.ssd_copy_q.put(item)
+                with self._ssd_cv:
+                    self._ssd_writes -= 1
+                    self._ssd_cv.notify_all()
+
+        for f in futs:
+            f.add_done_callback(one)
+
+    def _ssd_read_copy(self, op: TierMove, start_ns: int, futs: list):
+        """An SSD read whose slots all landed: HBM [b_lo, b_hi) and the state."""
+        host = self.dram if op.host_tier == "dram" else self.staging
         for f in futs:
             f.result()
+        owned: list = []
+        ev, _ = self._move("read", host, op, op.host_slots, op.host_state, 0, owned=owned)
         if owned:
             self._owned[op.op_id] = owned
         self.q["read"].put((op.op_id, ev, start_ns, len(futs) * self.slot_bytes, time.time_ns(), None))

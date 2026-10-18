@@ -54,7 +54,7 @@ def run(mems, ops):
             if m.tier == "ssd":                      # the SSD thread's work, here
                 e._ssd_op(*e.ssd_q[e.direction(m)].get_nowait())
                 if m.op == "read":                   # and the copy thread's
-                    e._ssd_read_copy(*e.ssd_copy_q.get_nowait())
+                    e._ssd_read_copy(*e.ssd_copy_q.get(timeout=30))
             op_id, wait, _, nbytes, _, _ = e.q[e.direction(m)].get(timeout=30)   # SSD writes: reported async
             assert op_id == m.op_id and wait is None
             moved.setdefault(op_id, []).append(nbytes)
@@ -312,3 +312,22 @@ def test_ssd_writes_are_reported_when_their_last_file_write_is_done():
     c[0].set_exception(OSError("disk"))
     c[1].set_result(None)
     assert isinstance(e.q["write"].get_nowait(), WorkerError) and e.q["write"].empty() and e._ssd_writes == 0
+
+
+def test_ssd_reads_are_copied_in_landing_order():
+    """A later SSD read whose slots all land first goes to the copy thread before an earlier one still on the SSD."""
+    import queue
+    import threading
+    from concurrent.futures import Future
+
+    e = PoolMember.__new__(PoolMember)
+    e.ssd_copy_q, e._ssd_writes, e._ssd_cv = queue.Queue(), 0, threading.Condition()
+    a, b = [Future(), Future()], [Future(), Future()]
+    e._copy_when_landed(NS(op_id=1, op="read"), a, 0)       # the earlier read
+    e._copy_when_landed(NS(op_id=2, op="read"), b, 0)
+    a[0].set_result(None)
+    b[0].set_result(None)
+    b[1].set_result(None)                                     # the later read is all in; the earlier is not
+    assert e.ssd_copy_q.get_nowait()[0].op_id == 2 and e.ssd_copy_q.empty() and e._ssd_writes == 1
+    a[1].set_result(None)
+    assert e.ssd_copy_q.get_nowait()[0].op_id == 1 and e._ssd_writes == 0
