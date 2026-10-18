@@ -190,8 +190,10 @@ class HbmLevel:
         self.unkept(key)
         self.pool.manager.hbm_evicted(key, k.tokens, k.content)
 
-    def admitted(self, key, req):
+    def admitted(self, key, req, hit: int = 0):
+        """`req` was admitted, `hit` tokens of it taken over from HBM's kept context."""
         self.pool.manager.drop_stale(key, req)
+        self.pool.manager.taken_over(key, hit)
 
     # --- the pool's -----------------------------------------------------------------------------------------------
 

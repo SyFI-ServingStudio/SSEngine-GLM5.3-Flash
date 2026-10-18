@@ -230,12 +230,13 @@ class Bytes:
 
 
 @pytest.mark.parametrize("seed", range(6))
-@pytest.mark.parametrize("dram", [0.012, None])
-def test_random_sessions_every_read_sees_its_context(seed, dram):
+@pytest.mark.parametrize("dram,writes", [(0.012, "hbm-evictions"), (0.012, "hbm-evictions-exclusive"),
+                                         (None, "hbm-evictions")])
+def test_random_sessions_every_read_sees_its_context(seed, dram, writes):
     """HBM writes contexts back (what the entry lacks), each round's admission drops what it does not resume from,
-    DRAM demotes ahead above its watermark and at eviction."""
+    DRAM demotes ahead above its watermark and at eviction (exclusive: a DRAM read releases the entry)."""
     rng = random.Random(seed)
-    t = TierManager(cfg(dram=dram, ssd=0.020, state_slots=2, staging=0.012, dram_write_ahead=0.7))
+    t = TierManager(cfg(dram=dram, ssd=0.020, state_slots=2, staging=0.012, dram_write_ahead=0.7, dram_writes=writes))
     mem, keys, ctx = Bytes(), {}, {}
     pending = []
     for step in range(300):
@@ -364,3 +365,75 @@ def test_scheduler_writes_back_ahead_and_evicts_only_written_contexts():
     assert rd is not None and rd.req_id == r.req_id and 3 not in kv.kept
     assert hbm.stats["ahead_writes"] + hbm.stats["evict_writes"] == 3
     assert set(pool.write_back_stats()) == {"hbm"}
+
+
+# --- exclusive DRAM (dram_writes: hbm-evictions-exclusive) ---------------------------------------------------------
+
+EXCL = "hbm-evictions-exclusive"
+
+
+def test_exclusive_dram_read_releases_the_entry_and_its_slots_wait_for_the_read():
+    t = TierManager(cfg(dram=0.006, dram_writes=EXCL))
+    store(t, 1, 2 * B)
+    drain(t)
+    slots = t.tiers[0].entries[1].slots + t.tiers[0].entries[1].state
+    op, _ = read(t, rnd(1, 2 * B + 1, 10), "dram", 2 * B, KVViews([7, 8], [1, 2, 3, 4, 5, 6], 2 * B))
+    assert 1 not in t.tiers[0].entries and t.tiers[0].used == 0 and t.tiers[0].stats["released"] == 1
+    assert t.take_gone() == [1]
+    slots_ok(t)
+    store(t, 2, 2 * B)
+    (w,) = store(t, 3, 2 * B)                                # reuses the released slots: waits for the read
+    assert set(w.slots + w.state_slots) == set(slots) and w.deps == [op.op_id]
+    drain(t)
+    t.drop_stale(1, rnd(1, 2 * B + 1, B // 2))              # session 1 ran on and HBM evicts it again: written whole
+    (w1,) = [o for o in t.prepare_write_back(1, 2 * B + B // 2, None, KVViews([], [])) if o.op == "write"]
+    assert w1.token_start == 0 and w1.block_start == 0 and len(w1.slots) == 3
+
+
+def test_inclusive_dram_read_keeps_the_entry():
+    t = TierManager(cfg(dram=0.006))
+    store(t, 1, 2 * B)
+    drain(t)
+    read(t, rnd(1, 2 * B + 1, 10), "dram", 2 * B, KVViews([7, 8], [1, 2, 3, 4, 5, 6], 2 * B))
+    assert 1 in t.tiers[0].entries and t.tiers[0].stats["released"] == 0
+
+
+def test_exclusive_dram_ssd_read_leaves_both_tiers():
+    """An SSD read: the SSD entry stays (inclusive); DRAM had no copy."""
+    t = TierManager(cfg(dram=0.003, ssd=0.020, dram_writes=EXCL))
+    store(t, 1, 2 * B)
+    store(t, 2, 2 * B)                                       # 1 -> SSD
+    drain(t)
+    read(t, rnd(1, 2 * B + 1, 10), "ssd", 2 * B, KVViews([7, 8, 9], [1, 2, 3, 4, 5, 6], 2 * B))
+    assert 1 in t.tiers[1].entries and set(t.tiers[0].entries) == {2}
+
+
+def test_dram_entry_the_ssd_holds_whole_is_clean():
+    """A context SSD still holds whole (read from SSD, evicted from HBM unchanged) is stored in DRAM clean: its
+    eviction demotes nothing."""
+    t = TierManager(cfg(dram=0.003, ssd=0.020, dram_writes=EXCL))
+    store(t, 1, 2 * B)
+    store(t, 2, 2 * B)                                       # 1 -> SSD
+    drain(t)
+    t.prepare_write_back(1, 2 * B, None, KVViews([], []))   # 1 back in DRAM (evicts 2 -> SSD)
+    drain(t)
+    assert t.wb[0].evictable(1)
+    before = dict(t.wb[0].stats)
+    ops = t.prepare_write_back(3, 2 * B, None, KVViews([], []))   # evicts 1: SSD has it, nothing moves for it
+    assert [o.op for o in ops if o.moves_bytes] == ["write"] and t.wb[0].stats == before
+
+
+def test_exclusive_hbm_hit_releases_the_write_ahead_copy():
+    """A kept context written ahead to DRAM and then taken over by its next round (an HBM hit) leaves DRAM."""
+    for writes, kept in (("hbm-evictions", True), (EXCL, False)):
+        kv = KvManager(21, keep_sessions=True)
+        pool = BalancedKVPool(cfg(dram=1.0, ssd=None, hbm_write_ahead=0.0, dram_writes=writes))
+        s = Scheduler(kv, SchedulerConfig(mb_tokens=8192), pool, dispatch_ahead=0)
+        finish(s, rnd(1, 0, 100))
+        (w,) = pool.ready_ops()
+        s.op_done(w.op_id, 0)
+        assert 1 in pool.manager.tiers[0].entries
+        r = rnd(1, 101, 10)
+        s.add(r, 0)
+        assert s.next_microbatch(0) is not None and r.cached == 100
+        assert (1 in pool.manager.tiers[0].entries) == kept

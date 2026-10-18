@@ -347,7 +347,7 @@ class KvManager:
         self.held[req.req_id] = alloc
         self._charge[req.req_id] = charge
         if self.lower is not None and req.session is not None:
-            self.lower.admitted(req.session, req)     # after this admission's evictions, as the simulator
+            self.lower.admitted(req.session, req, hit)   # after this admission's evictions, as the simulator
         self.stats["admitted"] += 1
         if hit:
             self.stats["hits"] += 1

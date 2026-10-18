@@ -506,6 +506,9 @@ def run_named(name: str, fake: bool, port: int, out_root: Path, args) -> dict:
         gb = {k: None if v in (None, "none") else float(v) for k, v in (("dram_gb", args.dram_gb),
                                                                          ("ssd_gb", args.ssd_gb))}
         extra["tiers"] = gb | ({"staging_gb": args.staging_gb} if args.staging_gb else {})
+        for kv in args.tier or []:                        # any other TierConfig field, KEY=VALUE (YAML value)
+            k, _, v = kv.partition("=")
+            extra["tiers"][k] = yaml.safe_load(v)
     scfg = {"model": "fake" if fake else "glm53", "device": "cpu" if args.cpu else "cuda", "run_dir": str(run_dir),
             **extra}
     if not fake:
@@ -611,6 +614,8 @@ def main():
     ap.add_argument("--dram-gb", help="tiers: DRAM per GPU in GB, or none (with --ssd-gb: TierConfig)")
     ap.add_argument("--ssd-gb", help="tiers: SSD per GPU in GB, or none")
     ap.add_argument("--staging-gb", type=float, help="tiers: staging area per GPU (every SSD read)")
+    ap.add_argument("--tier", action="append", metavar="KEY=VALUE",
+                    help="tiers: another TierConfig field (repeatable), e.g. dram_writes=hbm-evictions-exclusive")
     args = ap.parse_args()
     for n in args.names:
         parse_name(n)

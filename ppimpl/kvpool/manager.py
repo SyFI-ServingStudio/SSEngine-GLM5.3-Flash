@@ -13,8 +13,12 @@ that moves bytes becomes a `TierOp` the leader sends to all n members (n = PP de
   go of, and only what its entry for the key lacks: the fastest tier with HBM's kept contexts
   (`prepare_write_back`, driven by the HBM level's `writeback.WriteBack` in `BalancedKVPool`), SSD with DRAM's
   entries (`demote`, driven by DRAM's `WriteBack` here: ahead of need above `dram_write_ahead`, or at eviction).
-  A level letting go of what the one below already holds whole only refreshes it there (`hbm_evicted`). A read back
-  into HBM leaves the entry in place (a clean copy); an SSD read goes through the staging area, not into DRAM. When a
+  A level letting go of what the one below already holds whole only refreshes it there (`hbm_evicted`); an entry
+  stored where the tier below already holds it whole is clean. A read back into HBM leaves the entry in place (a clean
+  copy); an SSD read goes through the staging area, not into DRAM. **Exclusive DRAM** (`TierConfig.dram_writes`
+  "hbm-evictions-exclusive"): a DRAM read releases its entry (its slots are reused only after the read, `deps`), and
+  a round admitted on HBM's kept context releases the DRAM copy write-ahead made of it (`taken_over`): DRAM holds only
+  what HBM lacks, and HBM evicting the context again writes it whole. SSD stays inclusive. When a
   session's next round is admitted, every entry it does not resume from is dropped (`drop_stale`), so entries stay
   prefixes of the session's latest context (a KDA state exists only at a context's end). Writes are free in the
   target; the engine issues them and goes on.
@@ -167,7 +171,7 @@ class TierStore:
         self.used = 0.0
         self.channel_free_ns = 0
         self.stats = dict(stored=0, written_bytes=0, evicted=0, evicted_tokens=0, reads=0, read_tokens=0,
-                          read_bytes=0, dropped=0)
+                          read_bytes=0, dropped=0, released=0)      # released: exclusive DRAM, moved into HBM
 
     @property
     def num_slots(self) -> int:
@@ -270,6 +274,9 @@ class TierManager:
     def __init__(self, cfg: TierConfig, partial_hits: bool = False):
         self.cfg = cfg
         self.partial_hits = partial_hits
+        if cfg.dram_writes not in ("hbm-evictions", "hbm-evictions-exclusive"):
+            raise ValueError(f"tiers.dram_writes: {cfg.dram_writes!r} (hbm-evictions | hbm-evictions-exclusive)")
+        self.exclusive = cfg.dram_writes == "hbm-evictions-exclusive" and bool(cfg.dram_gb)
         self.slot_mode = bool(cfg.slot_bytes)
         self.guard = SlotGuard() if self.slot_mode else None
         kw = dict(slot_bytes=cfg.slot_bytes, state_slots=cfg.state_slots)
@@ -403,16 +410,41 @@ class TierManager:
         kw = dict(token_start=hbm_tokens, token_end=tokens, req_id=req_id, land_ns=land, **_blocks(views))
         if not self.slot_mode:
             self._emit("read", t.name, key, **kw)
+            self._release_read(tier, key)
             return self._take(), land
         n = kv_blocks_for(tokens)
         if t.name == "dram":
             b0 = hbm_tokens // BLOCK_TOKENS
             self._emit("read", t.name, key, block_start=b0, slots=e.slots[b0:n], state_slots=list(e.state), **kw)
+            self._release_read(tier, key)
             return self._take(), land
         hs = self.staging.take(n + self.staging.state_slots)       # SSD: the whole context through staging
         self._emit("read", t.name, key, slots=e.slots[:n], state_slots=list(e.state), host_tier="staging",
                    host_slots=hs[:n], host_state=hs[n:], **kw)
         return self._take(), land
+
+    def _release_read(self, tier: int, key):
+        """Exclusive DRAM: a read moves the entry into HBM; its slots are free for ops after the read (`deps`)."""
+        t = self.tiers[tier]
+        if not (self.exclusive and t.name == "dram"):
+            return
+        e = t.remove(key)
+        t.release(e.slots + e.state)
+        t.stats["released"] += 1
+        self._removed(tier, key)
+
+    def taken_over(self, key, tokens: int):
+        """A round was admitted on HBM's kept context of `key` (`tokens` long). Exclusive DRAM releases the copy
+        write-ahead made of it (a prefix of it, `drop_stale`): HBM holds it."""
+        if not self.exclusive or tokens <= 0:
+            return
+        t = self.tiers[0]
+        e = t.entries.get(key)
+        if e is not None and e.tokens <= tokens:
+            t.remove(key)
+            t.release(e.slots + e.state)
+            t.stats["released"] += 1
+            self._removed(0, key)
 
     # --- writes: the victim chain ---------------------------------------------------------------------------------
 
@@ -525,7 +557,11 @@ class TierManager:
         moved = None
         if stored:
             if i in self.wb:
-                self.wb[i].add(key, t.charge(tokens))
+                below = self.tiers[i + 1].entries.get(key)
+                if below is not None and below.tokens >= tokens:
+                    self.wb[i].remove(key)          # the tier below holds it whole already: clean
+                else:
+                    self.wb[i].add(key, t.charge(tokens))
             kw = _blocks(views)
             if self.slot_mode:
                 b0 = keeps // BLOCK_TOKENS

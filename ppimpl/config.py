@@ -63,6 +63,10 @@ class TierConfig(msgspec.Struct, forbid_unknown_fields=True):
     # (kvpool/writeback.py); None: write only when evicting.
     hbm_write_ahead: float | None = 0.9
     dram_write_ahead: float | None = 0.9
+    # "hbm-evictions": DRAM keeps a clean copy of what a read moves into HBM (inclusive after reads).
+    # "hbm-evictions-exclusive" (simulator `dram_tier_writes`, d17027cf): a DRAM read releases the entry and an HBM hit
+    # releases the DRAM copy its write-ahead made, so DRAM holds only what HBM lacks. SSD stays inclusive.
+    dram_writes: str = "hbm-evictions"
     bytes_per_token: int = 1635           # own stage (stage 0); balanced storage: 1,499
     state_bytes: int = 39_100_000         # one KDA state per context, own stage (stage 0); balanced: 36.9 MB
     max_read_wait_ms: float | None = 1000.0   # a read that would wait longer for its tier is passed over
