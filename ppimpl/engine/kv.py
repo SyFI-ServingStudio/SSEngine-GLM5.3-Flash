@@ -198,9 +198,13 @@ class KvManager:
         lets go: written there). If it fits only by evicting ones not yet written, the lower level starts their
         writes (`make_room`) and the request waits."""
         need = self.hard + self.footprint(req.num_tokens)
-        if need + self.kept_charge <= self.capacity:
+        own = self.kept.get(req.session) if req.session is not None else None   # taken over (or given back) at
+        own = 0 if own is None else self.kept_cost(own.tokens)                  # admission: not counted twice
+        if need + self.kept_charge - own <= self.capacity:
             return True
         held = 0 if self.lower is None else self.lower.held_back()
+        if own and self.lower is not None and not self.lower.evictable(req.session):
+            held -= own
         if need + held <= self.capacity:
             return True
         if held and need <= self.capacity:        # only writes still to land keep it out (write-before-evict)
