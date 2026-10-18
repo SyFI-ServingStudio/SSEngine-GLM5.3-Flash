@@ -24,9 +24,11 @@ usage:
   python -m bench.replay check-force [--steps ...]                    force check vs force_check_targets.json
   python -m bench.replay sessions --step good --n 500 [--minutes 20] [--pool-tokens T] [--tiers full|tiers|ssd_heavy]
                                  [--accounting blocks|tokens] [--partial-hits] --out <run dir>
-  python -m bench.replay writeback --run <server run dir> [--json]   the victim chain's write-back (slot mode, the
-                                 real KvManager + BalancedKVPool) on a server run's logged admissions, ops timed
-                                 by the measured write rates: waits for writes and write volume (TIERS.md §5)
+  python -m bench.replay writeback --run <server run dir> [--latency-from <run>] [--cap-ms 50] [--measured]
+                                 [--t-mode measured|physical|p99] [--dup-first drop|demote] [--ssd-backs]
+                                 the victim chain's write-back (slot mode, the real KvManager + BalancedKVPool) on a
+                                 server run's logged admissions, each op timed as the reference run measured it
+                                 (`OpLatency`, stalls included): HBM waits, write volume, hit split (TIERS.md §5)
 """
 
 import argparse
@@ -508,18 +510,117 @@ def run_bringup(kind: str, variant: str = "dram", handoff: Path = HANDOFF) -> li
 
 # --- write-back model on a server run's admissions (TIERS.md §5) ----------------------------------------------------
 
-WRITE_MS = (3.0, 1.0)       # HBM -> DRAM write: ms + ms per slot, ops in parallel (job 8094 ssd_heavy: p50 10.5 ms
-                            # for 8 slots, sent to landed)
-SSD_WRITE_GB_S = 4.6        # one member's SSD write rate while it writes (job 8094: demote service time); demotes
-                            # share it in order
+OP_KINDS = {("write", "dram"): "write", ("write", "ssd"): "demote", ("demote", "ssd"): "demote",
+            ("read", "dram"): "read_dram", ("read", "ssd"): "read_ssd"}
 
 
-def run_writeback(run: Path) -> dict:
+class OpLatency:
+    """Tier op times (sent -> landed) as a server run measured them (`tier_ops.jsonl`), stalls and queueing included:
+    per kind (HBM -> DRAM write, DRAM -> SSD demote, DRAM read, SSD read) a base a + b·slots (least squares on the
+    per-slot-count medians) plus the excess over it of the measured op of that kind sent nearest in workload time
+    (`at`: ns since the workload's first submit). Driving another run (or policy) with it replays the reference's
+    stalls when they happened. `phys_ms`: the write's physical time, the bytes at the link's measured write rate
+    (per GPU, the PCIe hop of `tier_trace_s*.jsonl`) plus the per-op overhead (median rest of the writes before the
+    first > 50 ms one: no stall, no queue). `cap_ms`: excess over the base capped (the stalls removed: what fixing
+    them would give)."""
+
+    def __init__(self, run: Path, cap_ms: float | None = None):
+        from bench.prefix import client_rows, shift_ms
+
+        self.run, self.cap_ms = run.name, cap_ms
+        self.shift = shift_ms(run, client_rows(run))
+        ops = [json.loads(x) for x in (run / "tier_ops.jsonl").read_text().splitlines()]
+        sb = json.loads((run / "tiers.json").read_text())["slot_bytes"]
+        self.kinds = {}
+        for k in set(OP_KINDS.values()):
+            xs = sorted((o["sent_ms"] - self.shift, o["landed_ms"] - o["sent_ms"], o["slots"]) for o in ops
+                        if o.get("landed_ms") is not None and OP_KINDS.get((o["kind"], o["tier"])) == k)
+            if not xs:
+                continue
+            at, dur, n = (np.array(c, dtype=float) for c in zip(*xs))
+            ns = np.unique(n)
+            med = np.array([np.median(dur[n == v]) for v in ns])
+            w = np.array([np.sum(n == v) for v in ns])
+            b, a = np.polyfit(ns, med, 1, w=np.sqrt(w)) if len(ns) > 1 else (0.0, float(med[0]))
+            ex = dur - (a + b * n)
+            self.kinds[k] = (at, ex if cap_ms is None else np.minimum(ex, cap_ms), a, b)
+        trace = [json.loads(x) for f in sorted(run.glob("tier_trace_s*.jsonl")) for x in f.read_text().splitlines()]
+        rate = [x["bytes"] / (x["gpu_end_us"] - x["gpu_start_us"]) / 1e3 for o in trace if o["kind"] == "write"
+                for x in o["batches"] if x["stream"] == "write" and x["gpu_end_us"] > x["gpu_start_us"]]
+        self.write_gb_s = float(np.median(rate)) if rate else 50.0
+        w = sorted((o for o in ops if o["kind"] == "write" and o.get("landed_ms") is not None), key=lambda o: o["sent_ms"])
+        first = next((i for i, o in enumerate(w) if o["landed_ms"] - o["sent_ms"] > 50), len(w))
+        w = w[:first]
+        self.write_overhead_ms = float(np.median([o["landed_ms"] - o["sent_ms"] - max(o["bytes"]) / self.write_gb_s / 1e6
+                                                  for o in w]))
+        self.slot_bytes = sb
+
+    def ms(self, kind: str, slots: int, at_ns: int) -> float:
+        at, ex, a, b = self.kinds[kind]
+        i = min(int(np.searchsorted(at, at_ns / MS)), len(at) - 1)
+        if i and at_ns / MS - at[i - 1] < at[i] - at_ns / MS:
+            i -= 1
+        base = a + b * slots
+        return max(base + ex[i], 0.25 * base)
+
+    def phys_ms(self, slots: int) -> float:
+        return self.write_overhead_ms + slots * self.slot_bytes / self.write_gb_s / 1e6
+
+    def describe(self) -> dict:
+        return dict(ref=self.run, cap_ms=self.cap_ms, write_gb_s=round(self.write_gb_s, 1), write_overhead_ms=round(self.write_overhead_ms, 2),
+                    base_ms={k: [round(v[2], 2), round(v[3], 3)] for k, v in self.kinds.items()})
+
+
+def hit_share(rows: list[dict], lo: float) -> dict:
+    """Hit tokens by where they came from (rounds arriving in minutes 10-20, as `bench.tiers.session_vs_target`)."""
+    got = {"hbm": 0, "dram": 0, "ssd": 0}
+    for r in rows:
+        if lo <= r["arrival_ms"] < lo + 600e3 and r.get("cached"):
+            t = r.get("tier_tokens", 0) if r.get("tier") else 0
+            got["hbm"] += r["cached"] - t
+            if t:
+                got[r["tier"]] += t
+    hit = max(sum(got.values()), 1)
+    return {k: round(100 * v / hit, 1) for k, v in got.items()}
+
+
+def measured_writeback(run: Path) -> dict:
+    """What the server run measured, in `run_writeback`'s terms."""
+    from bench.prefix import client_rows, server_rows, shift_ms
+
+    c = json.loads((run / "cache.json").read_text())
+    tiers = {t["tier"]: t for t in c["tiers"]}
+    wb = c.get("write_back") or {}
+    return dict(run=run.name, policy="measured", hbm_waits=(wb.get("hbm") or {}).get("evict_waits"),
+                blocked_by_write=c.get("blocked_by_write"),
+                write_gb={k: round(v["written_bytes"] / 1e9) for k, v in tiers.items()},
+                reads={k: v["reads"] for k, v in tiers.items()},
+                hit_share=hit_share(list(server_rows(run).values()), shift_ms(run, client_rows(run)) + 600e3),
+                R=(wb.get("hbm") or {}).get("headroom"), T_ms=(wb.get("hbm") or {}).get("write_ms"))
+
+
+def run_writeback(run: Path, lat: OpLatency | None = None, t_mode: str = "measured", dup_first: str | None = None,
+                  ssd_backs: bool = False) -> dict:
     """The server's pool policy (slot mode: `KvManager` with `BalancedKVPool.hbm_level`, the DRAM/SSD index) driven by
     a server run's logged rounds: each is admitted at its logged admission (read start or first dispatch) if it fits
     then, else as soon as it fits (re-checked at every op landing and release; a later round waits behind it), and
-    releases its context at its logged token time plus that wait. HBM writes take WRITE_MS, demotes share
-    SSD_WRITE_GB_S, reads land at the index's channel time. Returns the waits and the write volume."""
+    releases its context at its logged token time plus that wait. Every op takes the time `lat` (default: this run's
+    own `OpLatency`) gives it at its send, in workload time; drops take none.
+
+    Variants of the write-back policy, applied from here (the pool's code is the server's):
+    - `t_mode` "measured": T is the longest write measured (the server's); "physical": T is the longest write's
+      `OpLatency.phys_ms` (bytes / link rate + per-op overhead; no stall or queue inside T); "p99": the 99th
+      percentile of the last 4096 writes measured.
+    - `dup_first`: DRAM evicts first (LRU among them) the entries that are clean copies of contexts HBM keeps;
+      "drop": without a demote (HBM's entry is dirty again: `TierManager._removed`), "demote": as any other victim.
+    - `ssd_backs`: a context DRAM lets go of that SSD then holds whole stays clean in HBM (backed by SSD); otherwise
+      (the server) HBM's entry is dirty again and HBM writes it to DRAM again.
+    Policies without `BalancedKVPool(clock=)` (the 0.9 watermarks before 4106992) run with their own write-back."""
+    import inspect
+    from bench.prefix import client_rows, shift_ms
+
+    lat = lat or OpLatency(run)
+    shift = shift_ms(run, client_rows(run))
     cfg = json.loads((run / "tiers.json").read_text())
     srv = yaml.safe_load((run / "server_config.yaml").read_text())
     t = srv["tiers"]
@@ -528,9 +629,69 @@ def run_writeback(run: Path) -> dict:
                     staging_gb=t.get("staging_gb", 8.0), dram_read_gb_s=t["dram_read_gb_s"],
                     ssd_read_gb_s=t["ssd_read_gb_s"], max_read_wait_ms=None)
     now = [0]
-    pool = BalancedKVPool(tc, clock=lambda: now[0])
+    new = "clock" in inspect.signature(BalancedKVPool).parameters
+    pool = BalancedKVPool(tc, clock=lambda: now[0]) if new else BalancedKVPool(tc)
     kv = KvManager(json.loads((run / "pool.json").read_text())["num_blocks"], keep_sessions=True)
     kv.lower = pool.hbm_level(kv)
+    hwb = pool.hbm.wb
+    phys = [0.0]
+    if new and t_mode == "p99":
+        orig_done, seen = hwb.done, []
+
+        def done(key, token, started_ns=None):
+            w = hwb.writing.get(key)
+            if w is not None and w[0] is token:
+                seen.append(now[0] - (w[2] if started_ns is None else started_ns))
+            orig_done(key, token, started_ns)
+            hwb.write_ns = int(np.percentile(seen[-4096:], 99)) if seen else 0
+        hwb.done = done
+    if new and t_mode == "physical":
+        orig_done, t_phys = hwb.done, [0]
+
+        def done(key, token, started_ns=None):
+            orig_done(key, token, started_ns)
+            t_phys[0] = max(t_phys[0], int(phys[0] * MS))
+            hwb.write_ns = t_phys[0]
+        hwb.done = done
+    if dup_first:
+        m, dram = pool.manager, pool.manager.tiers[0]
+        dups = set()
+        orig_store, orig_evict = dram.store, m._evict
+
+        def store(key, tokens, content, keeps):
+            dups.clear()
+            dups.update(k for k in dram.entries if k != key and k in kv.kept and hwb.evictable(k))
+            if not dups:
+                return orig_store(key, tokens, content, keeps)
+            order = list(dram.entries)
+            for k in reversed(order):
+                if k in dups:
+                    dram.entries.move_to_end(k, last=False)
+            out = orig_store(key, tokens, content, keeps)
+            rank = {k: i for i, k in enumerate(order)}
+            rest = sorted(dram.entries.items(), key=lambda kv_: rank.get(kv_[0], len(rank)))
+            dram.entries.clear()
+            dram.entries.update(rest)
+            return out
+
+        def evict(i, key, e):
+            if i == 0 and key in dups and dup_first == "drop":
+                m.wb[0].remove(key)
+                m._removed(0, key)
+                m._emit("drop", dram.name, key)
+                return
+            orig_evict(i, key, e)
+        dram.store, m._evict = store, evict
+    if ssd_backs:
+        m, orig_removed = pool.manager, pool.manager._removed
+
+        def removed(i, key):
+            k, below = kv.kept.get(key), m.tiers[1].entries.get(key) if len(m.tiers) > 1 else None
+            if i == 0 and k is not None and below is not None and below.tokens >= k.tokens:
+                m.wb[0].remove(key)
+                return
+            orig_removed(i, key)
+        m._removed = removed
     rows = [json.loads(x) for x in (run / "server_requests.jsonl").read_text().splitlines()]
     rows = [r for r in rows if r["id"].startswith("session_") and "first_dispatch_ms" in r]
     ev, seq, last = [], 0, {}
@@ -540,20 +701,23 @@ def run_writeback(run: Path) -> dict:
         req = Request(r["id"], r["prompt_tokens"], session=s, prefix_tokens=last[s] + 1 if resumes else 0)
         last[s] = r["prompt_tokens"]
         at = int((r.get("read_start_ms") or r["first_dispatch_ms"]) * MS)
-        ev.append((at, seq, "arrive", (req, int(r["token_ms"] * MS) - at)))
+        ev.append((at, seq, "arrive", (req, int(r["token_ms"] * MS) - at, r["arrival_ms"])))
         seq += 1
     heapq.heapify(ev)
-    pending, waits, late_at, ssd_free = [], [], [], 0
+    pending, waits, late_at, got, landing = [], [], [], [], {}
 
     def admit():
         nonlocal seq
         while pending and kv.fits(pending[0][0]):
-            req, hold, at = pending.pop(0)
+            req, hold, arrival, at = pending.pop(0)
             hbm = kv.allocate(req)
             hit = pool.lookup(req.session, req, now[0])
+            row = dict(arrival_ms=arrival, cached=hbm)
             if hit is not None and hit.tokens > hbm:
                 a = kv.held[req.req_id]
                 pool.load(req.session, hit, KVViews(a.kv_blocks, a.state_blocks, hit.tokens, hbm), now[0], req.req_id)
+                row |= dict(cached=hit.tokens, tier=hit.tier, tier_tokens=hit.tokens - hbm)
+            got.append(row)
             waits.append((now[0] - at) / MS)
             if now[0] > at:
                 late_at.append(round(at / 1e9, 1))
@@ -567,27 +731,27 @@ def run_writeback(run: Path) -> dict:
         elif kind == "release":
             kv.release(x)
         else:
+            phys[0] = landing.pop(x, 0.0)
             pool.complete(x, now[0])
         admit()
         for o in pool.ready_ops():
             n = len(o.slots) + len(o.state_slots)
-            if o.op == "read":
-                done = o.land_ns
-            elif o.op == "demote" or o.tier == "ssd":
-                ssd_free = max(now[0], ssd_free) + int(n * sb / SSD_WRITE_GB_S)
-                done = ssd_free
-            else:
-                done = now[0] + int((WRITE_MS[0] + WRITE_MS[1] * n) * MS)
-            heapq.heappush(ev, (max(done, now[0]), seq, "op", o.op_id))
+            k = OP_KINDS.get((o.op, o.tier)) if o.moves_bytes else None
+            done = now[0] + (int(lat.ms(k, n, now[0] - int(shift * MS)) * MS) if k else 0)
+            if k == "write":
+                landing[o.op_id] = lat.phys_ms(n)
+            heapq.heappush(ev, (done, seq, "op", o.op_id))
             seq += 1
     w = np.array(waits)
     late = w[w > 0]
     tiers = {x["tier"]: x for x in pool.summary()}
-    return dict(run=run.name, rounds=len(w), waits=int(len(late)), wait_s=round(float(late.sum()) / 1e3, 3),
-                wait_ms_p99=round(float(np.percentile(late, 99)), 1) if len(late) else 0.0,
-                wait_ms_max=round(float(late.max()), 1) if len(late) else 0.0, waits_at_s=late_at[:20],
-                write_gb={k: round(v["written_bytes"] / 1e9) for k, v in tiers.items()},
-                write_back=pool.write_back_stats(), blocked_by_write=kv.stats["blocked_by_write"])
+    wb = pool.write_back_stats()
+    hb = wb.get("hbm") or {}
+    return dict(run=run.name, rounds=len(w), hbm_waits=hb.get("evict_waits"), waits=int(len(late)),
+                wait_s=round(float(late.sum()) / 1e3, 2), wait_ms_max=round(float(late.max()), 1) if len(late) else 0.0,
+                waits_at_s=late_at[:10], write_gb={k: round(v["written_bytes"] / 1e9) for k, v in tiers.items()},
+                reads={k: v["reads"] for k, v in tiers.items()}, hit_share=hit_share(got, shift + 600e3),
+                R=hb.get("headroom"), T_ms=hb.get("write_ms"), write_back=wb, blocked_by_write=kv.stats["blocked_by_write"])
 
 
 def main():
@@ -621,6 +785,12 @@ def main():
     p.add_argument("--out", type=Path, required=True)
     p = sub.add_parser("writeback")
     p.add_argument("--run", type=Path, required=True, action="append", help="a server run dir (repeatable)")
+    p.add_argument("--latency-from", type=Path, help="the run whose measured op times drive the model (default each)")
+    p.add_argument("--cap-ms", type=float, help="cap the measured op times' excess over their base (no stalls)")
+    p.add_argument("--t-mode", choices=["measured", "physical", "p99"], default="measured")
+    p.add_argument("--dup-first", choices=["drop", "demote"], help="DRAM evicts clean copies of HBM-kept contexts first")
+    p.add_argument("--ssd-backs", action="store_true", help="HBM stays clean when SSD holds what DRAM let go of")
+    p.add_argument("--measured", action="store_true", help="also print what each run measured")
     a = ap.parse_args()
     if a.cmd == "check-sched":
         for step in a.steps.split(","):
@@ -632,8 +802,14 @@ def main():
             diffs, got = check_force(step)
             print(f"{step:7} {'PASS' if not diffs else 'FAIL'} {json.dumps(got)}", *diffs, sep="\n  ")
     elif a.cmd == "writeback":
+        lat = OpLatency(a.latency_from or a.run[0], a.cap_ms) if a.latency_from or a.cap_ms is not None else None
+        if lat:
+            print(json.dumps(lat.describe()), flush=True)
         for run in a.run:
-            print(json.dumps(run_writeback(run)), flush=True)
+            if a.measured:
+                print(json.dumps(measured_writeback(run)), flush=True)
+            print(json.dumps(dict(run_writeback(run, lat, a.t_mode, a.dup_first, a.ssd_backs), t_mode=a.t_mode,
+                                  dup_first=a.dup_first, ssd_backs=a.ssd_backs)), flush=True)
     elif a.cmd == "bringup":
         for row in run_bringup(a.kind, a.variant):
             print(json.dumps(row))
