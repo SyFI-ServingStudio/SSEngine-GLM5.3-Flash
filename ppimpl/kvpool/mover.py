@@ -7,11 +7,14 @@ Two hops (`TierConfig.hops`, default; §2.3: a copy engine writing host data str
 31.7 GB/s against 47.6 into its own): the host side of a slot is contiguous, so a read copies each slot whole into a
 ring of chunks in this GPU's own HBM (one copy per slot, its own PCIe link), then one batch scatters the chunk's
 pieces from the ring to the stages' KV over NVLink. Writes gather into the ring, then copy each slot to host. Each
-direction has its ring (`ring_depth` chunks of `ring_chunk_slots` slots) and two streams (host side, NVLink side);
-chunk k+1's host copy overlaps chunk k's scatter, and a ring chunk is reused once the copy that read it is done
-(events). The ring is allocated after the model, from the HBM the KV pool (the contract's 7,144 blocks) leaves;
-`info` says how much that is. `hops: direct` puts the pieces straight between host and the stages' KV (one batch per
-transfer). Nothing above this layer sees the ring.
+direction has its ring (`ring_depth` chunks of `ring_chunk_slots` slots), two streams (host side, NVLink side) and a
+lock; chunk k+1's host copy overlaps chunk k's scatter. A transfer's slots (all its segments in order) are cut into
+chunks together, so per chunk there are two batch calls, their pointer arrays sliced from arrays built once per
+transfer. Each ring chunk has two events, recorded again at each use (no event per batch): its first hop done (the
+second hop waits for it) and its second hop done (the next first hop into the chunk waits for it). A transfer takes
+one pooled event for its end (and one for its start mark, `mark`). The ring is allocated after the model, from the
+HBM the KV pool (the contract's 7,144 blocks) leaves; `info` says how much that is. `hops: direct` puts the pieces
+straight between host and the stages' KV (one batch per transfer). Nothing above this layer sees the ring.
 """
 
 from __future__ import annotations
@@ -23,7 +26,11 @@ from typing import NamedTuple
 
 import numpy as np
 
-EVENT_POOL = 512   # CUDA events per mover made at start-up: an op takes ~2 per ring chunk + 1 (+ 1 per batch traced)
+EVENT_POOL = 1024  # pooled CUDA events per mover: an op takes 2 (start mark, end), + 2 per batch with the trace on
+
+# per direction: (first hop's stream, second hop's stream); the ring sits between them
+HOPS = {"read": ("read", "read_nvl"), "write": ("write_nvl", "write")}
+
 
 def runq_ns() -> int:
     """This thread's time runnable but waiting for a CPU so far (/proc/thread-self/schedstat; 0 if unavailable)."""
@@ -51,8 +58,18 @@ class Mover:
         self.device, self.cuda, self.sb = device, device.type == "cuda", slot_bytes
         self.ring = None
         self.info = "direct"
-        self._lock = threading.Lock()              # ring chunks and their order, across the submitting threads
-        self._ev_lock = threading.Lock()           # the event pool (taken inside _lock, never around it)
+        self._lock = {"read": threading.Lock(), "write": threading.Lock()}   # a direction's ring and streams
+        self._ev_lock = threading.Lock()           # the event pool (taken inside a direction's lock, never around it)
+        if self.cuda:
+            import torch
+            from vllm import _custom_ops
+            self.swap = _custom_ops.swap_blocks_batch
+            self.streams = {k: torch.cuda.Stream(device) for k in ("read", "write", "read_nvl", "write_nvl")}
+            # torch creates a CUDA event at its first record: every event is recorded once here, so a transfer only
+            # records (no cudaEventCreate on its path, which waits for the driver behind the launch thread)
+            self._events = [torch.cuda.Event(blocking=True, enable_timing=True) for _ in range(EVENT_POOL)]
+            self._made(self._events)
+        self.events_made = EVENT_POOL if self.cuda else 0   # the pool's events, and those made when it ran empty
         if hops == "two":                          # per direction: `depth` chunks of `chunk` slots, after the KV pool
             self.depth, self.chunk = ring_depth, ring_chunk_slots
             half = self.depth * self.chunk * slot_bytes
@@ -63,25 +80,22 @@ class Mover:
                 ring_ptr = self.ring.data_ptr()
                 self.info = (f"two hops: ring 2 x {self.depth} x {self.chunk} slots = {2 * half / 1e9:.3f} GB "
                              f"of {free / 1e9:.2f} GB free HBM after the model and KV pool")
+                # per direction and ring chunk: (first hop done, second hop done)
+                self._chunk_ev = {d: [(torch.cuda.Event(), torch.cuda.Event()) for _ in range(self.depth)]
+                                  for d in HOPS}
+                self._made([e for evs in self._chunk_ev.values() for pair in evs for e in pair])
             else:
                 self.ring = np.zeros(2 * half + 4096, dtype=np.uint8)
                 ring_ptr = self.ring.ctypes.data
                 self.info = f"two hops: ring 2 x {self.depth} x {self.chunk} slots"
             self._ring_base = {"read": ring_ptr, "write": ring_ptr + half}
             self._ring_next = {"read": 0, "write": 0}
-            self._ring_free = {"read": [None] * self.depth, "write": [None] * self.depth}
-        if self.cuda:
-            import torch
-            from vllm import _custom_ops
-            self.swap = _custom_ops.swap_blocks_batch
-            self.streams = {k: torch.cuda.Stream(device) for k in ("read", "write", "read_nvl", "write_nvl")}
-            # Pooled events: torch creates a CUDA event at its first record, so each is recorded once here; an op
-            # then only records (no cudaEventCreate on its path, which waits for the driver behind the launch thread)
-            self._events = [torch.cuda.Event(blocking=True, enable_timing=True) for _ in range(EVENT_POOL)]
-            for ev in self._events:
-                ev.record(self.streams["read"])
-            self.streams["read"].synchronize()
-        self.events_made = EVENT_POOL if self.cuda else 0   # the pool's events, and those made when it ran empty
+
+    def _made(self, events):
+        st = self.streams["read"]
+        for ev in events:
+            ev.record(st)
+        st.synchronize()
 
     def event(self, owned: list | None):
         """A pooled event (blocking sync, timing), appended to `owned` (the op's events, `release`d once it is done)."""
@@ -97,17 +111,8 @@ class Mover:
         return ev
 
     def release(self, owned: list):
-        """Back to the pool: the events of an op whose last copy completed (and whose trace was read). A ring chunk
-        whose last copy was one of them is free."""
-        if not owned:
-            return
-        ids = {id(e) for e in owned}
-        with self._lock:
-            if self.ring is not None:
-                for free in self._ring_free.values():
-                    for i, e in enumerate(free):
-                        if e is not None and id(e) in ids:
-                            free[i] = None
+        """Back to the pool: the events of a transfer whose last copy completed (and whose trace was read)."""
+        if owned:
             with self._ev_lock:
                 self._events.extend(owned)
 
@@ -116,80 +121,99 @@ class Mover:
         if not self.cuda:
             return None
         ev = self.event(owned)
-        ev.record(self.streams["write_nvl" if direction == "write" and self.ring is not None else direction])
+        ev.record(self.streams[HOPS[direction][0] if self.ring is not None else direction])
         return ev
 
     def transfer_async(self, direction: str, segments: list[Segment], ready=None, tr: list | None = None,
                        owned: list | None = None):
-        """"read" host -> HBM or "write" HBM -> host of every segment's pieces. Two hops: each segment is cut into ring
-        chunks of its own; direct: one batch of all pieces. `ready(i, k)`: called before the host side of segment i's
-        slots below k is read (an SSD read waits for its file reads there). `tr`: per-batch trace (`_batch`). Returns
-        (the last copy's event, None on CPU; bytes of HBM pieces moved). `owned`: gets every event the transfer
-        took from the pool (CUDA; `release` them once the last copy completed); None: the events are not returned."""
+        """"read" host -> HBM or "write" HBM -> host of every segment's pieces. Two hops: the segments' slots, in
+        order, are cut into ring chunks; direct: one batch of all pieces. `ready(i, k)`: called before the host side
+        of segment i's slots below k is read (an SSD read waits for its file reads there). `tr`: per-batch trace
+        (`_batch`). `owned`: gets every pooled event the transfer took (CUDA; `release` them once its last copy
+        completed). Returns (the transfer's end event, None on CPU or with nothing to move; bytes of HBM pieces)."""
         sb = self.sb
+        nslots = [len(s.host_ptrs) for s in segments]
+        first = np.cumsum([0] + nslots)            # global slot index of each segment's first slot
+        hosts = np.fromiter((p for s in segments for p in s.host_ptrs), dtype=np.int64, count=int(first[-1]))
+        hlen = np.repeat(np.array([s.host_len for s in segments], dtype=np.int64), nslots)
+        gslot = np.concatenate([s.off // sb + f for s, f in zip(segments, first)]).astype(np.int64)
+        inslot = np.concatenate([s.off % sb for s in segments]).astype(np.int64)
+        dev = np.concatenate([s.dev for s in segments]).astype(np.int64)
+        lens = np.concatenate([s.lens for s in segments]).astype(np.int64)
+        nbytes = int(lens.sum())
+        n = int(first[-1])
         if self.ring is None:
             if ready is not None:
-                for i, s in enumerate(segments):
-                    ready(i, len(s.host_ptrs))
-            host = np.concatenate([np.asarray(s.host_ptrs, dtype=np.int64)[s.off // sb] + s.off % sb
-                                   for s in segments])
-            dev = np.concatenate([s.dev for s in segments])
-            lens = np.concatenate([s.lens for s in segments])
+                for i, k in enumerate(nslots):
+                    ready(i, k)
+            if not len(lens):
+                return None, 0
+            host = hosts[gslot] + inslot
             src, dst = (host, dev) if direction == "read" else (dev, host)
-            return self._batch(direction, src, dst, lens, tr=tr, owned=owned), int(lens.sum())
+            with self._lock[direction]:
+                self._batch(direction, src, dst, lens, tr=tr, owned=owned)
+                return self._end(direction, owned), nbytes
         C = self.chunk
-        ev, nbytes = None, 0
-        for i, s in enumerate(segments):
-            slot = s.off // sb                      # non-decreasing: pieces never cross a slot (placement splits them)
-            for a in range(0, len(s.host_ptrs), C):
-                b = min(a + C, len(s.host_ptrs))
-                if ready is not None:
-                    ready(i, b)
-                lo, hi = np.searchsorted(slot, [a, b])
-                dev, roff, lens = s.dev[lo:hi], s.off[lo:hi] - a * sb, s.lens[lo:hi]
-                n = b - a
-                nbytes += int(lens.sum())
-                with self._lock:
-                    pos = self._ring_next[direction]
-                    self._ring_next[direction] = (pos + 1) % self.depth
-                    rbase = self._ring_base[direction] + pos * C * sb
-                    rings = [rbase + k * sb for k in range(n)]
-                    hl = np.full(n, s.host_len, dtype=np.int64)
-                    if direction == "read":         # host -> ring (PCIe), then ring -> the stages (NVLink)
-                        h = self._batch("read", s.host_ptrs[a:b], rings, hl, (self._ring_free[direction][pos],), tr,
-                                        owned)
-                        ev = self._batch("read_nvl", roff + rbase, dev, lens, (h,), tr, owned)
-                    else:                           # the stages -> ring, then ring -> host
-                        g = self._batch("write_nvl", dev, roff + rbase, lens, (self._ring_free[direction][pos],), tr,
-                                        owned)
-                        ev = self._batch("write", rings, s.host_ptrs[a:b], hl, (g,), tr, owned)
-                    self._ring_free[direction][pos] = ev
-        return ev, nbytes
+        rel = (np.arange(n, dtype=np.int64) % C) * sb       # a slot's place in its ring chunk
+        prel = (gslot % C) * sb + inslot                    # a piece's place in its ring chunk
+        cuts = np.searchsorted(gslot, np.arange(0, n + C, C))   # pieces of chunk j: cuts[j]:cuts[j + 1]
+        s1, s2 = HOPS[direction]
+        end = None
+        for j, a in enumerate(range(0, n, C)):
+            b = min(a + C, n)
+            if ready is not None:                  # each segment's slots below this chunk's end
+                for i in range(len(segments)):
+                    if first[i] < b and first[i + 1] > a:
+                        ready(i, int(min(b, first[i + 1]) - first[i]))
+            lo, hi = cuts[j], cuts[j + 1]
+            with self._lock[direction]:
+                pos = self._ring_next[direction]
+                self._ring_next[direction] = (pos + 1) % self.depth
+                rbase = self._ring_base[direction] + pos * C * sb
+                ev1, ev2 = self._chunk_ev[direction][pos] if self.cuda else (None, None)
+                rslots, rpieces = rbase + rel[a:b], rbase + prel[lo:hi]
+                if direction == "read":            # host -> ring (PCIe), then ring -> the stages (NVLink)
+                    self._batch(s1, hosts[a:b], rslots, hlen[a:b], ev2, ev1, tr, owned)
+                    self._batch(s2, rpieces, dev[lo:hi], lens[lo:hi], ev1, ev2, tr, owned)
+                else:                              # the stages -> ring, then ring -> host
+                    self._batch(s1, dev[lo:hi], rpieces, lens[lo:hi], ev2, ev1, tr, owned)
+                    self._batch(s2, rslots, hosts[a:b], hlen[a:b], ev1, ev2, tr, owned)
+                if b == n:
+                    end = self._end(s2, owned)
+        return end, nbytes
 
-    def _batch(self, stream: str, src, dst, lens, wait=(), tr: list | None = None, owned: list | None = None):
-        """One `cuMemcpyBatchAsync` on `stream` after the events `wait`; its end event (None on CPU, done). `tr`: append
-        (stream, pieces, bytes, host ns before the call, host ns after it, thread CPU ns in it, ns runnable without a
-        CPU in it, GPU start event, end event): the rest of the call is a wait for a lock (GIL or driver)."""
+    def _end(self, stream: str, owned: list | None):
+        """The transfer's end: a pooled event after its last copy on `stream` (None on CPU)."""
+        if not self.cuda:
+            return None
+        ev = self.event(owned)
+        ev.record(self.streams[stream])
+        return ev
+
+    def _batch(self, stream: str, src, dst, lens, wait=None, done=None, tr: list | None = None,
+               owned: list | None = None):
+        """One `cuMemcpyBatchAsync` on `stream`, after the event `wait`; records `done` after it (CUDA). `tr`: append
+        (stream, pieces, bytes, host ns before the call, host ns after it, thread CPU ns in it, GPU start event, end
+        event; the two events pooled, in `owned`): the rest of the call is a wait for a lock (GIL or driver)."""
         if not self.cuda:
             for s, t, k in zip(np.asarray(src).tolist(), np.asarray(dst).tolist(), np.asarray(lens).tolist()):
                 ctypes.memmove(t, s, k)
-            return None
+            return
         import torch
         st = self.streams[stream]
-        for ev in wait:
-            if ev is not None:
-                st.wait_event(ev)
-        args = [torch.from_numpy(np.ascontiguousarray(x, dtype=np.int64)) for x in (src, dst, lens)]
+        if wait is not None:
+            st.wait_event(wait)
+        args = [torch.from_numpy(x) for x in (src, dst, lens)]
         if tr is not None:
             ev0 = self.event(owned)
             ev0.record(st)
-            h0, c0, q0 = time.perf_counter_ns(), time.thread_time_ns(), runq_ns()
+            h0, c0 = time.perf_counter_ns(), time.thread_time_ns()
         with torch.cuda.stream(st):
             self.swap(*args)
         if tr is not None:
-            h1, c1, q1 = time.perf_counter_ns(), time.thread_time_ns(), runq_ns()
-        ev = self.event(owned)                     # timing: TierDone.gpu_ns
-        ev.record(st)
-        if tr is not None:
-            tr.append((stream, len(args[2]), int(args[2].sum()), h0, h1, c1 - c0, q1 - q0, ev0, ev))
-        return ev
+            h1, c1 = time.perf_counter_ns(), time.thread_time_ns()
+            ev1 = self.event(owned)
+            ev1.record(st)
+            tr.append((stream, len(lens), int(lens.sum()), h0, h1, c1 - c0, ev0, ev1))
+        if done is not None:
+            done.record(st)

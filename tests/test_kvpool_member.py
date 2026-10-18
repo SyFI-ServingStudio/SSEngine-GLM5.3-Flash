@@ -192,6 +192,63 @@ def test_kept_ssd_file_is_never_served_stale(tmp_path):
         e.close()
 
 
+def test_member_threads_route_dram_ops_by_direction(tmp_path):
+    """The real members' threads end to end (CPU): the receive thread hands DRAM ops to their direction's submit
+    thread, the done threads report every op over the report socket, a context written and read back through them is
+    byte-equal, and Shutdown ends every thread."""
+    import zmq
+
+    from ppimpl.runtime.transport import Shutdown, TierDone, decode_to_controller
+
+    views, ranges, mems, tc = members()
+    ctx = zmq.Context()
+    pull = ctx.socket(zmq.PULL)
+    port = pull.bind_to_random_port("tcp://127.0.0.1")
+    addr = lambda s: f"ipc://{tmp_path}/tier{s}"
+    for e in mems:
+        e.ctx, e.cfg = ctx, NS(**vars(e.cfg), tier_addr=addr, report_addr=lambda: f"tcp://127.0.0.1:{port}")
+        e.start()
+    pushes = []
+    for q in range(4):
+        p = ctx.socket(zmq.PUSH)
+        p.connect(addr(q))
+        pushes.append(p)
+
+    def send(ops):
+        for p in pushes:
+            p.send(encode(TierBatch([tier_move(o) for o in ops])))
+        got = [decode_to_controller(pull.recv()) for _ in range(4 * len(ops))]
+        assert all(isinstance(g, TierDone) for g in got)
+        assert sorted((g.op_id, g.stage) for g in got) == sorted((o.op_id, q) for o in ops for q in range(4))
+
+    pool = BalancedKVPool(tc)
+    T = 2 * B + 77
+    a = KVViews([3, 7, 1], [2, 4, 6, 8, 9, 10], T)
+    want = block_bytes(views, ranges, a.kv_blocks, a.state_blocks)
+    pool.write_back("s", T, None, a)
+    ops = pool.ready_ops()
+    send(ops)
+    for o in ops:
+        pool.complete(o.op_id, 0)
+    scramble(views)
+    b = KVViews([5, 11, 2, 9], [1, 3, 5, 7, 11, 0], T)
+    h = pool.load("s", pool.lookup("s", Request("s_r1", T + 50, session="s", prefix_tokens=T)), b, 0)
+    ops = pool.ready_ops()
+    send(ops)
+    for o in ops:
+        pool.complete(o.op_id, 0)
+    assert h.done() and block_bytes(views, ranges, b.kv_blocks[:3], b.state_blocks) == want
+    for p in pushes:
+        p.send(encode(Shutdown()))
+        p.close(linger=1000)
+    for e in mems:
+        for th in e.threads:
+            th.join(10)
+            assert not th.is_alive(), th.name
+    pull.close(linger=0)
+    ctx.term()
+
+
 def test_fake_member_reports_after_bandwidth_time():
     """The fake model's member: no bytes, each op done after slots x slot_bytes / bandwidth, one after another per
     direction; TierDone goes out over the report socket."""

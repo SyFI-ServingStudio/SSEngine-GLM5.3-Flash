@@ -2,9 +2,10 @@
 
 Every member moves its 1/n share (n = PP degree, `num_stages`) of every op (balanced storage, `placement.py`). The
 leader sends a `TierBatch` of ops whose dependencies are done to all n members' tier sockets (`tier_move`); a
-member's receive thread maps the op's slots to host addresses (`backends.py`), asks the placement for the pieces of
-its share over all stages' KV (the other stages' KV opened by CUDA IPC at start-up, `share_ranges`), hands them to
-its `mover.Mover` (read streams host -> HBM, write streams HBM -> host), and a done thread per direction reports
+member's receive thread hands each DRAM op to its direction's submit thread (reads never wait behind writes' host
+work), which maps the op's slots to host addresses (`backends.py`), asks the placement for the pieces of its share
+over all stages' KV (the other stages' KV opened by CUDA IPC at start-up, `share_ranges`), hands them to its
+`mover.Mover` (read streams host -> HBM, write streams HBM -> host), and a done thread per direction reports
 `TierDone` when the copies completed. No wait on the compute stream: a write's blocks are final and pinned until it
 is done, a read's blocks are held by a request that computes only after all n `TierDone`s.
 
@@ -121,6 +122,7 @@ class PoolMember:
         self.stop = threading.Event()
         self.q = {"read": queue.Queue(), "write": queue.Queue()}       # done threads: (op id, wait, start, bytes)
         self.ssd_q = {"read": queue.Queue(), "write": queue.Queue()}   # SSD threads: (op, start)
+        self.sub_q = {"read": queue.Queue(), "write": queue.Queue()}   # DRAM ops' submit threads: op
         self._ssd_writes = 0                       # SSD writes / demotes whose file writes are in flight
         self._ssd_cv = threading.Condition()
         self._due: dict[str, float] = {}           # fake member: when each direction's last op is done
@@ -191,6 +193,9 @@ class PoolMember:
             t = threading.Thread(target=self._done_loop, args=(name,), name=f"tier-{name}", daemon=True)
             t.start()
             self.threads.append(t)
+            t = threading.Thread(target=self._submit_loop, args=(name,), name=f"tier-submit-{name}", daemon=True)
+            t.start()
+            self.threads.append(t)
             if self.ssd is not None:
                 t = threading.Thread(target=self._ssd_loop, args=(name,), name=f"tier-ssd-{name}", daemon=True)
                 t.start()
@@ -256,18 +261,35 @@ class PoolMember:
                 msg = decode_tier(sock.recv())
                 if isinstance(msg, Shutdown):
                     break
-                for op in msg.ops:
-                    self.submit(op)
+                for op in sorted(msg.ops, key=lambda o: o.op != "read"):    # reads first
+                    if self.real and op.tier == "dram":
+                        self.sub_q[self.direction(op)].put(op)   # its direction's submit thread
+                    else:
+                        self.submit(op)                          # SSD: to its thread; fake: timed here
         except BaseException:   # noqa: BLE001 - reported to the controller, which fails the run
             err = WorkerError(self.stage, "tier thread:\n" + traceback.format_exc())
         finally:
             sock.close(linger=0)
-            for d in ("read", "write"):
-                if self.ssd is not None:     # the SSD thread passes the end on to the done thread
-                    self.ssd_q[d].put(err)
-                else:
-                    self.q[d].put(err)
+            for d in ("read", "write"):      # the submit thread passes the end on (SSD thread, done thread)
+                self.sub_q[d].put(err)
                 err = None
+
+    def _submit_loop(self, direction: str):
+        """A direction's DRAM ops, one after another: reads do not wait behind writes' host work."""
+        err = None
+        try:
+            if self.cuda:
+                import torch
+                torch.cuda.set_device(self.device)
+            while (item := self.sub_q[direction].get()) is not None:
+                if isinstance(item, WorkerError):
+                    err = item
+                    break
+                self.submit(item)
+        except BaseException:   # noqa: BLE001 - reported to the controller, which fails the run
+            err = WorkerError(self.stage, f"tier {direction} submit thread:\n" + traceback.format_exc())
+        finally:
+            (self.ssd_q if self.ssd is not None else self.q)[direction].put(err)
 
     def _ssd_loop(self, direction: str):
         err = None
@@ -327,9 +349,9 @@ class PoolMember:
         us = lambda ns: round(ns / 1e3, 1)
         self._trace_log.write(json.dumps({"op": op_id, "kind": kind, "start_ns": start_ns, "batches": [
             {"stream": s, "pieces": n, "bytes": b, "host_at_us": us(h0 - t0), "call_us": us(h1 - h0), "cpu_us": us(c),
-             "runq_us": us(q), "gpu_start_us": round(mark.elapsed_time(e0) * 1e3, 1),
+             "gpu_start_us": round(mark.elapsed_time(e0) * 1e3, 1),
              "gpu_end_us": round(mark.elapsed_time(e1) * 1e3, 1)}
-            for s, n, b, h0, h1, c, q, e0, e1 in tr]}) + "\n")
+            for s, n, b, h0, h1, c, e0, e1 in tr]}) + "\n")
 
     # --- one op -----------------------------------------------------------------------------------------------------
 

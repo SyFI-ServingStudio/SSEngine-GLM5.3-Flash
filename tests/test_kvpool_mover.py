@@ -1,6 +1,6 @@
 """One GPU's mover (ppimpl/kvpool/mover.py) on CPU (memmove): pieces of two segments (KV slots, state slots) written to
-host slots and read back are byte-equal through direct and two hops at several ring shapes; the ring is cut per
-segment, and `ready` is called before each chunk's host slots are read."""
+host slots and read back are byte-equal through direct and two hops at several ring shapes; the segments' slots are
+cut into ring chunks together, and `ready` is called before each chunk's host slots are read."""
 
 import numpy as np
 import pytest
@@ -44,5 +44,9 @@ def test_write_then_read_is_byte_equal(ring):
     if ring.get("hops") == "direct":
         assert calls == [(0, 5), (1, 2)]
     else:
-        c = ring.get("ring_chunk_slots", 4)
-        assert calls == [(0, min(k + c, 5)) for k in range(0, 5, c)] + [(1, min(k + c, 2)) for k in range(0, 2, c)]
+        c = ring.get("ring_chunk_slots", 4)      # chunks over both segments' 7 slots in order
+        want = []
+        for a in range(0, 7, c):
+            b = min(a + c, 7)
+            want += ([(0, min(b, 5))] if a < 5 else []) + ([(1, b - 5)] if b > 5 else [])
+        assert calls == want
