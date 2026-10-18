@@ -16,9 +16,11 @@ def test_bucket_is_smallest_that_holds_the_microbatch():
     assert graph_bucket(3000, GRAPH_BUCKETS) == 3072       # not 4096
     assert graph_bucket(2100, GRAPH_BUCKETS) == 2304       # 256-token steps
     assert graph_bucket(7937, GRAPH_BUCKETS) == 8192
-    assert len(GRAPH_BUCKETS) == 33
     assert graph_bucket(8192, GRAPH_BUCKETS) == 8192
-    assert graph_bucket(8193, GRAPH_BUCKETS) is None        # eager above the largest bucket
+    assert graph_bucket(8193, GRAPH_BUCKETS) == 8704        # 512-token steps above 8192
+    assert len(GRAPH_BUCKETS) == 33 + 48
+    assert graph_bucket(32768, GRAPH_BUCKETS) == 32768
+    assert graph_bucket(32769, GRAPH_BUCKETS) is None       # eager above the largest bucket
     assert graph_bucket(300, {1024: 0, 256: 0}) == 1024      # any container of buckets, unsorted
 
 

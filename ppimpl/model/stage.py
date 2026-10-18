@@ -51,8 +51,11 @@ RESERVE_GB = 13.6     # 1_contract.md §1: activations and workspace beside weig
 # token counts captured as CUDA graphs: 128, then every 256 to 8192 (33). A microbatch pads to its bucket, so
 # coarse buckets cost compute: with powers of 2 a 3,000-token prompt ran as 4,096 (round 0 TTFT 114 vs 96.7 ms
 # target, x1.18; job 7462), and on the N=400 smoke's stage-0 sizes (7569) the pad was 3.8% of the tokens (every 1024:
-# 1.5%; every 256: 0.6%). The graph pool is shared and sized by the 8192 bucket, so more buckets cost little memory.
-GRAPH_BUCKETS = (128,) + tuple(range(256, 8192 + 1, 256))
+# 1.5%; every 256: 0.6%). Above 8192 every 512 to 32,768 (48 more): eager microbatches (> 8192, most of v3 minutes
+# 3-8) left stage 0 idle while launching (RunAhead keeps one eager forward queued: 1.6-2.4 s/min at 8299 minutes
+# 5-7); the pad there is <= 511 tokens (<= 6% at 8,704, ~1% at 32k). The graph pool is shared and sized by the
+# largest bucket.
+GRAPH_BUCKETS = (128,) + tuple(range(256, 8192 + 1, 256)) + tuple(range(8192 + 512, 32768 + 1, 512))
 LONG_WARMUP = 65536    # context at which warm-up runs its long continuation chunks (StageModel.warmup)
 
 
@@ -541,7 +544,7 @@ class StageModel:
         from types import SimpleNamespace as NS
 
         B = self.kv.block_tokens
-        buckets = sorted((b for b in buckets if b <= min(self.max_tokens, B)), reverse=True)
+        buckets = sorted((b for b in buckets if b <= self.max_tokens), reverse=True)
         t0 = time.perf_counter()
         torch.cuda.synchronize(self.device)
         gc.collect()
@@ -552,7 +555,8 @@ class StageModel:
                                                      device=self.device)
         with torch.inference_mode():
             for Tb in buckets:
-                plan = NS(mb_id=-10, chunks=[NS(req_id="g", start=0, num_tokens=Tb, kv_blocks=[1], is_last=True,
+                kv = [1] + list(range(8, 8 + -(-Tb // B) - 1))     # a bucket above one block spans several
+                plan = NS(mb_id=-10, chunks=[NS(req_id="g", start=0, num_tokens=Tb, kv_blocks=kv, is_last=True,
                                                 state_blocks=list(range(2, 8)), token_ids=[1] * Tb)])
                 b = self.meta.build(plan, with_tokens=self.first, bucket=Tb)
                 e = GraphEntry(Tb, torch.empty_like(b.graph_rows), None if hidden is None else hidden[:Tb])

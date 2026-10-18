@@ -13,7 +13,7 @@ from ppimpl.model.stage import GRAPH_BUCKETS
 def test_buckets_are_the_graph_buckets_then_powers_of_two():
     b = mt.serving_buckets(131072)
     assert b[:8] == (1, 2, 4, 8, 16, 32, 64, 128)
-    assert set(GRAPH_BUCKETS) <= set(b)
+    assert {g for g in GRAPH_BUCKETS if g <= mt.TUNED_TOP} <= set(b)
     assert b[-5:] == (8192, 16384, 32768, 65536, 131072)
     assert mt.serving_buckets(8192)[-1] == 8192
 
