@@ -4,7 +4,8 @@
 `lookup` (a `Hit` with `wait_ns`), `load` -> `Handle` (with `eta_ns`) and a load's completion. Writes are the victim
 chain HBM -> DRAM -> SSD (TIERS.md §5): the HBM KV manager reaches the pool through `hbm_level(kv)`, an `HbmLevel`
 it asks whether a kept context may be evicted and tells about kept, taken-over and evicted contexts; the same
-`writeback.WriteBack` policy writes HBM's LRU tail to the fastest tier and DRAM's to SSD. Shares, slots, tiers' LRU
+`writeback.WriteBack` class writes HBM's LRU tail to the fastest tier ahead of need (free + clean headroom for the
+demand of two write times) and DRAM's entries to SSD at their eviction. Shares, slots, tiers' LRU
 and the ring stay inside. The controller posts every op to all n members (`ready_ops`, which also writes ahead,
 `member.tier_move`) and reports each one done when all n members did (`complete`). The read-wait bound is the
 scheduler's (from `Hit.wait_ns`), not the pool's.
@@ -20,7 +21,9 @@ evicts at the eviction, as the simulator) and a load lands at its `eta_ns` on th
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
+from typing import Callable
 
 from ppimpl.config import TierConfig
 from ppimpl.kvpool.manager import Hit, KVViews, TierManager, TierOp
@@ -49,8 +52,9 @@ class Handle:
 
 
 class BalancedKVPool:
-    def __init__(self, cfg: TierConfig, partial_hits: bool = False):
+    def __init__(self, cfg: TierConfig, partial_hits: bool = False, clock: Callable[[], int] = time.monotonic_ns):
         self.cfg = cfg
+        self.clock = clock                          # the write-back's (write times, demand windows); replay: its own
         self.manager = TierManager(cfg, partial_hits)
         self._of: dict[int, Handle] = {}            # slot mode: op id -> the handle waiting for it
         self.hbm: HbmLevel | None = None
@@ -97,15 +101,19 @@ class BalancedKVPool:
     # --- the leader's executor (the controller) -----------------------------------------------------------------
 
     def ready_ops(self) -> list[TierOp]:
-        """Write ahead where a level is over its watermark (HBM -> DRAM, DRAM -> SSD), then the ops whose
-        dependencies are done, to post to all n members now."""
+        """HBM's write-ahead (`WriteBack.step`), then the ops whose dependencies are done, to post to all n members
+        now."""
         m = self.manager
         if self.hbm is not None and self.hbm.wb is not None:
             for key in m.take_gone():
                 self.hbm.lost(key)
             self.hbm.wb.step()
-        m.step()
-        return m.ready_ops()
+        ops = m.ready_ops()
+        for o in ops:
+            h = self._of.get(o.op_id)
+            if h is not None and h.kind == "store" and h.t_start is None:
+                h.t_start = self.clock()            # its write runs from here (after the slots it reuses are free)
+        return ops
 
     def complete(self, op_id: int, now_ns: int) -> tuple[TierOp, Handle | None]:
         """Every member reported the op done: (the op, the handle that is done with it, if any)."""
@@ -125,14 +133,15 @@ class BalancedKVPool:
         return self.manager.summary()
 
     def write_back_stats(self) -> dict:
-        """Per level: writes ahead of need, writes at eviction, evictions that waited for a write (TIERS.md §5)."""
-        out = {} if self.hbm is None or self.hbm.wb is None else {"hbm": dict(self.hbm.wb.stats)}
-        return out | {self.manager.tiers[i].name: dict(wb.stats) for i, wb in self.manager.wb.items()}
+        """Per level: writes ahead of need, writes at eviction, evictions that waited for a write, the headroom R and
+        the longest write T (TIERS.md §5)."""
+        out = {} if self.hbm is None or self.hbm.wb is None else {"hbm": self.hbm.wb.summary()}
+        return out | {self.manager.tiers[i].name: wb.summary() for i, wb in self.manager.wb.items()}
 
 
 class HbmLevel:
     """The tiers below HBM as the KV manager sees them (`KvManager.lower`), and HBM as the upper level of a
-    `WriteBack` to the fastest tier (slot mode; the same policy as DRAM -> SSD, `TierConfig.hbm_write_ahead`).
+    `WriteBack` to the fastest tier (slot mode; ahead of need, writeback.py).
 
     The KV manager calls `kept`, `unkept`, `evicted` and `admitted` as its kept contexts change, evicts only what
     `evictable` allows, counts `held_back` as not evictable, and calls `make_room` when a request fits only by evicting
@@ -142,7 +151,7 @@ class HbmLevel:
 
     def __init__(self, pool: BalancedKVPool, kv):
         self.pool, self.kv = pool, kv
-        self.wb = WriteBack("hbm", self, pool.cfg.hbm_write_ahead) if pool.manager.slot_mode else None
+        self.wb = WriteBack("hbm", self, ahead=True, clock=pool.clock) if pool.manager.slot_mode else None
         self._writes: dict[Handle, object] = {}
 
     # --- WriteBack's level --------------------------------------------------------------------------------------
@@ -198,7 +207,7 @@ class HbmLevel:
     def landed(self, h: Handle):
         key = self._writes.pop(h)
         self.kv.unpin(key)
-        self.wb.done(key, h)
+        self.wb.done(key, h, h.t_start)
 
     def lost(self, key):
         """The fastest tier no longer holds `key`: HBM's kept copy, if any, is dirty again."""

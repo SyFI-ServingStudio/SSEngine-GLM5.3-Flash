@@ -12,7 +12,7 @@ that moves bytes becomes a `TierOp` the leader sends to all n members (n = PP de
 - **Victim chain HBM -> DRAM -> SSD** (user, 2026-10-17). Each tier is written only with what the level above lets
   go of, and only what its entry for the key lacks: the fastest tier with HBM's kept contexts
   (`prepare_write_back`, driven by the HBM level's `writeback.WriteBack` in `BalancedKVPool`), SSD with DRAM's
-  entries (`demote`, driven by DRAM's `WriteBack` here: ahead of need above `dram_write_ahead`, or at eviction).
+  entries (`demote`, driven by DRAM's `WriteBack` here, at eviction only: SSD takes only what DRAM evicts).
   A level letting go of what the one below already holds whole only refreshes it there (`hbm_evicted`). A read back
   into HBM leaves the entry in place (a clean copy); an SSD read goes through the staging area, not into DRAM. When a
   session's next round is admitted, every entry it does not resume from is dropped (`drop_stale`), so entries stay
@@ -255,8 +255,15 @@ class _TierLevel:
         return iter(self.t.entries)
 
     def write(self, key, entry=None):
+        """Demote `key`'s entry (or `entry`, just evicted): nothing moves if the tier below holds it whole (refreshed;
+        entries of a key are prefixes of the session's latest context, `drop_stale`)."""
         e = entry or self.t.entries[key]
+        held = self.m.tiers[self.i + 1].entries.get(key)
+        if held is not None and held.tokens >= e.tokens:
+            self.m.tiers[self.i + 1].touch(key)
+            return None
         _, op = self.m._store_in(self.i + 1, key, e.tokens, e.content, "demote", src=e)
+        return op
         return op
 
 
@@ -289,8 +296,8 @@ class TierManager:
         self._keys: dict[int, object] = {}
         self._next_op = 0
         self.gone: list = []        # keys whose entry left the fastest tier (HBM's kept copy is then no longer held)
-        # slot mode: each tier with one below writes back to it (DRAM -> SSD); the same policy as HBM -> DRAM
-        self.wb: dict[int, WriteBack] = {i: WriteBack(t.name, _TierLevel(self, i), cfg.dram_write_ahead)
+        # slot mode: each tier with one below demotes to it at eviction (writeback.py)
+        self.wb: dict[int, WriteBack] = {i: WriteBack(t.name, _TierLevel(self, i), ahead=False)
                                          for i, t in enumerate(self.tiers[:-1])} if self.slot_mode else {}
 
     def _take(self) -> list[TierOp]:
@@ -325,12 +332,6 @@ class TierManager:
         return [], []
 
     # --- the leader's side of slot mode ---------------------------------------------------------------------------
-
-    def step(self) -> list[TierOp]:
-        """Slot mode: each tier writes ahead to the one below above its watermark (`WriteBack.step`)."""
-        for wb in self.wb.values():
-            wb.step()
-        return self._take()
 
     def ready_ops(self) -> list[TierOp]:
         """Slot mode: the emitted ops whose deps are done (to send now), in emission order."""

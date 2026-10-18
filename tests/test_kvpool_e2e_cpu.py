@@ -1,6 +1,6 @@
 """DRAM tier end to end on CPU (lanes/m6 TIERS.md §5-§6): `python -m ppimpl serve` with `keep_sessions` and `tiers`,
 FakeStageModel over gloo (its tier engines move no bytes and take the configured bandwidth's time). DRAM is HBM's
-victim tier (kept contexts written back ahead of or at their eviction); a session evicted from HBM resumes from DRAM: a read, then only the new tokens are computed."""
+victim tier (kept contexts written back ahead of their eviction, by measured demand); a session evicted from HBM resumes from DRAM: a read, then only the new tokens are computed."""
 
 import json
 
@@ -51,9 +51,11 @@ def test_hbm_evicted_session_resumes_from_dram(server):
     reads = [o for o in ops if o["kind"] == "read"]
     assert {o["req"] for o in reads} == {"B_r1", "C_r1"}                 # B and C read back
     cache = json.loads((srv.run_dir / "cache.json").read_text())
-    # written back only near eviction (the LRU tail above 90% of the pool, or when evicting), not every round's
+    # written back ahead (C - F - D >= R: here one 7-block round of demand in a 29-block pool) or when evicting, at
+    # most once per round
     hb = cache["write_back"]["hbm"]
-    assert 0 < kinds.count("write") < 9 and hb["ahead_writes"] + hb["evict_writes"] == kinds.count("write")
+    assert 0 < kinds.count("write") <= 9 and hb["ahead_writes"] + hb["evict_writes"] == kinds.count("write")
+    assert hb["headroom"] >= 1 + STATE_BLOCKS
     for o in reads:          # each read entry was written before the read was sent
         assert any(w["kind"] == "write" and w["entry"] == o["entry"] and w["landed_ms"] <= o["sent_ms"] for w in ops)
     assert all(o["slots"] == 1 + 3 and len(set(o["bytes"])) == 1 for o in reads)   # 1 block + 3 state slots
