@@ -250,7 +250,7 @@ def stop(proc: subprocess.Popen, port: int, timeout_s: float = 90):
 def nsys_prefix(run_dir: Path, window: bool) -> list[str]:
     """Nsight Systems around the server; it follows the worker processes it spawns. With `window`, collection runs
     only between the workers' cudaProfilerStart/Stop (server config `profile_mbs`)."""
-    argv = [NSYS, "profile", "-o", str(run_dir / "trace"), "--force-overwrite", "true", "-t", "cuda,nvtx",
+    argv = [NSYS, "profile", "-o", str(run_dir / "trace"), "--force-overwrite", "true", "-t", "cuda,nvtx,osrt",
             "--cuda-graph-trace=node", "--sample=none", "--cpuctxsw=none"]
     if window:
         argv += ["--capture-range=cudaProfilerApi", "--capture-range-end=stop"]

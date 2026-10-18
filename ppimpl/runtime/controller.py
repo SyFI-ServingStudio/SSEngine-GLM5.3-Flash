@@ -61,6 +61,8 @@ from ppimpl.engine.scheduler import ChunkSpec, Request, Scheduler
 from ppimpl.kvpool import BalancedKVPool
 from ppimpl.kvpool.manager import TierOp
 from ppimpl.kvpool.member import tier_move
+from torch.cuda.nvtx import range as nvtx_range   # host ranges for Nsight Systems (bench/run.py --nsys)
+
 from ppimpl.runtime.cpus import CONTROLLER_CORES, cpu_list, pin_process, split_cores, threads
 from ppimpl.runtime.dispatch import NOW, WAIT, DispatchRule
 from ppimpl.runtime.transport import (Chunk, Plan, Ready, Shutdown, StageDone, TierBatch, TierDone, WorkerError,
@@ -430,10 +432,12 @@ class Controller:
                         more = True
                 if self.timer_at is not None and time.time_ns() >= self.timer_at:
                     self.timer_at = None
-                self._pump()
+                with nvtx_range("pump"):
+                    self._pump()
                 if self.tier_socks:
-                    self.sched.load(time.time_ns())      # staged loading: reads whose area has room now
-                    self._tier_send()
+                    with nvtx_range("load pass"):
+                        self.sched.load(time.time_ns())      # staged loading: reads whose area has room now
+                        self._tier_send()
                 for req_id in list(self.slab_views):
                     self._own(req_id)
                 if time.monotonic() >= next_check:

@@ -38,6 +38,8 @@ import threading
 import time
 import traceback
 
+from torch.cuda.nvtx import range as nvtx_range   # host ranges for Nsight Systems
+
 from ppimpl.kvpool.backends import HostTier, SsdTier, _ok, cgroup_peak_gb, node_cpus, num_slots
 from ppimpl.kvpool.shards import shard_bytes, shard_path
 from ppimpl.kvpool.layout import ViewRange
@@ -472,8 +474,9 @@ class PoolMember:
         marks: list = []
         tr = [] if self.trace else None
         t0 = time.perf_counter_ns()
-        ev, nbytes = self._move(d, self.dram, op, op.slots, op.state_slots, op.block_start, tr=tr, owned=owned,
-                                gate=None if d == "read" or op.urgent else self._yield_to_reads, marks=marks)
+        with nvtx_range(f"tier {op.op} {op.op_id}"):
+            ev, nbytes = self._move(d, self.dram, op, op.slots, op.state_slots, op.block_start, tr=tr, owned=owned,
+                                    gate=None if d == "read" or op.urgent else self._yield_to_reads, marks=marks)
         if tr is not None:
             self._traces[op.op_id] = (op.op, t0, tr)
         if owned:
@@ -554,7 +557,8 @@ class PoolMember:
             f.result()
         owned: list = []
         marks: list = []
-        ev, _ = self._move("read", host, op, op.host_slots, op.host_state, 0, owned=owned, marks=marks)
+        with nvtx_range(f"tier ssd read copy {op.op_id}"):
+            ev, _ = self._move("read", host, op, op.host_slots, op.host_state, 0, owned=owned, marks=marks)
         if owned:
             self._owned[op.op_id] = owned
         self.q["read"].put((op.op_id, ev, start_ns, len(futs) * self.slot_bytes, time.time_ns(),
