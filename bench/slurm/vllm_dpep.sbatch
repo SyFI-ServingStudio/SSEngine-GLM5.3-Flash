@@ -8,7 +8,19 @@
 #   SMOKE=1 N=8 sbatch -p priority --time=00:30:00 ...    # smoke: 3 min of client
 # Variables: N (client --max-concurrency), TRACE (default the v3 trace data/tracelab-v3/m6/sessions_2ps_v3.csv), OFFLOAD_GB (per GPU; --kv-offloading-size is per DP engine in GiB, since
 # CPUOffloadingSpec divides by the engine's world size = TP x PP = 1), CLIENT_TIMEOUT (default 22m; SMOKE 3m),
-# OUT (default <main tree>/measured/vllm_dpep), RUN (run name), VLLM_EXTRA (extra server args).
+# OUT (default <main tree>/measured/vllm_dpep), RUN (run name), VLLM_EXTRA (extra server args),
+# POLICY (vllm-router policy in front of the server, default cache_aware = prefix-aware; none = no router, the client
+# talks to vLLM's own load-only DP balancer as in job 8199), MNBT (--max-num-batched-tokens, default 32768 = our
+# engine's mb_tokens).
+# Router: vllm-router 0.1.15 (PyPI, github.com/vllm-project/router) in <main tree>/tmp/vllm-router-venv
+# (uv venv --python 3.12 && uv pip install vllm-router==0.1.15). --intra-node-data-parallel-size 4 expands the one vLLM
+# URL into 4 DP-aware workers and sends X-data-parallel-rank, which vLLM's DPLBAsyncMPClient honors (the request's
+# data_parallel_rank bypasses its load scoring). cache_aware hashes the request's token ids (joined as text) into a
+# radix tree per worker: prefix match >= cache_threshold 0.3 -> that worker, else the worker with the smallest tree;
+# shortest queue instead when max - min in-flight load > 64 and max > 1.5 x min.
+# --max-tree-size 200000000 characters per worker (default 67108864): token ids are ~6.5 characters each, so the
+# default tree tracks only ~10M tokens per engine, less than one engine's HBM KV (13.4M) and DRAM tier (~10M); an
+# evicted session would be routed by load to a rank without its cache.
 # Memory: refuses to start unless MemAvailable > need + 100 GB (need = 150 GB + 4 x OFFLOAD_GB); a watchdog stops the
 # job (INVALID.txt) when MemAvailable < 40 GB or memory PSI full avg10 > 20%. oom_score_adj 1000 on everything here.
 #SBATCH --gres=gpu:4
@@ -29,13 +41,16 @@ CLIENT=${CLIENT:-$MAIN/tmp/vllm_dpep_client/build/release/session_runner}
 TRACE=${TRACE:-/raid/kanzhu/ServingStudio/data/tracelab-v3/m6/sessions_2ps_v3.csv}   # v3 new-model trace (A/B)
 N=${N:?N (client max concurrency)}
 OFF=${OFFLOAD_GB:-}
+POLICY=${POLICY:-cache_aware}
+MNBT=${MNBT:-32768}
 TAG=$([ -n "$OFF" ] && echo "off${OFF}" || echo hbm)
+[ "$POLICY" != none ] && TAG=${TAG}_${POLICY}
 [ -n "${SMOKE:-}" ] && TAG=smoke_$TAG
 RUN=${RUN:-${TAG}_n${N}}_$JOB
 RD=${OUT:-$MAIN/measured/vllm_dpep}/$RUN
 mkdir -p "$RD/prom"
 P=$((20000 + JOB % 120 * 100 + 50))           # job-derived, below 32768 (notes.md); DP RPC port P+10
-for p in $P $((P + 10)); do
+for p in $P $((P + 10)) $((P + 20)) $((P + 30)); do   # vLLM, DP RPC, router, router metrics
   ss -ltnH "sport = :$p" | grep -q . && { echo "== port $p in use, not started"; exit 1; }
 done
 
@@ -51,7 +66,7 @@ ARGS=(serve "$CKPT" --served-model-name glm53-flash-pp4 --host 127.0.0.1 --port 
       --data-parallel-size 4 --tensor-parallel-size 1 --enable-expert-parallel --data-parallel-rpc-port $((P + 10))
       --kv-cache-dtype fp8_e4m3 --enable-prefix-caching --mamba-cache-mode align
       --max-model-len 1048576 --language-model-only --tokens-only --enable-prompt-tokens-details
-      --max-num-seqs 1016)
+      --max-num-seqs 1016 --max-num-batched-tokens $MNBT)
 # --max-num-seqs 1016, not the default 1024: the fork's KDA decode kernel (fused_recurrent_kda) launches grid
 # z = seqs x 64 KDA heads (TP1), and 1024 x 64 = 65536 exceeds CUDA's 65535 limit (job 8189: Triton "invalid argument"
 # during the CUDA-graph memory profile at capture size 1024). 1016 is the largest multiple of 8 below 1024.
@@ -88,12 +103,27 @@ echo "== ready after $(( $(date +%s) - T0 )) s" | tee "$RD/ready.txt"
 nvidia-smi --query-gpu=index,memory.used --format=csv,noheader > "$RD/gpus_ready.txt"
 numactl -H | grep free > "$RD/numa_ready.txt"
 curl -s "http://127.0.0.1:$P/metrics" > "$RD/prom/ready.prom"
+URL=http://127.0.0.1:$P
+if [ "$POLICY" != none ]; then
+  RCMD=($MAIN/tmp/vllm-router-venv/bin/vllm-router --host 127.0.0.1 --port $((P + 20)) --worker-urls "$URL"
+        --intra-node-data-parallel-size 4 --policy "$POLICY" --max-tree-size 200000000
+        --prometheus-host 127.0.0.1 --prometheus-port $((P + 30))
+        --log-dir "$RD/router" --log-level info)
+  echo "${RCMD[*]}" > "$RD/router_command.txt"
+  "${RCMD[@]}" > "$RD/router.log" 2>&1 &
+  RT=$!
+  trap 'kill $RT 2>/dev/null; stop_server; rm -rf "$TMPDIR"' EXIT
+  URL=http://127.0.0.1:$((P + 20))
+  for _ in $(seq 120); do curl -sf "$URL/health" > /dev/null && break; sleep 1; done
+  curl -sf "$URL/health" > /dev/null || { echo "== router not up"; tail -20 "$RD/router.log"; kill $WD; exit 3; }
+  echo "== router up: ${RCMD[*]}"
+fi
 
 # --- client: exactly the M6 command (client_command.txt of runs_m6/st_tiers_n400) but base URL and paths
 CT=${CLIENT_TIMEOUT:-$([ -n "${SMOKE:-}" ] && echo 3m || echo 22m)}
 CMD=(timeout "$CT" "$CLIENT" --trace "$TRACE" --input-file-format text-generation-session-execution-v2
      --text-file /raid/kanzhu/ServingStudio/data/corpus/enwik9 --tokenizer "$CKPT/tokenizer.json"
-     --model glm53-flash-pp4 --backend vllm-tokens --base-url "http://127.0.0.1:$P" --temperature 0
+     --model glm53-flash-pp4 --backend vllm-tokens --base-url "$URL" --temperature 0
      --arrival-mode trace-timed --stream-idle-timeout-secs 600 --stop-session-on-error true --timeline true
      --log-path "$RD/requests.jsonl" --summary-path "$RD/summary.json" --timeline-path "$RD/timeline.parquet"
      --max-concurrency "$N" --max-model-len 1048576)
@@ -104,12 +134,14 @@ C0=$(date +%s)
 CL=$!
 while kill -0 $CL 2>/dev/null; do            # /metrics every 60 s (queue, preemption, prefix and offload counters)
   e=$(( $(date +%s) - C0 )); curl -s -m 10 "http://127.0.0.1:$P/metrics" > "$RD/prom/t$(printf %04d $e).prom"
+  [ "$POLICY" != none ] && curl -s -m 10 "http://127.0.0.1:$((P + 30))/metrics" > "$RD/prom/router_t$(printf %04d $e).prom"
   nvidia-smi --query-gpu=index,memory.used,utilization.gpu --format=csv,noheader | sed "s/^/$e,/" >> "$RD/gpu_samples.csv"
   for _ in $(seq 60); do kill -0 $CL 2>/dev/null || break; sleep 1; done
 done
 wait $CL; rc=$?
 echo "== client rc=$rc after $(( $(date +%s) - C0 )) s"
 curl -s -m 10 "http://127.0.0.1:$P/metrics" > "$RD/prom/end.prom"
+[ "$POLICY" != none ] && curl -s -m 10 "http://127.0.0.1:$((P + 30))/metrics" > "$RD/prom/router_end.prom"
 kill $WD 2>/dev/null
 $PY "$H/metrics.py" "$RD/requests.jsonl" > "$RD/metrics.json" && cat "$RD/metrics.json"
 $PY -m bench.vllm_dpep_summary "$RD" --trace "$TRACE" || true
