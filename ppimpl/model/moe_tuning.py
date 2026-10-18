@@ -3,8 +3,9 @@
 Buckets. FlashInfer tunes the fused MoE at its "hybrid" token buckets (powers of 2 to 256, steps of 256 to 2,048,
 steps of 512 to 4,096, then powers of 2) and serves every token count with the tactic of the bucket at or above it,
 so 4,097-8,191-token microbatches ran 8,192's tactic. `install_buckets` (process-wide, `pp_patch` table) makes the
-MoE buckets the serving shapes instead: powers of 2 to 128, then every CUDA-graph bucket (`GRAPH_BUCKETS`: steps of
-256 to 8,192), then powers of 2 to the tuning bound. A token count still maps to the bucket at or above it. The
+MoE buckets the serving shapes instead: powers of 2 to 128, then the CUDA-graph buckets to `TUNED_TOP` (steps of
+256 to 8,192), then powers of 2 to the tuning bound. Graph buckets above `TUNED_TOP` (steps of 512) keep the
+power-of-2 tactics, which `TACTICS` holds; MoE tactics at them would need a retune. A token count still maps to the bucket at or above it. The
 persisted tactic file holds one entry per bucket, so a file and the process reading it must use the same buckets:
 `TACTICS` is tuned and read with these installed.
 
@@ -25,6 +26,7 @@ import json
 from pathlib import Path
 
 TOP_K = 8
+TUNED_TOP = 8192    # the largest CUDA-graph bucket with its own MoE tactic
 NUM_EXPERTS = 288
 
 
@@ -34,8 +36,8 @@ def serving_buckets(max_num_tokens: int, min_num_tokens: int = 1) -> tuple[int, 
     while m <= min(128, max_num_tokens):
         out.append(m)
         m *= 2
-    out += [b for b in GRAPH_BUCKETS if min_num_tokens <= b <= max_num_tokens]
-    m = 1 << (max(GRAPH_BUCKETS)).bit_length()
+    out += [b for b in GRAPH_BUCKETS if min_num_tokens <= b <= min(TUNED_TOP, max_num_tokens)]
+    m = 2 * TUNED_TOP
     while m <= max_num_tokens:
         out.append(m)
         m *= 2
