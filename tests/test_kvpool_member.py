@@ -53,6 +53,8 @@ def run(mems, ops):
             e.submit(m)
             if m.tier == "ssd":                      # the SSD thread's work, here
                 e._ssd_op(*e.ssd_q[e.direction(m)].get_nowait())
+                if m.op == "read":                   # and the copy thread's
+                    e._ssd_read_copy(*e.ssd_copy_q.get_nowait())
             op_id, wait, _, nbytes, _, _ = e.q[e.direction(m)].get(timeout=30)   # SSD writes: reported async
             assert op_id == m.op_id and wait is None
             moved.setdefault(op_id, []).append(nbytes)

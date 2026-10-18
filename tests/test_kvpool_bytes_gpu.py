@@ -122,6 +122,8 @@ def _worker(rank: int, port: int, out_dir: str):
             eng.submit(mv)
             if tier == "ssd":
                 eng._ssd_op(*eng.ssd_q[eng.direction(mv)].get())
+                if op == "read":
+                    eng._ssd_read_copy(*eng.ssd_copy_q.get())
             _, ev, _, nbytes, _, _ = eng.q[eng.direction(mv)].get()
             if ev is not None:
                 ev.synchronize()
