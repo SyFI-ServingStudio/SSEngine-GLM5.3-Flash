@@ -822,6 +822,11 @@ hbm-evictions-exclusive`), k = 1 (one KDA state per entry).
     latency into recv (sent -> decoded: the one receive thread), queue (decoded -> submit start: the submit thread
     busy with earlier ops), submit, wait (submit start -> mark: the link busy with earlier copies), GPU (mark -> end)
     and notify (end -> TierDone).
+  - **Submit straight to the driver** (kvpool/mover.py `Driver`): a DRAM op's host submit was 4.3 ms at p50 (job
+    8202: ~10 batch calls, 2.7 ms in the calls of which 1.7 ms driver CPU, 1.7 ms between them in torch dispatch,
+    stream contexts and tensor wrapping), so ops queued at the submit thread whenever the link drained faster. The
+    copies (`cuMemcpyBatchAsync`, CUDA 12.8 ABI as vLLM's `swap_blocks_batch`), stream waits and event records now go
+    through ctypes on libcuda; each call releases the GIL.
   - **Eviction stays ahead** (the lesson of Fix D, where every eviction waited for its write: blocked_by_write
     44k): each level's write-back keeps the LRU entries holding `reserve` written (`WriteBack.reserve`, replacing the
     0.9 watermark): fixed + dirty <= capacity - reserve, fixed counting the loading area. The reserve is what one

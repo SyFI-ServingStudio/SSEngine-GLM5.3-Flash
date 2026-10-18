@@ -1,7 +1,10 @@
 """Layer 4 of the KV pool (lanes/m6 TIERS.md §2.3, §3, §13.2): one GPU's copies between host slots and the stages' KV.
 
-Copy engines only, no SMs, no wait on the compute stream: `cuMemcpyBatchAsync` (vLLM `ops.swap_blocks_batch`) on
-the mover's own streams; on CPU (tests) `ctypes.memmove`, done at once.
+Copy engines only, no SMs, no wait on the compute stream: `cuMemcpyBatchAsync` on the mover's own streams; on CPU
+(tests) `ctypes.memmove`, done at once. The copies, stream waits and event records go straight to the driver
+(`Driver`, ctypes on libcuda: no torch dispatch, stream context or tensor wrapping per call, and the GIL is released
+in each call), so a transfer's host work is the driver's own (job 8202: 4.3 ms per DRAM op through torch and vLLM's
+`swap_blocks_batch`, of it 1.7 ms CPU in the driver).
 
 Two hops (`TierConfig.hops`, default; §2.3: a copy engine writing host data straight into the other GPUs' HBM runs at
 31.7 GB/s against 47.6 into its own): the host side of a slot is contiguous, so a read copies each slot whole into a
@@ -33,6 +36,46 @@ ANCHOR_S = 1.0     # a thread's GPU-to-host clock anchor is taken again after th
 
 # per direction: (first hop's stream, second hop's stream); the ring sits between them
 HOPS = {"read": ("read", "read_nvl"), "write": ("write_nvl", "write")}
+
+
+class Driver:
+    """The driver calls of a transfer, through ctypes (each releases the GIL): `cuMemcpyBatchAsync` at its CUDA 12.8
+    ABI (as vLLM's `swap_blocks_batch`: one attribute, source in stream order), `cuStreamWaitEvent`, `cuEventRecord`.
+    Streams and events are torch's (`cuda_stream`, `cuda_event` handles)."""
+
+    def __init__(self):
+        from cuda.bindings import driver
+        err, fn, _status = driver.cuGetProcAddress(b"cuMemcpyBatchAsync", 12080,
+                                                   driver.CUdriverProcAddress_flags.CU_GET_PROC_ADDRESS_DEFAULT)
+        if err != driver.CUresult.CUDA_SUCCESS or not int(fn):
+            raise RuntimeError(f"cuMemcpyBatchAsync (CUDA 12.8 ABI) not available: {err}")
+        vp, sz = ctypes.c_void_p, ctypes.c_size_t
+        self._batch = ctypes.CFUNCTYPE(ctypes.c_int, vp, vp, vp, sz, vp, vp, sz, vp, vp)(int(fn))
+        lib = ctypes.CDLL("libcuda.so.1")
+        self._wait, self._record = lib.cuStreamWaitEvent, lib.cuEventRecord
+        self._wait.argtypes, self._wait.restype = [vp, vp, ctypes.c_uint], ctypes.c_int
+        self._record.argtypes, self._record.restype = [vp, vp], ctypes.c_int
+        self._attr = (ctypes.c_uint32 * 6)(1, 0, 0, 0, 0, 0)    # CUmemcpyAttributes: srcAccessOrder STREAM (1)
+        self._attr_idx = (ctypes.c_size_t * 1)(0)
+
+    @staticmethod
+    def _ok(rc: int, what: str):
+        if rc:
+            raise RuntimeError(f"{what}: CUresult {rc}")
+
+    def batch(self, stream: int, src: np.ndarray, dst: np.ndarray, lens: np.ndarray):
+        """One `cuMemcpyBatchAsync` of src[i] -> dst[i], lens[i] bytes (int64 arrays) on `stream`."""
+        fail = ctypes.c_size_t(0)
+        src, dst, lens = (np.ascontiguousarray(x, dtype=np.int64) for x in (src, dst, lens))
+        rc = self._batch(dst.ctypes.data, src.ctypes.data, lens.ctypes.data, len(lens), ctypes.addressof(self._attr),
+                         ctypes.addressof(self._attr_idx), 1, ctypes.byref(fail), stream)
+        self._ok(rc, f"cuMemcpyBatchAsync of {len(lens)} copies failed at {fail.value}")
+
+    def wait(self, stream: int, ev):
+        self._ok(self._wait(stream, ev.cuda_event, 0), "cuStreamWaitEvent")
+
+    def record(self, ev, stream: int):
+        self._ok(self._record(ev.cuda_event, stream), "cuEventRecord")
 
 
 def runq_ns() -> int:
@@ -69,9 +112,9 @@ class Mover:
         self._ev_lock = threading.Lock()           # the event pool (taken inside a direction's lock, never around it)
         if self.cuda:
             import torch
-            from vllm import _custom_ops
-            self.swap = _custom_ops.swap_blocks_batch
+            self.drv = Driver()
             self.streams = {k: torch.cuda.Stream(device) for k in ("read", "write", "read_nvl", "write_nvl")}
+            self._st = {k: st.cuda_stream for k, st in self.streams.items()}   # the driver's stream handles
             # torch creates a CUDA event at its first record: every event is recorded once here, so a transfer only
             # records (no cudaEventCreate on its path, which waits for the driver behind the launch thread)
             self._events = [torch.cuda.Event(blocking=True, enable_timing=True) for _ in range(EVENT_POOL)]
@@ -113,6 +156,7 @@ class Mover:
         if ev is None:
             import torch
             ev = torch.cuda.Event(blocking=True, enable_timing=True)
+            ev.record(self.streams["read"])     # torch creates it at its first record (a handle for the driver)
         if owned is not None:
             owned.append(ev)
         return ev
@@ -128,7 +172,7 @@ class Mover:
         if not self.cuda:
             return None
         ev = self.event(owned)
-        ev.record(self.streams[HOPS[direction][0] if self.ring is not None else direction])
+        self.drv.record(ev, self._st[HOPS[direction][0] if self.ring is not None else direction])
         return ev
 
     def host_ns(self, ev) -> int | None:
@@ -219,7 +263,7 @@ class Mover:
                 else:                              # the stages -> ring, then ring -> host
                     self._batch(s1, dev[lo:hi], rpieces, lens[lo:hi], ev2, ev1, tr, owned)
                     if prev is not None:
-                        prev.record(self.streams[s1])
+                        self.drv.record(prev, self._st[s1])
                     self._batch(s2, rslots, hosts[a:b], hlen[a:b], ev1, ev2, tr, owned)
                 if b == n:
                     end = self._end(s2, owned)
@@ -230,7 +274,7 @@ class Mover:
         if not self.cuda:
             return None
         ev = self.event(owned)
-        ev.record(self.streams[stream])
+        self.drv.record(ev, self._st[stream])
         return ev
 
     def _batch(self, stream: str, src, dst, lens, wait=None, done=None, tr: list | None = None,
@@ -242,21 +286,18 @@ class Mover:
             for s, t, k in zip(np.asarray(src).tolist(), np.asarray(dst).tolist(), np.asarray(lens).tolist()):
                 ctypes.memmove(t, s, k)
             return
-        import torch
-        st = self.streams[stream]
+        st, drv = self._st[stream], self.drv
         if wait is not None:
-            st.wait_event(wait)
-        args = [torch.from_numpy(x) for x in (src, dst, lens)]
+            drv.wait(st, wait)
         if tr is not None:
             ev0 = self.event(owned)
-            ev0.record(st)
+            drv.record(ev0, st)
             h0, c0 = time.perf_counter_ns(), time.thread_time_ns()
-        with torch.cuda.stream(st):
-            self.swap(*args)
+        drv.batch(st, src, dst, lens)
         if tr is not None:
             h1, c1 = time.perf_counter_ns(), time.thread_time_ns()
             ev1 = self.event(owned)
-            ev1.record(st)
+            drv.record(ev1, st)
             tr.append((stream, len(lens), int(lens.sum()), h0, h1, c1 - c0, ev0, ev1))
         if done is not None:
-            done.record(st)
+            drv.record(done, st)
