@@ -241,7 +241,7 @@ class Controller:
         m = pool.manager
         info = {"slot_bytes": tc.slot_bytes, "state_slots": tc.state_slots,
                 "slots": {x.name: x.num_slots for x in m.tiers}, "staging_slots": m.staging.num_slots,
-                "write_back": {"hbm": "ahead: headroom R(2T)", "dram": "at eviction"}}
+                "write_ahead": {"hbm": tc.hbm_write_ahead, "dram": tc.dram_write_ahead}}
         (self.run_dir / "tiers.json").write_text(json.dumps(info) + "\n")
         print("tiers: " + json.dumps(info), flush=True)
         return pool

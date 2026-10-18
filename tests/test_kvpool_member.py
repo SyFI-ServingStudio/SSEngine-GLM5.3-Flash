@@ -138,7 +138,7 @@ def test_ssd_demote_and_staging_are_byte_equal(tmp_path, ring):
     for dram in (None, "one"):
         d = tmp_path / str(dram)
         ss = BalancedPlacement(stages()[1], 4, 0).state_slots
-        views, ranges, mems, tc = members(None if dram is None else 2 + ss, 60, 30, d,
+        views, ranges, mems, tc = members(None if dram is None else 2 + ss, 60, 30, d, dram_write_ahead=None,
                                           **ring)   # DRAM: one context, demoted when evicted
         pool = BalancedKVPool(tc)
         want = {}

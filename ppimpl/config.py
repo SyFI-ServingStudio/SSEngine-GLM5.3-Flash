@@ -58,8 +58,11 @@ class TierConfig(msgspec.Struct, forbid_unknown_fields=True):
     ssd_gb: float | None = 128.0          # None: no SSD tier. 128 GB per GPU (user, 2026-10-16); the handoff has 256
     ssd_read_gb_s: float = 10.0
     # Writes: the victim chain HBM -> DRAM -> SSD (user, 2026-10-17; TIERS.md §5): a tier takes only what the level
-    # above evicts. HBM writes ahead of need, by measured demand and write time; DRAM demotes at eviction
-    # (kvpool/writeback.py). No knob.
+    # above evicts. Each level writes its least recently used entries ahead of their eviction once its occupancy
+    # (HBM: running requests plus kept contexts not yet written; DRAM: entries not yet in SSD) passes its watermark
+    # (kvpool/writeback.py); None: write only when evicting.
+    hbm_write_ahead: float | None = 0.9
+    dram_write_ahead: float | None = 0.9
     bytes_per_token: int = 1635           # own stage (stage 0); balanced storage: 1,499
     state_bytes: int = 39_100_000         # one KDA state per context, own stage (stage 0); balanced: 36.9 MB
     max_read_wait_ms: float | None = 1000.0   # a read that would wait longer for its tier is passed over
