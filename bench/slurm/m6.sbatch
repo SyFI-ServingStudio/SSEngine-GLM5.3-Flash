@@ -21,7 +21,7 @@ R=$ROOT/${OUT:-measured/runs_m6}
 mkdir -p "$R/slurm"
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
 G=${CUDA_VISIBLE_DEVICES:-0,1,2,3}
-P=$((20000 + ${SLURM_JOB_ID:-0} % 120 * 100))
+P=${PPIMPL_PORT:-$((20000 + ${SLURM_JOB_ID:-0} % 120 * 100))}   # PPIMPL_PORT: two runs in one job (ab8.sbatch)
 export PPIMPL_SSD_DIR=${PPIMPL_SSD_DIR:-$MAIN/tmp/ssd_tier}
 export PPIMPL_HANDOFF=${PPIMPL_HANDOFF:-$MAIN/third_party/handoff_v2_realistic}   # v2-realistic targets
 trap 'rm -rf "$TMPDIR"; echo "== df after: $(df -h "$ROOT" | tail -1)"' EXIT
