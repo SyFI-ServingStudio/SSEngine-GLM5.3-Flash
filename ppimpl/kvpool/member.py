@@ -49,6 +49,9 @@ from ppimpl.kvpool.mover import EVENT_POOL, Mover, Segment
 from ppimpl.kvpool.placement import BalancedPlacement
 from ppimpl.runtime.transport import Shutdown, TierDone, TierMove, WorkerError, decode_tier, encode
 
+# PPIMPL_TIER_NOOP=1: a mechanism A/B, not a run: every tier op is reported done on arrival and moves no bytes (the
+# scheduler and its tier decisions unchanged; the KV read back is wrong), to time the stages without the tier threads' work
+NOOP = os.environ.get("PPIMPL_TIER_NOOP", "0") == "1"
 TRACE_EVERY = 8                          # the per-batch trace: 1 DRAM op in this many (PPIMPL_TIER_TRACE)
 PROBE_S, PROBE_LATE_S = 0.005, 0.020   # the GIL / CPU probe (`PoolMember._probe_loop`, with the trace)
 FAKE_BLOCK_BYTES = 8576 * 5996  # one block over all stages (GLM-5.3 PP4: 4 x 1,499 B/token); a GPU's slot is 1/n of
@@ -301,6 +304,10 @@ class PoolMember:
                 now = time.time_ns()
                 for op in msg.ops:
                     self._recv_ns[op.op_id] = now
+                if NOOP:                        # timing A/B only: done at once, no bytes moved (the KV is wrong)
+                    for op in msg.ops:
+                        self.q[self.direction(op)].put((op.op_id, None, now, 0, now, None))
+                    continue
                 for op in sorted(msg.ops, key=lambda o: o.op != "read"):    # reads first
                     if self.real and op.tier == "dram" and op.op == "read":
                         self._read_queued(op.op_id)
