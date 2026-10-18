@@ -34,6 +34,7 @@ from typing import NamedTuple
 
 import numpy as np
 
+CUDA_ERROR_NOT_READY = 600
 EVENT_POOL = 1024  # pooled CUDA events per mover: an op takes 2 (start mark, end), + 2 per batch with the trace on
 ANCHOR_S = 1.0     # a thread's GPU-to-host clock anchor is taken again after this long (`Mover.host_ns`)
 
@@ -63,6 +64,7 @@ class Driver:
         self._record.argtypes, self._record.restype = [vp, vp], ctypes.c_int
         self._elapsed = lib.cuEventElapsedTime
         self._elapsed.argtypes, self._elapsed.restype = [ctypes.POINTER(ctypes.c_float), vp, vp], ctypes.c_int
+        self.host_ns = {"record": [], "wait": []}   # per call, ns on the host (instrumentation: `summary`)
         self._attr = (ctypes.c_uint32 * 6)(1, 0, 0, 0, 0, 0)    # CUmemcpyAttributes: srcAccessOrder STREAM (1)
         self._attr_idx = (ctypes.c_size_t * 1)(0)
 
@@ -84,14 +86,34 @@ class Driver:
         each a GIL release): `cuEventElapsedTime` with the GIL held. The calling thread needs the device's context
         current (`torch.cuda.set_device`)."""
         ms = ctypes.c_float()
-        self._ok(self._elapsed(ctypes.byref(ms), a.cuda_event, b.cuda_event), "cuEventElapsedTime")
+        rc = self._elapsed(ctypes.byref(ms), a.cuda_event, b.cuda_event)
+        if rc == CUDA_ERROR_NOT_READY:          # not expected (callers read completed events): wait, then read
+            a.synchronize()
+            b.synchronize()
+            rc = self._elapsed(ctypes.byref(ms), a.cuda_event, b.cuda_event)
+        self._ok(rc, "cuEventElapsedTime")
         return ms.value
 
     def wait(self, stream: int, ev):
-        self._ok(self._wait(stream, ev.cuda_event, 0), "cuStreamWaitEvent")
+        t = time.perf_counter_ns()
+        rc = self._wait(stream, ev.cuda_event, 0)
+        self.host_ns["wait"].append(time.perf_counter_ns() - t)
+        self._ok(rc, "cuStreamWaitEvent")
 
     def record(self, ev, stream: int):
-        self._ok(self._record(ev.cuda_event, stream), "cuEventRecord")
+        t = time.perf_counter_ns()
+        rc = self._record(ev.cuda_event, stream)
+        self.host_ns["record"].append(time.perf_counter_ns() - t)
+        self._ok(rc, "cuEventRecord")
+
+    def summary(self) -> str:
+        """Host time of the GIL-holding calls (a blocked one stalls every Python thread), us p50 / p99 / max."""
+        out = []
+        for k, v in self.host_ns.items():
+            if v:
+                a = np.asarray(v) / 1e3
+                out.append(f"{k} n {len(a)} p50 {np.median(a):.1f} p99 {np.percentile(a, 99):.1f} max {a.max():.0f} us")
+        return "; ".join(out)
 
 
 def _runs(src: np.ndarray, dst: np.ndarray, lens: np.ndarray, slot: np.ndarray):
@@ -137,6 +159,7 @@ class Mover:
         # not chunk by chunk interleaved (which would make both end late)
         self._lock = {"read": threading.RLock(), "write": threading.RLock()}
         self._anchor = threading.local()
+        self.gate_wait_ns: list[int] = []          # a gated write's host wait for its previous chunk (instrumentation)
         self._ev_lock = threading.Lock()           # the event pool (taken inside a direction's lock, never around it)
         if self.cuda:
             import torch
@@ -272,7 +295,9 @@ class Mover:
             b = min(a + C, n)
             if gate is not None:
                 if prev is not None:
+                    t = time.perf_counter_ns()
                     prev.synchronize()
+                    self.gate_wait_ns.append(time.perf_counter_ns() - t)
                 gate()
             if ready is not None:                  # each segment's slots below this chunk's end
                 for i in range(len(segments)):

@@ -38,6 +38,7 @@ import threading
 import time
 import traceback
 
+import numpy as np
 from torch.cuda.nvtx import range as nvtx_range   # host ranges for Nsight Systems
 
 from ppimpl.kvpool.backends import HostTier, SsdTier, _ok, cgroup_peak_gb, node_cpus, num_slots
@@ -262,6 +263,10 @@ class PoolMember:
             print(f"stage {self.stage} tier events: {self.mover.events_made} made, {EVENT_POOL} of them at start; "
                   f"write chunks that yielded to reads {self.yields['waits']}, {self.yields['wait_ms']:.0f} ms",
                   flush=True)
+            g = np.asarray(self.mover.gate_wait_ns) / 1e3
+            print(f"stage {self.stage} tier driver calls: {self.mover.drv.summary()}; gated-write chunk waits n {len(g)}"
+                  + (f" p50 {np.median(g):.0f} p99 {np.percentile(g, 99):.0f} max {g.max():.0f} us, sum "
+                     f"{g.sum() / 1e6:.1f} s" if len(g) else ""), flush=True)
         if self.cuda:
             import torch
             torch.cuda.synchronize(self.device)
