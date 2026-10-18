@@ -237,14 +237,18 @@ def trace_parts(op: dict) -> dict:
 
 
 def trace_summary(run_dir: Path) -> dict | None:
-    """Per kind (read / write), p50 and mean of trace_parts over every traced op on every GPU."""
+    """Per kind (read / write), p50 and mean of trace_parts over every traced op on every GPU. The trace holds 1 DRAM
+    op in `every` (PPIMPL_TIER_TRACE; older traces: every op): `ops` counts the ops it stands for, `traced` the lines;
+    counts and totals of tier ops come from tier_ops.jsonl, not from here."""
     rows: dict[str, list] = {}
+    every: dict[str, int] = {}
     for f in sorted(run_dir.glob("tier_trace_s*.jsonl")):
         for op in read_jsonl(f):
             rows.setdefault(op["kind"], []).append(trace_parts(op))
+            every[op["kind"]] = every.get(op["kind"], 0) + op.get("every", 1)
     if not rows:
         return None
-    out = {k: {"ops": len(v), **{f: {"p50": round(float(np.median([r[f] for r in v])), 1),
+    out = {k: {"ops": every[k], "traced": len(v), **{f: {"p50": round(float(np.median([r[f] for r in v])), 1),
                                      "mean": round(float(np.mean([r[f] for r in v])), 1),
                                      "max": round(float(np.max([r[f] for r in v])), 1)} for f in v[0]}}
            for k, v in rows.items()}

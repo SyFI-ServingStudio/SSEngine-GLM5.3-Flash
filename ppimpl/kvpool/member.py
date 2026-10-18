@@ -432,7 +432,8 @@ class PoolMember:
             self._trace_log = open(os.path.join(self.cfg.run_dir, f"tier_trace_s{self.stage}.jsonl"), "a")
         us = lambda ns: round(ns / 1e3, 1)
         ms = self.mover.drv.elapsed_ms       # the op's last copy completed: so did every event here
-        self._trace_log.write(json.dumps({"op": op_id, "kind": kind, "start_ns": start_ns, "batches": [
+        self._trace_log.write(json.dumps({"op": op_id, "kind": kind, "start_ns": start_ns, "every": self.trace_every,
+                                         "batches": [
             {"stream": s, "pieces": n, "bytes": b, "host_at_us": us(h0 - t0), "call_us": us(h1 - h0), "cpu_us": us(c),
              "gpu_start_us": round(ms(mark, e0) * 1e3, 1),
              "gpu_end_us": round(ms(mark, e1) * 1e3, 1)}
