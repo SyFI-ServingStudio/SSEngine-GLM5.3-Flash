@@ -326,6 +326,7 @@ def run_worker(cfg: RunConfig, stage: int):   # makes inference tensors, which a
             hidden_in = pipe.recv(plan.num_tokens, model.hidden_width) if stage > 0 else None
             if stage == 0:
                 pipe.gate(mbs)                        # at most max_in_flight in flight (ppimpl/runtime/dispatch.py)
+            prep_ns = time.time_ns()                  # prepared: the host side done (before any run-ahead wait)
             eager = getattr(batch, "bucket", 0) is None   # StageModel: no CUDA graph for this size
             ahead.before(eager)                       # bounded run-ahead (RunAhead): never block inside a launch
             ready_ns = time.time_ns()                 # prepared, stream waits queued: the GPU may start from here
@@ -338,7 +339,7 @@ def run_worker(cfg: RunConfig, stage: int):   # makes inference tensors, which a
             ahead.after(end, eager)
             if last:
                 pipe.exited(mbs)
-            host = (plan_ns, fwd_ns, ready_ns, time.time_ns())
+            host = (plan_ns, fwd_ns, prep_ns, ready_ns, time.time_ns())
             if hidden_in is not None:
                 pipe.release()                        # CePipe: the sender may reuse the slot once this forward ran
             del hidden_in

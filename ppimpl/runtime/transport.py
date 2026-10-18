@@ -79,8 +79,8 @@ class StageDone(msgspec.Struct, tag=True):
     start_ns: int                 # GPU start of the stage's first kernel (host clock)
     end_ns: int                   # GPU end of its last kernel, before the send
     tokens: list[tuple[str, int]] | None = None   # stage 3: (req_id, greedy token) per is_last chunk
-    host_ns: tuple[int, int, int, int] | None = None   # host clock: plan received, prepare called, start mark, run
-                                                       # returned
+    host_ns: tuple[int, int, int, int, int] | None = None   # host clock: plan received, prepare called, prepared,
+                                                            # start mark (after any run-ahead wait), run returned
 
 
 class TierDone(msgspec.Struct, tag=True):

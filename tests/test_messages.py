@@ -9,7 +9,7 @@ def test_round_trip():
     assert plan.num_tokens == 103
     assert isinstance(decode_to_worker(encode(Shutdown())), Shutdown)
     for msg in (Ready(2, 7144), StageDone(3, 7, 10, 20, [("a", 5)]), StageDone(1, 7, 10, 20, None),
-                StageDone(0, 7, 10, 20, None, (1, 2, 3, 4)),
+                StageDone(0, 7, 10, 20, None, (1, 2, 3, 4, 5)),
                 WorkerError(0, "boom")):
         assert decode_to_controller(encode(msg)) == msg
 

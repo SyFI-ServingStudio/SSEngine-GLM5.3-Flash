@@ -256,3 +256,16 @@ def test_reports_in_any_order_across_stages():
     s0, peak, _ = simulate(rule, n_mb=300, actual=lambda k, s: table[(k, s)], report_delay=lambda k, s: delay[(k, s)])
     assert len(s0) == 300 and peak <= 4
     assert not rule.flight and not rule.on_stage0
+
+
+def test_host_time_from_worker_stamps_on_every_microbatch():
+    """With the worker's stamps, a plan formed while stage 0 was busy is a sample too: delivery + prepare + launch,
+    without the time the plan waited for the GPU (job 8242: the old rule saw almost no samples once saturated)."""
+    r = DispatchRule(4, 3.0)
+    r.dispatched(0, 0, 8192)
+    r.stage_done(0, 0, int(20 * MS), int(100 * MS), (int(1 * MS), int(1 * MS), int(16 * MS), int(16 * MS), 0))
+    assert r.host.predict_ns(8192) == pytest.approx(20 * MS)      # 1 delivery + 15 prepare + 4 launch
+    r.dispatched(1, int(50 * MS), 8192)            # formed while mb 0 computes; prepared by 70, GPU free at 100
+    r.stage_done(0, 1, int(102 * MS), int(180 * MS), (int(51 * MS), int(51 * MS), int(70 * MS), int(70 * MS), 0))
+    # sample 1 + 19 + 2 (start - previous end) = 22 ms, not the 52 ms from forming to start
+    assert r.host.predict_ns(8192) == pytest.approx(0.75 * 20 * MS + 0.25 * 22 * MS)

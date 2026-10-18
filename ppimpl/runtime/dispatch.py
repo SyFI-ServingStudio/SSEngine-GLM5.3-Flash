@@ -12,7 +12,8 @@ stage 0 idle for both every time. So:
   the rest (per stage, a per-token EWMA of measured times per power-of-two size bucket: `StagePredictor`), the rule
   projects each stage's timeline with the gate and gets the next microbatch's start T = max(stage 0 free, exit of
   microbatch next-`max_in_flight`). It forms the plan at T - host - `lead_ms`, `host` being the predicted time from
-  forming to the stage-0 start (an EWMA per size bucket over plans that found stage 0 ready). A report refreshes the
+  forming to the stage-0 start (an EWMA per size bucket of every plan's delivery + prepare + launch, from the
+  worker's host stamps; GPU waits left out). A report refreshes the
   projection; a stage that ends earlier than predicted is seen by its report and the plan forms at once.
 - **The microbatch's contents are the targets'**: the scheduler forms it with the microbatches projected to have left
   the pipeline by T taken out of the in-flight count and the backlog (`exiting`).
@@ -103,12 +104,13 @@ class DispatchRule:
         self.last_tokens = tokens
         self.next_mb = mb_id + 1
 
-    def stage_done(self, stage: int, mb_id: int, start_ns: int, end_ns: int):
+    def stage_done(self, stage: int, mb_id: int, start_ns: int, end_ns: int, host_ns: tuple | None = None):
         """A stage's report, in any order across stages: each stage's worker reports its microbatches in order, but a
         stage-0 report may reach the controller after later stages' reports of the same microbatch (job 7878: stage 0's
         reporter held ~0.5 s by its main thread's forward of the next one; mb 6279 left stage 3 before its stage-0
         report came). Keyed by mb_id; a stage that finished microbatch k finished every earlier one on it (one
-        stream per stage), so any stage's report of k retires stage 0's entries up to k."""
+        stream per stage), so any stage's report of k retires stage 0's entries up to k. `host_ns`: the worker's host
+        stamps (`StageDone.host_ns`); with them stage 0's host time is measured on every microbatch (`_host_time`)."""
         self.stage_end[stage] = max(self.stage_end[stage], end_ns)
         for k in [k for k in self.on_stage0 if k <= mb_id]:
             del self.on_stage0[k]
@@ -119,15 +121,28 @@ class DispatchRule:
         self.stage_pred[stage].observe(tokens, end_ns - start_ns)
         ends[stage] = end_ns
         if stage == 0:
-            ready = max(self.last_end_ns or 0, self._exit_known(mb_id - self.max_in_flight) or 0)
-            if ready <= dispatch_ns and self._exit_known(mb_id - self.max_in_flight) is not False:
-                self.host.observe(tokens, max(start_ns - dispatch_ns, 0))     # stage 0 was ready: host time only
+            if host_ns is not None:
+                self.host.observe(tokens, self._host_time(dispatch_ns, start_ns, host_ns))
+            else:                                    # no stamps: only a plan that found stage 0 ready shows host time
+                ready = max(self.last_end_ns or 0, self._exit_known(mb_id - self.max_in_flight) or 0)
+                if ready <= dispatch_ns and self._exit_known(mb_id - self.max_in_flight) is not False:
+                    self.host.observe(tokens, max(start_ns - dispatch_ns, 0))
             self.last_end_ns = max(self.last_end_ns or 0, end_ns)
         if stage == self.num_stages - 1:
             del self.flight[mb_id]
             self.exits[mb_id] = end_ns
             for old in [k for k in self.exits if k < mb_id - 2 * self.max_in_flight]:
                 del self.exits[old]
+
+    def _host_time(self, dispatch_ns: int, start_ns: int, host_ns: tuple) -> int:
+        """Forming -> stage-0 start were stage 0 free all along: the plan's delivery (formed -> received), the worker's
+        host side (prepare call -> prepared) and its launch (start mark, or stage 0's previous end if later -> first
+        kernel). Waits for the GPU (run-ahead, the previous microbatch still computing) are left out, so every
+        microbatch is a sample, not only the few that found stage 0 ready (a saturated pipeline gave almost none and
+        the estimate stayed at its early value: 8 ms planned vs 19 ms taken at v3 minutes 6-8, job 8242)."""
+        plan, call, prep, ready = host_ns[:4]
+        launch = start_ns - max(ready, self.last_end_ns or 0)
+        return max(plan - dispatch_ns, 0) + max(prep - call, 0) + max(launch, 0)
 
     def _exit_known(self, mb_id: int):
         """A reported exit: its time; None: long gone (or never existed); False: still in flight."""
