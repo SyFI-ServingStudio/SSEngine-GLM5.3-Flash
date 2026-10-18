@@ -23,11 +23,13 @@ Matching (server, `content_keys`): a kept context is found by content, not by a 
 (5_prefix_cache.md §2). Two prompts that share their first tokens but not the whole kept context get no hit, and the
 newer context replaces the older one.
 
-Loading area (staged loading, `area` > 0; the scheduler's docstring). `area` blocks are held for tier reads whether
-used or not: running requests and kept contexts never use them (`hard + kept + max(area_held, area) <= capacity`, in
-`fits` and `_make_room`). A read holds its context's blocks there (`hold_read`, `area_held`) until its request is
-admitted, which takes them over (`allocate`); a read larger than the whole area starts when the area is empty, once
-kept contexts make the room. A read whose room is held only by kept contexts not yet written below waits
+In-flight read area (staged loading, `area` > 0; the scheduler's docstring). `area` blocks are held for tier reads in
+progress whether used or not: running requests, landed reads and kept contexts never use them
+(`hard + landed_held + kept + max(area_held, area) <= capacity`, in `fits` and `_make_room`). A read holds its
+context's blocks there (`hold_read`, `area_held`) while it runs; a read larger than the whole area starts when the
+area is empty, once kept contexts make the room. When it lands (`read_landed`) its blocks leave the area and become
+ordinary pinned HBM (`landed_held`, counted like running requests, never evicted) until its request is admitted,
+which takes them over (`allocate`). A read whose room is held only by kept contexts not yet written below waits
 (`area_waits`), never an admission.
 
 Accounting. `blocks` (the real pool): a request costs blocks_for(prompt), a kept session the same. `tokens` (replay
@@ -183,8 +185,10 @@ class KvManager:
         # it is told about kept, taken-over and evicted contexts and decides which kept context may be evicted now.
         self.lower = None
         self.area = 0                                  # loading area in blocks (staged loading), held for reads
-        self.area_held = 0                             # blocks the reads hold in it
+        self.area_held = 0                             # blocks the reads in flight hold in it
+        self.landed_held = 0                           # blocks of landed reads, pinned until admitted
         self.reads: dict[str, Allocation] = {}         # req id -> the blocks its read holds, until admitted
+        self.landed: set[str] = set()                  # req ids of landed reads
 
     @property
     def num_blocks(self) -> int:
@@ -220,8 +224,10 @@ class KvManager:
         writes (`make_room`) and the request waits. A request whose read holds blocks in the loading area takes them
         over."""
         rd = self.reads.get(req.req_id)
-        need = self.hard + self.footprint(req.num_tokens) \
-            + self.area_charge(self.area_held - (0 if rd is None else rd.num_blocks))
+        mine = 0 if rd is None else rd.num_blocks
+        landed = req.req_id in self.landed
+        need = self.hard + self.footprint(req.num_tokens) + self.landed_held - (mine if landed else 0) \
+            + self.area_charge(self.area_held - (0 if landed else mine))
         own = self.kept.get(req.session) if req.session is not None else None   # taken over (or given back) at
         own = 0 if own is None else self.kept_cost(own.tokens)                  # admission: not counted twice
         if need + self.kept_charge - own <= self.capacity:
@@ -242,7 +248,7 @@ class KvManager:
         below: their writes start (`make_room`) and the read waits."""
         assert self.accounting == "blocks" and req.req_id not in self.reads
         c = self.kept_cost(tokens)
-        base = self.hard + self.area_charge(self.area_held + c)
+        base = self.hard + self.landed_held + self.area_charge(self.area_held + c)
         if base + self.kept_charge > self.capacity:
             held = 0 if self.lower is None else self.lower.held_back()
             if base + held > self.capacity:
@@ -256,10 +262,23 @@ class KvManager:
         self.reads[req.req_id] = alloc
         return alloc
 
+    def read_landed(self, req):
+        """The request's read landed: its blocks leave the in-flight area and stay pinned until admission; kept
+        contexts make room for them where they can (the area is then whole again)."""
+        c = self.reads[req.req_id].num_blocks
+        self.area_held -= c
+        self.landed_held += c
+        self.landed.add(req.req_id)
+        self._make_room(0)
+
     def drop_read(self, req):
-        """Give back what the request's read holds in the loading area (a read that could not start)."""
+        """Give back what the request's read holds (a read that could not start)."""
         alloc = self.reads.pop(req.req_id)
-        self.area_held -= alloc.num_blocks
+        if req.req_id in self.landed:
+            self.landed.discard(req.req_id)
+            self.landed_held -= alloc.num_blocks
+        else:
+            self.area_held -= alloc.num_blocks
         self.pool.give(alloc.kv_blocks + alloc.state_blocks)
 
     # --- pins: a kept context a tier write copies from ------------------------------------------------------------
@@ -365,8 +384,12 @@ class KvManager:
         evicted_before = self.stats["evicted_sessions"]
         info = {"hit_kind": "none_first_round", "kept_tokens": 0, "common_prefix_tokens": None}
         rd = self.reads.pop(req.req_id, None)
-        if rd is not None:                              # its read landed in the loading area: it takes the blocks
-            self.area_held -= rd.num_blocks
+        if rd is not None:                              # its read landed: it takes the blocks
+            if req.req_id in self.landed:
+                self.landed.discard(req.req_id)
+                self.landed_held -= rd.num_blocks
+            else:
+                self.area_held -= rd.num_blocks
             info["hit_kind"] = "tier"
             if k is not None:                           # a shorter kept context the read superseded
                 self._unkeep(k)
@@ -430,7 +453,7 @@ class KvManager:
     def _make_room(self, blocks_needed: int):
         """Evict kept sessions, least recently used first, until the hard charge fits and `blocks_needed` blocks are
         free."""
-        while self.kept and (self.hard + self.kept_charge + self.area_charge() > self.capacity
+        while self.kept and (self.hard + self.landed_held + self.kept_charge + self.area_charge() > self.capacity
                              or (not self.pool.virtual and self.pool.num_free < blocks_needed)):
             key = next((x for x in self.kept if x not in self.pinned
                         and (self.lower is None or self.lower.evictable(x))), None)

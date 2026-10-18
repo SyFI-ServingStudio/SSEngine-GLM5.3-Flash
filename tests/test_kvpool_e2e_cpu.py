@@ -100,7 +100,8 @@ def test_staged_loading_end_to_end(tmp_path):
     port = free_port_block()
     cfg = {**CPU, "tiers": {"dram_gb": 7 * slot / 1e9, "ssd_gb": 1.0, "dram_read_gb_s": 5.0, "ssd_read_gb_s": 2.0,
                             "staging_gb": 0.1, "dram_writes": "hbm-evictions-exclusive",
-                            "loading_read_gb_s": 6.5 * slot / 1e9, "loading_prefill_tok_s": 8192}}
+                            "loading_read_gb_s": 6.5 * slot / 1e9, "loading_ssd_read_gb_s": 1.5 * slot / 1e9,
+                            "loading_prefill_tok_s": 8192}}
     srv = Server(tmp_path / "run", port, intake_procs=0, **cfg)
     try:
         srv.wait_ready()

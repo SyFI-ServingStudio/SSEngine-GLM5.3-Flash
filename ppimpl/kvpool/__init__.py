@@ -76,35 +76,40 @@ class BalancedKVPool:
 
     # --- staged loading -------------------------------------------------------------------------------------------
 
-    def loading_area_blocks(self, mb_tokens: int) -> int:
-        """HBM's loading area in blocks by Little's law (`TierConfig.loading_read_gb_s`): the tiers' read rate into
-        HBM x how long a read holds the area, its read time plus its wait for admission (one batch period, mb_tokens /
-        prefill tokens/s); 0 when staged loading is off."""
+    def loading_area_blocks(self, mb_tokens: int) -> tuple[int, int]:
+        """The in-flight areas by Little's law, (HBM's in blocks, DRAM's in slots): each channel's read rate into it
+        (`TierConfig.loading_read_gb_s`, `loading_ssd_read_gb_s`) x one batch period (mb_tokens / prefill tokens/s);
+        (0, 0) when staged loading is off, DRAM's 0 without DRAM and SSD."""
         c = self.cfg
         if c.loading_read_gb_s is None:
-            return 0
+            return 0, 0
         if not self.manager.slot_mode or not c.loading_prefill_tok_s:
             raise ValueError("staged loading needs slot mode and tiers.loading_prefill_tok_s")
-        hold_s = c.loading_read_s + mb_tokens / c.loading_prefill_tok_s
-        return math.ceil(c.loading_read_gb_s * 1e9 * hold_s / c.slot_bytes)
+        period_s = mb_tokens / c.loading_prefill_tok_s
+        hbm = math.ceil(c.loading_read_gb_s * 1e9 * period_s / c.slot_bytes)
+        if not self.manager.has_dram_area_tier():
+            return hbm, 0
+        if c.loading_ssd_read_gb_s is None:
+            raise ValueError("staged loading with DRAM and SSD needs tiers.loading_ssd_read_gb_s")
+        return hbm, math.ceil(c.loading_ssd_read_gb_s * 1e9 * period_s / c.slot_bytes)
 
     def set_loading_area(self, kv, mb_tokens: int) -> int:
-        """Stage loads (engine/scheduler.py): HBM's loading area in `kv` (`KvManager.area`), the same fraction of DRAM
-        with an SSD behind it, and each level's write-ahead reserve: what it frees in one batch period, the area plus
-        one microbatch's footprint. Returns the area in blocks (0: off)."""
-        area = self.loading_area_blocks(mb_tokens)
+        """Stage loads (engine/scheduler.py): HBM's in-flight area in `kv` (`KvManager.area`), DRAM's with an SSD
+        behind it, and each level's write-ahead reserve: what it frees in one batch period, its area plus one
+        microbatch's footprint. Returns HBM's area in blocks (0: off)."""
+        area, dram = self.loading_area_blocks(mb_tokens)
         if not area:
             return 0
-        fraction = area / kv.capacity
-        if not 0 < fraction < 0.5:
-            raise ValueError(f"loading area {area} blocks = {fraction:.1%} of HBM's {kv.capacity}: must be in (0, 50%)")
+        if not 0 < area / kv.capacity < 0.5:
+            raise ValueError(f"loading area {area} blocks = {area / kv.capacity:.1%} of HBM's {kv.capacity}: "
+                             "must be in (0, 50%)")
         kv.area = area
-        self.manager.set_dram_area(fraction)
-        reserve = area + blocks_for(mb_tokens)
         if self.hbm is not None and self.hbm.wb is not None:
-            self.hbm.wb.reserve = reserve
+            self.hbm.wb.reserve = area + blocks_for(mb_tokens)
+        if dram:
+            self.manager.set_dram_area(dram)
         for wb in self.manager.wb.values():
-            wb.reserve = reserve * self.cfg.slot_bytes
+            wb.reserve = (dram + blocks_for(mb_tokens)) * self.cfg.slot_bytes
         return area
 
     def dram_area_fits(self, tokens: int) -> bool | None:
@@ -218,7 +223,7 @@ class HbmLevel:
         return self.kv.capacity
 
     def fixed(self) -> float:
-        return self.kv.hard + self.kv.area_charge()     # running and held requests, the loading area
+        return self.kv.hard + self.kv.landed_held + self.kv.area_charge()   # running, landed reads, in-flight area
 
     def lru(self):
         return iter(self.kv.kept)

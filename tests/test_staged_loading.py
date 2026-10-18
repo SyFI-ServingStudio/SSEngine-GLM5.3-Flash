@@ -1,5 +1,5 @@
-"""Staged loading (ppimpl/engine/scheduler.py "Staged loading"; ServingStudioSim pp-staged): pending -> loading ->
-ready -> batch, one test per invariant. HBM is a KvManager of a few dozen blocks; a context of one block costs 7
+"""Staged loading (ppimpl/engine/scheduler.py "Staged loading", loading rule B; ServingStudioSim pp-staged): pending
+-> loading -> ready -> batch, one test per invariant. HBM is a KvManager of a few dozen blocks; a context of one block costs 7
 (1 KV + 6 state blocks), in DRAM/SSD 2 slots (1 KV + 1 state). Ops are completed by hand (`op_done`)."""
 
 import math
@@ -16,11 +16,13 @@ MB = 8192
 EXCL = "hbm-evictions-exclusive"
 
 
-def cfg(area=14, dram=0.020, ssd=0.100, **kw):
-    """`area` HBM blocks: the read rate is `area` slots per batch period (mb_tokens at mb_tokens/s: 1 s)."""
+def cfg(area=14, dram_area=7, dram=0.030, ssd=0.100, **kw):
+    """In-flight areas of `area` HBM blocks and `dram_area` DRAM slots: the read rates are that many slots per batch
+    period (mb_tokens at mb_tokens/s: 1 s)."""
     return TierConfig(dram_gb=dram, ssd_gb=ssd, slot_bytes=SLOT, state_slots=1, staging_gb=0.010,
                       dram_read_gb_s=10.0, ssd_read_gb_s=1.0, dram_writes=EXCL,
-                      loading_read_gb_s=area * SLOT / 1e9, loading_prefill_tok_s=MB, **kw)
+                      loading_read_gb_s=area * SLOT / 1e9, loading_ssd_read_gb_s=None if dram_area is None else dram_area * SLOT / 1e9,
+                      loading_prefill_tok_s=MB, **kw)
 
 
 def sched(blocks=60, force_ms=None, **kw):
@@ -78,18 +80,19 @@ def run_mb(s, now=0):
 
 # --- 6: the area by Little's law -----------------------------------------------------------------------------------
 
-def test_area_is_read_rate_times_the_hold_time():
-    """Little's law: read rate x (read time + one batch period until admission)."""
-    s, kv, pool, t = sched(area=14)
-    assert s.staged and kv.area == 14
+def test_area_is_channel_read_rate_times_one_batch_period():
+    """Little's law: each in-flight area is its channel's read rate x one batch period."""
+    s, kv, pool, t = sched(area=14, dram_area=7)
+    assert s.staged and kv.area == 14 and t.tiers[0].area == 7
     c = pool.cfg
     assert kv.area == math.ceil(c.loading_read_gb_s * 1e9 * MB / c.loading_prefill_tok_s / SLOT)
-    s2, kv2, *_ = sched(area=14, loading_read_s=0.5)                       # reads take half a batch period
-    assert kv2.area == 21
-    assert t.tiers[0].area == math.ceil(14 / 60 * t.tiers[0].num_slots)     # the same fraction of DRAM
+    assert t.tiers[0].area == math.ceil(c.loading_ssd_read_gb_s * 1e9 * MB / c.loading_prefill_tok_s / SLOT)
     assert pool.hbm.wb.reserve == 14 + blocks_for(MB)                      # write-ahead: one batch period's room
+    assert s.ready_bound == 4 * MB                                         # pp_size x max_batch_tokens
     with pytest.raises(ValueError):
         sched(area=30)                                                     # half of HBM: not a loading area
+    with pytest.raises(ValueError):
+        sched(dram_area=None)                                            # DRAM + SSD: DRAM's rate is needed
     off = Scheduler(KvManager(60, keep_sessions=True), SchedulerConfig(mb_tokens=MB),
                     BalancedKVPool(TierConfig(dram_gb=0.02, ssd_gb=None, slot_bytes=SLOT)))
     assert not off.staged and off.kv.area == 0
@@ -145,10 +148,11 @@ def test_reads_start_in_order_and_stop_at_the_first_that_does_not_fit():
     reads = sent(pool)
     assert [o.req_id for o in reads] == [rs[0].req_id] and kv.area_held == 7
     assert rs[1].load_phase is None and rs[2].load_phase is None
-    done(s, reads)
-    assert run_mb(s) is not None and rs[0].req_id in kv.held   # 1 admitted: area free; 2 starts, 3 does not fit
+    done(s, reads)                                      # 1 lands: the area is free at once; 2 starts, 3 does not fit
+    s.load(0)
     reads = sent(pool)
     assert [o.req_id for o in reads] == [rs[1].req_id] and rs[2].load_phase is None and kv.area_held == 8
+    assert rs[0] in s.landed and rs[0].req_id not in kv.held
 
 
 def test_read_larger_than_the_area_starts_when_it_is_empty():
@@ -164,9 +168,9 @@ def test_read_larger_than_the_area_starts_when_it_is_empty():
     s._load_dirty = True
     s.load(0)
     assert not sent(pool)                               # the area is not empty: b waits
-    s.op_done(next(iter(t.in_flight)), 0)
-    run_mb(s)                                           # a admitted: the area is empty; b starts
-    assert [o.req_id for o in sent(pool)] == [b.req_id] and kv.area_held == 18
+    s.op_done(next(iter(t.in_flight)), 0)               # a lands: the area is empty; b starts
+    s.load(0)
+    assert [o.req_id for o in sent(pool)] == [b.req_id] and kv.area_held == 18 and a in s.landed
 
 
 # --- 3: only rounds whose context is all in HBM join a batch; rereads ----------------------------------------------
@@ -206,9 +210,9 @@ def test_a_round_ready_in_hbm_whose_context_is_evicted_is_read_again():
 # --- 4: SSD reads land in DRAM's area, hop to HBM's; a full DRAM area stalls the SSD queue -------------------------
 
 def test_ssd_read_lands_in_the_dram_area_then_hops_to_hbm():
-    s, kv, pool, t = sched(blocks=60, area=14, dram=0.030)
+    s, kv, pool, t = sched(blocks=60, area=14, dram_area=7)
     d = t.tiers[0]
-    assert d.area == 7                                  # 14/60 of 30 slots
+    assert d.area == 7
     put(t, 1, 2 * B, "ssd")
     s.add(r := rnd(1, 2 * B + 1, 10), 0)
     s.load(0)
@@ -221,14 +225,14 @@ def test_ssd_read_lands_in_the_dram_area_then_hops_to_hbm():
     assert kv.area_held == 8 and r.load_phase == "hop" and r.fetch_land_ns == 10
     assert 1 in t.tiers[1].entries                     # SSD stays inclusive
     done(s, [h], 20)
-    assert d.area_used == 0 and kv.area_held == 8       # DRAM's area back; HBM's held until admission (5)
+    assert d.area_used == 0 and kv.area_held == 0 and kv.landed_held == 8   # both areas back at landing
     mb = run_mb(s)
-    assert mb[0].req is r and mb[0].start == 2 * B and kv.area_held == 0
+    assert mb[0].req is r and mb[0].start == 2 * B and kv.landed_held == 0
     assert t.tiers[0].stats["hops"] == 1
 
 
 def test_a_full_dram_area_stalls_the_ssd_queue_without_bypass():
-    s, kv, pool, t = sched(blocks=60, area=14, dram=0.030)    # DRAM area 7 slots
+    s, kv, pool, t = sched(blocks=60, area=14, dram_area=7)
     put(t, 1, 5 * B, "ssd")                             # 6 slots
     put(t, 2, 2 * B, "ssd")                             # 3 slots: does not fit beside 1's
     put(t, 3, B)                                        # a DRAM read: HBM's area has room
@@ -242,8 +246,7 @@ def test_a_full_dram_area_stalls_the_ssd_queue_without_bypass():
     assert b.load_phase is None                         # waits for DRAM's area; not read straight into HBM
     done(s, [ops[0]])                                   # a's fetch lands; its hop (11 blocks) waits for c's 7
     assert not sent(pool) and a.load_phase == "hop_wait"
-    done(s, [ops[1]])
-    run_mb(s)                                           # c admitted: HBM's area empty, a hops
+    done(s, [ops[1]])                                   # c lands: HBM's area empty, a hops
     (h,) = sent(pool)
     assert h.req_id == a.req_id and t.tiers[0].area_used == 6
     done(s, [h])                                        # DRAM's area back: b's fetch starts
@@ -251,20 +254,49 @@ def test_a_full_dram_area_stalls_the_ssd_queue_without_bypass():
     assert [o.op for o in sent(pool)] == ["fetch"] and b.load_phase == "fetch"
 
 
-# --- 5: the area is held until admission -----------------------------------------------------------------------------
+# --- 5: the area is released at landing; landed data is pinned HBM until admission; the ready bound -----------------
 
-def test_area_is_held_until_the_round_is_admitted():
+def test_landed_read_leaves_the_area_and_stays_pinned_until_admission():
     s, kv, pool, t = sched(blocks=60, area=14)
     put(t, 1, B)
     s.add(r := rnd(1, B + 1, 10), 0)
     s.load(0)
     done(s, sent(pool))
-    assert r in s.landed and kv.area_held == 7 and r.req_id in kv.reads
+    assert r in s.landed and kv.area_held == 0 and kv.landed_held == 7 and r.req_id in kv.reads
+    assert pool.hbm.fixed() == kv.landed_held + kv.area     # counted in HBM's occupancy
+    s.add(c := rnd(5, 0, 100), 0)                       # kept contexts are evicted around it, never it
     s.on_stage0 = 5                                     # stage 0 busy: nothing forms
-    assert s.next_microbatch(0) is None and kv.area_held == 7
+    assert s.next_microbatch(0) is None and kv.landed_held == 7
     s.on_stage0 = 0
     run_mb(s)
-    assert kv.area_held == 0 and r.req_id in kv.held and not kv.reads
+    assert kv.landed_held == 0 and r.req_id in kv.held and not kv.reads
+
+
+def test_reads_stop_while_the_ready_set_holds_a_pipeline_of_work():
+    """New reads start only while the landed rounds' fresh tokens are below pp_size x max_batch_tokens."""
+    s, kv, pool, t = sched(blocks=200, area=40, dram=0.100)
+    s.cfg.order = "fifo"
+    rs = []
+    for k in range(1, 4):
+        put(t, k, B)
+        rs.append(rnd(k, B + 1, 2 * MB, arrival=k))     # 2 x MB fresh tokens each
+    for r in rs:
+        s.add(r, 0)
+    s.load(0)
+    first = sent(pool)
+    assert [o.req_id for o in first] == [r.req_id for r in rs]   # ready set empty: all start (area 21 of 40)
+    done(s, first[:2])                                  # 2 land: 4 x MB of fresh work ready
+    assert s.ready_fresh() == 4 * MB
+    put(t, 9, B)
+    s.add(late := rnd(9, B + 1, 10, arrival=9), 0)
+    s.load(0)
+    assert late.load_phase is None and s.stats["ready_stops"] >= 1   # the bound stops it, the area has room
+    done(s, first[2:])
+    while s.ready_fresh() >= 4 * MB:                    # admission drains the ready set below the bound
+        assert late.load_phase is None
+        run_mb(s)
+    s.load(0)
+    assert late.load_phase == "read"
 
 
 # --- 7: force-schedule covers loading rounds -------------------------------------------------------------------------

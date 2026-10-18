@@ -244,7 +244,8 @@ class Controller:
         info = {"slot_bytes": tc.slot_bytes, "state_slots": tc.state_slots,
                 "slots": {x.name: x.num_slots for x in m.tiers}, "staging_slots": m.staging.num_slots,
                 "write_ahead": {"hbm": tc.hbm_write_ahead, "dram": tc.dram_write_ahead}, "dram_writes": tc.dram_writes,
-                "loading": {"read_gb_s": tc.loading_read_gb_s, "prefill_tok_s": tc.loading_prefill_tok_s}}
+                "loading": {"read_gb_s": tc.loading_read_gb_s, "ssd_read_gb_s": tc.loading_ssd_read_gb_s,
+                            "prefill_tok_s": tc.loading_prefill_tok_s}}
         (self.run_dir / "tiers.json").write_text(json.dumps(info) + "\n")
         print("tiers: " + json.dumps(info), flush=True)
         return pool
