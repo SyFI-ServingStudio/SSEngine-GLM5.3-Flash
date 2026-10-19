@@ -1,169 +1,505 @@
-# pp-impl: GLM-5.3-Flash NVFP4 · PP4 on B200, real implementation
+# ppimpl
 
-Implements the sim-to-real handoff `glm53_flash_pp4_b200_v2` (ServingStudioSim commit `5153041a`,
-`doc/handoff/glm53_flash_pp4_b200_v2/`), the frozen handoff in use; v2 replaces `glm53_flash_pp4_b200_v1`
-(frozen `7bb224a6`) with the whole-context prefix-hit rule, its session targets and a refit microbatch fit. The
-handoff's README, contract and milestone files 2–7 are the specification; its `data/` holds the targets
-(`bench/common.py` `HANDOFF`: `third_party/handoff`, or `PPIMPL_HANDOFF`).
+A pipeline-parallel prefill server for GLM-5.3-Flash NVFP4 on 4×B200 with HBM, DRAM and SSD KV-cache tiers.
 
-## Provenance (fixed before any code)
+ppimpl serves one model, [`nvidia/GLM-5.3-Flash-NVFP4`](https://huggingface.co/nvidia/GLM-5.3-Flash-NVFP4), as
+4 pipeline stages on 4 NVIDIA B200 GPUs. Its exact prefix cache keeps whole sessions' context (KV and KDA state) in
+HBM. Two optional tiers sit behind HBM: pinned host DRAM and NVMe SSD. The server is OpenAI-compatible
+(`/v1/completions`, `/v1/chat/completions`). The design was chosen and sized with the
+[ServingStudio](https://github.com/SyFI-ServingStudio/ServingStudioSim) simulator.
 
-1. **Engine provenance: hybrid.** Our own small engine (scheduler, KV/prefix cache, DRAM/SSD tiers, pipeline
-   runtime, server). Kernels and model-layer code are reused from the vLLM fork (`servingstudio-alignment` line,
-   commit `892da0822f`, `vllm/models/glm5next`), imported as a library. Where a stage needs different behavior (the
-   stage split, the mHC hand-off between stages, the kernel choices of `2_kernels.md`) `ppimpl/model/pp_patch.py`
-   overrides it at run time; its docstring lists every override, why, and the test that proves it still applies.
-2. **Runtime dependencies:** PyTorch, the vLLM fork as a kernel/layer library (its custom ops, FlashInfer, DeepGEMM,
-   DeepSelect, TileLang, causal-conv1d as it pins them), safetensors, Uvicorn (the server is a bare ASGI app), pyzmq +
-   msgspec (control messages), torch.distributed gloo (barriers; activations go over CUDA IPC, `ppimpl/runtime/README.md`). Nothing else without a note in this file.
-3. **Model execution** is owned by `ppimpl` (one process per stage, our forward loop); no vLLM engine,
-   scheduler, model runner or KV-cache manager runs.
-4. **Attention backends:** DSA = DeepGEMM `fp8_mqa_logits` + top-k + FlashInfer TRTLLM sparse MLA; KDA = FlashInfer
-   `recurrent_kda` (cute-dsl persistent); per `2_kernels.md`.
-5. **Existing serving engines in execution:** none in the serving path. vLLM serves only as the separate
-   correctness reference (`1_contract.md` §4, TP4 + EP).
+> [!IMPORTANT]
+> **Prefill and one output token only.** The engine has no decode path. Each request returns exactly one token,
+> picked greedily: `max_tokens` must be 1, and sampling parameters are ignored. ppimpl is meant to be the prefill
+> side of a deployment whose decode runs elsewhere, or to measure time to first token (TTFT).
 
-Goal: small codebase, maximum reuse.
+**Contents:** [Results](#results) · [Features](#features) · [Quick start](#quick-start) ·
+[Configuration](#configuration) · [API](#api) · [Docker](#docker) · [Performance](#performance) ·
+[Architecture](#architecture) · [Development](#development) · [Reproduce](#reproduce) ·
+[Troubleshooting](#troubleshooting) · [License](#license)
 
-## Layout
+## Results
+
+The M6 session workload is a closed loop of 400 concurrent sessions replaying the TraceLab v3 session trace for
+20 minutes. The numbers below count requests whose first token comes in minutes 10–20. All systems ran on 4×B200
+nodes of the same cluster, with the same client (req-frontend) and the same trace. TTFT is the time from submit to
+first token.
+
+| System (4×B200) | KV storage per GPU | Requests/s | TTFT p50 / p90 / p99 (s) |
+|---|---|---|---|
+| **ppimpl**, PP4, full setting | HBM ~100 GB + DRAM 50 GB + SSD 128 GB | **40.51** | **0.61 / 1.52 / 60.43** |
+| vLLM DP4/EP4 + vllm-router `cache_aware` | HBM only | 4.64 | 48.31 / 148.23 / 212.89 |
+| vLLM TP4 | HBM only | 1.17 | 319.95 / 344.78 / 349.48 |
+
+The vLLM runs use the same vLLM fork whose kernels ppimpl uses (`892da0822f`). With vLLM's CPU offload at 50 GB per
+engine, DP4/EP4 gives 4.37 r/s in the same window. Every setting and window is in
+[measured/eval_m6/summary.md](measured/eval_m6/summary.md), with N = 100 and 300, a simulator column, and the
+smaller-HBM settings. The baselines' setup is in [measured/vllm_dpep/summary.md](measured/vllm_dpep/summary.md).
+
+## Features
+
+- **Pipeline parallelism over 4 GPUs.** Layers are split 12/11/11/11. Activations move between stages over CUDA IPC
+  by the copy engine. Microbatches up to 8,192 tokens replay CUDA graphs.
+- **Exact prefix cache.** Sessions are kept whole and evicted least recently used first. A context resumes only where
+  both its KV and its KDA (linear-attention) state are saved.
+- **KV tiers behind HBM.** Every GPU stores and moves a quarter of every context ("balanced storage"):
+  - DRAM: pinned memory on the GPU's NUMA node.
+  - SSD: O_DIRECT through io_uring.
+  - HBM evictions are written to DRAM and DRAM evictions to SSD (a victim chain).
+  - Tier reads land in a reserved 10% loading area of HBM.
+- **Scheduler.** It forms microbatches of up to 32,768 tokens, shortest remaining prefill first. Landed tier reads
+  go first, and so does any request that has waited 60 s.
+- **OpenAI-compatible server.** Completions and chat completions, with streaming. Prompts are text or token ids.
+  Chat uses the checkpoint's own chat template. HTTP runs in 16 intake processes, and each response reports the
+  prompt tokens served from cache.
+- **Kernels reused, not copied.** Model layers and kernels come from a vLLM fork, used as a library: FlashInfer,
+  DeepGEMM, DeepSelect, TileLang, causal-conv1d. No vLLM engine, scheduler or KV manager runs.
+
+### Supported hardware and model
+
+| | Supported | Tested |
+|---|---|---|
+| Model | `nvidia/GLM-5.3-Flash-NVFP4` (`Glm5NextForConditionalGeneration`, NVFP4). Any other model is refused at start. | revision `da920bb0b9f4a06727223a349e55468e38352348` (~191 GB) |
+| GPUs | 4 × B200 in one NVLink domain | HGX B200, every pair NV18 ([measured/setup.md](measured/setup.md)) |
+| Driver / CUDA | driver ≥ 580, CUDA 13.0 | 580.178.04 |
+| OS | Linux x86_64 | Ubuntu 24.04 (the image); [measured/setup.md](measured/setup.md) has the host |
+| SSD tier | a local file system on NVMe that supports O_DIRECT | md RAID0 of 8 NVMe |
+
+## Quick start
+
+### With Docker
+
+Build the image from the repo root. The build needs no GPU, takes about 10 minutes, and makes a 16.6 GB image.
+Then serve:
+
+<!-- lane-docker-jit: the `docker compose -f docker/compose.yaml up` one-liner goes here, ahead of `docker run`. -->
+
+```bash
+docker build -f docker/Dockerfile -t ppimpl .
+docker run --gpus all --ipc=host -p 8000:8000 \
+  -v ~/.cache/huggingface:/root/.cache/huggingface \
+  -v ppimpl-cache:/root/.cache \
+  ppimpl
+```
+
+With no arguments, the image runs `ppimpl serve`, which serves `nvidia/GLM-5.3-Flash-NVFP4` with HBM only. If the
+weights are not in the mounted Hugging Face cache, they are downloaded first (~191 GB). Options after the image
+name go to `ppimpl serve`: `docker run ... ppimpl --dram-gb 50` runs `ppimpl serve --dram-gb 50`.
+
+The first start compiles FlashInfer's JIT kernels and takes 11–16 minutes. The `ppimpl-cache` volume keeps those
+kernels, so later starts are ready in about 50 seconds. See [Docker](#docker) for GPU selection, tiers and logs.
+
+<!-- lane-docker-jit: note here that the image ships the JIT kernels (first start without compiling). -->
+
+### From source
+
+You need:
+
+- 4 × B200 and NVIDIA driver ≥ 580.
+- The CUDA 13 toolkit, with `nvcc` at `$CUDA_HOME` (default `/usr/local/cuda`). It builds causal-conv1d and
+  FlashInfer's JIT kernels.
+- `git`, `curl`, `liburing2` (the SSD tier), `/usr/bin/ninja` (Ubuntu `ninja-build`, for FlashInfer's JIT), `g++`
+  and [uv](https://docs.astral.sh/uv/).
+- A normal user account: `make_env.sh` refuses to run as root.
+- A `TMPDIR` of at most 64 characters (see [Troubleshooting](#troubleshooting)).
+
+```bash
+STEPS="venv vllm conv1d check" env/make_env.sh             # .venv + third_party/vllm; ~10 min (causal-conv1d build)
+uv pip install --python .venv/bin/python --no-deps -e .    # the `ppimpl` command
+
+# optional: fetch the weights ahead of the first start (otherwise `ppimpl serve` downloads them)
+.venv/bin/hf download nvidia/GLM-5.3-Flash-NVFP4 --revision da920bb0b9f4a06727223a349e55468e38352348
+
+.venv/bin/ppimpl serve                                     # port 8000, HBM only
+```
+
+`env/make_env.sh` builds the pinned environment from public sources and checks it with `env/check_env.py`. Its
+versions are in [ENV.md](ENV.md). The weights go into the Hugging Face cache (`HF_HOME`, default
+`~/.cache/huggingface`). `ppimpl serve` also takes a local checkpoint directory: `ppimpl serve /path/to/checkpoint`.
+
+### Send requests
+
+`GET /health` returns 200 once all four stages are ready, and 503 before that:
+
+```bash
+curl -i localhost:8000/health
+```
+
+```bash
+curl localhost:8000/v1/models
+```
+```json
+{"object":"list","data":[{"id":"nvidia/GLM-5.3-Flash-NVFP4","object":"model","created":1792395419,"owned_by":"ppimpl",
+ "root":"/root/.cache/huggingface/hub/models--nvidia--GLM-5.3-Flash-NVFP4/snapshots/da920bb0b9f4a06727223a349e55468e38352348",
+ "parent":null,"max_model_len":1048576}]}
+```
+
+```bash
+curl localhost:8000/v1/completions -H 'Content-Type: application/json' \
+  -d '{"model": "nvidia/GLM-5.3-Flash-NVFP4", "prompt": "The capital of France is", "max_tokens": 1}'
+```
+```json
+{"id":"cmpl-04c74e7cc0254e2995b45eca422e895b","created":1792395424,"model":"nvidia/GLM-5.3-Flash-NVFP4",
+ "object":"text_completion","choices":[{"index":0,"text":" Paris","logprobs":null,"finish_reason":"length"}],
+ "usage":{"prompt_tokens":5,"completion_tokens":1,"total_tokens":6,"prompt_tokens_details":{"cached_tokens":0}}}
+```
+
+```bash
+curl localhost:8000/v1/chat/completions -H 'Content-Type: application/json' \
+  -d '{"messages": [{"role": "user", "content": "What is 2+2? Answer with one digit."}],
+       "chat_template_kwargs": {"reasoning_effort": "low"}}'
+```
+```json
+{"id":"chatcmpl-d7041c92b679491ab1b02c0df76fb580","created":1792395425,"model":"nvidia/GLM-5.3-Flash-NVFP4",
+ "object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"4"},"logprobs":null,
+ "finish_reason":"length"}],"usage":{"prompt_tokens":24,"completion_tokens":1,"total_tokens":25,
+ "prompt_tokens_details":{"cached_tokens":0}}}
+```
+
+These responses come from the image's GPU smoke test (`bench/slurm/docker_smoke.sbatch`), which serves with
+`--served-model-name glm53-flash`. Here they are shown with the default model name. The `openai` Python client
+works too: point `base_url` at `http://localhost:8000/v1`.
+
+## Configuration
+
+### Serve options
+
+`ppimpl serve [<model>] [options]` (`ppimpl serve --help`). By default it runs the design setting of the M6
+evaluation ("st10"):
+
+- the scheduler of step `good`;
+- the exact prefix cache;
+- with a tier: exclusive DRAM writes (DRAM holds only what HBM evicted) and a 10% HBM loading area.
+
+| Option | Default | Meaning |
+|---|---|---|
+| `<model>` | `nvidia/GLM-5.3-Flash-NVFP4` | Hugging Face repo id or local checkpoint directory; only this model is accepted |
+| `--revision` | `da920bb0b9` (for the default model) | Hugging Face revision |
+| `--host`, `--port` | `0.0.0.0`, `8000` | HTTP address. The engine also uses the next 11 ports (`port+1` … `port+11`) on 127.0.0.1 |
+| `--served-model-name` | `<model>` as given | the model name of the API |
+| `--max-model-len` | 1,048,576 | longest prompt + 1; also capped by what the KV pool holds |
+| `--dram-gb` | no DRAM tier | DRAM tier per GPU, in GB (pinned host memory) |
+| `--ssd-gb` | no SSD tier | SSD tier per GPU, in GB; must equal the shard size of the shard set |
+| `--ssd-dir` | `$PPIMPL_SSD_DIR` | directory of the SSD shard sets |
+| `--run-dir` | `./run` | logs: `server.log`, `worker*.log`, `server_config.yaml`, `microbatches.jsonl`, … |
+| `--config YAML` | — | any `RunConfig` field (below), applied on top of the design setting; command-line options win. Name the model with it (see below) |
+
+**Any engine field through `--config`.** The YAML may set any field of `RunConfig` or of its nested
+`TierConfig` / `SchedulerConfig` ([ppimpl/config.py](ppimpl/config.py)). Unknown fields are refused. For example,
+to cap HBM's KV pool:
+
+```yaml
+# hbm20.yaml: HBM pool capped at 12,220,800 tokens (~20 GB of KV per GPU)
+pool_tokens: 12220800
+```
+
+```bash
+ppimpl serve nvidia/GLM-5.3-Flash-NVFP4 --config hbm20.yaml --dram-gb 20 --ssd-gb 128 --ssd-dir /nvme/ppimpl
+```
+
+With `--config`, name the model. `ppimpl serve --config run.yaml` without a model takes the whole run config from
+the YAML instead of the design setting, and refuses `--revision` and the tier options. The bench harnesses run it
+that way.
+
+### Memory tiers
+
+<!-- lane-docker-jit: the compose variant of the tier example (PPIMPL_ARGS / PPIMPL_SSD_DIR) goes here. -->
+
+```bash
+ppimpl serve --dram-gb 50                                            # HBM + DRAM
+ppimpl serve --dram-gb 50 --ssd-gb 128 --ssd-dir /nvme/ppimpl       # HBM + DRAM + SSD
+```
+
+**DRAM.** `--dram-gb G` pins G GB of host memory per GPU on that GPU's NUMA node: 4 × G GB in total, plus room for
+the server's own processes.
+
+**SSD.** The SSD tier reads and writes preallocated shard files and never creates or resizes them. Make a shard set
+once, on a local NVMe file system:
+
+```bash
+python -m ppimpl.kvpool.shards create --dir /nvme/ppimpl --gb 128   # set0/shard{0..3}.bin, 128 GB each
+python -m ppimpl.kvpool.shards list --dir /nvme/ppimpl              # sizes, and whether a server holds each set
+```
+
+- `--gb` must equal the server's `--ssd-gb`. A set with a missing shard or one of another size stops the start.
+  `--force` rewrites shards at a new size.
+- A server locks the first free set for as long as it runs. To run two servers on one 8-GPU host (GPUs 0–3 and 4–7),
+  make two sets with `--sets 2`. Give the second server other GPUs and a port block that does not overlap:
+
+  ```bash
+  CUDA_VISIBLE_DEVICES=4,5,6,7 ppimpl serve --port 8100 --dram-gb 50 --ssd-gb 128 --ssd-dir /nvme/ppimpl
+  ```
+
+- Shard contents are never trusted across runs: every run starts with an empty index.
+
+**Sizing.** Measured on the M6 workload (v3 session trace):
+
+| Setting (per GPU) | HBM KV | DRAM | SSD | N = 400, minutes 10–20 |
+|---|---|---|---|---|
+| full | full pool, 61.26M tokens (~100 GB) | 50 GB | 128 GB | 40.51 r/s, 94% of reused contexts from HBM |
+| tiers | 12.2M tokens (~20 GB) | 20 GB | 128 GB | 37.66 r/s, 47% from SSD |
+| ssdheavy | 7.6M tokens (12.5 GB) | 12.5 GB | 128 GB | 36.71 r/s, 77% from SSD |
+| HBM only | full pool | — | — | 12.97 r/s: contexts are lost and recomputed |
+
+Source: [measured/eval_m6/summary.md](measured/eval_m6/summary.md).
+
+- **Without SSD, HBM + DRAM must hold the peak retained context.** On the v3 trace at N = 400 the peak is about
+  65M tokens. In a simulator scan, every N = 400 configuration with HBM + DRAM ≤ 57M tokens collapsed within
+  20 minutes: hits fall and the GPUs spend their time recomputing. 62.3M and 65.3M held. Two real runs agree:
+  25 GB HBM + 50 GB DRAM (48.6M tokens) collapsed, and 25 GB HBM + 75 GB DRAM (65.3M tokens) held. The eval's 20/20
+  and 12.5/12.5 GB sizes collapse without SSD by minute 4–8. See
+  [measured/v3_dram_only_collapse.md](measured/v3_dram_only_collapse.md).
+- **With an SSD tier, 8-hour runs are stable in the simulator.** The runs use DRAM 150 GB per GPU and an 8 TB SSD
+  tier, at 1,438–2,500 concurrent sessions, and model a decode that runs elsewhere. The hit rate stays at
+  99.2–99.4%. The SSD holds at most 56% of its capacity after 8 h and never evicts. With DRAM 150 GB and no SSD,
+  every configuration of the deployed rules collapses to under 1 r/s. See
+  [measured/v3_8h_steady.md](measured/v3_8h_steady.md). The real engine has run 20-minute workloads, not 8 hours.
+
+## API
+
+| Endpoint | Body |
+|---|---|
+| `GET /health` | 200 when ready, 503 while starting or after a failure |
+| `GET /v1/models` | the one served model, with `max_model_len` |
+| `POST /v1/completions` | `prompt`: a string or a list of token ids (no batch of prompts) |
+| `POST /v1/chat/completions` | `messages`, rendered by the checkpoint's chat template; `tools` and `chat_template_kwargs` are passed to the template |
+| `POST /inference/v1/generate` | req-frontend's token endpoint: `{"token_ids": [...], "sampling_params": {...}, "stream": ...}` |
+
+Limits:
+
+- **One output token**, greedy:
+  - `max_tokens` (or `max_completion_tokens`) must be 1 or absent; any other value is a 400.
+  - `temperature`, `top_p` and the other sampling fields are accepted and ignored.
+  - `finish_reason` is `stop` when the token is an end-of-sequence token, else `length`.
+- **Refused with 400:** `n` > 1, `echo`, `logprobs`, an empty prompt, a token id outside the vocabulary, and a
+  prompt longer than `max_model_len` - 1.
+- **Wrong model name:** a `model` other than the served name is a 404. Leaving `model` out is allowed.
+- **Streaming:** `"stream": true` sends one chunk, then a usage chunk if `stream_options.include_usage`, then
+  `data: [DONE]`.
+- **Usage:** `usage.prompt_tokens_details.cached_tokens` is the number of prompt tokens served from the prefix cache
+  or a tier.
+- **Errors** use OpenAI's shape: `{"error": {"message", "type", "param", "code"}}`.
+
+## Docker
+
+`docker/Dockerfile` builds the serving environment of [ENV.md](ENV.md) on `nvidia/cuda:13.0.2-devel-ubuntu24.04`,
+running `env/make_env.sh` with `STEPS="venv vllm conv1d"`, and installs ppimpl in `/opt/ppimpl`. The benchmark-only
+parts (ServingStudioSim, req-frontend, enwik9) are left out. `--build-arg MAX_JOBS=N` sets the number of parallel
+nvcc jobs for the causal-conv1d build (default 16). The entry point (`docker/entrypoint`) works as follows:
+
+| Command | Runs |
+|---|---|
+| `<image>` (no arguments), or `<image> --option ...` | `ppimpl serve [options]` |
+| `<image> serve [<model>] [options]` | `ppimpl serve` |
+| `<image> check-env` | `env/check_env.py`; needs no GPU |
+| `<image> <command>` | the command as is, e.g. `bash` or `python -m ppimpl.kvpool.shards ...` |
+
+<!-- lane-docker-jit: JIT prebake / GPU seed notes and `docker compose -f docker/compose.yaml up` go here. -->
+
+- **GPUs.** `--gpus all` needs exactly 4 B200 in one NVLink domain. On a larger host, name four:
+  `--gpus '"device=0,1,2,3"'`.
+- **`--ipc=host`.** The stages pass activations over CUDA IPC, and the intake processes share prompts through
+  `/dev/shm`.
+- **Caches.** The `ppimpl-cache` volume at `/root/.cache` keeps the JIT and autotune caches (FlashInfer, Triton,
+  TileLang, DeepGEMM). Without it, every container compiles them again (11–16 min). The host's Hugging Face cache is
+  mounted over `/root/.cache/huggingface`.
+- **Tiers.** Run with `--ulimit memlock=-1`. The DRAM tier pins host memory, and the SSD tier registers that memory
+  with io_uring, which counts against the memlock limit (8 MB by default under the Docker 29 we tested).
+  - The SSD tier also needs io_uring, which Docker's default seccomp profile denies since Docker 25. Run with
+    `--security-opt seccomp=docker/seccomp.json`: Docker's default profile plus the three io_uring syscalls
+    (`docker/make_seccomp.py` writes it).
+  - Mount the shard directory and create a set once:
+
+  ```bash
+  docker run --rm -v /nvme/ppimpl:/ssd ppimpl python -m ppimpl.kvpool.shards create --dir /ssd --gb 128
+  docker run --gpus all --ipc=host -p 8000:8000 --ulimit memlock=-1 \
+    --security-opt seccomp=docker/seccomp.json \
+    -v ~/.cache/huggingface:/root/.cache/huggingface -v ppimpl-cache:/root/.cache -v /nvme/ppimpl:/ssd \
+    ppimpl --dram-gb 50 --ssd-gb 128 --ssd-dir /ssd
+  ```
+
+  The tiers have not been measured inside a container yet. The GPU smoke test, `bench/slurm/docker_smoke.sbatch`,
+  serves HBM only.
+- **Logs** go to `/workspace/run`; mount `-v $PWD/run:/workspace/run` to keep them.
+
+## Performance
+
+| Document | What it measures |
+|---|---|
+| [measured/eval_m6/summary.md](measured/eval_m6/summary.md) | **The evaluation.** ppimpl vs the simulator vs vLLM DP4/EP4 and TP4 at N = 100/300/400, every tier setting, and ablations |
+| [measured/vllm_dpep/summary.md](measured/vllm_dpep/summary.md) | The vLLM baselines: flags, router, per-run rows |
+| [measured/v3_dram_only_collapse.md](measured/v3_dram_only_collapse.md) | HBM + DRAM without SSD: when the prefix cache collapses (simulator scan + 2 real runs) |
+| [measured/v3_8h_steady.md](measured/v3_8h_steady.md) | 8-hour steady state with and without SSD (simulator) |
+| [measured/kda_ckpt_k_recompute_v3.md](measured/kda_ckpt_k_recompute_v3.md) | Extra prefill from keeping 1, 2 or 4 KDA states per context (simulator) |
+| [measured/iteration.md](measured/iteration.md) | Single requests, 1k–128k tokens, vs the simulator's targets |
+| [measured/prefix_cache.md](measured/prefix_cache.md) | Prefix cache and chunked prefill |
+| [measured/scheduler.md](measured/scheduler.md) | The scheduler |
+| [measured/kernels.md](measured/kernels.md), [measured/kernels_identity.md](measured/kernels_identity.md), [measured/kernels_nodecheck.md](measured/kernels_nodecheck.md) | Kernel timings and call-path identity against the profiler rows |
+| [measured/reference.md](measured/reference.md), [measured/kvaudit.md](measured/kvaudit.md) | Correctness against vLLM TP4: first tokens and KV/state contents |
+| [measured/setup.md](measured/setup.md) | The node and software the measurements ran on |
+| [measured/issues.md](measured/issues.md) | Known gaps from the design targets |
+
+## Architecture
+
+```
+ clients ──HTTP :8000──▶ 16 intake processes ──zmq──▶ controller
+                                                      scheduler · prefix cache · KV pool · tier index
+                                                          │ microbatch plans        ▲ reports
+                                                          ▼                         │
+                         GPU 0: stage 0 ─▶ GPU 1: stage 1 ─▶ GPU 2: stage 2 ─▶ GPU 3: stage 3
+                         (activations over CUDA IPC; each GPU stores and moves 1/4 of every context
+                          to and from its own DRAM and SSD tiers)
+```
+
+- **Controller.** It owns scheduling, the prefix cache, the KV page pool and the tier index, and sends each stage
+  its microbatch plans.
+- **Stage workers.** Each one builds its layers of the model from the vLLM fork's `Glm5Next` modules and runs them
+  inside vLLM's forward context. Block tables and state slots come from the controller.
+  [ppimpl/model/pp_patch.py](ppimpl/model/pp_patch.py) lists every runtime override of the fork, with the reason
+  for each and the test that checks it.
+- **Tiers** live in [ppimpl/kvpool/](ppimpl/kvpool/). DRAM reads and writes are copy-engine batches. SSD I/O uses
+  io_uring with the host arenas as fixed buffers.
+
+Design documents:
+
+- [PLAN.md](PLAN.md): the reuse boundary, process model and file structure.
+- [ppimpl/runtime/README.md](ppimpl/runtime/README.md): the runtime and transport.
+- [TIERS.md](TIERS.md): the tier design.
+- The design follows the ServingStudio sim-to-real handoff `glm53_flash_pp4_b200_v2`
+  (ServingStudioSim `doc/handoff/glm53_flash_pp4_b200_v2/` at `5153041a`). Its milestone files (`1_contract.md` …
+  `7_offloading.md`) are the specification the code and `measured/` refer to.
+
+## Project layout
 
 | Path | Content |
 |---|---|
-| `ppimpl/` | the engine: `config.py`, `model/` (one stage on the vLLM fork), `runtime/` (controller, workers, transport), `engine/` (scheduler, KV), `kvpool/` (DRAM/SSD tiers behind HBM, TIERS.md §13), `serve/` (HTTP) |
-| `bench/` | harnesses that run the handoff's milestones and write `measured/` (`python -m bench.<name>`); `bench/slurm/` the job scripts |
-| `env/` | `make_env.sh` builds the environment, `check_env.py` checks it; versions in `ENV.md` |
-| `tests/` | `pytest -q` runs the CPU tests; `-m gpu` the GPU tests |
-| `measured/` | measurements in the handoff's `measured/` format; `issues.md` is the gap log |
-| `lanes/` | per-lane git worktrees (ignored) |
-| `old-wt/` | retired lane worktrees and snapshots, kept with their branches (ignored) |
+| `ppimpl/config.py` | `RunConfig`, `TierConfig`, `SchedulerConfig`: every engine setting |
+| `ppimpl/serve/` | the CLI (`launch.py`), HTTP intake, OpenAI endpoints |
+| `ppimpl/runtime/` | controller, stage workers, transport, dispatch |
+| `ppimpl/engine/` | scheduler, KV pool and prefix cache |
+| `ppimpl/kvpool/` | DRAM and SSD tiers, the SSD shard files |
+| `ppimpl/model/` | one pipeline stage on the vLLM fork, and the patches to it |
+| `bench/` | benchmark and measurement harnesses (`python -m bench.<name>`); `bench/slurm/` holds the job scripts |
+| `env/` | `make_env.sh`, `check_env.py`, `requirements.lock` |
+| `docker/` | Dockerfile, entry point, seccomp profile |
+| `tests/` | CPU tests, plus GPU tests (`-m gpu`) |
+| `measured/` | measurement results |
+
+## Development
+
+```bash
+CUDA_VISIBLE_DEVICES="" .venv/bin/python -m pytest -q          # CPU tests: scheduler, KV, tiers, server on a fake model
+```
+
+- The CPU tests run the server end to end on a fake model. Hiding the GPUs keeps them off any GPU.
+- `test_req_frontend_cpu` (in `tests/test_e2e_cpu.py`) drives the server with req-frontend's `session_runner`.
+  It is skipped until that binary exists in `build/req-frontend/release/`. The first bench run builds it, which
+  needs the bench environment (`STEPS="client" env/make_env.sh`) and `cargo`.
+- The GPU tests need 4 GPUs: `.venv/bin/python -m pytest -q -m gpu`, through Slurm where there is one.
 
 ## Reproduce
 
-**Hardware and system.** One node with 4 × NVIDIA B200 in one NVLink domain (measured on HGX B200, every pair NV18),
-driver 580 or newer (measured: 580.178.04), the CUDA 13 toolkit (nvcc, for the causal-conv1d build), git, curl,
-unzip, [uv](https://docs.astral.sh/uv/), `cargo` (req-frontend), about 200 GB of disk for the weights. Slurm is
-optional: the job scripts also run with `bash`. `measured/setup.md` records the node the measurements ran on.
-
-**Environment** (`ENV.md` has the versions and sources). As the normal user, never as root:
+The evaluation needs the serving environment and the bench parts:
 
 ```bash
-env/make_env.sh            # .venv and third_party/ in this tree, from public sources; ends with env/check_env.py
+env/make_env.sh        # all steps: serving env + ServingStudioSim + req-frontend + enwik9 + check
+
+# the handoff (traces, targets, microbatch fit) at its frozen commit; make_env.sh does not place it
+mkdir -p third_party/handoff_src
+git -C third_party/ServingStudioSim archive 5153041a doc/handoff/glm53_flash_pp4_b200_v2 | tar -x -C third_party/handoff_src
+ln -s handoff_src/doc/handoff/glm53_flash_pp4_b200_v2 third_party/handoff
 ```
 
-**Weights.** `nvidia/GLM-5.3-Flash-NVFP4` at revision `da920bb0b9f4a06727223a349e55468e38352348` (public, ~191 GB),
-into the Hugging Face cache:
-
-```bash
-export HF_HOME=/path/to/hf          # default ~/.cache/huggingface
-.venv/bin/hf download nvidia/GLM-5.3-Flash-NVFP4 --revision da920bb0b9f4a06727223a349e55468e38352348
-```
+This also needs `unzip` and `cargo`: req-frontend's `session_runner` is built on first use. About 200 GB of disk
+holds the weights. Slurm is optional, since the job scripts also run with `bash`. `measured/setup.md` records the
+node.
 
 **Settings.** Every path has a default; set a variable only to point elsewhere.
 
 | Variable | Default | What |
 |---|---|---|
 | `PPIMPL_CHECKPOINT` | the snapshot above under `$HF_HOME/hub` | the checkpoint directory |
-| `PPIMPL_SIM` | `third_party/ServingStudioSim` | ServingStudioSim at `820adda0`: the handoff and req-frontend |
+| `PPIMPL_HANDOFF` | `third_party/handoff` | the handoff directory: `doc/handoff/glm53_flash_pp4_b200_v2` of ServingStudioSim at `5153041a` (traces, targets, microbatch fit) |
+| `PPIMPL_SIM` | `third_party/ServingStudioSim` | ServingStudioSim at `820adda0` |
 | `PPIMPL_ENWIK9` | `third_party/enwik9` | the prompt corpus |
-| `PPIMPL_PYTHON` | `.venv/bin/python` | the interpreter the job scripts use |
+| `PPIMPL_REQ_FRONTEND` | `third_party/req-frontend` | req-frontend at `8723d90` or later. Its `session_runner` is built into `build/req-frontend/release/` and rebuilt when the commit changes |
+| `PPIMPL_PYTHON` | `.venv/bin/python` | the interpreter of the job scripts |
 | `PPIMPL_TMP` | `$TMPDIR`, else `/tmp` | parent of each job's short `TMPDIR` |
-| `PPIMPL_REQ_FRONTEND` | `third_party/req-frontend` | req-frontend's checkout at 8723d90 or later (the session slot release; a run fails on an older or modified checkout). Its `session_runner` is built into `build/req-frontend/release/` on first use and rebuilt when the checkout's commit changes; `run.json` records its source, commit and sha256 |
+| `PPIMPL_SSD_DIR` | `<main tree>/tmp/ssd_tier` (job scripts) | the SSD shard sets |
 | `PPIMPL_FI_TACTICS` | `ppimpl/data/flashinfer_tactics_b200.json` | the tuned FlashInfer tactics (`bench/tune_tactics.py`) |
 
-**Run one milestone check end to end**: M3 (`4_iteration.md`), one 1k-token request through the 4-stage server,
-driven by req-frontend, compared with the handoff's targets:
+**One request end to end.** This is the M3 check: one 1k-token request through the 4-stage server, driven by
+req-frontend and compared with the handoff's targets.
 
 ```bash
-.venv/bin/python -m pytest -q                       # CPU tests (scheduler, KV, tiers, protocol, server on a fake model)
 mkdir -p measured/logs
 RUNS=one_1k sbatch -p <partition> --time=00:20:00 -o measured/logs/%j.out bench/slurm/runs.sbatch
 #   without Slurm, on GPUs 0-3:  RUNS=one_1k bash bench/slurm/runs.sbatch
 .venv/bin/python -m bench.report --summarize measured/runs_m3 --out measured    # measured/iteration.md
 ```
 
-The run directory `measured/runs_m3/one_1k/` holds the server and client logs, `metrics.json` and `report.json`.
-Model correctness against vLLM TP4 at the same prompt: `sbatch -p <partition> --time=00:30:00 --gres=gpu:4 -o
-measured/logs/%j.out bench/slurm/chain.sbatch "chain vllm"`. The other milestones have their job scripts in
-`bench/slurm/`, each with its usage at the top.
-
-## Serve
-
-`ppimpl serve [<model>]` starts the server the way `vllm serve <model>` does (`ppimpl/serve/launch.py`). `<model>`
-defaults to `nvidia/GLM-5.3-Flash-NVFP4`, so `ppimpl serve` alone serves it; it can also be
-a Hugging Face repo id or a local checkpoint directory, and only one model is served: `nvidia/GLM-5.3-Flash-NVFP4`
-(`Glm5NextForConditionalGeneration`, NVFP4) as 4 pipeline stages on 4 GPUs. Any other model is refused from its
-`config.json` before anything else is downloaded. A repo id is fetched into the Hugging Face cache (`HF_HOME`) on
-first use (~191 GB), at the revision above unless `--revision` says otherwise.
+**The M6 evaluation.** One run per job (`bench/slurm/m6.sbatch`, usage at its top). The trace is the TraceLab v3
+session trace `sessions_2ps_v3.csv`, which is not in this repository. `m6.sbatch` reads its targets from
+`third_party/handoff_v2_realistic` (the v2 handoff with regenerated targets) unless `PPIMPL_HANDOFF` is set:
 
 ```bash
-uv pip install --python .venv/bin/python --no-deps -e .   # once: the `ppimpl` command (or .venv/bin/python -m ppimpl)
-ppimpl serve                                                                 # nvidia/GLM-5.3-Flash-NVFP4, HBM only
-ppimpl serve /path/to/checkpoint                                             # the same model from a local directory
-ppimpl serve --dram-gb 50 --ssd-gb 128 --ssd-dir /nvme/ppimpl   # with DRAM and SSD tiers
+python -m ppimpl.kvpool.shards create --dir $PPIMPL_SSD_DIR --gb 128       # once
+sbatch -p <partition> --time=00:30:00 --mem=400G -o measured/runs_m6/slurm/%j.out bench/slurm/m6.sbatch \
+  sched_good_n400 --trace <sessions_2ps_v3.csv> --dram-gb 50 --ssd-gb 128 \
+  --tier dram_writes=hbm-evictions-exclusive --tier loading_area=0.10 --run-name st10_full_n400
+python measured/eval_m6/eval_table.py real:full=measured/runs_m6/st10_full_n400   # numpy + pyarrow; not in .venv
 ```
 
-The run config is the design setting of the M6 evaluation (`measured/eval_m6/summary.md`, "st10"): scheduler step
-`good` (6_scheduler.md), the exact prefix cache (`keep_sessions`) and, with a tier, exclusive DRAM writes and a 10%
-loading area (TIERS.md). The options:
+The vLLM baselines use `bench/slurm/vllm_dpep.sbatch`, with its usage at the top. Correctness against vLLM TP4:
+`sbatch -p <partition> --time=00:30:00 --gres=gpu:4 -o measured/logs/%j.out bench/slurm/chain.sbatch "chain vllm"`.
+The other milestones each have a job script in `bench/slurm/`, with its usage at the top.
 
-| Option | Config (`ppimpl/config.py`) | Default |
-|---|---|---|
-| `<model>` | `checkpoint` (the snapshot directory), after the model check | — |
-| `--host`, `--port` | `host`, `port` (the engine also takes the next 11 ports on 127.0.0.1) | 0.0.0.0, 8000 |
-| `--served-model-name` | `served_model_name`: the OpenAI API's model name | `<model>` as given |
-| `--max-model-len` | `max_model_len`: longest prompt + output the API takes | 1,048,576 (the model's) |
-| `--dram-gb`, `--ssd-gb` | `tiers.dram_gb`, `tiers.ssd_gb` per GPU; either one turns tiers on | no tiers |
-| `--ssd-dir` | `tiers.ssd_dir`: the SSD shard sets, made once with `python -m ppimpl.kvpool.shards create --dir DIR --gb <ssd-gb>` (TIERS.md §5) | `$PPIMPL_SSD_DIR` |
-| `--run-dir` | `run_dir`: logs (`server_config.yaml`, `microbatches.jsonl`, `worker*.log`, ...) | `./run` |
-| `--config YAML` | any `RunConfig` field, applied on top of the design setting; the options above win | — |
+## Troubleshooting
 
-`python -m ppimpl serve --config <yaml>` without a model still takes the whole run config from the YAML (bench/).
+**The first start takes 11–16 minutes.** FlashInfer compiles its JIT kernels into `~/.cache/flashinfer` and
+downloads trtllm-gen cubins from NVIDIA, which needs network access. Later starts reuse the cache: about 50 s in
+Docker and 65 s natively. In Docker, mount a volume at `/root/.cache` or every container compiles again. On a host,
+use `/usr/bin/ninja`: processes that share the cache but use another ninja rebuild every object, and `check_env.py`
+warns about this.
 
-The endpoints: `GET /health`, `GET /v1/models`, `POST /v1/completions` (a string or token-id prompt),
-`POST /v1/chat/completions` (the checkpoint's chat template; `tools` and `chat_template_kwargs` pass through), and
-req-frontend's `POST /inference/v1/generate`. **The engine computes prefill and one output token** (greedy; PLAN.md §1:
-no decode path), so `max_tokens` must be 1 (the default here); sampling fields are ignored, and `n` > 1, `echo` and
-`logprobs` are refused. The usage block reports the prompt tokens served from the prefix cache
-(`prompt_tokens_details.cached_tokens`). The first start compiles FlashInfer's JIT kernels into `~/.cache` (minutes);
-later starts reuse them.
+**`io_uring_setup` / `io_uring_register_buffers` fails (EPERM, ENOMEM).** Only the SSD tier uses io_uring.
+- Docker 25 and later deny it by default: add `--security-opt seccomp=docker/seccomp.json`.
+- ENOMEM in a container is the memlock limit: add `--ulimit memlock=-1`.
+- On a host, `sysctl kernel.io_uring_disabled` must be 0, or 1 with your user in `kernel.io_uring_group`.
 
-## Docker
+**The DRAM tier fails to pin memory.** Check that the host has 4 × `--dram-gb` GB free, plus room for the server's
+processes, and that no container or job memory limit is lower than that. In a container, also add
+`--ulimit memlock=-1`.
 
-`docker/Dockerfile` builds the serving environment of `ENV.md` (`env/make_env.sh` with `STEPS="venv vllm conv1d"`:
-CUDA 13.0 devel on Ubuntu 24.04, uv's Python 3.12, `env/requirements.lock`, the vLLM fork, causal-conv1d built from
-source) with this repo installed; the bench-only parts (ServingStudioSim, req-frontend, enwik9) are not in it. Build
-from the repo root (CPU only, ~10 min, 8 of them the causal-conv1d build; the image is 16.6 GB; `--build-arg MAX_JOBS=N` sets the causal-conv1d build's parallel nvcc jobs,
-default 16):
+**`TMPDIR ... is over 64 characters`, or zmq "File name too long".** vLLM's zmq IPC path is `TMPDIR` plus a UUID and
+must fit in 107 characters. Use a short `TMPDIR`, such as `/tmp`.
 
-```bash
-docker build -f docker/Dockerfile -t ppimpl .
-docker run --rm ppimpl check-env                  # env/check_env.py, no GPU needed
-```
+**`SSD shard set ...: shards ... the run needs 4 shards of N B`.** The shard size differs from `--ssd-gb`, or a shard
+is missing. Recreate the set with the matching `--gb` (`--force` rewrites existing shards). **`every SSD shard set ...
+is in use`**: another server holds every set. Create another set with `--sets K`.
 
-Run it as `vllm/vllm-openai` is run, with the subcommand first:
+**Address already in use.** The server uses `--port` and the next 11 ports. Pick a port block that is free for all 12.
 
-```bash
-docker run --gpus all --ipc=host -p 8000:8000 \
-  -v ~/.cache/huggingface:/root/.cache/huggingface \
-  -v ppimpl-cache:/root/.cache \
-  ppimpl serve --served-model-name glm53-flash
+**`unsupported model`.** Only `nvidia/GLM-5.3-Flash-NVFP4` is served; the check reads `config.json` before anything
+else is downloaded.
 
-curl localhost:8000/health
-curl localhost:8000/v1/completions -H 'Content-Type: application/json' \
-  -d '{"model": "glm53-flash", "prompt": "The capital of France is", "max_tokens": 1}'
-```
+**`max_tokens 16: this engine computes prefill and one output token`.** By design: see the note at the top.
 
-- `--gpus`: 4 B200 in one NVLink domain; with more on the host, name four: `--gpus '"device=0,1,2,3"'`.
-- `--ipc=host`: the stages pass activations over CUDA IPC and the intake processes share prompts through `/dev/shm`.
-- `ppimpl-cache` keeps the JIT and autotune caches (FlashInfer, Triton, TileLang, DeepGEMM) across containers: the
-  first start compiles FlashInfer's JIT kernels and is ready after 11-16 min, later ones after ~50 s (jobs 8495, 8512,
-  8517; natively 65 s). Without the volume every start compiles again. The weights' cache is the host's, mounted over `/root/.cache/huggingface`.
-- Tiers: `--dram-gb 50` pins that much host memory per GPU. The SSD tier reads and writes through io_uring, which
-  Docker's default seccomp profile denies: run with `--security-opt seccomp=docker/seccomp.json` (the default profile
-  plus the three io_uring syscalls; `docker/make_seccomp.py` writes it). Mount a directory for the shards and make its
-  shard set once: `docker run --rm -v /nvme/ppimpl:/ssd ppimpl python -m ppimpl.kvpool.shards create --dir /ssd --gb
-  128`, then serve with `-v /nvme/ppimpl:/ssd ... --ssd-gb 128 --ssd-dir /ssd`. (The tiers in a container are not
-  measured yet; the GPU smoke test, `bench/slurm/docker_smoke.sbatch`, runs HBM only.)
-- Logs go to `/workspace/run` in the container (`-v $PWD/run:/workspace/run` keeps them). `TMPDIR` is `/tmp`: vLLM's zmq
-  ipc path is `TMPDIR` + a uuid and must fit in 107 characters, so the entry point refuses a `TMPDIR` over 64.
-- `<image> <command>` runs any other command (`bash`, `python -m ...`).
+## Acknowledgements
+
+ppimpl builds on:
+
+- [vLLM](https://github.com/vllm-project/vllm), through the fork
+  [serendipity-zk/vllm](https://github.com/serendipity-zk/vllm) (branch `servingstudio-alignment`): model layers,
+  weight loading, attention metadata, custom ops.
+- [FlashInfer](https://github.com/flashinfer-ai/flashinfer): MoE, FP4 GEMM, sparse MLA and KDA kernels. Its
+  `_split_heads` search is ported to C++ in `ppimpl/native/kda_split_heads.cpp`.
+- [DeepGEMM](https://github.com/deepseek-ai/DeepGEMM) and [TileLang](https://github.com/tile-ai/tilelang).
+- [causal-conv1d](https://github.com/Dao-AILab/causal-conv1d).
+- [req-frontend (request-factory)](https://github.com/uw-syfi/request-factory): the benchmark client.
+- [ServingStudioSim](https://github.com/SyFI-ServingStudio/ServingStudioSim): the simulator that set the design,
+  its targets and the kernel profiler. It is under its own license.
+
+## License
+
+Apache License 2.0; see [LICENSE](LICENSE). Third-party components keep their own licenses.
