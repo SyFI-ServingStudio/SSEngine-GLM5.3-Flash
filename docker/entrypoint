@@ -1,0 +1,18 @@
+#!/bin/bash
+# The image's entry point (docker/Dockerfile), like vllm/vllm-openai's but with the subcommand:
+#   <image> serve <model> [options]     the server (`ppimpl serve --help`); any other ppimpl subcommand too
+#   <image> check-env                   env/check_env.py (no GPU needed)
+#   <image> <command> [args]            anything else runs as is (bash, python -m ppimpl.kvpool.shards create ...)
+set -euo pipefail
+# vLLM's zmq ipc path is TMPDIR + "/" + a uuid and must fit in 107 characters (ENV.md)
+export TMPDIR=${TMPDIR:-/tmp}
+if (( ${#TMPDIR} > 64 )); then echo "TMPDIR $TMPDIR is over 64 characters (vLLM's zmq ipc path)" >&2; exit 1; fi
+mkdir -p "$TMPDIR"
+case "${1:-}" in
+  ""|-h|--help|serve|worker|intake) exec ppimpl "$@" ;;
+  check-env)   # without --gpus there is no libcuda.so.1: the toolkit's stub lets the extensions load (no kernel runs)
+    shift
+    ldconfig -p | grep -q 'libcuda\.so\.1 ' || export LD_LIBRARY_PATH=/opt/cuda-stub${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+    exec python /opt/ppimpl/env/check_env.py "$@" ;;
+  *) exec "$@" ;;
+esac
