@@ -1,0 +1,36 @@
+ppimpl
+Copyright 2026 the ppimpl authors
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+Files derived from ServingStudioSim
+-----------------------------------
+The following files are derived from ServingStudioSim
+(https://github.com/SyFI-ServingStudio/ServingStudioSim): from its sim-to-real handoff
+glm53_flash_pp4_b200_v1/v2 (doc/handoff/) or from its simulator's outputs. The ServingStudioSim
+copyright holders make these files available under the Apache License, Version 2.0, as part of
+this product:
+
+  - bench/prefix.py: the window-metric functions (real_arrays, sim_arrays, window_metrics), ported
+    from the handoff's data/metrics.py
+  - bench/sim_rounds.py: the run export, using the columns and filter of the handoff's
+    data/metrics.py
+  - bench/targets_ext/*: prefix_targets_ext.py is a parameterized copy of the handoff's
+    data/prefix_targets.py, make_prefix_ext.py follows its data/bringup/make_bringup.py, and the
+    .csv/.json files are traces and simulator targets made with them
+  - ppimpl/data/topk_rows.json: rows of the handoff's data/kernel_specs.jsonl
+  - measured/sessions_sim/*: per-round exports of the simulator runs behind the handoff's targets
+  - measured/victim_chain_rows.jsonl: simulator rows of the run 20261017_7_victim_chain
+
+ServingStudioSim itself is not part of this product and remains under its own license (PolyForm
+Noncommercial License 1.0.0 or PolyForm Internal Use License 1.0.0).
+
+Other third-party material
+--------------------------
+  - ppimpl/native/kda_split_heads.cpp is a C++ port of the `_split_heads` search in FlashInfer
+    (flashinfer/kda_kernels/persistent/forward.py, https://github.com/flashinfer-ai/flashinfer),
+    licensed under the Apache License, Version 2.0.
+  - docker/seccomp.json is Docker's default seccomp profile from moby
+    (https://github.com/moby/moby, vendor/github.com/moby/profiles/seccomp/default.json at
+    3d80467678f6e36325fa9ae3dd486fe91e5652e3), licensed under the Apache License, Version 2.0,
+    with the three io_uring syscalls added by docker/make_seccomp.py.

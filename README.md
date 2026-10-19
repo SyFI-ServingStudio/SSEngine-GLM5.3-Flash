@@ -503,4 +503,6 @@ ppimpl builds on:
 
 ## License
 
-Apache License 2.0; see [LICENSE](LICENSE). Third-party components keep their own licenses.
+Apache License 2.0; see [LICENSE](LICENSE). [NOTICE](NOTICE) lists the files derived from ServingStudioSim, which its
+copyright holders make available under Apache-2.0 here, and the FlashInfer and moby material. ServingStudioSim itself
+and the other dependencies keep their own licenses.

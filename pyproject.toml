@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "GLM-5.3-Flash NVFP4 as a 4-stage pipeline on 4xB200 (handoff glm53_flash_pp4_b200_v2)"
 requires-python = ">=3.12"
 license = "Apache-2.0"
-license-files = ["LICENSE"]
+license-files = ["LICENSE", "NOTICE"]
 # torch and the vLLM fork come from the shared env (.venv); see README.md, Architecture.
 dependencies = ["uvicorn", "uvloop", "httptools", "msgspec", "pyzmq", "pyyaml", "numpy"]
 

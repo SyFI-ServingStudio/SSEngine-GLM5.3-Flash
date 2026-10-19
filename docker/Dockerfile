@@ -32,7 +32,7 @@ RUN --mount=type=cache,target=/root/.cache/uv STEPS=vllm env/make_env.sh && rm -
 RUN --mount=type=cache,target=/root/.cache/uv STEPS=conv1d MAX_JOBS=$MAX_JOBS env/make_env.sh \
  && rm -rf third_party/downloads third_party/wheels
 
-COPY pyproject.toml README.md ENV.md LICENSE ./
+COPY pyproject.toml README.md ENV.md LICENSE NOTICE ./
 COPY env/check_env.py env/
 COPY ppimpl ppimpl
 COPY docker/entrypoint docker/entrypoint
