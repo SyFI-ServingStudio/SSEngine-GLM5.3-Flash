@@ -447,7 +447,8 @@ python -m ppimpl.kvpool.shards create --dir $PPIMPL_SSD_DIR --gb 128       # onc
 sbatch -p <partition> --time=00:30:00 --mem=400G -o measured/runs_m6/slurm/%j.out bench/slurm/m6.sbatch \
   sched_good_n400 --trace <sessions_2ps_v3.csv> --dram-gb 50 --ssd-gb 128 \
   --tier dram_writes=hbm-evictions-exclusive --tier loading_area=0.10 --run-name st10_full_n400
-python measured/eval_m6/eval_table.py real:full=measured/runs_m6/st10_full_n400   # numpy + pyarrow; not in .venv
+uv pip install --python .venv/bin/python pyarrow                            # once: eval_table.py reads parquet
+.venv/bin/python measured/eval_m6/eval_table.py real:full=measured/runs_m6/st10_full_n400
 ```
 
 The vLLM baselines use `bench/slurm/vllm_dpep.sbatch`, with its usage at the top. Correctness against vLLM TP4:
