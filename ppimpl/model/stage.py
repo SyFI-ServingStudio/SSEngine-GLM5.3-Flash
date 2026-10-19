@@ -37,7 +37,8 @@ import torch
 os.environ.setdefault("VLLM_USE_BREAKABLE_CUDAGRAPH", "1")
 
 from ppimpl import kernels  # noqa: E402
-from ppimpl.config import CHECKPOINT  # noqa: E402
+from ppimpl.config import CHECKPOINT, PAGE_TOKENS  # noqa: E402
+from ppimpl.engine.kv import block_pages  # noqa: E402
 from ppimpl.model import kv_tensors, pp_patch, sm_h2d  # noqa: E402
 from ppimpl.model.metadata import StageMetadata  # noqa: E402
 
@@ -288,6 +289,7 @@ class StageModel:
         self.kv = kv_tensors.allocate(vc, vc.compilation_config.static_forward_context, local_spec, num_blocks,
                                       device, ipc=ipc_kv)
         self.num_blocks = num_blocks
+        assert self.kv.page_tokens == PAGE_TOKENS, (self.kv.page_tokens, PAGE_TOKENS)   # the controller's KV pages
         self.meta = StageMetadata(vc, self.kv, device)
         self.max_tokens = max_tokens
         self.graphs: dict[int, GraphEntry] = {}
@@ -325,7 +327,7 @@ class StageModel:
 
         def chunk(rid, start, n, base):
             kv = list(range(base, base + -(-(start + n) // B)))
-            return NS(req_id=rid, start=start, num_tokens=n, kv_blocks=kv, is_last=True,
+            return NS(req_id=rid, start=start, num_tokens=n, kv_pages=block_pages(kv), is_last=True,
                       state_blocks=list(range(base + len(kv), base + len(kv) + 6)), token_ids=[1] * n)
 
         def plans():
@@ -417,7 +419,7 @@ class StageModel:
         B, base, out = self.kv.block_tokens, 1, []
         for i, (start, n) in enumerate(specs):
             nb = -(-(start + n) // B)
-            out.append(NS(req_id=f"ws{i}", start=start, num_tokens=n, kv_blocks=list(range(base, base + nb)),
+            out.append(NS(req_id=f"ws{i}", start=start, num_tokens=n, kv_pages=block_pages(range(base, base + nb)),
                           is_last=True, state_blocks=list(range(base + nb, base + nb + 6)), token_ids=[1] * n))
             base += nb + 6
         return out
@@ -554,7 +556,8 @@ class StageModel:
                                                      device=self.device)
         with torch.inference_mode():
             for Tb in buckets:
-                plan = NS(mb_id=-10, chunks=[NS(req_id="g", start=0, num_tokens=Tb, kv_blocks=[1], is_last=True,
+                plan = NS(mb_id=-10, chunks=[NS(req_id="g", start=0, num_tokens=Tb, kv_pages=block_pages([1]),
+                                                is_last=True,
                                                 state_blocks=list(range(2, 8)), token_ids=[1] * Tb)])
                 b = self.meta.build(plan, with_tokens=self.first, bucket=Tb)
                 e = GraphEntry(Tb, torch.empty_like(b.graph_rows), None if hidden is None else hidden[:Tb])

@@ -6,8 +6,8 @@ import json
 import pytest
 from bench.replay import HANDOFF
 
-from ppimpl.config import BLOCK_TOKENS, SchedulerConfig, TierConfig
-from ppimpl.engine.kv import KvManager
+from ppimpl.config import BLOCK_PAGES, BLOCK_TOKENS, SchedulerConfig, TierConfig
+from ppimpl.engine.kv import KvManager, kv_pages_for, pages_for
 from ppimpl.engine.scheduler import Request, Scheduler
 from ppimpl.kvpool import BalancedKVPool, Hit, KVViews
 from ppimpl.kvpool.manager import TierManager
@@ -215,5 +215,5 @@ def test_pool_blocks_and_read_into_held_blocks():
     pool.manager.prepare_load = lambda *a: loads.append(real(*a)) or loads[-1]
     assert s.next_microbatch(0) is None
     ((op,), _) = loads[0]
-    assert op.op == "read" and op.kv_blocks == [r.alloc.kv_blocks] and len(r.alloc.kv_blocks) == 3
-    assert kv.hard == 3 + 6 and kv.pool.num_free == 50 - 9
+    assert op.op == "read" and op.kv_pages == [r.alloc.kv_pages] and len(r.alloc.kv_pages) == kv_pages_for(r.num_tokens)
+    assert kv.hard == pages_for(r.num_tokens) and kv.pool.num_free == 50 * BLOCK_PAGES - kv.hard

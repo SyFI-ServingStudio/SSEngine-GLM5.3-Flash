@@ -11,13 +11,14 @@ import msgspec
 import pytest
 import torch
 
-from ppimpl.config import BLOCK_TOKENS as B, TierConfig
+from ppimpl.config import BLOCK_PAGES as P, BLOCK_TOKENS as B, TierConfig
+from ppimpl.engine.kv import block_pages, kv_pages_for
 from ppimpl.engine.scheduler import Request
 from ppimpl.kvpool import BalancedKVPool, KVViews, shards
 from ppimpl.kvpool.member import PoolMember, tier_move
 from ppimpl.kvpool.placement import BalancedPlacement
 from ppimpl.runtime.transport import TierBatch, decode_tier, encode
-from test_kvpool_placement import block_bytes, stages
+from test_kvpool_placement import block_bytes, scattered, stages
 
 
 def members(nslots: int | None = 40, ssd_slots: int | None = None, staging_slots: int = 0, ssd_dir=None, **ring):
@@ -78,19 +79,20 @@ def test_write_evict_read_back_is_byte_equal_and_growth_moves_only_new_blocks(ri
     assert pool.manager.tiers[0].num_slots == 40
     tokens = 2 * B + 77
     r0 = Request("s_r0", tokens, session="s", token_ids=None)
-    a0 = KVViews([3, 7, 1], [2, 4, 6, 8, 9, 10], tokens)
-    want = block_bytes(views, ranges, a0.kv_blocks, a0.state_blocks)
+    a0 = KVViews(block_pages([3, 7, 1])[:kv_pages_for(tokens)], [2, 4, 6, 8, 9, 10], tokens)
+    want = block_bytes(views, ranges, a0.kv_pages, a0.state_blocks)
     h = pool.write_back("s", tokens, None, a0)                    # HBM lets it go: DRAM is its victim tier
     ops = pool.ready_ops()
     assert [o.op for o in ops] == ["write"] and h.ops == {ops[0].op_id}
     moved = run(mems, ops)
     st = sum(r.nbytes for r in ranges if r.kind == "state")
     kv = sum(r.nbytes for r in ranges if r.kind == "kv")
-    assert sum(moved[ops[0].op_id]) == 3 * kv + st                 # the four quarters: every byte once
+    assert sum(moved[ops[0].op_id]) == 2 * kv + kv // P + st        # the four quarters: every page's byte once
     assert pool.complete(ops[0].op_id, 0) == (ops[0], h) and h.done()
     scramble(views)                                                # HBM lost the context
     r1 = Request("s_r1", tokens + 50, session="s", prefix_tokens=tokens)
-    a1 = KVViews([5, 0 + 11, 2, 9], [1, 3, 5, 7, 11, 0], tokens)
+    a1 = KVViews(scattered([5, 0, 11, 2, 9], kv_pages_for(3 * B + 10), 1), [1, 3, 5, 7, 11, 0], tokens)   # pages
+                                                                   # scattered over blocks, as a packed pool has them
     hit = pool.lookup("s", r1)
     assert (hit.tier, hit.tokens) == ("dram", tokens)
     h = pool.load("s", hit, a1, 0, r1.req_id)
@@ -98,24 +100,24 @@ def test_write_evict_read_back_is_byte_equal_and_growth_moves_only_new_blocks(ri
     assert [o.op_id for o in ops] == list(h.ops) and ops[0].op == "read"
     run(mems, ops)
     assert pool.complete(ops[0].op_id, 7)[1] is h and h.t_land == 7
-    assert block_bytes(views, ranges, a1.kv_blocks[:3], a1.state_blocks) == want
-    # round 1 ends at 3 B + 10: blocks 0, 1 kept in DRAM, blocks 2, 3 and the state written
+    assert block_bytes(views, ranges, a1.kv_pages[:kv_pages_for(tokens)], a1.state_blocks) == want
+    # round 1 ends at 3 B + 10: blocks 0, 1 kept in DRAM, blocks 2 (67 pages), 3 (1 page) and the state written
     r1.num_tokens = 3 * B + 10
-    pool.write_back("s", r1.num_tokens, None, KVViews(a1.kv_blocks, a1.state_blocks, r1.num_tokens))
+    pool.write_back("s", r1.num_tokens, None, KVViews(a1.kv_pages, a1.state_blocks, r1.num_tokens))
     (w,) = pool.ready_ops()
     assert w.block_start == 2 and tier_move(w).b_lo == 2 and tier_move(w).b_hi == 4
     moved = run(mems, [w])
-    assert sum(moved[w.op_id]) == 2 * kv + st
+    assert sum(moved[w.op_id]) == kv + kv // P + st
     pool.complete(w.op_id, 0)
-    want = block_bytes(views, ranges, a1.kv_blocks, a1.state_blocks)
+    want = block_bytes(views, ranges, a1.kv_pages, a1.state_blocks)
     scramble(views)
     r2 = Request("s_r2", 3 * B + 99, session="s", prefix_tokens=3 * B + 10)
-    a2 = KVViews([8, 6, 4, 10], [6, 5, 4, 3, 2, 1], 3 * B + 10)
+    a2 = KVViews(block_pages([8, 6, 4, 10])[:kv_pages_for(3 * B + 99)], [6, 5, 4, 3, 2, 1], 3 * B + 10)
     h = pool.load("s", pool.lookup("s", r2), a2, 0)
     (rd,) = pool.ready_ops()
     run(mems, [rd])
     pool.complete(rd.op_id, 0)
-    assert h.done() and block_bytes(views, ranges, a2.kv_blocks, a2.state_blocks) == want
+    assert h.done() and block_bytes(views, ranges, a2.kv_pages, a2.state_blocks) == want
 
 
 def drive(pool, mems):
@@ -136,7 +138,8 @@ def test_ssd_demote_and_staging_are_byte_equal(tmp_path, ring):
     back through the staging arena into other HBM blocks, Y's from DRAM. SSD only: writes and reads through the
     staging arena. Every context byte-equal; the files are deleted at close."""
     T = 2 * B - 5
-    X, Y = KVViews([1, 2], [3, 4, 5, 6, 7, 8], T), KVViews([9, 10], [0, 9, 10, 11, 1, 2], T)
+    X = KVViews(block_pages([1, 2]), [3, 4, 5, 6, 7, 8], T)
+    Y = KVViews(block_pages([9, 10]), [0, 9, 10, 11, 1, 2], T)
     for dram in (None, "one"):
         d = tmp_path / str(dram)
         ss = BalancedPlacement(stages()[1], 4, 0).state_slots
@@ -145,12 +148,13 @@ def test_ssd_demote_and_staging_are_byte_equal(tmp_path, ring):
         pool = BalancedKVPool(tc)
         want = {}
         for name, a in (("x", X), ("y", Y)):
-            want[name] = block_bytes(views, ranges, a.kv_blocks, a.state_blocks)
+            want[name] = block_bytes(views, ranges, a.kv_pages, a.state_blocks)
             pool.write_back(name, T, None, a)
             kinds = [o.op for o in drive(pool, mems)]
             assert kinds == (["write"] if dram is None or name == "x" else ["demote", "write"]), kinds
         scramble(views)
-        for name, a in (("x", KVViews([5, 6], [0, 1, 2, 3, 4, 5], T)), ("y", KVViews([7, 8], [6, 7, 8, 9, 10, 11], T))):
+        for name, a in (("x", KVViews(block_pages([5, 6]), [0, 1, 2, 3, 4, 5], T)),
+                        ("y", KVViews(block_pages([7, 8]), [6, 7, 8, 9, 10, 11], T))):
             r = Request(f"{name}1", T + 9, session=name, prefix_tokens=T)
             hit = pool.lookup(name, r)
             assert (hit.tier, hit.tokens) == ("ssd" if dram is None or name == "x" else "dram", T)
@@ -160,7 +164,7 @@ def test_ssd_demote_and_staging_are_byte_equal(tmp_path, ring):
             (rd,) = [o for o in ops if o.op_id in mine]
             assert h.done() and rd.host_tier == ("staging" if hit.tier == "ssd" else None)
             assert [o.op for o in ops] == ["read"]
-            assert block_bytes(views, ranges, a.kv_blocks, a.state_blocks) == want[name]
+            assert block_bytes(views, ranges, a.kv_pages, a.state_blocks) == want[name]
         paths = [e.ssd.path for e in mems]
         for e in mems:
             e.close()
@@ -171,7 +175,8 @@ def test_kept_ssd_file_is_never_served_stale(tmp_path):
     """A second run over the first run's shard set (same files, x's bytes still in them) starts with an empty index:
     x is found nowhere (computed again), and what it reads back is only what it wrote itself."""
     T = 2 * B - 5
-    X, Y = KVViews([1, 2], [3, 4, 5, 6, 7, 8], T), KVViews([9, 10], [0, 9, 10, 11, 1, 2], T)
+    X = KVViews(block_pages([1, 2]), [3, 4, 5, 6, 7, 8], T)
+    Y = KVViews(block_pages([9, 10]), [0, 9, 10, 11, 1, 2], T)
     views, ranges, mems, tc = members(None, 60, 30, tmp_path)
     pool = BalancedKVPool(tc)
     pool.write_back("x", T, None, X)
@@ -181,15 +186,15 @@ def test_kept_ssd_file_is_never_served_stale(tmp_path):
     views, ranges, mems, tc = members(None, 60, 30, tmp_path)         # the next run: same files
     pool = BalancedKVPool(tc)
     assert pool.lookup("x", Request("x1", T + 9, session="x", prefix_tokens=T)) is None
-    want = block_bytes(views, ranges, Y.kv_blocks, Y.state_blocks)
+    want = block_bytes(views, ranges, Y.kv_pages, Y.state_blocks)
     pool.write_back("y", T, None, Y)                                 # takes the slots x had
     drive(pool, mems)
     scramble(views)
-    a = KVViews([5, 6], [0, 1, 2, 3, 4, 5], T)
+    a = KVViews(block_pages([5, 6]), [0, 1, 2, 3, 4, 5], T)
     r = Request("y1", T + 9, session="y", prefix_tokens=T)
     pool.load("y", pool.lookup("y", r), a, 0)
     drive(pool, mems)
-    assert block_bytes(views, ranges, a.kv_blocks, a.state_blocks) == want
+    assert block_bytes(views, ranges, a.kv_pages, a.state_blocks) == want
     for e in mems:
         e.close()
 
@@ -225,21 +230,21 @@ def test_member_threads_route_dram_ops_by_direction(tmp_path):
 
     pool = BalancedKVPool(tc)
     T = 2 * B + 77
-    a = KVViews([3, 7, 1], [2, 4, 6, 8, 9, 10], T)
-    want = block_bytes(views, ranges, a.kv_blocks, a.state_blocks)
+    a = KVViews(block_pages([3, 7, 1]), [2, 4, 6, 8, 9, 10], T)
+    want = block_bytes(views, ranges, a.kv_pages[:kv_pages_for(T)], a.state_blocks)
     pool.write_back("s", T, None, a)
     ops = pool.ready_ops()
     send(ops)
     for o in ops:
         pool.complete(o.op_id, 0)
     scramble(views)
-    b = KVViews([5, 11, 2, 9], [1, 3, 5, 7, 11, 0], T)
+    b = KVViews(block_pages([5, 11, 2, 9]), [1, 3, 5, 7, 11, 0], T)
     h = pool.load("s", pool.lookup("s", Request("s_r1", T + 50, session="s", prefix_tokens=T)), b, 0)
     ops = pool.ready_ops()
     send(ops)
     for o in ops:
         pool.complete(o.op_id, 0)
-    assert h.done() and block_bytes(views, ranges, b.kv_blocks[:3], b.state_blocks) == want
+    assert h.done() and block_bytes(views, ranges, b.kv_pages[:kv_pages_for(T)], b.state_blocks) == want
     for p in pushes:
         p.send(encode(Shutdown()))
         p.close(linger=1000)

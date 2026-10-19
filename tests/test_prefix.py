@@ -2,8 +2,8 @@
 
 import pytest
 
-from ppimpl.config import BLOCK_TOKENS, STATE_BLOCKS, SchedulerConfig
-from ppimpl.engine.kv import STATE_TOKENS, KvManager, blocks_for
+from ppimpl.config import BLOCK_PAGES, BLOCK_TOKENS, PAGE_TOKENS, SchedulerConfig
+from ppimpl.engine.kv import STATE_TOKENS, KvManager, kv_pages_for, pages_for
 from ppimpl.engine.scheduler import Request, Scheduler
 
 
@@ -21,13 +21,14 @@ def serve(kv, req):
 
 
 def check_pool(kv):
-    held = sum(a.num_blocks for a in kv.held.values())
-    kept = sum(k.alloc.num_blocks for k in kv.kept.values())
-    assert held + kept + kv.pool.num_free == kv.num_blocks
-    assert kv.hard + kv.kept_charge <= kv.capacity
-    ids = [b for a in kv.held.values() for b in a.kv_blocks + a.state_blocks]
-    ids += [b for k in kv.kept.values() for b in k.alloc.kv_blocks + k.alloc.state_blocks]
-    assert len(set(ids)) == len(ids) and 0 not in ids
+    held = sum(a.num_pages for a in kv.held.values())
+    kept = sum(k.alloc.num_pages for k in kv.kept.values())
+    assert held + kept + kv.pool.num_free == kv.num_blocks * BLOCK_PAGES
+    assert kv.hard + kv.kept_charge == held + kept <= kv.capacity
+    allocs = list(kv.held.values()) + [k.alloc for k in kv.kept.values()]
+    ids = [p for a in allocs for p in a.kv_pages] + [b * BLOCK_PAGES + i for a in allocs for b in a.state_blocks
+                                                     for i in range(BLOCK_PAGES)]
+    assert len(set(ids)) == len(ids) and min(ids) >= BLOCK_PAGES
 
 
 @pytest.mark.parametrize("P,A", [(8192, 1024), (32768, 8192), (131072, 1024), (524288, 8192)])
@@ -46,12 +47,13 @@ def test_kept_blocks_move_to_the_next_round():
     r0 = rnd("r0", 1, 0, BLOCK_TOKENS + 100)
     serve(kv, r0)
     kept = kv.kept[1].alloc
-    kv_ids, state_ids = list(kept.kv_blocks), list(kept.state_blocks)
+    kv_ids, state_ids = list(kept.kv_pages), list(kept.state_blocks)
     r1 = rnd("r1", 1, BLOCK_TOKENS + 101, 3 * BLOCK_TOKENS)
     r1.cached = kv.allocate(r1)
     a = kv.held["r1"]
-    assert a.kv_blocks[:2] == kv_ids and a.state_blocks == state_ids    # same blocks: the KDA state continues in place
-    assert len(a.kv_blocks) == 5 and 1 not in kv.kept
+    assert len(kv_ids) == kv_pages_for(BLOCK_TOKENS + 100) == BLOCK_PAGES + 1
+    assert a.kv_pages[:len(kv_ids)] == kv_ids and a.state_blocks == state_ids   # same pages and states: the KDA
+    assert len(a.kv_pages) == kv_pages_for(4 * BLOCK_TOKENS + 101) and 1 not in kv.kept   # state continues in place
     check_pool(kv)
 
 
@@ -81,15 +83,16 @@ def test_content_match_by_token_ids():
 
 
 def test_lru_evicts_whole_sessions_for_running_requests():
-    per = blocks_for(2 * BLOCK_TOKENS)                       # 2 KV + 6 state blocks
-    kv = KvManager(3 * per, keep_sessions=True)
     n = 2 * BLOCK_TOKENS - 100
+    per, rest = divmod(pages_for(n), BLOCK_PAGES)             # 134 KV pages + 6 state blocks = 8 blocks' pages
+    assert rest == 0
+    kv = KvManager(3 * per, keep_sessions=True)
     for s in (1, 2, 3):
         serve(kv, rnd(f"s{s}", s, 0, n))
     assert list(kv.kept) == [1, 2, 3] and kv.pool.num_free == 0
     serve(kv, rnd("s1b", 1, n + 1, 9))                       # a hit (within its 2 blocks) refreshes session 1
     assert list(kv.kept) == [2, 3, 1]
-    big = rnd("new", 4, 0, BLOCK_TOKENS * 2 + 5000)          # needs 3 + 6 blocks: sessions 2 then 3 go, whole
+    big = rnd("new", 4, 0, BLOCK_TOKENS * 2 + 5000)          # needs 174 + 402 pages: sessions 2 then 3 go, whole
     assert kv.fits(big)
     big.cached = kv.allocate(big)
     assert list(kv.kept) == [1] and kv.stats["evicted_sessions"] == 2
@@ -107,7 +110,7 @@ def test_pool_accounting_tokens_mode_matches_the_simulator_ledger():
     assert kv.kept_charge == 10_000 + STATE_TOKENS and kv.hard == 0
     blocks = KvManager(100, keep_sessions=True)
     serve(blocks, rnd("r0", 1, 0, 10_000))
-    assert blocks.used_tokens == (2 + STATE_BLOCKS) * BLOCK_TOKENS
+    assert blocks.used_tokens == kv_pages_for(10_000) * PAGE_TOKENS + STATE_TOKENS     # 10,112 + 51,456
 
 
 def test_chunked_continuation_after_a_hit_and_cached_token_accounting():
@@ -135,10 +138,10 @@ def test_chunked_continuation_after_a_hit_and_cached_token_accounting():
 def test_server_backlog_counts_new_tokens_without_a_declared_prefix():
     """The server has token ids, no declared prefix: a waiting round adds its tokens beyond its session's previous
     context to the backlog, also when that context was evicted and must be recomputed (as the simulator counts)."""
-    per = blocks_for(2 * BLOCK_TOKENS)
+    n = 2 * BLOCK_TOKENS - 100
+    per = pages_for(n) // BLOCK_PAGES                         # 8 blocks' pages per session
     kv = KvManager(2 * per, keep_sessions=True, content_keys=True)
     s = Scheduler(kv, SchedulerConfig(order="srpt", mb_tokens=32768, load_budget=True), dispatch_ahead=0)
-    n = 2 * BLOCK_TOKENS - 100
     ids = {k: [k * 100_000 + i for i in range(n)] for k in (1, 2, 3)}
     for k in (1, 2):
         serve(kv, Request(f"s{k}", n, session=kv.find_session(ids[k]), token_ids=ids[k]))

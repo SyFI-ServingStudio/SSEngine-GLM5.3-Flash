@@ -41,6 +41,8 @@ import traceback
 import numpy as np
 from torch.cuda.nvtx import range as nvtx_range   # host ranges for Nsight Systems
 
+from ppimpl.config import BLOCK_PAGES
+from ppimpl.engine.kv import kv_pages_for
 from ppimpl.kvpool.backends import HostTier, SsdTier, _ok, cgroup_peak_gb, node_cpus, num_slots
 from ppimpl.kvpool.shards import shard_bytes, shard_path
 from ppimpl.kvpool.layout import ViewRange
@@ -59,9 +61,11 @@ FAKE_BLOCK_BYTES = 8576 * 5996  # one block over all stages (GLM-5.3 PP4: 4 x 1,
 
 
 def tier_move(o: TierOp) -> TierMove:
-    """What every member needs of a tier op: HBM blocks [b_lo, b_hi) of the context move (none for a demote)."""
+    """What every member needs of a tier op: the context's blocks [b_lo, b_hi) move (none for a demote), from and to
+    the HBM pages its tokens reach."""
     b_lo, b_hi = o.blocks
-    return TierMove(o.op_id, o.op, o.tier, o.host_tier, b_lo, b_hi, o.block_start, [b[:b_hi] for b in o.kv_blocks],
+    n = min(b_hi * BLOCK_PAGES, kv_pages_for(o.token_end))
+    return TierMove(o.op_id, o.op, o.tier, o.host_tier, b_lo, b_hi, o.block_start, [p[:n] for p in o.kv_pages],
                     o.state_blocks, o.slots, o.state_slots, o.host_slots, o.host_state, o.urgent)
 
 
@@ -516,13 +520,12 @@ class PoolMember:
         copy's event, bytes of HBM pieces moved). `owned`: gets the mover's pooled events the copies took. `gate`: a write's
         wait before each ring chunk; `marks`: gets the start mark (`Mover.transfer_async`)."""
         P, b_lo, b_hi = self.placement, op.b_lo, op.b_hi
-        dev, off, lens = P.pieces(op.kv_blocks, op.state_blocks, list(range(b_hi - b_lo)), [], b_lo, b_hi, b_lo)
+        dev, off, lens, stage = P.pieces(op.kv_pages, op.state_blocks, list(range(b_hi - b_lo)), [], b_lo, b_hi, b_lo)
         segs = [Segment([host.ptr(s) for s in slots[b_lo - block_start:b_hi - block_start]], P.kv_slot_bytes, dev,
-                        off, lens, P.local(self.stage, b_hi - b_lo, False))]
+                        off, lens, stage == self.stage)]
         if len(sslots):
-            segs.append(Segment([host.ptr(s) for s in sslots], self.slot_bytes,
-                                *P.pieces(op.kv_blocks, op.state_blocks, [], list(range(len(sslots))), 0, 0, 0),
-                                P.local(self.stage, 0, True)))
+            dev, off, lens, stage = P.pieces(op.kv_pages, op.state_blocks, [], list(range(len(sslots))), 0, 0, 0)
+            segs.append(Segment([host.ptr(s) for s in sslots], self.slot_bytes, dev, off, lens, stage == self.stage))
         wait = None if ready is None else lambda i, k: ready(b_lo + k if i == 0 else None)
         return self.mover.transfer_async(d, segs, wait, tr, owned, gate, marks)
 

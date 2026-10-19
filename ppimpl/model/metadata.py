@@ -7,8 +7,11 @@ vLLM's own builder classes build the MLA, indexer and kpool-tail metadata (as `G
   threshold, 256 tokens at 64 heads) first. When a plan breaks that order, every stage applies the same stable
   reordering, the hidden rows travel between stages in that order, and only stage 0 (token ids) and stage 3 (the
   rows that produce tokens) translate. `Batch.order` is the chunk order used.
-- g0 (MLA + indexer K): block table in 64-token kernel blocks, logical block b -> b * 134 + j; slot mapping
-  b * 8576 + pos % 8576 with b = kv_blocks[pos // 8576]. The table's width is the microbatch's longest request in
+- g0 (MLA + indexer K): block table in 64-token kernel blocks from the request's 128-token KV pages
+  (`config.PAGE_TOKENS`), logical page i -> 2 p + j with p = kv_pages[i]; slot mapping p * 128 + pos % 128 with
+  p = kv_pages[pos // 128] (page p is page p % 67 of block p // 67, so its slots are block * 8576 + offset, as the
+  views lay them out). vLLM's indexer builder takes every second column // 2 as its 128-token storage page table
+  (`storage_block_size`): page p again. The table's width is the microbatch's longest request in
   blocks rounded up to a power of 2, capped at vLLM's full width for max_model_len (`table_width`): the indexer's
   decode metadata kernel takes the width as a Triton constexpr, so each distinct width compiled a kernel in the
   middle of a run (smoke 7658: 670 and 1,072 columns, ~75 ms each, every stage); vLLM's own tables are always
@@ -38,7 +41,7 @@ from ppimpl.model.pp_patch import (KPOOL_HEADS, TOPK_SEGMENTS, KdaPrefillMeta, K
                                    kpool_heads_suffix, make_kda_plan_host)
 
 DECODE_THRESHOLD = 256
-KERNEL_BLOCK = 64
+KERNEL_BLOCK = kv_tensors.KERNEL_BLOCK
 PAD_SLOT_ID = -1
 
 
@@ -71,6 +74,26 @@ def graph_rows(positions, slots, token_ids, bucket: int) -> np.ndarray:
     for i, r in enumerate(rows):
         out[i, :T] = r
     return out
+
+
+def g0_table(pages: list, seq_lens: np.ndarray, positions: np.ndarray, qsl: np.ndarray, width: int,
+             page_tokens: int) -> tuple[np.ndarray, np.ndarray]:
+    """g0's kernel-block table [rows, width] and slot mapping [T] for rows whose KV pages are `pages[r]`: page p is
+    kernel blocks p * k .. p * k + k - 1 (k = page_tokens / KERNEL_BLOCK), position x is slot
+    pages[r][x // page_tokens] * page_tokens + x % page_tokens."""
+    P, kpp = page_tokens, page_tokens // KERNEL_BLOCK
+    R, T = len(pages), int(qsl[-1])
+    table = np.zeros((R, width), dtype=np.int64)
+    slots = np.empty(T, dtype=np.int64)
+    j = np.arange(kpp)
+    for r in range(R):
+        pg = np.asarray(pages[r], dtype=np.int64)
+        n = -(-int(seq_lens[r]) // P)
+        assert len(pg) >= n, (r, len(pg), n)
+        table[r, : n * kpp] = (pg[:n, None] * kpp + j).reshape(-1)
+        pos = positions[qsl[r]:qsl[r + 1]]
+        slots[qsl[r]:qsl[r + 1]] = pg[pos // P] * P + pos % P
+    return table, slots
 
 
 class Pack:
@@ -121,8 +144,10 @@ class StageMetadata:
 
         self.vc, self.kv, self.device = vc, kv, device
         self.block_tokens = kv.block_tokens
-        assert self.block_tokens % KERNEL_BLOCK == 0
+        self.page_tokens = kv.page_tokens
+        assert self.block_tokens % self.page_tokens == 0 and self.page_tokens % KERNEL_BLOCK == 0
         self.kernel_per_block = self.block_tokens // KERNEL_BLOCK
+        self.kernel_per_page = self.page_tokens // KERNEL_BLOCK
         ctx = vc.compilation_config.static_forward_context
         self.groups: list[tuple[str, object]] = []    # ("g0" | "tail", AttentionGroup)
         for gid, group in enumerate(kv.config.kv_cache_groups):
@@ -196,19 +221,10 @@ class StageMetadata:
         T = int(qsl[-1])
         positions = np.concatenate([np.arange(s, e) for s, e in zip(starts, seq_lens)])
 
-        # g0: kernel-block table and slot mapping
-        B = self.block_tokens
-        width = self.table_width(int(max(-(-int(s) // B) for s in seq_lens)))
-        table = np.zeros((R, width), dtype=np.int64)
-        slots = np.empty(T, dtype=np.int64)
-        j = np.arange(self.kernel_per_block)
-        for r, i in enumerate(order):
-            blocks = np.asarray(chunks[i].kv_blocks, dtype=np.int64)
-            n = -(-int(seq_lens[r]) // B)
-            assert len(blocks) >= n, (chunks[i].req_id, len(blocks), n)
-            table[r, : n * self.kernel_per_block] = (blocks[:n, None] * self.kernel_per_block + j).reshape(-1)
-            pos = positions[qsl[r]:qsl[r + 1]]
-            slots[qsl[r]:qsl[r + 1]] = blocks[pos // B] * B + pos % B
+        # g0: kernel-block table and slot mapping, from the KV pages
+        width = self.table_width(int(max(-(-int(s) // self.block_tokens) for s in seq_lens)))
+        table, slots = g0_table([chunks[i].kv_pages for i in order], seq_lens, positions, qsl, width,
+                                self.page_tokens)
         tail_table = np.array([[chunks[i].state_blocks[kv_tensors.TAIL_STATE]] for i in order], dtype=np.int64)
 
         # every host array of this microbatch -> one pinned buffer -> one H2D copy (M3: was 16 pinned allocations,

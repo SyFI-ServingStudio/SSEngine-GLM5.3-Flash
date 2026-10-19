@@ -21,7 +21,7 @@ class Chunk(msgspec.Struct, array_like=True):
     req_id: str
     start: int                    # tokens of this request already in KV (cached + computed by earlier chunks)
     num_tokens: int               # tokens computed in this chunk
-    kv_blocks: list[int]          # DSA blocks covering [0, start + num_tokens)
+    kv_pages: list[int]           # DSA KV pages (config.PAGE_TOKENS each) covering [0, start + num_tokens)
     state_blocks: list[int]       # 6 KDA state blocks
     is_last: bool                 # last chunk of the prompt: stage 3 returns this request's token
     token_ids: list[int] | None   # the chunk's prompt tokens; stage 0 only
@@ -50,7 +50,8 @@ class TierMove(msgspec.Struct, array_like=True):
     b_lo: int                     # HBM blocks [b_lo, b_hi) of the context move (an SSD read moves all of its slots)
     b_hi: int
     block_start: int              # slots[i] holds block block_start + i
-    kv_blocks: list[list[int]]    # the context's HBM blocks from block 0: one list for every stage, or one per stage
+    kv_pages: list[list[int]]     # the context's HBM pages from token 0, those of blocks [0, b_hi): one list for every
+                                  # stage, or one per stage
     state_blocks: list[list[int]]
     slots: list[int]
     state_slots: list[int]

@@ -55,8 +55,8 @@ import msgspec
 import numpy as np
 import zmq
 
-from ppimpl.config import BLOCK_TOKENS, CONTRACT_BLOCKS, RunConfig, dump_config
-from ppimpl.engine.kv import KvManager, kv_blocks_for, pool_size
+from ppimpl.config import BLOCK_TOKENS, CONTRACT_BLOCKS, PAGE_TOKENS, RunConfig, dump_config
+from ppimpl.engine.kv import KvManager, kv_pages_for, pool_size
 from ppimpl.engine.scheduler import ChunkSpec, Request, Scheduler
 from ppimpl.kvpool import BalancedKVPool
 from ppimpl.kvpool.manager import TierOp
@@ -213,8 +213,8 @@ class Controller:
         self.tier_log = open(self.run_dir / "tier_ops.jsonl", "w") if pool is not None else None
         (self.run_dir / "pool.json").write_text(json.dumps(
             {"ready_blocks": [r.num_blocks for r in ready], "num_blocks": num_blocks,
-             "pool_tokens": num_blocks * BLOCK_TOKENS, "keep_sessions": cfg.keep_sessions,
-             "loading_area_blocks": self.sched.kv.area, "loading_area_bytes": self.sched.kv.area_bytes,
+             "pool_tokens": num_blocks * BLOCK_TOKENS, "page_tokens": PAGE_TOKENS, "keep_sessions": cfg.keep_sessions,
+             "loading_area_pages": self.sched.kv.area, "loading_area_bytes": self.sched.kv.area_bytes,
              "dram_area_slots": pool.manager.tiers[0].area if pool is not None and pool.manager.tiers else 0}))
         self._write_cache()
         # Leave start-up objects (torch, FastAPI, ...) out of later collections: a full one took ~50 ms with the GIL
@@ -331,9 +331,10 @@ class Controller:
         info = {"keep_sessions": kv.keep_sessions, "num_blocks": kv.num_blocks,
                 "pool_tokens": kv.num_blocks * BLOCK_TOKENS, **kv.stats, "kept_sessions": len(kv.kept),
                 "kept_tokens": sum(k.tokens for k in kv.kept.values()), "used_tokens": kv.used_tokens,
-                "free_blocks": kv.pool.num_free, "time_ms": self._ms(time.time_ns()) if self.t0_ns else None,
+                "free_pages": kv.pool.num_free, "free_whole_blocks": kv.pool.num_whole,
+                "time_ms": self._ms(time.time_ns()) if self.t0_ns else None,
                 "scheduler": dict(self.sched.stats),
-                "loading_area": {"blocks": kv.area, "held": kv.area_held, "reads": len(kv.reads)}}    # busy_waits: rounds that waited for a tier write (TIERS.md §5)
+                "loading_area": {"pages": kv.area, "held": kv.area_held, "reads": len(kv.reads)}}    # busy_waits: rounds that waited for a tier write (TIERS.md §5)
         if self.sched.pool is not None:
             m = self.sched.pool.manager
             info["tiers"] = m.summary()
@@ -586,14 +587,14 @@ class Controller:
 
     def _write_gate(self, chunks: list[ChunkSpec]) -> bool:
         """Whether a write at eviction (exclusive DRAM writes when HBM evicts, as the simulator) still copies from
-        blocks this microbatch writes: it is sent once those writes are done (`_on_tier_done` pumps)."""
+        pages this microbatch writes: it is sent once those writes are done (`_on_tier_done` pumps)."""
         pool = self.sched.pool
         if pool is None or pool.hbm is None or not pool.hbm.at_eviction:
             return False
         for c in chunks:
             a = c.req.alloc
             end = c.start + c.num_tokens
-            if pool.hbm_busy(a.kv_blocks[c.start // BLOCK_TOKENS:kv_blocks_for(end)]) or pool.hbm_busy(a.state_blocks):
+            if pool.hbm_busy(a.kv_pages[c.start // PAGE_TOKENS:kv_pages_for(end)], a.state_blocks):
                 return True
         return False
 
@@ -608,14 +609,14 @@ class Controller:
             d = self.sched.pool.manager.dram_area
             kv = self.sched.kv                           # HBM: kept contexts and their blocks, running+held blocks
             log.update(area_held=kv.area_held, dram_area_used=None if d is None else d.area_used, kept=len(kv.kept),
-                       kept_blocks=kv.kept_charge, hard=kv.hard, evicted=kv.stats["evicted_sessions"])
+                       kept_pages=kv.kept_charge, hard=kv.hard, evicted=kv.stats["evicted_sessions"])
         self.rule.dispatched(mb_id, now, log["tokens"])
         chunks = []
         for c in specs:
             r = c.req
             end = c.start + c.num_tokens
             ids = r.token_ids[c.start:end]
-            chunks.append(Chunk(r.req_id, c.start, c.num_tokens, r.alloc.kv_blocks[:kv_blocks_for(end)],
+            chunks.append(Chunk(r.req_id, c.start, c.num_tokens, r.alloc.kv_pages[:kv_pages_for(end)],
                                 r.alloc.state_blocks, c.is_last, ids if isinstance(ids, list) else ids.tolist()))
             info = self.reqs[r.req_id][2]
             if "first_dispatch_ms" not in info:

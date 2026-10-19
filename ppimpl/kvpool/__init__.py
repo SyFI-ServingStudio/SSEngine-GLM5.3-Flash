@@ -22,8 +22,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from ppimpl.config import BLOCK_TOKENS, TierConfig
-from ppimpl.engine.kv import blocks_for
+from ppimpl.config import BLOCK_PAGES, BLOCK_TOKENS, PAGE_TOKENS, TierConfig
+from ppimpl.engine.kv import pages_for
 from ppimpl.kvpool.manager import Hit, KVViews, TierManager, TierOp
 from ppimpl.kvpool.writeback import WriteBack
 
@@ -83,7 +83,7 @@ class BalancedKVPool:
         level's write-ahead reserve: what it frees in one batch period, the area plus one microbatch's footprint.
         Reads are gated in bytes as the simulator's held area (`KvManager.read_bytes`): a read counts its KV and one
         state as a tier slot holds them (per GPU), the area the same fraction of HBM's tokens at HBM's bytes per token
-        (`TierConfig.bytes_per_token`); HBM counts max(the reads' blocks, the area). Returns the area in blocks (0:
+        (`TierConfig.bytes_per_token`); HBM counts max(the reads' pages, the area). Returns the area in pages (0:
         off)."""
         fraction = self.cfg.loading_area
         if not fraction:
@@ -94,15 +94,15 @@ class BalancedKVPool:
             raise ValueError(f"tiers.loading_area {fraction}: must be in (0, 0.5)")
         area = int(kv.capacity * fraction)
         kv.area = area
-        kv.area_bytes = int(kv.capacity * BLOCK_TOKENS * fraction) * self.cfg.bytes_per_token
+        kv.area_bytes = int(kv.capacity * PAGE_TOKENS * fraction) * self.cfg.bytes_per_token
         bpt, sb = self.cfg.slot_bytes / BLOCK_TOKENS, self.state_bytes
         kv.read_bytes = lambda tokens: int(tokens * bpt) + sb
         self.manager.set_dram_area(fraction)
-        reserve = area + blocks_for(mb_tokens)
+        reserve = area + pages_for(mb_tokens)                 # HBM pages
         if self.hbm is not None and self.hbm.wb is not None:
             self.hbm.wb.reserve = reserve
-        for wb in self.manager.wb.values():
-            wb.reserve = reserve * self.cfg.slot_bytes
+        for wb in self.manager.wb.values():                   # the tiers' slots: one per block
+            wb.reserve = -(-reserve // BLOCK_PAGES) * self.cfg.slot_bytes
         return area
 
     def dram_area_fits(self, tokens: int) -> bool | None:
@@ -133,9 +133,10 @@ class BalancedKVPool:
         self._track(h, [o for o in ops if o.op == "read"])
         return h
 
-    def hbm_busy(self, blocks) -> bool:
-        """Whether a write at eviction still copies from any of these HBM blocks (their new user waits)."""
-        return self.manager.slot_mode and self.manager.hbm_busy(blocks)
+    def hbm_busy(self, pages, state_blocks=()) -> bool:
+        """Whether a write at eviction still copies from any of these HBM pages or state blocks (their new user
+        waits)."""
+        return self.manager.slot_mode and self.manager.hbm_busy(pages, state_blocks)
 
     def release_dram_area(self, area: list[int]):
         self.manager.dram_area.area_give(area)
@@ -238,7 +239,7 @@ class HbmLevel:
 
     def write(self, key, entry=None):
         k = self.kv.kept[key]
-        h = self.pool.write_back(key, k.tokens, k.content, KVViews(k.alloc.kv_blocks, k.alloc.state_blocks, k.tokens))
+        h = self.pool.write_back(key, k.tokens, k.content, KVViews(k.alloc.kv_pages, k.alloc.state_blocks, k.tokens))
         if h.done():
             return None
         self._writes[h] = key
@@ -267,7 +268,7 @@ class HbmLevel:
 
     def evicted(self, key, k):
         self.unkept(key)
-        views = KVViews(k.alloc.kv_blocks, k.alloc.state_blocks, k.tokens) if self.at_eviction else None
+        views = KVViews(k.alloc.kv_pages, k.alloc.state_blocks, k.tokens) if self.at_eviction else None
         self.pool.manager.hbm_evicted(key, k.tokens, k.content, views)
 
     def admitted(self, key, req, hit: int = 0):

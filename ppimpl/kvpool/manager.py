@@ -39,8 +39,8 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from ppimpl.config import BLOCK_TOKENS, TierConfig
-from ppimpl.engine.kv import kv_blocks_for, resumable_tokens
+from ppimpl.config import BLOCK_PAGES, BLOCK_TOKENS, TierConfig
+from ppimpl.engine.kv import kv_blocks_for, kv_pages_for, resumable_tokens
 from ppimpl.kvpool.writeback import WriteBack
 
 NS = 1_000_000_000
@@ -58,10 +58,10 @@ def states_to_move(states: list[int], resume: int, k: int, added: int) -> list[i
 
 @dataclass
 class KVViews:
-    """A context's blocks in the KV caches the members registered: KV block ids from block 0 and the state blocks.
+    """A context's KV in the caches the members registered: its KV pages from token 0 and its state blocks.
     One KVViews names the same blocks on every stage (this engine: one allocation for all); a list of n names each
     stage's own. A load fills tokens [hbm_tokens, tokens): HBM already holds the first hbm_tokens."""
-    kv_blocks: list[int]
+    kv_pages: list[int]
     state_blocks: list[int]
     tokens: int = 0
     hbm_tokens: int = 0
@@ -81,14 +81,15 @@ def _blocks(views: KVViews | list[KVViews] | None) -> dict:
     if views is None:
         return {}
     vs = views if isinstance(views, list) else [views]
-    return dict(kv_blocks=[list(v.kv_blocks) for v in vs], state_blocks=[list(v.state_blocks) for v in vs])
+    return dict(kv_pages=[list(v.kv_pages) for v in vs], state_blocks=[list(v.state_blocks) for v in vs])
 
 
 @dataclass
 class TierOp:
-    """One byte move for the members. `kv_blocks`/`state_blocks` are HBM block ids, one list for every stage or one
-    per stage (reads: the held blocks to fill; writes: the kept blocks to copy from). Tokens [token_start, token_end)
-    of KV plus the KDA state move.
+    """One byte move for the members. `kv_pages`/`state_blocks` are HBM page and block ids, one list for every stage
+    or one per stage (reads: the held pages to fill; writes: the kept pages to copy from). Tokens [token_start,
+    token_end) of KV plus the KDA state move, in whole blocks of the context (`blocks`): the tiers' slots are per
+    block, and of a block HBM holds only the pages the context has.
 
     Slot mode: `slots[i]` is `tier`'s slot of the context's KV block `block_start + i`, `state_slots` its state.
     `host_slots`/`host_state` are the host side of an SSD op on the same blocks: the DRAM entry (a demote's source)
@@ -101,7 +102,7 @@ class TierOp:
     entry: int                 # the key's entry id (same on every member)
     token_start: int = 0
     token_end: int = 0
-    kv_blocks: list[list[int]] = field(default_factory=list)
+    kv_pages: list[list[int]] = field(default_factory=list)
     state_blocks: list[list[int]] = field(default_factory=list)
     req_id: str | None = None  # read: the request it is for
     land_ns: int | None = None  # read: when the engine expects it to land
@@ -120,8 +121,8 @@ class TierOp:
 
     @property
     def blocks(self) -> tuple[int, int]:
-        """HBM blocks [b_lo, b_hi) the op moves: from the block holding token_start to the last one (none for a
-        demote)."""
+        """The context's blocks [b_lo, b_hi) the op moves: from the block holding token_start to the last one (none
+        for a demote)."""
         return (0, 0) if self.op in ("demote", "fetch") else (self.token_start // BLOCK_TOKENS, kv_blocks_for(self.token_end))
 
 
@@ -367,9 +368,10 @@ class TierManager:
         """(written, read) slot keys of a byte-moving op."""
         t = [(o.tier, s) for s in o.slots + o.state_slots]
         h = [(o.host_tier, s) for s in o.host_slots + o.host_state]
-        b_lo, b_hi = o.blocks           # HBM blocks: a write copies from them, a read fills them
-        hbm = {("hbm", b) for bl in o.kv_blocks for b in bl[b_lo:b_hi]} | {("hbm", b) for bl in o.state_blocks
-                                                                           for b in bl}
+        b_lo, b_hi = o.blocks           # HBM pages: a write copies from them, a read fills them
+        hbm = {("hbm", p) for bl in o.kv_pages for p in bl[b_lo * BLOCK_PAGES:min(b_hi * BLOCK_PAGES,
+                                                                                    kv_pages_for(o.token_end))]}
+        hbm |= {("hbm", p) for bl in o.state_blocks for b in bl for p in range(b * BLOCK_PAGES, (b + 1) * BLOCK_PAGES)}
         if o.op == "write":
             return t + h, list(hbm)     # SSD write through staging: staging written, then read, by this op
         if o.op in ("read", "fetch"):
@@ -596,10 +598,13 @@ class TierManager:
             o.urgent = True
         return ops
 
-    def hbm_busy(self, blocks) -> bool:
-        """Whether a write not yet done still copies from any of these HBM blocks (freed by an eviction)."""
+    def hbm_busy(self, pages, state_blocks=()) -> bool:
+        """Whether a write not yet done still copies from any of these HBM pages or state blocks (freed by an
+        eviction). A state block is its pages: the memory a page of an evicted context's state may be reused as."""
         readers = self.guard.readers
-        return bool(readers) and any(("hbm", b) in readers for b in blocks)
+        return bool(readers) and (any(("hbm", p) in readers for p in pages)
+                                  or any(("hbm", p) in readers for b in state_blocks
+                                         for p in range(b * BLOCK_PAGES, (b + 1) * BLOCK_PAGES)))
 
     def drop_stale(self, key, req) -> list[TierOp]:
         """The session's next round `req` was admitted: an entry it does not resume from is dropped (byte mode with

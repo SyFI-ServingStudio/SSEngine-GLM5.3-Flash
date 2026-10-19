@@ -358,7 +358,7 @@ class Scheduler:
             if alloc is None:
                 return
             self.waiting_hop.popleft()
-            h = self.pool.hop(r.session, r.cached, r.dram_area, KVViews(alloc.kv_blocks, alloc.state_blocks, r.cached),
+            h = self.pool.hop(r.session, r.cached, r.dram_area, KVViews(alloc.kv_pages, alloc.state_blocks, r.cached),
                               now_ns, r.req_id)
             r.load_phase, r.hop_start_ns, r.read_land_ns = "hop", now_ns, h.eta_ns
             self.stats["hops"] += 1
@@ -479,7 +479,7 @@ class Scheduler:
         alloc = self.kv.hold_read(r, hit.tokens)
         if alloc is None:
             return False
-        h = self.pool.load(r.session, hit, KVViews(alloc.kv_blocks, alloc.state_blocks, hit.tokens, 0), now_ns,
+        h = self.pool.load(r.session, hit, KVViews(alloc.kv_pages, alloc.state_blocks, hit.tokens, 0), now_ns,
                            r.req_id)
         if h is None:                                # the tier let it go meanwhile: compute it
             self.kv.drop_read(r)
@@ -707,7 +707,7 @@ class Scheduler:
             return "blocked"
         r.hbm_tokens = self.kv.allocate(r)
         r.alloc = self.kv.held[r.req_id]
-        h = self.pool.load(r.session, hit, KVViews(r.alloc.kv_blocks, r.alloc.state_blocks, hit.tokens, r.hbm_tokens),
+        h = self.pool.load(r.session, hit, KVViews(r.alloc.kv_pages, r.alloc.state_blocks, hit.tokens, r.hbm_tokens),
                            now_ns, r.req_id)
         r.read_start_ns = now_ns
         if h is None:       # the tier copy went while HBM made room (its own evictions): the round lands at once

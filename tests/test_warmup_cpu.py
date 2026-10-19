@@ -5,6 +5,7 @@ import json
 from types import SimpleNamespace as NS
 
 from bench.run import in_run_jit, run_failure
+from ppimpl.config import BLOCK_PAGES as P
 from ppimpl.model.metadata import StageMetadata
 from ppimpl.model.stage import StageModel
 
@@ -40,8 +41,9 @@ def test_served_shapes_cover_every_table_width_and_decode_mix():
     for s in shapes:
         assert sum(n for _, n in s) <= m.max_tokens and all(st + n <= 1_048_576 for st, n in s)
         chunks = StageModel._warm_chunks(m, s)
-        used = [b for c in chunks for b in c.kv_blocks + c.state_blocks]
-        assert len(used) == len(set(used)) and min(used) >= 1 and max(used) < m.num_blocks
+        used = [p for c in chunks for p in c.kv_pages] + [b * P + i for c in chunks for b in c.state_blocks
+                                                          for i in range(P)]
+        assert len(used) == len(set(used)) and min(used) >= P and max(used) < m.num_blocks * P
 
 
 def test_served_shapes_skip_what_a_small_pool_cannot_hold():

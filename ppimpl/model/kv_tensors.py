@@ -20,6 +20,7 @@ caches and KDA layers read their views from `layer.kv_cache`).
 from __future__ import annotations
 
 import contextlib
+import math
 import os
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -32,6 +33,7 @@ from ppimpl.config import CONTRACT_BLOCKS
 PREFIX = "language_model.model.layers"
 NUM_LAYERS = 45
 STATE_BLOCKS = 6
+KERNEL_BLOCK = 64         # g0's kernel block: FlashInfer sparse MLA's page (metadata.KERNEL_BLOCK)
 TAIL_STATE = 5            # state_blocks[5] backs the kpool tail group
 
 
@@ -126,6 +128,16 @@ class StageKV:
     def block_tokens(self) -> int:
         return self.mla_spec.block_size
 
+    @property
+    def page_tokens(self) -> int:
+        """The KV allocation unit (`config.PAGE_TOKENS`): the smallest token range both g0 kernels address through
+        their page tables, lcm of the MLA kernel block (`KERNEL_BLOCK`) and the indexer's storage page
+        (`storage_block_size`: DeepGEMM paged MQA's 32 or 64 pooled entries x index_kpool tokens)."""
+        storage = getattr(self.indexer_spec, "storage_block_size", None) or KERNEL_BLOCK
+        page = math.lcm(KERNEL_BLOCK, storage)
+        assert self.block_tokens % page == 0, (self.block_tokens, page)
+        return page
+
     def kda_state_index(self) -> dict[str, int]:
         return {name: g for g, names in enumerate(self.kda_groups) for name in names}
 
@@ -165,7 +177,7 @@ def allocate(vc, static_ctx: dict, local_spec: dict, num_blocks: int, device: to
         else:
             for name in group.layer_names:
                 (idx if ".indexer." in name else mla).append(name)
-            kernel_block_sizes.append(64)   # FlashInfer sparse MLA / indexer kernel block (select_common_block_size)
+            kernel_block_sizes.append(KERNEL_BLOCK)   # FlashInfer sparse MLA / indexer (select_common_block_size)
     assert len(kda) == STATE_BLOCKS - 1, f"{len(kda)} KDA groups"
     layout = resolve_layout(vc, static_ctx, local_spec)
     if hasattr(cfg, "kv_cache_layout"):

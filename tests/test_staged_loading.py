@@ -1,13 +1,14 @@
 """Staged loading (ppimpl/engine/scheduler.py "Staged loading"; ServingStudioSim pp-staged): pending -> loading ->
-ready -> batch, one test per invariant. HBM is a KvManager of a few dozen blocks; a context of one block costs 7
-(1 KV + 6 state blocks), in DRAM/SSD 2 slots (1 KV + 1 state). Ops are completed by hand (`op_done`)."""
+ready -> batch, one test per invariant. HBM is a KvManager of a few dozen blocks; a context of one block (8,576
+tokens) costs 7 blocks' pages (67 KV pages + 6 state blocks, `P` pages each), in DRAM/SSD 2 slots (1 KV + 1 state).
+Ops are completed by hand (`op_done`)."""
 
 import math
 
 import pytest
 
-from ppimpl.config import BLOCK_TOKENS as B, SchedulerConfig, TierConfig
-from ppimpl.engine.kv import KvManager, blocks_for
+from ppimpl.config import BLOCK_PAGES as P, BLOCK_TOKENS as B, SchedulerConfig, TierConfig
+from ppimpl.engine.kv import KvManager, pages_for
 from ppimpl.engine.scheduler import Request, Scheduler
 from ppimpl.kvpool import BalancedKVPool, KVViews
 
@@ -30,7 +31,7 @@ def sched(blocks=60, force_ms=None, **kw):
     pool = BalancedKVPool(cfg(blocks=blocks, **kw))
     s = Scheduler(kv, SchedulerConfig(mb_tokens=MB, force_after_ms=force_ms), pool, dispatch_ahead=0)
     if s.staged:
-        kv.area_bytes = kv.area * SLOT
+        kv.area_bytes = kv.area * SLOT // P                 # the area's blocks' worth of slots
         kv.read_bytes = lambda tokens: -(-tokens // B) * SLOT + 6 * SLOT
     return s, kv, pool, pool.manager
 
@@ -84,12 +85,12 @@ def run_mb(s, now=0):
 # --- 6: the area is a fixed fraction of HBM (simulator `prefix_tier_loading_area`) ---------------------------------
 
 def test_area_is_a_fraction_of_hbm():
-    """HBM's area is `tiers.loading_area` of its blocks, rounded down; DRAM's the same fraction of its slots."""
+    """HBM's area is `tiers.loading_area` of its pages, rounded down; DRAM's the same fraction of its slots."""
     s, kv, pool, t = sched(area=14)
-    assert s.staged and kv.area == 14 == int(60 * pool.cfg.loading_area)
+    assert s.staged and kv.area == int(60 * P * pool.cfg.loading_area) == 14 * P + P // 2
     assert t.tiers[0].area == int(pool.cfg.loading_area * t.tiers[0].num_slots)
     assert pool.hbm.at_eviction and pool.hbm.wb is None                   # exclusive DRAM: HBM writes at eviction
-    assert t.wb[0].reserve == (14 + blocks_for(MB)) * SLOT                 # DRAM -> SSD: one batch period's room
+    assert t.wb[0].reserve == -(-(kv.area + pages_for(MB)) // P) * SLOT    # DRAM -> SSD: one batch period's room
     with pytest.raises(ValueError):
         sched(area=30)                                                     # half of HBM: not a loading area
     off = Scheduler(KvManager(60, keep_sessions=True), SchedulerConfig(mb_tokens=MB),
@@ -106,15 +107,15 @@ def test_area_gates_reads_by_tier_bytes_as_the_simulator():
     pool = BalancedKVPool(c)
     pool.state_bytes = 2 * SLOT
     s = Scheduler(kv, SchedulerConfig(mb_tokens=MB), pool, dispatch_ahead=0)
-    assert kv.area == 14 and kv.area_bytes == int(60 * B * c.loading_area) * 200
+    assert kv.area == 14 * P + P // 2 and kv.area_bytes == int(60 * B * c.loading_area) * 200
     assert kv.read_bytes(B) == int(B * SLOT / B) + 2 * SLOT
-    tok = B                                              # 3 slots of tier bytes, 7 HBM blocks
+    tok = B                                              # 3 slots of tier bytes, 7 HBM blocks' pages
     n = 0
     while kv.area_fits(tok):
         assert kv.hold_read(rnd(n, 0, tok), tok) is not None
         n += 1
     assert n == kv.area_bytes // (3 * SLOT)            # 8 reads of 3 slots in 24.5 MB, not 14 // 7 = 2
-    assert kv.area_held == 7 * n and kv.area_charge() == 7 * n > kv.area
+    assert kv.area_held == 7 * P * n and kv.area_charge() == 7 * P * n > kv.area
 
 
 # --- 1: the area is deducted; write-back stays ahead so admission does not wait ------------------------------------
@@ -123,11 +124,11 @@ def test_area_is_never_used_by_admission_or_kept_contexts():
     s, kv, pool, t = sched(blocks=40, area=14)
     big = Request("big", 4 * B)                         # 4 + 6 = 10 blocks, fits beside the area
     s.add(big, 0)
-    assert run_mb(s) is not None and kv.hard == 10
+    assert run_mb(s) is not None and kv.hard == 10 * P
     huge = Request("huge", 20 * B)                      # 26 blocks: fits in 40 - 10 but not beside the 14 area
     s.add(huge, 0)
     run_mb(s)
-    assert huge.req_id not in kv.held and kv.hard + kv.area > 40 - 26
+    assert huge.req_id not in kv.held and kv.hard + kv.area > (40 - 26) * P
     s.policy.remove(huge)
     for i in range(1, 6):                               # kept contexts: evicted to keep the area free
         s.add(r := rnd(100 + i, 0, 100), 0)
@@ -166,12 +167,12 @@ def test_reads_start_in_order_and_stop_at_the_first_that_does_not_fit():
         s.add(r, 0)
     s.load(0)
     reads = sent(pool)
-    assert [o.req_id for o in reads] == [rs[0].req_id] and kv.area_held == 7
+    assert [o.req_id for o in reads] == [rs[0].req_id] and kv.area_held == 7 * P
     assert rs[1].load_phase is None and rs[2].load_phase is None
     done(s, reads)
     assert run_mb(s) is not None and rs[0].req_id in kv.held   # 1 admitted: area free; 2 starts, 3 does not fit
     reads = sent(pool)
-    assert [o.req_id for o in reads] == [rs[1].req_id] and rs[2].load_phase is None and kv.area_held == 8
+    assert [o.req_id for o in reads] == [rs[1].req_id] and rs[2].load_phase is None and kv.area_held == 8 * P
 
 
 def test_read_larger_than_the_area_starts_when_it_is_empty():
@@ -189,7 +190,7 @@ def test_read_larger_than_the_area_starts_when_it_is_empty():
     assert not sent(pool)                               # the area is not empty: b waits
     s.op_done(next(iter(t.in_flight)), 0)
     run_mb(s)                                           # a admitted: the area is empty; b starts
-    assert [o.req_id for o in sent(pool)] == [b.req_id] and kv.area_held == 18
+    assert [o.req_id for o in sent(pool)] == [b.req_id] and kv.area_held == 18 * P
 
 
 # --- 3: only rounds whose context is all in HBM join a batch; rereads ----------------------------------------------
@@ -220,7 +221,7 @@ def test_a_round_ready_in_hbm_whose_context_is_evicted_is_read_again():
     put(t, 1, 100)                                      # then HBM evicts it, written to DRAM
     k = kv.kept.pop(1)
     kv._unkeep(k, evicted=True)
-    kv.pool.give(k.alloc.kv_blocks + k.alloc.state_blocks)
+    kv.pool.give(k.alloc)
     s._load_dirty = True
     s.load(0)
     assert r.load_phase == "read" and s.stats["rereads"] == 1
@@ -241,10 +242,10 @@ def test_ssd_read_lands_in_the_dram_area_then_hops_to_hbm():
     done(s, [f], 10)
     (h,) = sent(pool)                                   # the hop: DRAM's area -> HBM's
     assert h.op == "read" and h.tier == "dram" and h.slots + h.state_slots == f.host_slots + f.host_state
-    assert kv.area_held == 8 and r.load_phase == "hop" and r.fetch_land_ns == 10
+    assert kv.area_held == 8 * P and r.load_phase == "hop" and r.fetch_land_ns == 10
     assert 1 in t.tiers[1].entries                     # SSD stays inclusive
     done(s, [h], 20)
-    assert d.area_used == 0 and kv.area_held == 8       # DRAM's area back; HBM's held until admission (5)
+    assert d.area_used == 0 and kv.area_held == 8 * P   # DRAM's area back; HBM's held until admission (5)
     mb = run_mb(s)
     assert mb[0].req is r and mb[0].start == 2 * B and kv.area_held == 0
     assert t.tiers[0].stats["hops"] == 1
@@ -282,9 +283,9 @@ def test_area_is_held_until_the_round_is_admitted():
     s.add(r := rnd(1, B + 1, 10), 0)
     s.load(0)
     done(s, sent(pool))
-    assert r in s.landed and kv.area_held == 7 and r.req_id in kv.reads
+    assert r in s.landed and kv.area_held == 7 * P and r.req_id in kv.reads
     s.on_stage0 = 5                                     # stage 0 busy: nothing forms
-    assert s.next_microbatch(0) is None and kv.area_held == 7
+    assert s.next_microbatch(0) is None and kv.area_held == 7 * P
     s.on_stage0 = 0
     run_mb(s)
     assert kv.area_held == 0 and r.req_id in kv.held and not kv.reads

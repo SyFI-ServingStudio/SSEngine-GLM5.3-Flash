@@ -5,7 +5,7 @@ import json
 import pytest
 from bench.replay import HANDOFF, MEMORY, Replay, StageModel, load_trace, make_scheduler
 
-from ppimpl.config import TierConfig
+from ppimpl.config import BLOCK_PAGES, TierConfig
 
 
 class Watched:
@@ -22,8 +22,8 @@ class Watched:
             out = f(*a, **k)
             kv = self.kv
             assert kv.hard + kv.kept_charge <= kv.capacity
-            held = sum(x.num_blocks for x in kv.held.values()) + sum(x.alloc.num_blocks for x in kv.kept.values())
-            assert held + kv.pool.num_free == kv.num_blocks
+            held = sum(x.num_pages for x in kv.held.values()) + sum(x.alloc.num_pages for x in kv.kept.values())
+            assert held + kv.pool.num_free == kv.num_blocks * BLOCK_PAGES and held == kv.hard + kv.kept_charge
             self.max_used = max(self.max_used, kv.hard + kv.kept_charge)
             return out
         return g

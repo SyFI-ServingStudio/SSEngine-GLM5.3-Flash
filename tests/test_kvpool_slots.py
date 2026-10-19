@@ -7,8 +7,8 @@ import random
 
 import pytest
 
-from ppimpl.config import BLOCK_TOKENS as B, SchedulerConfig, TierConfig
-from ppimpl.engine.kv import KvManager
+from ppimpl.config import BLOCK_PAGES, BLOCK_TOKENS as B, SchedulerConfig, TierConfig
+from ppimpl.engine.kv import KvManager, pages_for
 from ppimpl.engine.scheduler import Request, Scheduler
 from ppimpl.kvpool import BalancedKVPool, Hit, KVViews
 from ppimpl.kvpool.manager import TierManager
@@ -334,14 +334,14 @@ def test_scheduler_writes_back_ahead_and_evicts_only_written_contexts():
     s = Scheduler(kv, SchedulerConfig(mb_tokens=8192), pool, dispatch_ahead=0)
     hbm = pool.hbm.wb
     finish(s, rnd(1, 0, 100))
-    assert pool.ready_ops() == [] and hbm.dirty_charge == 7             # 7 of 21: nothing written
+    assert pool.ready_ops() == [] and hbm.dirty_charge == pages_for(100)   # 403 of 1,407 pages: nothing written
     finish(s, rnd(2, 0, 100))
-    finish(s, rnd(3, 0, 100))                                           # 21 of 21 > 14.7: write 1 ahead
+    finish(s, rnd(3, 0, 100))                                           # 1,209 > 0.7 x 1,407: write 1 ahead
     (w,) = pool.ready_ops()
     assert hbm.stats["ahead_writes"] == 1 and kv.pinned[1] == 1 and not hbm.evictable(1)
     s.op_done(w.op_id, 0)
-    assert hbm.evictable(1) and not kv.pinned and hbm.dirty_charge == 14
-    big = Request("big", 2 * B, session=9)                              # 2 + 6 blocks: evicts 1 (written) and 2
+    assert hbm.evictable(1) and not kv.pinned and hbm.dirty_charge == 2 * pages_for(100)
+    big = Request("big", 3 * B, session=9)                              # 201 + 402 pages: evicts 1 (written) and 2
     s.add(big, 0)
     assert s.next_microbatch(0) is None                                 # 2 is not written yet: its write starts
     assert kv.stats["blocked_by_write"] >= 1 and hbm.stats["evict_writes"] == 1 and hbm.stats["evict_waits"] >= 1
@@ -351,7 +351,7 @@ def test_scheduler_writes_back_ahead_and_evicts_only_written_contexts():
     r = rnd(1, 101, 10)                         # session 1 resumes from DRAM, once 3 (not written) makes room
     s.add(r, 0)
     rd = None
-    for _ in range(6):                          # big's prompt runs on (it holds 8 blocks)
+    for _ in range(6):                          # big's prompt runs on
         if s.on_stage0:
             s.stage_done(0, 3)
         s.next_microbatch(0)
@@ -448,17 +448,19 @@ def test_exclusive_writes_at_eviction_and_the_blocks_wait_for_it():
     finish(s, rnd(1, 0, 100))
     assert pool.ready_ops() == [] and 1 not in pool.manager.tiers[0].entries      # not written ahead
     k = kv.kept[1]
-    blocks = k.alloc.kv_blocks + k.alloc.state_blocks
-    big = rnd(2, 0, 9 * B - 100)                    # 9 + 6 blocks: fits only by evicting session 1 (7 blocks)
+    pages, states = list(k.alloc.kv_pages), list(k.alloc.state_blocks)
+    big = rnd(2, 0, 9 * B - 100)                    # 9 + 6 blocks' pages: fits only by evicting session 1
     s.add(big, 0)
     assert s.next_microbatch(0) is not None and 1 not in kv.kept and kv.stats["blocked_by_write"] == 0
-    assert 1 in pool.manager.tiers[0].entries and pool.hbm_busy(blocks)
+    assert 1 in pool.manager.tiers[0].entries and pool.hbm_busy(pages) and pool.hbm_busy([], states)
     (w,) = pool.ready_ops()
-    assert w.op == "write" and w.urgent and sorted(w.kv_blocks[0] + w.state_blocks[0]) == sorted(blocks)
-    o = pool.manager._emit("read", "dram", 9, token_start=0, token_end=B, kv_blocks=[blocks[:1]], state_blocks=[[]])
+    assert w.op == "write" and w.urgent and w.kv_pages[0] == pages and w.state_blocks[0] == states
+    reuse = [states[0] * BLOCK_PAGES + 5]           # a page of an evicted state block, reused as KV
+    assert pool.hbm_busy(reuse) and not pool.hbm_busy([max(pages) + 1])
+    o = pool.manager._emit("read", "dram", 9, token_start=0, token_end=B, kv_pages=[reuse], state_blocks=[[]])
     assert w.op_id in o.deps
     s.op_done(w.op_id, 0)
-    assert not pool.hbm_busy(blocks)
+    assert not pool.hbm_busy(pages, states)
     r = rnd(1, 101, 10)                              # its next round reads it back from DRAM
     assert pool.lookup(1, r).tier == "dram"
 

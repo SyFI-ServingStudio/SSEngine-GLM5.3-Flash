@@ -1,5 +1,5 @@
-from ppimpl.config import BLOCK_TOKENS, STATE_BLOCKS
-from ppimpl.engine.kv import KvManager
+from ppimpl.config import BLOCK_PAGES, BLOCK_TOKENS, STATE_BLOCKS
+from ppimpl.engine.kv import KvManager, pages_for
 from ppimpl.engine.scheduler import PlainScheduler, Request
 
 
@@ -83,4 +83,4 @@ def test_admission_waits_in_arrival_order_and_resumes():
     s.finish(reqs[0])                                        # r0's blocks free: r1, then r2, are admitted
     assert drain(s) == [[("r1", 0, 8192, False)], [("r1", 8192, 8192, False)],
                         [("r1", 16384, 3616, True), ("r2", 0, 1000, True)]]
-    assert s.kv.pool.num_free == 0
+    assert s.kv.pool.num_free == (per + 7) * BLOCK_PAGES - pages_for(20000) - pages_for(1000)

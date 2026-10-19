@@ -91,8 +91,8 @@ def test_dram_evictions_go_to_ssd_and_resume_from_there(tmp_path):
 
 
 def test_staged_loading_end_to_end(tmp_path):
-    """Staged loading (exclusive DRAM, loading areas of 0.25): HBM's 29 blocks keep a 7-block area (one 5,000-token
-    context), so 3 contexts stay kept; DRAM (8 slots) keeps a 2-slot area, the rest for contexts. A..E: A and B leave HBM and DRAM.
+    """Staged loading (exclusive DRAM, loading areas of 0.25): HBM's 29 blocks keep a 485-page area (one 5,000-token
+    context: 40 + 402 pages), so 3 contexts stay kept; DRAM (8 slots) keeps a 2-slot area, the rest for contexts. A..E: A and B leave HBM and DRAM.
     A's next round is fetched from SSD into DRAM's area (larger than the area: it starts with the area empty) and
     hops to HBM's."""
     from ppimpl.kvpool.member import FAKE_BLOCK_BYTES
@@ -113,7 +113,7 @@ def test_staged_loading_end_to_end(tmp_path):
     finally:
         assert srv.stop() == 0, (tmp_path / "run/server.log").read_text()
     pool = json.loads((srv.run_dir / "pool.json").read_text())
-    assert pool["loading_area_blocks"] == 7 and pool["dram_area_slots"] == 2
+    assert pool["loading_area_pages"] == int(29 * 67 * 0.25) and pool["dram_area_slots"] == 2
     sr = sreq_of(srv.run_dir)
     assert sr["A_r1"]["tier"] == "ssd" and sr["A_r1"]["fetch_land_ms"] <= sr["A_r1"]["hop_start_ms"]
     assert sr["B_r1"]["tier"] in ("dram", "ssd")    # DRAM's one context: B's or one evicted later

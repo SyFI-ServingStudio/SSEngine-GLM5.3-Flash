@@ -11,6 +11,12 @@ import yaml
 BLOCK_TOKENS = 8576          # one block: 8,576 tokens of DSA KV, or one KDA layer's state
 CONTRACT_BLOCKS = 7144       # 1_contract.md §1: KV blocks per stage, incl. the null block
 STATE_BLOCKS = 6             # KDA state blocks per request (5 cache groups + 1 scratch)
+# The KV allocation unit (engine/kv.py): the smallest token range every KV kernel addresses through its own page table,
+# lcm of FlashInfer sparse MLA's 64-token kernel block and the kpool indexer's storage page (DeepGEMM paged MQA: 32
+# pooled entries x index_kpool 4 = 128 tokens). A block is BLOCK_PAGES pages; a KDA state still takes a whole block.
+# Each stage derives it from its vLLM specs and checks it (`kv_tensors.page_tokens`).
+PAGE_TOKENS = 128
+BLOCK_PAGES = BLOCK_TOKENS // PAGE_TOKENS    # 67
 NULL_BLOCK = 0
 HIDDEN_WIDTH = 4 * 4096      # 4-stream mHC residual, BF16: 32 KiB per token between stages
 MB_TOKENS = 8192             # plain scheduler: microbatch budget and chunk size
