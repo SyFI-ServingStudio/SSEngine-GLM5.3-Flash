@@ -1,4 +1,4 @@
-"""Linux native AIO for the SSD tier (layer 3, `backends.SsdTier`, `tiers.ssd_backend: aio`; TIERS.md §2.5): one
+"""Linux native AIO for the SSD tier (layer 3, `backends.SsdTier`, `tiers.ssd_backend: aio`; dev:research/TIERS.md §2.5): one
 context per member, the same requests, pieces and queues as `uring.UringFile`.
 
 The kernel's io_setup / io_submit / io_getevents / io_destroy, called as raw syscalls through ctypes (libc's

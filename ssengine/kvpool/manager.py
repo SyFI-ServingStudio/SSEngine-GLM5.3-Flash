@@ -1,4 +1,4 @@
-"""Layer 5 of the KV pool (lanes/m6 TIERS.md §3-§7, §13.2): the DRAM and SSD index behind the HBM prefix cache
+"""Layer 5 of the KV pool (dev:research/TIERS.md §3-§7, §13.2): the DRAM and SSD index behind the HBM prefix cache
 (7_offloading.md §2). Pure policy on the leader, no torch: it decides, the members move the bytes. Every decision
 that moves bytes becomes a `TierOp` the leader sends to all n members (n = PP degree).
 
@@ -6,7 +6,7 @@ that moves bytes becomes a `TierOp` the leader sends to all n members (n = PP de
   state at the prompt's end. Each tier evicts on its own, least recently used first, a whole entry at a time; a read
   refreshes its entry.
 - **Accounting.** Bytes (`TierConfig.slot_bytes` None: replay, the target's own accounting, bytes per token plus one
-  state per context) or slots (the server, TIERS.md §3): a tier is a free list of fixed slots, one slot per KV block
+  state per context) or slots (the server, dev:research/TIERS.md §3): a tier is a free list of fixed slots, one slot per KV block
   of the context plus `state_slots` for its state, the same slot ids on every GPU. Each GPU's slot holds its 1/n of
   that block on all n stages (balanced storage, `placement.py`).
 - **Victim chain HBM -> DRAM -> SSD** (user, 2026-10-17). Each tier is written only with what the level above lets
@@ -724,6 +724,6 @@ class TierManager:
         if self.slot_mode:
             for i, (d, t) in enumerate(zip(out, self.tiers)):
                 d |= dict(slots=t.num_slots, free_slots=len(t.free))
-                if i in self.wb:                    # its write-back to the tier below (TIERS.md §5)
+                if i in self.wb:                    # its write-back to the tier below (dev:research/TIERS.md §5)
                     d["write_back"] = dict(self.wb[i].stats)
         return out

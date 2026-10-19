@@ -1,4 +1,4 @@
-"""Slot-mode index of the pool's leader (ssengine/kvpool/manager.py; the server, lanes/m6 TIERS.md §3, §5-§7): slots per
+"""Slot-mode index of the pool's leader (ssengine/kvpool/manager.py; the server, dev:research/TIERS.md §3, §5-§7): slots per
 block, op order by dependencies, write before evict in HBM, SSD eviction at a small SSD, SSD reads through DRAM or
 staging. A byte model executes the ops in any order `ready_ops` allows and checks that every op reads what the
 context holds."""

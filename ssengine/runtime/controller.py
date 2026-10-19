@@ -27,7 +27,7 @@ Prefix cache (`keep_sessions`, 5_prefix_cache.md §2): a finished request's bloc
 that starts with that whole context takes them over and computes only the rest (`engine/kv.py`, matched by content).
 Its cached tokens go back in `usage.prompt_tokens_details.cached_tokens` and into `server_requests.jsonl`.
 When a microbatch forms is `DispatchRule`'s decision (ssengine/runtime/dispatch.py); what it holds is the scheduler's.
-Tiers (`tiers`, lanes/m6 TIERS.md): the KV pool's leader (`ssengine/kvpool`, in the scheduler) decides every byte
+Tiers (`tiers`, dev:research/TIERS.md): the KV pool's leader (`ssengine/kvpool`, in the scheduler) decides every byte
 move; the control thread sends ops whose dependencies are done to all workers' tier sockets (`TierBatch`) and
 completes an op when all of them reported it (`TierDone`): `tier_ops.jsonl`, one line per op (sent, done per stage,
 bytes per GPU); `server_requests.jsonl` gains the tier, tokens read and read start/landing of a round served from a
@@ -150,7 +150,7 @@ class Controller:
             from ssengine.kvpool.shards import ShardSet, shard_bytes
             base = tc.ssd_dir or os.environ.get("SSENGINE_SSD_DIR")
             if not base:
-                raise ValueError("SSD tier: set tiers.ssd_dir or SSENGINE_SSD_DIR (the shard sets, TIERS.md §5)")
+                raise ValueError("SSD tier: set tiers.ssd_dir or SSENGINE_SSD_DIR (the shard sets, dev:research/TIERS.md §5)")
             self.shard_set = ShardSet(base, self.n, shard_bytes(tc.ssd_gb))
             print(f"tiers: SSD shard set {self.shard_set.dir}", flush=True)
             self.cfg = msgspec.structs.replace(self.cfg, tiers=msgspec.structs.replace(tc, ssd_dir=self.shard_set.dir))
@@ -334,7 +334,7 @@ class Controller:
                 "free_pages": kv.pool.num_free, "free_whole_blocks": kv.pool.num_whole,
                 "time_ms": self._ms(time.time_ns()) if self.t0_ns else None,
                 "scheduler": dict(self.sched.stats),
-                "loading_area": {"pages": kv.area, "held": kv.area_held, "reads": len(kv.reads)}}    # busy_waits: rounds that waited for a tier write (TIERS.md §5)
+                "loading_area": {"pages": kv.area, "held": kv.area_held, "reads": len(kv.reads)}}    # busy_waits: rounds that waited for a tier write (dev:research/TIERS.md §5)
         if self.sched.pool is not None:
             m = self.sched.pool.manager
             info["tiers"] = m.summary()

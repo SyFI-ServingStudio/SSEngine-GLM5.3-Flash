@@ -1,4 +1,4 @@
-"""KV pool bytes on 4 GPUs (lanes/m6 TIERS.md §8): real StageModels joined by the serving pipe, a PoolMember per
+"""KV pool bytes on 4 GPUs (dev:research/TIERS.md §8): real StageModels joined by the serving pipe, a PoolMember per
 worker (ssengine/kvpool/member.py); the ranges come from the real StageKV (layout.from_stage_kv).
 
 Round 0 (P = 40,000 tokens: a partial last block, chunk starts off KDA's 64-token grid) on blocks K0. Every worker

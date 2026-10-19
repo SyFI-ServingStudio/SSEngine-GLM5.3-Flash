@@ -1,4 +1,4 @@
-"""Layer 4 of the KV pool (lanes/m6 TIERS.md §2.3, §3, §13.2): one GPU's copies between host slots and the stages' KV.
+"""Layer 4 of the KV pool (dev:research/TIERS.md §2.3, §3, §13.2): one GPU's copies between host slots and the stages' KV.
 
 Copy engines only, no SMs, no wait on the compute stream: `cuMemcpyBatchAsync` on the mover's own streams; on CPU
 (tests) `ctypes.memmove`, done at once. The copies, stream waits and event records go straight to the driver

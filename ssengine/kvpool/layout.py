@@ -1,4 +1,4 @@
-"""Layer 1 of the KV pool (lanes/m6 TIERS.md §13.2): which bytes a KV block or a context's state owns on one stage.
+"""Layer 1 of the KV pool (dev:research/TIERS.md §13.2): which bytes a KV block or a context's state owns on one stage.
 
 Every byte range a context owns in HBM is one logical block's row of one cache view on one stage:
 - KV ranges: for each DSA layer, the MLA latent pages and the indexer K pages of one logical block (`kind="kv"`);

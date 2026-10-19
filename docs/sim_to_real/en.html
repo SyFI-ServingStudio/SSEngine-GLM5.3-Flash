@@ -697,7 +697,7 @@ nav.lang a[aria-current="page"] { background: var(--accent); color: var(--surfac
 <li>4 GPUs share one socket's host-side bandwidth; the target (48.4) is within 3%.</li>
 <li>SSD: the data file system is an md RAID0 of 8 KIOXIA CM7 Gen5 drives. fio O_DIRECT, io_uring qd 16, 4 jobs: sequential read 96.9–99.6 GB/s, sequential write 53.8 GB/s, 4 reads plus 4 writes concurrently 45.4 + 25.8 GB/s. nvidia-fs is not loaded on the node, so no GDS.</li>
 </ul>
-<p class="src">TIERS.md §2.2–§2.3 · job 7916</p>
+<p class="src">dev:research/TIERS.md §2.2–§2.3 · job 7916</p>
 
 <h3 id="s6-3">6.3 Host memory safety</h3>
 <p>The full setting originally pinned 150 GB DRAM per GPU, 600 GB across 4 GPUs, and it must land on the NUMA node where the GPU sits. The node has about 1,057 GB per node and is shared with others; node 0 also hosts a VM of up to 512 GiB. The final approach:</p>
@@ -760,7 +760,7 @@ nav.lang a[aria-current="page"] { background: var(--accent); color: var(--surfac
 <li>SSD files are kept per group (<code>set&lt;k&gt;/shard&lt;q&gt;.bin</code>); shard q stores the 1/4 belonging to member q, reused across runs, with the whole group locked per run.</li>
 <li>File contents are never trusted: the index is empty on every start.</li>
 </ul>
-<p class="src">lane-m6-ssd TIERS.md §2.5 · db48f02 · ceff3dc</p>
+<p class="src">dev:research/TIERS.md §2.5 · db48f02 · ceff3dc</p>
 
 <h3 id="s6-7">6.7 The three memory settings</h3>
 <p>The full setting's HBM holds most of the latest contexts, so hits are almost all in HBM. To actually exercise DRAM and SSD, two smaller settings are provided. In the sim we swept HBM × DRAM (SSD fixed at 128 GB) and picked:</p>
@@ -804,7 +804,7 @@ nav.lang a[aria-current="page"] { background: var(--accent); color: var(--surfac
   <div class="fighead"><span class="q">Round 1 TTFT: which tier it reads from, real engine vs target</span>
     <div class="seg" data-for="f6e" data-key="t"><button data-v="hbm">HBM hit</button><button data-v="dram">DRAM</button><button data-v="ssd">SSD</button></div></div>
   <div id="f6e" class="chart short" role="img" aria-label="Round 1 TTFT for 32k, 128k, 512k, two bar groups: real engine and target"></div>
-  <figcaption>ms. HBM hit 7960; DRAM 8042 (after kvpool refactor); SSD 8073 (DRAM off, SSD 128 GB, GPUs 4–7). Target is the v2-realistic tiered bring-up (TIERS.md §10).</figcaption>
+  <figcaption>ms. HBM hit 7960; DRAM 8042 (after kvpool refactor); SSD 8073 (DRAM off, SSD 128 GB, GPUs 4–7). Target is the v2-realistic tiered bring-up (dev:research/TIERS.md §10).</figcaption>
 </figure>
 <div class="tbl"><table>
 <thead><tr><th>Context</th><th>DRAM target TTFT (ms)</th><th>7966 (before refactor)</th><th>8042 (after refactor)</th><th>8042 read (ms)</th><th>Target read</th></tr></thead>
@@ -852,7 +852,7 @@ nav.lang a[aria-current="page"] { background: var(--accent); color: var(--surfac
 <figure>
   <div class="fighead"><span class="q">h25d37: rounds completed per 2 minutes</span></div>
   <div id="f6f" class="chart short" role="img" aria-label="before collapse the two lines overlap window by window; in minutes 12 to 14 the real engine is a bit lower"></div>
-  <figcaption>Old trace, DRAM only, N = 400. Real engine 7969, sim is the v2-realistic tiered target.<span class="src">TIERS.md §9 step 1b</span></figcaption>
+  <figcaption>Old trace, DRAM only, N = 400. Real engine 7969, sim is the v2-realistic tiered target.<span class="src">dev:research/TIERS.md §9 step 1b</span></figcaption>
 </figure>
 <ul class="find">
 <li><b>h25d37:</b> matches window by window before collapse (hit share 0.83–0.91 vs 0.83–0.90; DRAM reads 9–852 vs 10–847 per 2 minutes). Collapse window: sim minutes 14–16, real engine minutes 12–16 (the real engine has fewer rounds in minutes 12–14): r/s −5%, TTFT p90 +44%.</li>

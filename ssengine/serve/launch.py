@@ -4,7 +4,7 @@
 GLM-5.3-Flash NVFP4 as 4 pipeline stages (`check_model`); anything else is refused before a weight is read or
 downloaded. The config is the design setting of the M6 evaluation (docs/results/eval_m6.md, "st10"): the
 scheduler of 6_scheduler.md step "good", the exact prefix cache (kept sessions) and, when a DRAM or SSD tier is given,
-exclusive DRAM writes and a 10% loading area (TIERS.md); without one, HBM only. A `--config` YAML is applied on top of
+exclusive DRAM writes and a 10% loading area (dev:research/TIERS.md); without one, HBM only. A `--config` YAML is applied on top of
 that, the command-line options last.
 """
 
@@ -154,7 +154,7 @@ def build_config(a) -> RunConfig:
     if raw.get("tiers") and raw["tiers"].get("ssd_gb") and not (raw["tiers"].get("ssd_dir")
                                                                 or os.environ.get("SSENGINE_SSD_DIR")):
         raise SystemExit("the SSD tier needs --ssd-dir (or SSENGINE_SSD_DIR): a directory with a shard set, made once by "
-                         "`python -m ssengine.kvpool.shards create --dir DIR --gb <ssd-gb>` (TIERS.md §5)")
+                         "`python -m ssengine.kvpool.shards create --dir DIR --gb <ssd-gb>` (dev:research/TIERS.md §5)")
     if raw.get("tiers"):
         check_tiers(msgspec.convert(raw["tiers"], TierConfig))
     if a.max_model_len is not None and not 1 < a.max_model_len <= MAX_MODEL_LEN:

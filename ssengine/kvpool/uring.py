@@ -1,4 +1,4 @@
-"""io_uring for the SSD tier (layer 3, `backends.SsdTier`; lanes/m6 TIERS.md §2.4, §5.1): one ring per member.
+"""io_uring for the SSD tier (layer 3, `backends.SsdTier`; dev:research/TIERS.md §2.4, §5.1): one ring per member.
 
 liburing (liburing-ffi.so.2, the distribution's liburing2 package) through ctypes; no fallback: a ring that cannot be
 set up, or host memory that cannot be registered, fails the member at start-up.

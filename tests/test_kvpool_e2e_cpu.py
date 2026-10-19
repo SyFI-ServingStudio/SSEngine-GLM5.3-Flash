@@ -1,4 +1,4 @@
-"""DRAM tier end to end on CPU (lanes/m6 TIERS.md §5-§6): `python -m ssengine serve` with `keep_sessions` and `tiers`,
+"""DRAM tier end to end on CPU (dev:research/TIERS.md §5-§6): `python -m ssengine serve` with `keep_sessions` and `tiers`,
 FakeStageModel over gloo (its tier engines move no bytes and take the configured bandwidth's time). DRAM is HBM's
 victim tier (kept contexts written back ahead of or at their eviction); a session evicted from HBM resumes from DRAM: a read, then only the new tokens are computed."""
 

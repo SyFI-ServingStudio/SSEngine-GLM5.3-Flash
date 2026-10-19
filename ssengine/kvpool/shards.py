@@ -1,4 +1,4 @@
-"""The SSD tier's shard files, kept across runs (user, 2026-10-17; lanes/m6 TIERS.md §5).
+"""The SSD tier's shard files, kept across runs (user, 2026-10-17; dev:research/TIERS.md §5).
 
 Balanced storage (`placement.py`) gives member q its quarter (1/n) of every slot, so an SSD file holds a shard, not
 a GPU's KV cache: `<SSENGINE_SSD_DIR>/set<k>/shard<q>.bin`, q = 0..n-1. A run takes a whole set:
@@ -41,7 +41,7 @@ def check_set(set_dir: str, n: int, nbytes: int):
     if bad:
         raise RuntimeError(f"SSD shard set {set_dir}: shards " + ", ".join(
             f"{q} ({'missing' if b is None else f'{b} B'})" for q, b in bad) + f", the run needs {n} shards of "
-            f"{nbytes} B; create them with `python -m ssengine.kvpool.shards create` (TIERS.md §5)")
+            f"{nbytes} B; create them with `python -m ssengine.kvpool.shards create` (dev:research/TIERS.md §5)")
 
 
 class ShardSet:

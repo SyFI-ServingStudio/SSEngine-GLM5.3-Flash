@@ -1,5 +1,5 @@
 #!/bin/bash
-# M6 (7_offloading.md, TIERS.md) runs on one 4-GPU server, into OUT (default runs/m6). Usage, from the repo
+# M6 (7_offloading.md, dev:research/TIERS.md) runs on one 4-GPU server, into OUT (default runs/m6). Usage, from the repo
 # root (one run per job; the benchmarks/run.py options follow the name):
 #   mkdir -p runs/m6/slurm
 #   sbatch -p <partition> -J ppm6 --time=00:20:00 --mem=300G -o runs/m6/slurm/%j.out benchmarks/jobs/m6.sbatch \

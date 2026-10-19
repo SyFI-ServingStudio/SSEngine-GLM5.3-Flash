@@ -511,7 +511,7 @@ def run_named(name: str, fake: bool, port: int, out_root: Path, args) -> dict:
         extra["profile_mbs"] = [int(x) for w in args.nsys_mbs.split(",") for x in w.split(":")]   # a:b[,c:d...]
     if args.pool_tokens or (kind == "tier_bringup" and args.pool_tokens is None):   # 0: the full pool
         extra["pool_tokens"] = args.pool_tokens or TIER_BRINGUP_POOL
-    if args.dram_gb is not None or args.ssd_gb is not None:   # lanes/m6 TIERS.md; SSD files in $SSENGINE_SSD_DIR
+    if args.dram_gb is not None or args.ssd_gb is not None:   # dev:research/TIERS.md; SSD files in $SSENGINE_SSD_DIR
         gb = {k: None if v in (None, "none") else float(v) for k, v in (("dram_gb", args.dram_gb),
                                                                          ("ssd_gb", args.ssd_gb))}
         extra["tiers"] = gb | ({"staging_gb": args.staging_gb} if args.staging_gb else {})

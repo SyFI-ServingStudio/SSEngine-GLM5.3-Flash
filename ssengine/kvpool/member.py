@@ -1,4 +1,4 @@
-"""A stage process's side of the KV pool (lanes/m6 TIERS.md §3-§6, §13.2): `PoolMember`, the data plane.
+"""A stage process's side of the KV pool (dev:research/TIERS.md §3-§6, §13.2): `PoolMember`, the data plane.
 
 Every member moves its 1/n share (n = PP degree, `num_stages`) of every op (balanced storage, `placement.py`). The
 leader sends a `TierBatch` of ops whose dependencies are done to all n members' tier sockets (`tier_move`); a
@@ -9,7 +9,7 @@ over all stages' KV (the other stages' KV opened by CUDA IPC at start-up, `share
 chunk to its last, so reads complete in order, each at the link's rate), and a done thread per direction reports
 `TierDone` when the copies completed, with when the GPU began them (`Mover.host_ns`); a trace thread then writes the
 op's trace and returns its events, so no report waits for an earlier op's bookkeeping. Reads go first on the host link: H2D and D2H of four GPUs on one socket share
-~48 GB/s per GPU (TIERS.md §2.3), so a write copy running beside a read halves it. A write (not `urgent`, i.e. no HBM
+~48 GB/s per GPU (dev:research/TIERS.md §2.3), so a write copy running beside a read halves it. A write (not `urgent`, i.e. no HBM
 eviction waits for it) yields at each ring chunk to the reads queued or in flight then (`_yield_to_reads`), and
 does not run ahead of its previous chunk. No wait on the compute stream: a write's blocks are final and pinned until it
 is done, a read's blocks are held by a request that computes only after all n `TierDone`s.
@@ -57,7 +57,7 @@ NOOP = os.environ.get("SSENGINE_TIER_NOOP", "0") == "1"
 TRACE_EVERY = 8                          # the per-batch trace: 1 DRAM op in this many (SSENGINE_TIER_TRACE)
 PROBE_S, PROBE_LATE_S = 0.005, 0.020   # the GIL / CPU probe (`PoolMember._probe_loop`, with the trace)
 FAKE_BLOCK_BYTES = 8576 * 5996  # one block over all stages (GLM-5.3 PP4: 4 x 1,499 B/token); a GPU's slot is 1/n of
-                                # it rounded up to 4 KiB (PP4: 12,857,344 B, the real balanced slot, TIERS.md §3)
+                                # it rounded up to 4 KiB (PP4: 12,857,344 B, the real balanced slot, dev:research/TIERS.md §3)
 
 
 def tier_move(o: TierOp) -> TierMove:

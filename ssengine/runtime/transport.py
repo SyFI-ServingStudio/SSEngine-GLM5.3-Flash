@@ -42,7 +42,7 @@ class Shutdown(msgspec.Struct, tag=True):
 
 class TierMove(msgspec.Struct, array_like=True):
     """One tier op as every worker runs it on its 1/n share, n = PP degree (ssengine/kvpool: manager.TierOp,
-    member.tier_move; lanes/m6 TIERS.md §3)."""
+    member.tier_move; dev:research/TIERS.md §3)."""
     op_id: int
     op: str                       # "write" HBM -> tier, "read" tier -> HBM, "demote" DRAM -> SSD
     tier: str                     # "dram" | "ssd": destination of write/demote, source of read

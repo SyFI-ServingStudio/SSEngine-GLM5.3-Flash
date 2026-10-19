@@ -1,5 +1,5 @@
 """The host media (ssengine/kvpool/backends.py) on CPU: the arena, the SSD file's slot round trip, lock and reuse, and
-the OOM guards of TIERS.md §14.1 (preferred NUMA placement, oom_score_adj, residency per node, cgroup peak)."""
+the OOM guards of dev:research/TIERS.md §14.1 (preferred NUMA placement, oom_score_adj, residency per node, cgroup peak)."""
 
 import ctypes
 import os
