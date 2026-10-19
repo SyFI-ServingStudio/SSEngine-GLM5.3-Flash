@@ -67,7 +67,13 @@ Two kernels follow the design rather than the fork (`measured/kernels_identity.m
 5. Downloads enwik9 (http://mattmahoney.net/dc/enwik9.zip) and checks the zip's and the file's sha256.
 6. Runs `env/check_env.py`.
 
-Run it as the normal user, never as root, with a short `TMPDIR`: vLLM's zmq ipc path is `TMPDIR` + a uuid and must fit
+`STEPS` names the steps to run (default all): `venv vllm conv1d` (1-3) is the serving environment, `sim client corpus`
+(4, 4b, 5) the bench's, `check` step 6. The Docker image (`docker/Dockerfile`, README "Docker") runs the serving steps
+one per layer on `nvidia/cuda:13.0.2-devel-ubuntu24.04` (with `apt` `git curl liburing2 ninja-build g++` and uv 0.8.19),
+drops the downloads, installs this repo (`pip install -e .`, the `ppimpl` command) and ends with `env/check_env.py`;
+the versions above hold there too, at `/opt/ppimpl`.
+
+Run it as the normal user, never as root (`PPIMPL_ALLOW_ROOT=1` is for the container build only), with a short `TMPDIR`: vLLM's zmq ipc path is `TMPDIR` + a uuid and must fit
 in 107 characters (`bench/slurm/env.sh` makes one short TMPDIR per job under `PPIMPL_TMP`).
 
 ## Other tools

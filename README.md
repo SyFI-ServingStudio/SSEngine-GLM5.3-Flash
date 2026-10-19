@@ -85,3 +85,83 @@ The run directory `measured/runs_m3/one_1k/` holds the server and client logs, `
 Model correctness against vLLM TP4 at the same prompt: `sbatch -p <partition> --time=00:30:00 --gres=gpu:4 -o
 measured/logs/%j.out bench/slurm/chain.sbatch "chain vllm"`. The other milestones have their job scripts in
 `bench/slurm/`, each with its usage at the top.
+
+## Serve
+
+`ppimpl serve <model>` starts the server the way `vllm serve <model>` does (`ppimpl/serve/launch.py`). `<model>` is
+a Hugging Face repo id or a local checkpoint directory, and only one model is served: `nvidia/GLM-5.3-Flash-NVFP4`
+(`Glm5NextForConditionalGeneration`, NVFP4) as 4 pipeline stages on 4 GPUs. Any other model is refused from its
+`config.json` before anything else is downloaded. A repo id is fetched into the Hugging Face cache (`HF_HOME`) on
+first use (~191 GB), at the revision above unless `--revision` says otherwise.
+
+```bash
+uv pip install --python .venv/bin/python --no-deps -e .   # once: the `ppimpl` command (or .venv/bin/python -m ppimpl)
+ppimpl serve nvidia/GLM-5.3-Flash-NVFP4                                      # HBM only
+ppimpl serve nvidia/GLM-5.3-Flash-NVFP4 --dram-gb 50 --ssd-gb 128 --ssd-dir /nvme/ppimpl   # with DRAM and SSD tiers
+```
+
+The run config is the design setting of the M6 evaluation (`measured/eval_m6/summary.md`, "st10"): scheduler step
+`good` (6_scheduler.md), the exact prefix cache (`keep_sessions`) and, with a tier, exclusive DRAM writes and a 10%
+loading area (TIERS.md). The options:
+
+| Option | Config (`ppimpl/config.py`) | Default |
+|---|---|---|
+| `<model>` | `checkpoint` (the snapshot directory), after the model check | — |
+| `--host`, `--port` | `host`, `port` (the engine also takes the next 11 ports on 127.0.0.1) | 0.0.0.0, 8000 |
+| `--served-model-name` | `served_model_name`: the OpenAI API's model name | `<model>` as given |
+| `--max-model-len` | `max_model_len`: longest prompt + output the API takes | 1,048,576 (the model's) |
+| `--dram-gb`, `--ssd-gb` | `tiers.dram_gb`, `tiers.ssd_gb` per GPU; either one turns tiers on | no tiers |
+| `--ssd-dir` | `tiers.ssd_dir`: the SSD shard sets, made once with `python -m ppimpl.kvpool.shards create --dir DIR --gb <ssd-gb>` (TIERS.md §5) | `$PPIMPL_SSD_DIR` |
+| `--run-dir` | `run_dir`: logs (`server_config.yaml`, `microbatches.jsonl`, `worker*.log`, ...) | `./run` |
+| `--config YAML` | any `RunConfig` field, applied on top of the design setting; the options above win | — |
+
+`python -m ppimpl serve --config <yaml>` without a model still takes the whole run config from the YAML (bench/).
+
+The endpoints: `GET /health`, `GET /v1/models`, `POST /v1/completions` (a string or token-id prompt),
+`POST /v1/chat/completions` (the checkpoint's chat template; `tools` and `chat_template_kwargs` pass through), and
+req-frontend's `POST /inference/v1/generate`. **The engine computes prefill and one output token** (greedy; PLAN.md §1:
+no decode path), so `max_tokens` must be 1 (the default here); sampling fields are ignored, and `n` > 1, `echo` and
+`logprobs` are refused. The usage block reports the prompt tokens served from the prefix cache
+(`prompt_tokens_details.cached_tokens`). The first start compiles FlashInfer's JIT kernels into `~/.cache` (minutes);
+later starts reuse them.
+
+## Docker
+
+`docker/Dockerfile` builds the serving environment of `ENV.md` (`env/make_env.sh` with `STEPS="venv vllm conv1d"`:
+CUDA 13.0 devel on Ubuntu 24.04, uv's Python 3.12, `env/requirements.lock`, the vLLM fork, causal-conv1d built from
+source) with this repo installed; the bench-only parts (ServingStudioSim, req-frontend, enwik9) are not in it. Build
+from the repo root (CPU only, ~10 min, 8 of them the causal-conv1d build; the image is 16.6 GB; `--build-arg MAX_JOBS=N` sets the causal-conv1d build's parallel nvcc jobs,
+default 16):
+
+```bash
+docker build -f docker/Dockerfile -t ppimpl .
+docker run --rm ppimpl check-env                  # env/check_env.py, no GPU needed
+```
+
+Run it as `vllm/vllm-openai` is run, with the subcommand first:
+
+```bash
+docker run --gpus all --ipc=host -p 8000:8000 \
+  -v ~/.cache/huggingface:/root/.cache/huggingface \
+  -v ppimpl-cache:/root/.cache \
+  ppimpl serve nvidia/GLM-5.3-Flash-NVFP4 --served-model-name glm53-flash
+
+curl localhost:8000/health
+curl localhost:8000/v1/completions -H 'Content-Type: application/json' \
+  -d '{"model": "glm53-flash", "prompt": "The capital of France is", "max_tokens": 1}'
+```
+
+- `--gpus`: 4 B200 in one NVLink domain; with more on the host, name four: `--gpus '"device=0,1,2,3"'`.
+- `--ipc=host`: the stages pass activations over CUDA IPC and the intake processes share prompts through `/dev/shm`.
+- `ppimpl-cache` keeps the JIT and autotune caches (FlashInfer, Triton, TileLang, DeepGEMM) across containers: the
+  first start compiles FlashInfer's JIT kernels and is ready after 11-16 min, later ones after ~50 s (jobs 8495, 8512,
+  8517; natively 65 s). Without the volume every start compiles again. The weights' cache is the host's, mounted over `/root/.cache/huggingface`.
+- Tiers: `--dram-gb 50` pins that much host memory per GPU. The SSD tier reads and writes through io_uring, which
+  Docker's default seccomp profile denies: run with `--security-opt seccomp=docker/seccomp.json` (the default profile
+  plus the three io_uring syscalls; `docker/make_seccomp.py` writes it). Mount a directory for the shards and make its
+  shard set once: `docker run --rm -v /nvme/ppimpl:/ssd ppimpl python -m ppimpl.kvpool.shards create --dir /ssd --gb
+  128`, then serve with `-v /nvme/ppimpl:/ssd ... --ssd-gb 128 --ssd-dir /ssd`. (The tiers in a container are not
+  measured yet; the GPU smoke test, `bench/slurm/docker_smoke.sbatch`, runs HBM only.)
+- Logs go to `/workspace/run` in the container (`-v $PWD/run:/workspace/run` keeps them). `TMPDIR` is `/tmp`: vLLM's zmq
+  ipc path is `TMPDIR` + a uuid and must fit in 107 characters, so the entry point refuses a `TMPDIR` over 64.
+- `<image> <command>` runs any other command (`bash`, `python -m ...`).
