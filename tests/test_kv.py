@@ -3,9 +3,9 @@ import random
 import numpy as np
 import pytest
 
-from ppimpl.config import BLOCK_PAGES, BLOCK_TOKENS, PAGE_TOKENS, STATE_BLOCKS
-from ppimpl.engine.kv import (STATE_PAGES, KvManager, PagePool, kv_blocks_for, kv_pages_for, pages_for, pool_size)
-from ppimpl.engine.scheduler import Request
+from ssengine.config import BLOCK_PAGES, BLOCK_TOKENS, PAGE_TOKENS, STATE_BLOCKS
+from ssengine.engine.kv import (STATE_PAGES, KvManager, PagePool, kv_blocks_for, kv_pages_for, pages_for, pool_size)
+from ssengine.engine.scheduler import Request
 
 
 def test_block_and_page_counts():

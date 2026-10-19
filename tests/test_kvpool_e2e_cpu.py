@@ -1,4 +1,4 @@
-"""DRAM tier end to end on CPU (lanes/m6 TIERS.md §5-§6): `python -m ppimpl serve` with `keep_sessions` and `tiers`,
+"""DRAM tier end to end on CPU (lanes/m6 TIERS.md §5-§6): `python -m ssengine serve` with `keep_sessions` and `tiers`,
 FakeStageModel over gloo (its tier engines move no bytes and take the configured bandwidth's time). DRAM is HBM's
 victim tier (kept contexts written back ahead of or at their eviction); a session evicted from HBM resumes from DRAM: a read, then only the new tokens are computed."""
 
@@ -8,7 +8,7 @@ import pytest
 
 from conftest import free_port_block
 from e2e import Server
-from ppimpl.config import STATE_BLOCKS
+from ssengine.config import STATE_BLOCKS
 from test_prefix_e2e_cpu import CPU, Client, chunks_of, sreq_of
 
 TIERS = {**CPU, "tiers": {"dram_gb": 0.5, "ssd_gb": None, "dram_read_gb_s": 5.0}}
@@ -95,7 +95,7 @@ def test_staged_loading_end_to_end(tmp_path):
     context: 40 + 402 pages), so 3 contexts stay kept; DRAM (8 slots) keeps a 2-slot area, the rest for contexts. A..E: A and B leave HBM and DRAM.
     A's next round is fetched from SSD into DRAM's area (larger than the area: it starts with the area empty) and
     hops to HBM's."""
-    from ppimpl.kvpool.member import FAKE_BLOCK_BYTES
+    from ssengine.kvpool.member import FAKE_BLOCK_BYTES
     slot = -(-FAKE_BLOCK_BYTES // 4 // 4096) * 4096
     port = free_port_block()
     cfg = {**CPU, "tiers": {"dram_gb": 8 * slot / 1e9, "ssd_gb": 1.0, "dram_read_gb_s": 5.0, "ssd_read_gb_s": 2.0,

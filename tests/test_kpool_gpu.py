@@ -8,7 +8,7 @@ import types
 import numpy as np
 import pytest
 
-from ppimpl.model import pp_patch
+from ssengine.model import pp_patch
 
 pytestmark = pytest.mark.gpu
 KPOOL, HD, PAGE = 4, 128, 64
@@ -94,7 +94,7 @@ def test_expand_into_matches_the_fork_bitwise(rows, pools, start):
     import torch
     from vllm.models.glm5next.nvidia.ops import kpool_compress as kops
 
-    from ppimpl.model import kpool_fast
+    from ssengine.model import kpool_fast
 
     dev = torch.device("cuda")
     gen = torch.Generator(device=dev).manual_seed(rows)

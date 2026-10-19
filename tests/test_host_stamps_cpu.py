@@ -1,10 +1,10 @@
-"""ppimpl/runtime/host_stamps.py on a stand-in model: segment starts, inclusive function times, worker output."""
+"""ssengine/runtime/host_stamps.py on a stand-in model: segment starts, inclusive function times, worker output."""
 
 import json
 import time
 from types import SimpleNamespace as NS
 
-from ppimpl.runtime import host_stamps
+from ssengine.runtime import host_stamps
 
 
 def _leaf():
@@ -48,7 +48,7 @@ def test_stamps_time_functions_and_segments():
 
 
 def test_worker_stamps_writes_the_window(tmp_path, monkeypatch):
-    monkeypatch.setenv("PPIMPL_HOST_STAMPS", "1:2@0")
+    monkeypatch.setenv("SSENGINE_HOST_STAMPS", "1:2@0")
     monkeypatch.setattr(host_stamps, "FUNCTIONS", [])
     model = _model()
     ws = host_stamps.WorkerStamps(0, str(tmp_path), model)
@@ -64,7 +64,7 @@ def test_worker_stamps_writes_the_window(tmp_path, monkeypatch):
 
 
 def test_worker_stamps_slow_mode_keeps_only_slow_forwards(tmp_path, monkeypatch):
-    monkeypatch.setenv("PPIMPL_HOST_STAMPS", "slow:20@0")
+    monkeypatch.setenv("SSENGINE_HOST_STAMPS", "slow:20@0")
     model = _model()
     ws = host_stamps.WorkerStamps(0, str(tmp_path), model)
     assert ws.on and ws.slow_ms == 20

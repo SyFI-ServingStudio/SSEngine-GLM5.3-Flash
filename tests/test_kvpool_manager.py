@@ -1,16 +1,16 @@
-"""The leader's index in byte mode (ppimpl/kvpool/manager.py, replay's accounting): placement, LRU, read channels,
+"""The leader's index in byte mode (ssengine/kvpool/manager.py, replay's accounting): placement, LRU, read channels,
 write-back to SSD, and the scheduler's read path through the pool (read-wait bound, landed rounds first)."""
 
 import json
 
 import pytest
-from bench.replay import HANDOFF
+from benchmarks.replay import HANDOFF
 
-from ppimpl.config import BLOCK_PAGES, BLOCK_TOKENS, SchedulerConfig, TierConfig
-from ppimpl.engine.kv import KvManager, kv_pages_for, pages_for
-from ppimpl.engine.scheduler import Request, Scheduler
-from ppimpl.kvpool import BalancedKVPool, Hit, KVViews
-from ppimpl.kvpool.manager import TierManager
+from ssengine.config import BLOCK_PAGES, BLOCK_TOKENS, SchedulerConfig, TierConfig
+from ssengine.engine.kv import KvManager, kv_pages_for, pages_for
+from ssengine.engine.scheduler import Request, Scheduler
+from ssengine.kvpool import BalancedKVPool, Hit, KVViews
+from ssengine.kvpool.manager import TierManager
 
 MB = 1_000_000          # 1 MB per token below: 1 GB holds 1,000 tokens
 MS = 1_000_000

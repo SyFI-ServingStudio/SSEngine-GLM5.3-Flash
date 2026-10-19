@@ -1,4 +1,4 @@
-"""`ppimpl serve <model>` (ppimpl/serve/launch.py) and the OpenAI-compatible endpoints (ppimpl/serve/openai.py): the
+"""`ssengine serve <model>` (ssengine/serve/launch.py) and the OpenAI-compatible endpoints (ssengine/serve/openai.py): the
 model check, the config it builds, the chat template as transformers renders it, and the endpoints end to end on CPU
 (FakeStageModel, a small word-level tokenizer)."""
 
@@ -14,9 +14,9 @@ import yaml
 
 from conftest import free_port_block
 from e2e import ROOT, Server
-from ppimpl.config import CHECKPOINT
-from ppimpl.model.fake import fake_token
-from ppimpl.serve import launch
+from ssengine.config import CHECKPOINT
+from ssengine.model.fake import fake_token
+from ssengine.serve import launch
 
 # config.json of nvidia/GLM-5.3-Flash-NVFP4, the fields the check reads
 GLM53_FLASH = {"architectures": ["Glm5NextForConditionalGeneration"], "model_type": "glm5_next",
@@ -106,7 +106,7 @@ def test_build_config_is_the_design_setting(tmp_path):
 
 def test_cli_refuses_another_model_before_starting(tmp_path):
     d = model_dir(tmp_path / "llama", {"architectures": ["LlamaForCausalLM"]})
-    r = subprocess.run([sys.executable, "-m", "ppimpl", "serve", str(d)], cwd=ROOT, capture_output=True, text=True)
+    r = subprocess.run([sys.executable, "-m", "ssengine", "serve", str(d)], cwd=ROOT, capture_output=True, text=True)
     assert r.returncode == 1 and "unsupported model" in r.stderr and "LlamaForCausalLM" in r.stderr, r.stderr
 
 
@@ -115,7 +115,7 @@ def test_render_chat_equals_transformers():
     """The GLM-5.3 template rendered here (jinja2 only) and by transformers' apply_chat_template."""
     from transformers import AutoTokenizer
 
-    from ppimpl.serve.openai import Text, render_chat
+    from ssengine.serve.openai import Text, render_chat
 
     hf = AutoTokenizer.from_pretrained(CHECKPOINT)
     text = Text(CHECKPOINT)
@@ -189,12 +189,12 @@ def test_openai_endpoints_cpu(tmp_path, intake_procs):
 
 
 def test_cli_serves_a_model_dir_cpu(tmp_path):
-    """`python -m ppimpl serve <dir> --config <yaml>`: the model's config built, the YAML on top (the fake model)."""
+    """`python -m ssengine serve <dir> --config <yaml>`: the model's config built, the YAML on top (the fake model)."""
     d = model_dir(tmp_path / "m")
     (tmp_path / "fake.yaml").write_text(yaml.safe_dump({**CPU, "intake_procs": 1}))
     port = free_port_block()
     log = open(tmp_path / "serve.log", "w")
-    p = subprocess.Popen([sys.executable, "-m", "ppimpl", "serve", str(d), "--config", str(tmp_path / "fake.yaml"),
+    p = subprocess.Popen([sys.executable, "-m", "ssengine", "serve", str(d), "--config", str(tmp_path / "fake.yaml"),
                           "--host", "127.0.0.1", "--port", str(port), "--served-model-name", "glm",
                           "--run-dir", str(tmp_path / "run")], cwd=ROOT, stdout=log, stderr=subprocess.STDOUT,
                          start_new_session=True)

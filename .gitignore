@@ -6,16 +6,19 @@ __pycache__/
 goal.md
 progress.md
 notes.md
-measured/runs*/
 third_party/
-measured/logs/
 build/
-# measured/: the md tables and the handoff-format jsonl are tracked; raw outputs are not (history: 7598487)
-measured/batchflip/
-measured/graphs/
-measured/host/
-measured/kernels_runs/
-measured/nodecheck_runs/
 tmp/
-measured/kvaudit/
+# run outputs (benchmarks/run.py, benchmarks/jobs/*.sbatch): runs/<name>/, runs/m6/, runs/logs/, runs/vllm_dpep/
+runs/
+# the GPU seed of the Docker image (docker/Dockerfile): made on a GPU, optional, not in git
 docker/jit-seed/
+# research/measured/: the md tables and the handoff-format jsonl are tracked; raw outputs are not (history: 7598487)
+research/measured/runs*/
+research/measured/logs/
+research/measured/batchflip/
+research/measured/graphs/
+research/measured/host/
+research/measured/kernels_runs/
+research/measured/nodecheck_runs/
+research/measured/kvaudit/

@@ -1,4 +1,4 @@
-"""ppimpl/model/moe_tuning.py: the MoE's serving tactic buckets and the served routing it is tuned on (CPU)."""
+"""ssengine/model/moe_tuning.py: the MoE's serving tactic buckets and the served routing it is tuned on (CPU)."""
 
 import json
 import random
@@ -6,8 +6,8 @@ import random
 import pytest
 import torch
 
-from ppimpl.model import moe_tuning as mt
-from ppimpl.model.stage import GRAPH_BUCKETS
+from ssengine.model import moe_tuning as mt
+from ssengine.model.stage import GRAPH_BUCKETS
 
 
 def test_buckets_are_the_graph_buckets_then_powers_of_two():
@@ -93,7 +93,7 @@ def test_real_routing_swaps_the_logit_initializer_while_tuning_only():
 
 
 def test_merge_fills_the_serving_buckets_from_the_base_and_takes_only_faster_ab_tactics(tmp_path):
-    from bench.tune_tactics import merge
+    from benchmarks.tune_tactics import merge
 
     op = "flashinfer::trtllm_fp4_block_scale_moe"
     key = lambda t: f"('{op}', 'MoERunner', (({t}, 4096), ({t}, 288)), ('Module', 8))"     # noqa: E731

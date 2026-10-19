@@ -1,4 +1,4 @@
-"""Shared end-to-end harness: start `python -m ppimpl serve`, drive it over HTTP, check responses and the logs."""
+"""Shared end-to-end harness: start `python -m ssengine serve`, drive it over HTTP, check responses and the logs."""
 
 import asyncio
 import json
@@ -12,8 +12,8 @@ from pathlib import Path
 import httpx
 import yaml
 
-from ppimpl.config import BLOCK_TOKENS, STATE_BLOCKS
-from ppimpl.model.fake import fake_token
+from ssengine.config import BLOCK_TOKENS, STATE_BLOCKS
+from ssengine.model.fake import fake_token
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -28,7 +28,7 @@ class Server:
         env = {k: v for k, v in os.environ.items() if k != "SLURM_JOB_ID"}
         # its own session: the server, its workers and intake processes form one process group that kill_group()
         # ends, so no test leaves them behind (test_worker_failure_stops_server leaked servers holding its ports)
-        self.proc = subprocess.Popen([sys.executable, "-m", "ppimpl", "serve", "--config", str(run_dir / "server.yaml")],
+        self.proc = subprocess.Popen([sys.executable, "-m", "ssengine", "serve", "--config", str(run_dir / "server.yaml")],
                                      cwd=ROOT, stdout=self.log, stderr=subprocess.STDOUT, env=env,
                                      start_new_session=True)
 

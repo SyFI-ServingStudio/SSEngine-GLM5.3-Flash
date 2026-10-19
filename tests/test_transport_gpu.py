@@ -22,7 +22,7 @@ def sent(i: int, n: int, device):
 
 def _stage(stage: int, n: int, port: int, out_path: str):
     import torch
-    from ppimpl.runtime.transport import CePipe
+    from ssengine.runtime.transport import CePipe
 
     device = torch.device("cuda", stage)
     torch.cuda.set_device(device)
@@ -70,7 +70,7 @@ def _gate_stage(stage: int, n: int, port: int, out_path: str):
     """Stage 0 runs fast, the last stage 20 ms per microbatch: with the gate (2 in flight) stage 0 can finish its
     microbatch k only after the last stage finished k-2."""
     import torch
-    from ppimpl.runtime.transport import CePipe
+    from ssengine.runtime.transport import CePipe
 
     device = torch.device("cuda", stage)
     torch.cuda.set_device(device)

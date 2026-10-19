@@ -1,0 +1,1651 @@
+<!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}html{scroll-padding-top:env(safe-area-inset-top,0px)}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#fff;color:#000}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style></head><body>
+<title>从模拟到真机</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Noto+Sans+SC:wght@400;500;700&family=Noto+Serif+SC:wght@600;700&display=swap">
+<style>
+/* Layout: one reading column (~46rem), figures and tables in the column; the engineering-notebook look of the
+   companion note (长上下文 Prefill 的流水线并行). Colors: cool paper ground, ink text, cobalt accent = real system,
+   a warm second hue = simulator; pending blocks in the warn tone. */
+:root {
+  --bg: #f5f6f8; --surface: #ffffff; --fg: #18202e; --muted: #5a6476; --rule: #d9dee7; --grid: #e6e9ef;
+  --accent: #2f4fc4; --slo: #b0322a; --tag: #eef1f8; --warn: #8a5a00; --warnbg: #fbf3e2;
+  --c-real: #2f4fc4; --c-sim: #c2503c; --c-hbm: #2f4fc4; --c-dram: #2c8a6e; --c-ssd: #b8862a; --c-miss: #b9c0cc;
+  --c-alt: #8b4fb3; --c-alt2: #7f8aa0;
+  --serif: "Noto Serif SC", "Songti SC", "SimSun", serif;
+  --sans: "Noto Sans SC", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #12161d; --surface: #1a1f28; --fg: #e4e8ef; --muted: #9aa4b5; --rule: #2d3442; --grid: #232a36;
+    --accent: #8ea2ff; --slo: #ff8a7a; --tag: #222a38; --warn: #f0c36a; --warnbg: #2b2416;
+    --c-real: #8ea2ff; --c-sim: #ef7e68; --c-hbm: #8ea2ff; --c-dram: #5cc7a5; --c-ssd: #e0b45a; --c-miss: #4a5262;
+    --c-alt: #c08ae6; --c-alt2: #9aa5bb;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #12161d; --surface: #1a1f28; --fg: #e4e8ef; --muted: #9aa4b5; --rule: #2d3442; --grid: #232a36;
+  --accent: #8ea2ff; --slo: #ff8a7a; --tag: #222a38; --warn: #f0c36a; --warnbg: #2b2416;
+  --c-real: #8ea2ff; --c-sim: #ef7e68; --c-hbm: #8ea2ff; --c-dram: #5cc7a5; --c-ssd: #e0b45a; --c-miss: #4a5262;
+  --c-alt: #c08ae6; --c-alt2: #9aa5bb;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.85 var(--sans); }
+main { max-width: 46rem; margin: 0 auto; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); padding-block: 40px 96px; }
+h1, h2, h3, h4 { font-family: var(--serif); text-wrap: balance; line-height: 1.35; }
+h1 { font-size: 2.05rem; margin: 0.4em 0 0.3em; letter-spacing: 0.01em; }
+h2 { font-size: 1.42rem; margin: 3.2em 0 0.6em; padding-top: 1.1em; border-top: 1px solid var(--rule); }
+h2 .no { font-family: var(--mono); font-weight: 500; font-size: 0.8em; color: var(--accent); margin-right: 0.5em; }
+h3 { font-size: 1.08rem; margin: 2em 0 0.4em; }
+h4 { font-size: 0.98rem; margin: 1.7em 0 0.3em; }
+p { margin: 0.75em 0; }
+a { color: var(--accent); }
+a:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.lede { font-size: 1.08rem; }
+.kicker { font-family: var(--mono); font-size: 0.78rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.byline { color: var(--muted); font-size: 0.9rem; }
+.alpha { background: var(--warnbg); color: var(--warn); border-radius: 6px; padding: 10px 14px; font-size: 0.9rem; line-height: 1.7; margin: 1.4em 0; }
+.num { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 0.94em; }
+code { font-family: var(--mono); font-size: 0.86em; background: var(--tag); padding: 0.1em 0.35em; border-radius: 4px; overflow-wrap: anywhere; }
+ul.find { padding-left: 1.2em; }
+ul.find li { margin: 0.35em 0; }
+ul.find ul { padding-left: 1.1em; margin: 0.2em 0; }
+nav.toc { font-size: 0.92rem; margin: 1.6em 0; }
+nav.toc ol { padding-left: 1.6em; margin: 0.3em 0; columns: 2 18rem; column-gap: 2rem; }
+nav.toc li { margin: 0.15em 0; break-inside: avoid; }
+nav.toc a { color: var(--fg); text-decoration: none; border-bottom: 1px solid var(--rule); }
+nav.toc a:hover, nav.toc a:focus-visible { border-bottom-color: var(--accent); }
+figure { margin: 1.8em 0 2em; }
+.fighead { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 6px 16px; margin-bottom: 6px; }
+.fighead .q { font-weight: 700; font-size: 0.98rem; }
+.fighead .segs { display: flex; flex-wrap: wrap; gap: 6px; }
+.seg { display: inline-flex; border: 1px solid var(--rule); border-radius: 6px; overflow: hidden; background: var(--surface); }
+.seg button { font: 500 0.78rem/1 var(--sans); color: var(--muted); background: transparent; border: 0; padding: 7px 10px; cursor: pointer; }
+.seg button + button { border-left: 1px solid var(--rule); }
+.seg button[aria-pressed="true"] { background: var(--accent); color: var(--surface); }
+.chart { width: 100%; height: 380px; background: var(--surface); border: 1px solid var(--rule); border-radius: 8px; }
+.chart.short { height: 320px; }
+.chart.tall { height: 500px; }
+figcaption { font-size: 0.86rem; color: var(--muted); line-height: 1.7; margin-top: 8px; }
+.tbl { overflow-x: auto; margin: 1.2em 0; }
+table { border-collapse: collapse; width: 100%; font-size: 0.86rem; }
+th, td { text-align: right; padding: 6px 10px; border-bottom: 1px solid var(--rule); white-space: nowrap; font-variant-numeric: tabular-nums; vertical-align: top; }
+th:first-child, td:first-child { text-align: left; }
+th { font-weight: 500; color: var(--muted); }
+td.best { color: var(--accent); font-weight: 700; }
+tr.ref td { color: var(--muted); }
+tr.grp td { border-top: 2px solid var(--rule); }
+table.wrap td, table.wrap th { white-space: normal; text-align: left; min-width: 7.5em; }
+table.wrap td:first-child { min-width: 9em; }
+.note { font-size: 0.9rem; color: var(--muted); border-left: 2px solid var(--rule); padding-left: 12px; }
+.simsays { font-size: 0.92rem; background: var(--surface); border: 1px solid var(--rule); border-radius: 8px; padding: 10px 14px; margin: 1.4em 0; }
+.simsays b:first-child { color: var(--c-sim); font-family: var(--mono); font-size: 0.78rem; letter-spacing: 0.06em; margin-right: 0.6em; }
+.tk { font-size: 0.95rem; background: var(--surface); border: 1px solid var(--rule); border-left: 3px solid var(--accent); border-radius: 6px; padding: 8px 14px; margin: 0.8em 0 1.4em; }
+.tk > b { font-family: var(--mono); font-size: 0.76rem; letter-spacing: 0.06em; color: var(--accent); }
+.tk ul { margin: 0.2em 0 0; padding-left: 1.2em; }
+.tk li { margin: 0.2em 0; }
+.tag { display: inline-block; font: 500 0.7rem/1.6 var(--mono); background: var(--tag); color: var(--muted); border-radius: 4px; padding: 0 6px; margin-left: 6px; vertical-align: 0.15em; letter-spacing: 0; }
+.pending { display: inline-block; font: 500 0.78rem/1.6 var(--mono); color: var(--warn); background: var(--warnbg); border-radius: 4px; padding: 1px 8px; }
+.src { font-size: 0.8rem; color: var(--muted); font-family: var(--mono); overflow-wrap: anywhere; }
+pre.src { white-space: pre-wrap; }
+.flow { display: grid; grid-template-columns: repeat(auto-fit, minmax(9.5rem, 1fr)); gap: 10px; margin: 1.2em 0 0.6em; font-size: 0.84rem; }
+.flow div { background: var(--surface); border: 1px solid var(--rule); border-radius: 8px; padding: 10px 12px; min-width: 0; }
+.flow div b { display: block; font-size: 0.92rem; }
+.flow div .num { color: var(--muted); }
+.flow div.hl { border-color: var(--accent); }
+@media (max-width: 34rem) { body { font-size: 15.5px; } h1 { font-size: 1.6rem; } .chart { height: 330px; } .chart.tall { height: 470px; } }
+@media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto; } }
+nav.lang { display: flex; justify-content: flex-end; margin: 0 0 4px; }
+nav.lang .pill { display: inline-flex; border: 1px solid var(--rule); border-radius: 6px; overflow: hidden; background: var(--surface); }
+nav.lang a { font: 500 0.78rem/1 var(--sans); color: var(--muted); text-decoration: none; padding: 7px 10px; }
+nav.lang a + a { border-left: 1px solid var(--rule); }
+nav.lang a[aria-current="page"] { background: var(--accent); color: var(--surface); }
+</style>
+<main>
+<nav class="lang" aria-label="Language"><span class="pill"><a href="index.html" hreflang="zh" lang="zh" aria-current="page">中文</a><a href="en.html" hreflang="en" lang="en">English</a></span></nav>
+<script>(function () {
+  var links = document.querySelectorAll("nav.lang a");
+  function sync() { links.forEach(function (a) { a.href = a.getAttribute("href").split("#")[0] + location.hash; }); }
+  links.forEach(function (a) { a.addEventListener("click", function () {
+    sync(); try { localStorage.setItem("sim-to-real-lang", a.getAttribute("hreflang")); } catch (e) {}
+  }); });
+  sync(); window.addEventListener("hashchange", sync);
+})();</script>
+<p class="kicker">ServingStudio · research notes · draft</p>
+<h1>从模拟到真机：GLM-5.3-Flash NVFP4 PP4 on B200 的实现与对齐</h1>
+<p class="byline">GLM-5.3-Flash NVFP4 · 4 × B200 PP4 · TraceLab coding-agent sessions · 目标来自 ServingStudio 模拟，实测来自 SSEngine</p>
+
+<div class="alpha"><b>草稿 v3。</b>写于 M6 eval 完成之后。
+<ul class="find">
+<li>最终对照（§5.6、§6.9–§6.10、§7）用 TraceLab v3（新模型）trace：20 分钟闭环用于真机对照，8 小时闭环只在 sim 里跑。</li>
+<li>引擎逐步搭建的 bring-up（§4–§6 中标“合成负载”或“旧 trace”的小节）用当时的合成负载和旧 trace，记录的是每一步的最终结果。</li>
+<li>真机数字来自 <code>SSEngine</code>（各节注明 Slurm 作业号）；sim 数字来自 ServingStudioSim 的 handoff <code>glm53_flash_pp4_b200_v2</code> 和之后的实验目录（v3 部分在 wt-pp-staged）。</li>
+<li>还没做完的工作集中在 <a href="#s9">§9</a>。</li>
+</ul></div>
+
+<p class="lede">上一份笔记用 ServingStudio 模拟器为 GLM-5.3-Flash 选出了一个方案：4 张 B200 组成 4 级 pipeline，scheduler 按最短剩余优先组 microbatch，session 的上下文保存在 HBM、DRAM 和 SSD 三层里。这份笔记记录把这个方案在真机上一步步实现出来的过程，回答两个问题：</p>
+<ul class="find">
+<li>照着 sim 的设计做出来，能不能达到 sim 预测的性能？</li>
+<li>差距出在哪里？</li>
+</ul>
+
+<h3 id="s0-1">Setting</h3>
+<ul class="find">
+<li>和上一份笔记相同：只做 prefill，decode 在别的 GPU 上。</li>
+<li>负载：20 分钟的闭环 coding-agent session，同时最多 N 个 session（N = 400 是 SLO 点，500 是过载点）。</li>
+<li>SLO：p99 TTFT ≤ 6 s。</li>
+</ul>
+
+<h3 id="s0-2">Method</h3>
+<ul class="find">
+<li>真机系统叫 SSEngine：自己写的小引擎（scheduler、KV/prefix cache、DRAM/SSD 分层、pipeline runtime、server）。</li>
+<li>kernel 和模型层代码复用 vLLM 的 fork。</li>
+<li>sim 给出每个阶段的目标（handoff），真机逐阶段追目标，一个阶段过关才进入下一个。</li>
+</ul>
+
+<h3 id="s0-3">结论（概要）</h3>
+<ul class="find">
+<li><b>和 sim 对得上。</b>HBM → DRAM → SSD 三层都打开时，真机和 sim 的吞吐在 N = 100 / 300 相差 1% 以内，N = 400 相差 4–5%。三档内存配置（full、Tiers、SSD-heavy）都是这样，命中在三层之间的分布也对得上（<a href="#s6-9">§6.9</a>）。</li>
+<li><b>比 vLLM 快得多，TTFT 低一到两个数量级。</b>同一 v3 负载、同样 4 张 B200，第 0–20 分钟：
+  <ul>
+  <li>N = 400：本引擎（Tiers）34.07 r/s，TTFT p50 / p90 / p99 0.99 / 4.70 / 61.00 s，超过 60 s 的 707 轮；vLLM DP4/EP4 6.58 r/s，36.23 / 67.53 / 201.68 s，910 轮；vLLM TP4 1.78 r/s，147.10 / 333.85 / 346.84 s，1,374 轮。吞吐分别是 5.2 倍和 19 倍。</li>
+  <li>N = 300：本引擎（full）32.03 r/s，0.23 / 0.99 / 19.83 s，205 轮；vLLM DP4/EP4 9.70 r/s，18.86 / 30.68 / 43.02 s，0 轮（吞吐 3.3 倍）；vLLM TP4 1.81 r/s，68.74 / 289.89 / 303.05 s，1,400 轮。</li>
+  <li>N = 100：三者都服务了所有到达的轮，但第 10–20 分钟 TTFT p50 / p90 / p99 本引擎 0.09 / 0.17 / 0.36 s，vLLM DP4/EP4 1.31 / 2.24 / 3.72 s，TP4 0.76 / 3.81 / 7.92 s（都没有超过 60 s 的轮）。见 <a href="#s6-10">§6.10</a>。</li>
+  </ul></li>
+<li><b>分层是吞吐的来源。</b>N = 400 时三层让这 4 张 GPU 维持 37–41 r/s（第 10–20 分钟）；只用 HBM 时约 16 r/s（<a href="#s5-6">§5.6</a>）。</li>
+<li><b>每一步 bring-up 都对上了目标。</b>kernel、单层、单请求、所有请求在 t = 0 同时到达的饱和测试、prefix 命中、scheduler 的逐步检查、DRAM/SSD 读，都在目标的 ±10% 内或原因已知（<a href="#s4">§4</a>–<a href="#s6">§6</a>）。</li>
+<li><b>sim 还决定了很多设计：</b>DRAM 从 150 GB 降到 50 GB，SSD 只写 DRAM 淘汰的内容，SSD 定 128 GB，哪些优化不必做（<a href="#s2">§2</a>）。</li>
+<li><b>容量不够会塌缩。</b>没有 SSD 时命中会突然归零，每轮整段重算。sim 预测的塌缩窗口和真机相同，塌缩前逐窗口吻合；塌缩之后两边落到不同的稳态（<a href="#s7">§7</a>）。</li>
+<li><b>剩下的差距有四个来源，都已定位：</b>sim 不计写入代价；stage 2/3 的 GPU 更热、频率更低；KV block 取整浪费 HBM；主机开销（<a href="#s8">§8</a>）。</li>
+<li><b>8 小时 sim 里带 SSD 的配置全程稳定。</b>KDA state 只在少数位置可用，多存检查点、压缩 state 还没在真机上做（<a href="#s7-5">§7.5</a>、<a href="#s9">§9</a>）。</li>
+</ul>
+
+<h3 id="s0-4">文章结构</h3>
+<ul class="find">
+<li>§1：模型、负载、目标，以及“对齐”的含义。</li>
+<li>§2：全文主线。sim 给出了哪些判断，真机上结果如何。</li>
+<li>§3–§6：按实现顺序走一遍。引擎结构 → kernel 与单步迭代 → prefix cache 与 scheduler → DRAM/SSD 分层。每一步都有 bring-up 测试、设置、真机 vs 目标、图。</li>
+<li>§7：塌缩、反抖动和 8 小时稳态。§8：sim 的准确度。§9：还没做完的 KDA state 检查点和 state 压缩。</li>
+<li>每节开头有“要点”，末尾有“sim 怎么说”，以及“哪里出了问题”（没成功的尝试和事故）。</li>
+</ul>
+
+<nav class="toc" aria-label="目录"><b>目录</b>
+<ol start="1">
+<li><a href="#s1">背景与目标</a></li>
+<li><a href="#s2">sim 如何指导实现</a></li>
+<li><a href="#s3">实现：SSEngine</a></li>
+<li><a href="#s4">Kernel 与单步迭代</a></li>
+<li><a href="#s5">Prefix cache 与 scheduler</a></li>
+<li><a href="#s6">DRAM 与 SSD 分层</a></li>
+<li><a href="#s7">不稳定与塌缩</a></li>
+<li><a href="#s8">sim 有多准</a></li>
+<li><a href="#s9">待办：KDA state 检查点与压缩</a></li>
+<li><a href="#s10">结论与下一步</a></li>
+<li><a href="#s11">附录：作业、实验与提交</a></li>
+</ol></nav>
+
+<!-- ============================== 1 ============================== -->
+<h2 id="s1"><span class="no">1</span>背景与目标</h2>
+<div class="tk"><b>要点</b><ul>
+<li>45 层的 GLM-5.3-Flash 切成 4 级 pipeline，每级放整层，级内没有 TP/EP。</li>
+<li>sim 把设计冻结成 handoff，分 7 个里程碑，每个都有目标数字和过关规则。</li>
+<li>每个里程碑先用合成 bring-up 负载过关，再上 session 负载。</li>
+</ul></div>
+
+<h3 id="s1-1">1.1 模型与部署</h3>
+<ul class="find">
+<li><b>层：</b>共 45 层，hidden size 4096。11 层是 DSA（sparse MLA + indexer，第 3、7、…、43 层），34 层是 KDA（linear attention）。</li>
+<li><b>FFN：</b>前 3 层是 dense FFN，其余 42 层是 MoE（288 个 routed expert，top-8）。</li>
+<li><b>精度：</b>dense FFN 和 routed expert 用 NVFP4；attention、router、shared expert 和 lm_head 保持 BF16；KV cache 是 FP8。</li>
+<li><b>切分：</b>4 级 pipeline，层的划分是 [12, 11, 11, 11]。级间传 4 路 residual stream，每 token 32 KiB。</li>
+</ul>
+<div class="tbl"><table>
+<thead><tr><th>Stage</th><th>层</th><th>DSA 层</th><th>KV B/token</th></tr></thead>
+<tbody>
+<tr><td>0</td><td>0–11</td><td>3, 7, 11</td><td>1,635</td></tr>
+<tr><td>1</td><td>12–22</td><td>15, 19</td><td>1,090</td></tr>
+<tr><td>2</td><td>23–33</td><td>23, 27, 31</td><td>1,635</td></tr>
+<tr><td>3</td><td>34–44</td><td>35, 39, 43</td><td>1,635</td></tr>
+</tbody></table></div>
+<ul class="find">
+<li>每张 GPU 的 KV 是 100.18 GB。整条 pipeline 共用一个 block pool，按有 3 层 DSA 的 stage 计算，能放 6,126 万 token（pool 61,258,368 tokens）。</li>
+<li>DRAM 和 SSD 按 8,576 token 的 block 存；HBM 里的 KV 按 128 token 一页分配（取整的原因见 <a href="#s8-2">§8.2</a>）。</li>
+</ul>
+
+<h3 id="s1-2">1.2 负载</h3>
+<h4>v3 trace（最终对照）</h4>
+<ul class="find">
+<li>TraceLab v3：新模型下采集的 coding-agent session。真机对照用 20 分钟的版本（<code>data/tracelab-v3/m6/sessions_2ps_v3.csv</code>）。</li>
+<li>新 session 每秒到达 2 个，持续 20 分钟，共 2,457 个 session、26.1 万轮；同时最多 N 个活跃，多的排队等空位。每次运行从空 cache 开始。</li>
+<li>每一轮的 prompt = 上一轮的 prompt + 上一轮的输出 + 新 token。偶尔 agent 先截掉上下文的末尾，或者压缩上下文。</li>
+<li>平均每轮上下文约 16.9 万 token，新 token 2.7k，98% 是 session 自己的 prefix；最长的上下文接近 100 万 token。</li>
+<li>这 4 张 GPU 只算每轮的 prefill 和第一个输出 token。下一轮在 decode 时间（80 token/s）加上 tool 等待之后到达。</li>
+<li>小时级的稳态只在 sim 里跑：8 小时闭环，同时 1,563 / 2,000 / 2,500 个 session（<code>data/tracelab-v3/traces/closed_c*_s0.csv</code>），见 <a href="#s7-5">§7.5</a>。</li>
+</ul>
+<h4>bring-up 负载（搭建过程）</h4>
+<p>M3–M6 的每一步先用下面的负载过关。合成负载的 prompt 是 enwik9 的 token，按确定规则截取；“旧 trace”是 handoff 自带的 <code>data/sessions_2ps.csv</code>，同样每秒 2 个、20 分钟、2,457 个 session，换 v3 之前的 M4–M6 session 都用它。</p>
+<div class="tbl"><table class="wrap">
+<thead><tr><th>负载</th><th>请求</th><th>到达</th><th>检查什么</th><th>见</th></tr></thead>
+<tbody>
+<tr><td>单请求</td><td>每个长度 L（1k–128k）5 个，无 prefix，1 个输出 token</td><td>间隔 10 s，GPU 空闲</td><td>每个 stage 的时间、级间发送、TTFT</td><td><a href="#s4-4">§4.4</a></td></tr>
+<tr><td>饱和（同时到达）</td><td>每个长度共 2<sup>24</sup> token：1k 16,384 个，…，128k 128 个</td><td><b>全部在 t = 0</b></td><td>满载吞吐、排队决定的 TTFT、stage 忙碌率</td><td><a href="#s4-5">§4.5</a></td></tr>
+<tr><td>prefix bring-up</td><td>40 个两轮 session：P ∈ {8k, 32k, 128k, 512k} × A ∈ {1k, 8k}</td><td>每 30 s 一个</td><td>命中 = P，第 1 轮只算 A</td><td><a href="#s5-2">§5.2</a></td></tr>
+<tr><td>调度检查</td><td>28 个 prompt：1 × 128k、1 × 32k、8 × 4k、16 × 1k，之后单独 8k、1k</td><td><b>26 个在 t = 0</b>，8k 在 5 s，1k 在 7 s</td><td>每个 microbatch 逐 chunk 相同</td><td><a href="#s5-4">§5.4</a></td></tr>
+<tr><td>强制调度检查</td><td>1 × 32k，16,000 × 1k</td><td>32k 在 t = 0；1k 每秒 200 个，持续 80 s</td><td>60 s 强制规则、budget</td><td><a href="#s5-4">§5.4</a></td></tr>
+<tr><td>分层 bring-up</td><td>两轮 session，P ∈ {32k, 128k, 512k}，小 pool 让第 1 轮必须从 DRAM 或 SSD 读</td><td>每次一个</td><td>读时间、TTFT</td><td><a href="#s6-8">§6.8</a></td></tr>
+<tr><td>session（旧 trace）</td><td>2,457 个 session</td><td>每秒 2 个，最多 N 个活跃</td><td>r/s、TTFT、命中</td><td><a href="#s5-3">§5.3</a>、<a href="#s5-5">§5.5</a>、<a href="#s6-8">§6.8</a></td></tr>
+</tbody></table></div>
+
+<h3 id="s1-3">1.3 sim 给出的设计与目标</h3>
+<ul class="find">
+<li>sim 把设计冻结成一份 handoff（v2，ServingStudioSim 的 <code>1de110c0</code>）。</li>
+<li>handoff 分 7 个文件，每个对应一个里程碑：约定、kernel、单层、单步迭代、prefix cache、scheduler、DRAM/SSD 分层。每个里程碑有自己的目标数字和过关规则。</li>
+<li>真机按 M1 到 M6 的顺序追。</li>
+<li>目标数字最初用默认 profile DB 生成；后来改用真实输入重新 profile kernel（realistic-input DB），真机对照的是后者，记作 v2-realistic（原因见 <a href="#s4-7">§4.7</a>）。</li>
+<li>换成 v3 trace 之后，sim 目标在 wt-pp-staged 里按同样的设置重跑（<code>logs/20261018_9_v3_m6</code> 等，见 <a href="#s11-2">§11.2</a>）。</li>
+</ul>
+
+<h3 id="s1-4">1.4 “对齐”的含义</h3>
+<ul class="find">
+<li><b>kernel、单层、单步迭代：</b>每个 kernel 配置、每个 stage 的时间，和 profile 里的行或目标比，偏差在 ±10% 以内，否则要在 <code>issues.md</code> 里写出原因。</li>
+<li><b>session：</b>比较 rounds/s、新 token/s、TTFT p50 / p90 / p99、超过 60 s 的轮数。p99 落在“1% 的轮等满 60 s”这条边界附近，极其敏感，所以优先比较超过 60 s 的轮数和每分钟的 token 数。</li>
+<li><b>动态：</b>每 2 分钟窗口的轮数、命中份额、各层读写次数。塌缩的配置只比较塌缩前的窗口。</li>
+<li><b>正确性：</b>经过 cache 或分层读回后，输出 token 必须和不用 cache 时一致，分层读回的字节逐位相同。</li>
+</ul>
+
+<!-- ============================== 2 ============================== -->
+<h2 id="s2"><span class="no">2</span>sim 如何指导实现</h2>
+<div class="tk"><b>要点</b><ul>
+<li>sim 的价值不只在于预测得准，更在于很多设计决定在动手之前就能算清楚。</li>
+<li>一个 8 小时闭环模拟不到 2 分钟（c1000 75.7 s，c1438 48.8 s，c2000 66.8 s），所以每个选择都先扫参数，再拿真机验证。</li>
+</ul></div>
+<p>下表是这个项目里 sim 直接决定的事情。</p>
+
+<div class="tbl"><table class="wrap">
+<thead><tr><th>决定</th><th>sim 给出的依据</th><th>真机上的结果</th><th>详见</th></tr></thead>
+<tbody>
+<tr><td>scheduler 怎么写</td><td>照 sim 的调度流程逐条实现：SRPT、按 backlog 定的 budget、准入、60 s 强制调度</td><td>调度检查逐 microbatch 相同；v3 eval：N = 100 / 300 吞吐误差 1% 以内，N = 400 为 4–5%</td><td><a href="#s5-4">§5.4</a>、<a href="#s6-9">§6.9</a></td></tr>
+<tr><td>不做逐层流水加载</td><td>DRAM 读 1.7–16 ms，首轮计算 52–57 ms，读不在关键路径上</td><td>真机 DRAM 读 6.66 / 10.98 / 15.86 ms（p50/p90/p99）</td><td><a href="#s6-1">§6.1</a></td></tr>
+<tr><td>DRAM 要多大</td><td>写透模式要 150 GB；改成 victim（只写 HBM 淘汰的内容）后 50 GB 就够</td><td>每个 NUMA node 少固定 400 GB 主机内存</td><td><a href="#s6-5">§6.5</a></td></tr>
+<tr><td>SSD 什么时候写</td><td>只写 DRAM 淘汰的内容，SSD 写入量降到写透的 7–60%，目标不变或略好</td><td>采用逐级写回 HBM → DRAM → SSD</td><td><a href="#s6-5">§6.5</a></td></tr>
+<tr><td>SSD 要多大</td><td>128 GB 和 256 GB 的 TTFT 几乎相同，64 GB 时 Tiers / SSD-heavy 的 p99 到 15–29 s</td><td>定为每 GPU 128 GB</td><td><a href="#s6-7">§6.7</a></td></tr>
+<tr><td>三档内存配置</td><td>扫描 HBM × DRAM，找三层命中约 1:1:1 的点和以 SSD 为主的点</td><td>Tiers 20/20，SSD-heavy 12.5/12.5</td><td><a href="#s6-7">§6.7</a></td></tr>
+<tr><td>SSD 的 I/O 要多快</td><td>需求是每 GPU 读 0.7–1.8 GB/s（10 s 峰值最高 4.7），写 0.08–0.69 GB/s</td><td>io_uring 实测 16.8 GB/s，余量 3 倍以上</td><td><a href="#s6-6">§6.6</a></td></tr>
+<tr><td>读等待上限 1 s</td><td>sim 里的规则和取值</td><td>真机直接照用</td><td><a href="#s6-1">§6.1</a></td></tr>
+<tr><td>HBM 留 10% 装载区（st10）</td><td>落地的读要在 HBM 里等到下一个 batch 才被准入，按 Little 定律算出装载区要占 HBM 的 0–7.5%（SSD-heavy 最多）；8 小时 sim 里 5% 在高负载下会饿住 pipeline，取 10%</td><td>真机上不留装载区，N = 400 吞吐低 12%（sim 里两者相同，原因见 <a href="#s8-2">§8.2</a>）</td><td><a href="#s6-9">§6.9</a></td></tr>
+<tr><td>塌缩的原因和对策</td><td>用保留上下文总量 W 和容量 C 的大小关系预测哪一档、何时塌缩</td><td>v3 上 h25d50 真机和 sim 塌在同一个 2 分钟窗口；h25d75 两边都稳定</td><td><a href="#s7">§7</a></td></tr>
+<tr><td>哪些优化不必做</td><td>读的耗时远小于计算，主机提交读请求的开销被传输掩盖</td><td>C++ Mover、读完成通知路径只记录，不实现</td><td><a href="#s6-9">§6.9</a></td></tr>
+</tbody></table></div>
+
+<p>也有 sim 说不清或说错的地方：</p>
+<ul class="find">
+<li><b>写入代价：</b>sim 认为写入是免费的，所以没有装载区时它看不出差别；真机上读要等淘汰写入腾出空间，N = 400 吞吐低 12%（<a href="#s8-2">§8.2</a>）。</li>
+<li><b>GPU 的位置：</b>第 3、4 张卡更热，在功耗上限下频率低 5–7%，stage 2/3 成为瓶颈。sim 里 4 张卡一样快（<a href="#s8-2">§8.2</a>）。</li>
+<li><b>主机开销：</b>sim 里准入、leader 准备、读请求的提交和完成都不花时间。真机 TTFT p50 因此偏高，主机繁忙时更多（<a href="#s8-2">§8.2</a>）。</li>
+<li><b>塌缩之后的稳态：</b>塌缩窗口两边相同，但之后 sim 完全塌缩，真机停在约 65% 命中（<a href="#s7-1">§7.1</a>）。</li>
+<li><b>默认 profile DB 偏乐观：</b>用非真实输入 profile 的 kernel 时间偏短（<a href="#s4-7">§4.7</a>）。</li>
+</ul>
+
+<!-- ============================== 3 ============================== -->
+<h2 id="s3"><span class="no">3</span>实现：SSEngine</h2>
+<div class="tk"><b>要点</b><ul>
+<li>引擎自己写，kernel 和模型层从 vLLM fork 当库导入，不复制任何 kernel。</li>
+<li>一个 controller 加 4 个 stage worker；级间激活走 copy engine，不占 SM。</li>
+<li>正确性的参照是 vLLM fork 的 TP4 + EP 单实例。</li>
+</ul></div>
+
+<h3 id="s3-1">3.1 复用边界</h3>
+<ul class="find">
+<li>kernel 和模型层复用 vLLM fork（<code>892da0822f</code>，<code>vllm/models/glm5next</code>），当作库导入。没有任何 kernel 被复制进 SSEngine。</li>
+<li>不运行 vLLM 的 engine、scheduler、model runner 或 KV manager。vLLM 只作为独立的正确性参照（<a href="#s3-4">§3.4</a>）。</li>
+</ul>
+<p>fork 有两处和 PP 不兼容，在 <code>ssengine/model/pp_patch.py</code> 里用小补丁覆盖：</p>
+<ul class="find">
+<li><b>mHC 的 stage 边界：</b>fork 关掉了 glm5next 的 PP，stage 边界会丢掉 mHC 的延迟状态。发送方先做完最后一层的 <code>hc_post</code>，发完整的 4 路 residual；接收方第一层单独做 <code>hc_pre</code>。比目标里融合的 post+pre 每个边界慢 0.03 ms（8k）到 0.32 ms（128k），不到一个 stage 的 0.06%。</li>
+<li><b>只做 prefill，只出一个 token：</b>没有 decode 路径，没有 MTP，stage 3 做 greedy 采样。</li>
+</ul>
+
+<h3 id="s3-2">3.2 进程模型</h3>
+<div class="flow">
+<div class="hl"><b>controller</b><span class="num">stage 0 所在主机</span><br>scheduler · KV 分配 · prefix cache · 分层索引；最多 4 个 microbatch 在途</div>
+<div><b>stage 0</b><span class="num">GPU 0 · 层 0–11</span><br>embedding、dense FFN</div>
+<div><b>stage 1–2</b><span class="num">GPU 1–2 · 层 12–33</span></div>
+<div><b>stage 3</b><span class="num">GPU 3 · 层 34–44</span><br>final norm、lm_head、greedy</div>
+</div>
+<ul class="find">
+<li>controller 把每个 microbatch 的计划同时发给 4 个 worker。</li>
+<li>级间激活用 copy engine 拷进下一张 GPU 的 ring（CUDA IPC），由 stream 上的 flag 排序，没有 kernel，也没有主机握手（<a href="#s4-4">§4.4</a>）。</li>
+<li>下一个 microbatch 的规划和 metadata 构建，和当前 microbatch 的计算重叠。</li>
+<li>请求由 req-frontend 按 trace 回放。</li>
+</ul>
+
+<h3 id="s3-3">3.3 里程碑</h3>
+<div class="tbl"><table class="wrap">
+<thead><tr><th>里程碑</th><th>内容</th><th>状态</th></tr></thead>
+<tbody>
+<tr><td>M1 kernel</td><td>35 个 kernel 配置：调用路径对照、与 profile 行逐行对比</td><td>完成（<a href="#s4-1">§4.1</a>–<a href="#s4-2">§4.2</a>）</td></tr>
+<tr><td>M2 单层 · M3 单步迭代</td><td>每层、每个 stage；单请求和所有请求同时到达的饱和测试</td><td>完成（<a href="#s4-3">§4.3</a>–<a href="#s4-5">§4.5</a>）</td></tr>
+<tr><td>M4 prefix cache</td><td>session 级保留、整段命中</td><td>完成，tag <code>m4-done</code> = db6895d（<a href="#s5-2">§5.2</a>–<a href="#s5-3">§5.3</a>）</td></tr>
+<tr><td>M5 scheduler</td><td>调度检查、强制调度检查、闭环 session N = 200–500</td><td>10-17 15:45 被接受，tag <code>m5-done</code> = a167593（<a href="#s5-4">§5.4</a>–<a href="#s5-5">§5.5</a>）</td></tr>
+<tr><td>M6 DRAM/SSD</td><td>分层存储、三档配置，v3 trace 上 N = 100 / 300 / 400 对照</td><td>eval 完成（eval 代码 lanes/m6-eval-run a78dc6f / 9496233）；下一版 c5d4e09 加入 128-token 页和 hostgate（<a href="#s6">§6</a>）</td></tr>
+</tbody></table></div>
+
+<h3 id="s3-4">3.4 正确性参照 <span class="tag">合成负载</span></h3>
+<ul class="find">
+<li><b>参照：</b>vLLM fork 单实例 TP4 + EP，fp8 KV，关掉 prefix cache，greedy，1 个输出 token，不做 MTP（job 7029）。</li>
+<li><b>提示词：</b>8 个长度（1k–128k）× 5 个请求，从 enwik9 的 token 池按确定规则截取；每个 prompt 的 sha256 都和重建的一致。</li>
+<li><b>判定：</b>输出 token 和参照相同即通过。参照的 top-2 logprob 差小于 3 nats 时算近似平局，不判（批内数值会翻转，见 <a href="#s4-5">§4.5</a>）。</li>
+<li><b>长上下文：</b>做 KV 和数值对照时，vLLM 参照用它的 Triton KDA prefill（<a href="#s4-6">§4.6</a>）。</li>
+</ul>
+<p class="src">measured/reference.md · reference.jsonl</p>
+
+<!-- ============================== 4 ============================== -->
+<h2 id="s4"><span class="no">4</span>Kernel 与单步迭代</h2>
+<div class="tk"><b>要点</b><ul>
+<li>kernel 在 SSEngine 环境里重测，15 个配置的中位比值 0.95–1.08；单层、单请求的每个 stage 都在目标的 ±10% 内。</li>
+<li>所有请求在 t = 0 同时到达时，满载吞吐是目标的 0.93–1.00 倍，TTFT 分布和目标一致。</li>
+<li>KV cache 和 vLLM 在噪声范围内一致；长上下文的差异来自 vLLM 的 KDA kernel，不是 SSEngine。</li>
+</ul></div>
+
+<h3 id="s4-1">4.1 调用路径对照</h3>
+<p>对 handoff 的 35 个 kernel 配置，逐个读代码比较：profile 行计时的是哪个函数，fork 在同一位置调用的是哪个。</p>
+<div class="tbl"><table>
+<thead><tr><th>判定</th><th>含义</th><th>配置数</th></tr></thead>
+<tbody>
+<tr><td>SAME</td><td>同一函数、同样的参数和布局</td><td>24</td></tr>
+<tr><td>ARGS</td><td>同一函数，但影响 launch 的参数或布局不同</td><td>6</td></tr>
+<tr><td>DIFF</td><td>fork 调用的是另一个函数</td><td>5</td></tr>
+</tbody></table></div>
+<ul class="find">
+<li><b>14 个配置直接覆盖</b>（同一函数且库版本等价），21 个需要在 SSEngine 环境里重测。</li>
+<li><b>DIFF 的配置跟设计走，不跟 fork：</b>KDA prefill 用 FlashInfer 的 persistent <code>recurrent_kda</code>，KDA short conv 用 Dao 的 channel-last 实现，每个 mHC 边界用 DeepGEMM 的 <code>mega_mhc</code>，indexer top-k 按形状选 DeepSelect 或 <code>top_k_per_row_prefill</code>。</li>
+<li><b>目标多算的地方：</b>目标每个 MoE 层算两次 router GEMM，fork 只算一次，所以目标偏慢一点（记入 <code>issues.md</code>）。</li>
+</ul>
+<p class="src">measured/kernels_identity.md · identity_notes/</p>
+
+<h3 id="s4-2">4.2 Kernel 重测</h3>
+<ul class="find">
+<li><b>方法：</b>用 ServingStudioSim profiler 自己的 runner，在 SSEngine 的环境里重测 profile DB 的行（cold L2，不写库）。</li>
+<li><b>全量重测：</b>需要重测的 15 个配置共 3,084 行全部重测。各配置的中位比值在 0.95–1.08 之间，大部分在 0.96–1.01，例如 KDA chunk prefill 1.001，mHC 融合 post+pre 1.000，NVFP4 MoE 1.003。</li>
+<li><b>超出 ±10% 的 154 行</b>里，149 行不到 20 µs，绝对差最多 2.3 µs；另有 5 个 21–101 µs 的 GEMM 快了 10–16%。把这些行换进目标，stage 时间最多变 0.35%，所以目标不变。</li>
+<li><b>本机抽查：</b>35 个配置各取最小、中位、最大一行，共 105 行，中位比值 0.999；超出 ±10% 的 27 行大多是 launch 限制的极小形状。按调用次数加权，对一个 stage 的影响是 −0.2% 到 −0.6%。</li>
+</ul>
+<figure>
+  <div class="fighead"><span class="q">15 个配置重测：真机 ÷ profile DB</span></div>
+  <div id="f4a" class="chart tall" role="img" aria-label="每个 kernel 配置的中位比值和最小到最大的范围，中位都在 0.95 到 1.08 之间"></div>
+  <figcaption>点是每个配置所有行的中位比值，横条是最小到最大，灰带是 ±10%。范围的两端都来自几 µs 的小形状。<span class="src">measured/kernels.md · kernels.jsonl</span></figcaption>
+</figure>
+
+<h3 id="s4-3">4.3 单层 <span class="tag">合成负载</span></h3>
+<ul class="find">
+<li><b>结果：</b>每种层在每个 prompt 长度上都不比目标慢 10% 以上，只有两个 head 在几十 µs 的尺寸上例外：<code>input_head</code> 1k ×1.13（0.016 对 0.014 ms），<code>output_head</code> 1k ×1.10（0.250 对 0.227 ms），都不到一个 stage 的 0.2%。</li>
+<li><b>比目标快 10% 以上（记录，不算失败）：</b>KDA 层 ×0.77–0.94。FlashInfer persistent KDA 的 chunk prefill 只用 profile 行一半的时间（8k：0.40 对 0.84 ms），BF16 GEMM 也比 cold-L2 的行快。</li>
+<li><b>stage 合计</b>是目标单请求 stage 时间的 0.87–0.99 倍。</li>
+<li><b>逐位置比较找出的修正：</b>超过 32,768 行的 TRTLLM sparse MLA 要按行数切分（<a href="#s4-8">§4.8</a>）；≤ 2,048 token 的短 prefill 保持走 sparse MLA，和目标的结构一致。</li>
+</ul>
+<p class="src">measured/issues.md “M2 results” · jobs 7068–7070, 7080</p>
+
+<h3 id="s4-4">4.4 单请求 <span class="tag">合成负载</span></h3>
+<p><b>设置：</b>每个长度 5 个请求，间隔 10 s，每个请求独占空闲的 pipeline。目标是 handoff 的单请求时间。</p>
+<figure>
+  <div class="fighead"><span class="q">单请求：真机 ÷ 目标</span></div>
+  <div id="f4b" class="chart short" role="img" aria-label="1k 到 128k，GPU 总时间和 TTFT 的比值都在 0.91 到 1.02 之间"></div>
+  <figcaption>每个长度 5 个请求的平均。GPU 总时间 = stage 0 开始到 stage 3 结束；TTFT 在客户端测。灰带是 ±10%。<span class="src">measured/iteration.md</span></figcaption>
+</figure>
+<ul class="find">
+<li><b>GPU 总时间</b>是目标的 0.91–1.00 倍；1k–32k 时真机反而更快：目标多算了一次 router GEMM，output head 也只对返回的行计算。</li>
+<li><b>TTFT</b>是目标的 0.93–1.02 倍。目标里主机时间为 0；真机的主机部分 1k 时 3.9 ms，128k 时 18.8 ms（主要是接收和解析 prompt）。</li>
+<li><b>级间发送</b>每跳比目标多约 0.11 ms，短请求（1k、2k）上比值到 1.8–4 倍，绝对值很小，不再追。</li>
+</ul>
+<h4>级间传输：copy engine 而不是 NCCL</h4>
+<div class="tbl"><table>
+<thead><tr><th>A/B（job 7279）</th><th>copy engine</th><th>NCCL（8 channel）</th><th>目标</th></tr></thead>
+<tbody>
+<tr><td>单请求每跳，1k (ms)</td><td class="best">0.17–0.28</td><td>0.34–0.42</td><td>0.068</td></tr>
+<tr><td>单请求每跳，8k (ms)</td><td class="best">0.47–0.65</td><td>1.14–1.27</td><td>0.482</td></tr>
+<tr><td>饱和 8k (tok/s)</td><td class="best">139.6k</td><td>136.1k</td><td>143.4k</td></tr>
+<tr><td>饱和 1k (tok/s)</td><td class="best">150.0k</td><td>144.2k</td><td>149.3k</td></tr>
+</tbody></table></div>
+<ul class="find">
+<li>发送方的 <code>cudaMemcpyAsync</code> 直接写进接收方的 K 槽 ring（CUDA IPC），用 <code>cuStreamWaitValue32</code> / <code>cuStreamWriteValue32</code> 排序。</li>
+<li>和 NCCL 逐字节相同（10 个 1–4096 行的 microbatch，含 ring 回绕和慢消费者）。copy engine 是唯一的 GPU 传输。</li>
+</ul>
+<h4>主机时间与 CUDA graph</h4>
+<figure>
+  <div class="fighead"><span class="q">stage 0 一次 forward：主机时间 vs GPU 时间</span></div>
+  <div id="f4c" class="chart short" role="img" aria-label="eager 时主机时间约 17 毫秒，高于 1k 和 2k 的 GPU 时间；CUDA graph 把它降到约 5 毫秒"></div>
+  <figcaption>中位数，ms。eager 7303，CUDA graph 7304；GPU 时间来自 job 7091。<span class="src">measured/issues.md “M2 results” · measured/host/</span></figcaption>
+</figure>
+<ul class="find">
+<li><b>问题：</b>eager 时 stage 0 一次 forward 发出约 390 个 kernel，主机时间约 17 ms，2.5k token 以下比 GPU 时间还长。</li>
+<li><b>做法：</b>按 token 桶捕获 CUDA graph（128 起 2 的幂，最多 8,192），输入补齐到桶大小；DSA attention、indexer 和 KDA prefill 处断开，其余（MoE、mHC、linear、norm、quant、KV 写入）都在 graph 里。</li>
+<li><b>结果：</b>主机时间 1k 17.1 → 4.7 ms，8k 18.2 → 5.6 ms。每个桶的 replay 和同样补齐的 eager 逐位相同。</li>
+<li><b>其他：</b>FlashInfer tactic 持久化，warm-up 从约 180 s 降到 6 s；eval 代码去掉了 32k 的 graph，graph 内存 26 → 10 GiB，吞吐无损。</li>
+</ul>
+
+<h3 id="s4-5">4.5 饱和：所有请求在 t = 0 同时到达 <span class="tag">合成负载</span></h3>
+<p><b>设置：</b>每个长度一次运行，共 2<sup>24</sup> token、全部在 t = 0 到达（1k 16,384 个，128k 128 个）。目标里每次运行是 2,048 个 8,192 token 的 microbatch，stage 0 最忙、决定节奏；TTFT 由请求在队列里的位置决定，p50 约为整次运行的一半。</p>
+<figure>
+  <div class="fighead"><span class="q">同时到达：真机 vs 目标</span>
+    <div class="seg" data-for="f4d" data-key="m"><button data-v="tps">吞吐</button><button data-v="p50">TTFT p50</button><button data-v="p99">TTFT p99</button></div></div>
+  <div id="f4d" class="chart short" role="img" aria-label="各长度的满载吞吐和 TTFT，真机和目标两条线接近"></div>
+  <figcaption>吞吐 = 运行中间 80% 的 prompt token/s；TTFT 统计所有请求。<span class="src">measured/iteration.md · saturated.jsonl</span></figcaption>
+</figure>
+<div class="tbl"><table>
+<thead><tr><th>长度</th><th>请求</th><th>真机 tok/s</th><th>目标</th><th>比值</th><th>TTFT p50 / p90 / p99 (s) 真机</th><th>目标</th><th>stage 忙碌率 0 / 1 / 2 / 3 (%)</th></tr></thead>
+<tbody>
+<tr><td>1k</td><td>16,384</td><td>149.2k</td><td>149.3k</td><td>1.00</td><td>55.5 / 100.6 / 110.6</td><td>56.3 / 101.3 / 111.4</td><td>96.3 / 96.3 / 99.9 / 98.6</td></tr>
+<tr><td>2k</td><td>8,192</td><td>146.5k</td><td>149.9k</td><td>0.98</td><td>56.9 / 102.9 / 113.2</td><td>56.1 / 100.9 / 110.9</td><td>95.7 / 94.5 / 99.9 / 98.1</td></tr>
+<tr><td>4k</td><td>4,096</td><td>142.8k</td><td>147.5k</td><td>0.97</td><td>58.5 / 105.6 / 116.2</td><td>57.0 / 102.5 / 112.7</td><td>95.6 / 92.9 / 99.9 / 98.1</td></tr>
+<tr><td>8k</td><td>2,048</td><td>138.4k</td><td>143.4k</td><td>0.96</td><td>60.5 / 109.1 / 120.0</td><td>58.7 / 105.4 / 115.9</td><td>95.9 / 92.6 / 99.9 / 98.1</td></tr>
+<tr><td>16k</td><td>1,024</td><td>136.8k</td><td>143.4k</td><td>0.95</td><td>61.2 / 110.3 / 121.4</td><td>58.7 / 105.4 / 116.0</td><td>95.9 / 92.2 / 99.8 / 97.6</td></tr>
+<tr><td>32k</td><td>512</td><td>136.4k</td><td>143.0k</td><td>0.95</td><td>61.7 / 110.8 / 121.8</td><td>58.9 / 105.7 / 116.3</td><td>97.2 / 92.9 / 99.8 / 98.9</td></tr>
+<tr><td>64k</td><td>256</td><td>134.2k</td><td>141.8k</td><td>0.95</td><td>62.6 / 112.6 / 123.8</td><td>59.6 / 106.7 / 117.3</td><td>97.4 / 92.7 / 99.8 / 98.2</td></tr>
+<tr><td>128k</td><td>128</td><td>129.4k</td><td>138.4k</td><td>0.93</td><td>65.3 / 116.9 / 128.5</td><td>61.2 / 109.3 / 120.1</td><td>96.3 / 89.9 / 99.8 / 97.9</td></tr>
+</tbody></table></div>
+<ul class="find">
+<li><b>吞吐</b>是目标的 0.93–1.00 倍，TTFT 的各分位跟着运行时长走（比值 0.99–1.07）。</li>
+<li><b>瓶颈在 stage 2：</b>真机里 stage 2 忙碌率 99.8–99.9%，目标里是 stage 0（100%）。原因是功耗上限：
+  <ul>
+  <li>同一个 8k microbatch 单独约 51 ms/stage，背靠背跑时 55–59 ms。每张 GPU 都停在 1000 W 上限（不能再调高），SM 频率在 3 个 microbatch 内从 1965 降到约 1590 MHz。</li>
+  <li>profile 行本来就是在持续功耗受限的频率下测的，所以 stage 0、1 在饱和时和目标相同（57.0 / 55.0 对 57.1 / 54.1 ms）；单请求时的 0.90 倍是“凉板子”。</li>
+  <li>stage 2、3 比目标多 7% 和 4%：这两张 GPU 热约 10 °C。把 stage 反过来放到 GPU 上（7396），约 1.2 ms 跟着 GPU 走。</li>
+  </ul></li>
+<li><b>第一个 TTFT：</b>1k 时 1.37 s 对 0.215 s。16,384 个请求的提交本身散开 2.3 s，目标里全部在 t = 0；这一项不在过关规则里。</li>
+<li><b>输出 token：</b>每个长度都和参照一致或是近似平局。1k 里有一个请求（参照 top-2 差 2.0 nats）在批内翻转：模型的输出依赖 microbatch 的总 token 数（mHC 的 split 数随 T 变，NVFP4 放大差异），vLLM 批处理时也翻转同一个请求；没有竞争，也没有残留状态（逐位检查过）。</li>
+</ul>
+
+<h3 id="s4-6">4.6 KV cache 与数值：对照 vLLM <span class="tag">合成负载</span></h3>
+<p><b>设置：</b>同一个 enwik9 prompt 分别过本引擎和 vLLM（TP4 + EP，eager，不开 prefix cache），prefill 后两边按同一格式导出每层的 MLA latent、indexer K、KDA state 和 conv state。本引擎还测分块（8192、3001/8001 这类不对齐的起点）和 prefix 命中。噪声基线是 vLLM 对自己、本引擎分块对整段。</p>
+<ul class="find">
+<li><b>32k 以内都在噪声内：</b>没有哪个 pool、block 或层的偏移是系统性错的。最差是第 43 层 MLA 0.24，噪声 0.18（vLLM）/ 0.24（本引擎）。</li>
+<li><b>分块不变：</b>8,192 分块和整段在 32k、128k 逐位相同；不对齐的起点在噪声内。</li>
+<li><b>prefix 命中在噪声内：</b>包括 decode 级的极小追加（A = 3、256）。</li>
+<li><b>最终 logits 每个长度 top-1 都相同</b>；512k 时 KL 最多 6e-4（噪声 2e-4）。</li>
+<li><b>128k 以后，几个长记忆 KDA head 随长度漂移。</b>原因在 vLLM：它的 FlashKDA 在每个 16-token tile 后把 state 存成 bf16。三种 kernel 喂同样的输入、对照 float64：</li>
+</ul>
+<figure>
+  <div class="fighead"><span class="q">KDA 输出相对误差（对 float64，512k 末段）</span></div>
+  <div id="f4e" class="chart short" role="img" aria-label="本引擎的 FlashInfer persistent 和 Triton 在三层都约 0.003，FlashKDA 在第 1、2 层到 0.08 和 0.41"></div>
+  <figcaption>对数坐标。KDA 第 0–2 层，16 个位置分箱中最后一箱的输出相对误差（所有 head）。FlashKDA 为 vLLM 的 pin b59532f。job 7539。<span class="src">measured/kvaudit-notes.md finding 6</span></figcaption>
+</figure>
+<p>vLLM 改用 Triton KDA prefill 之后（job 7530），本引擎在 512k 的每一层都落在噪声内：</p>
+<div class="tbl"><table>
+<thead><tr><th>512k 对比</th><th>L0 state</th><th>L1 state</th><th>L2 state</th><th>L3 MLA</th><th>L3 indexer</th><th>L3 top-k 重合</th></tr></thead>
+<tbody>
+<tr><td>本引擎 vs vLLM（FlashKDA，默认）</td><td>0.0099</td><td>0.208</td><td>0.301</td><td>0.278</td><td>0.299</td><td>0.56</td></tr>
+<tr><td><b>本引擎 vs vLLM（Triton KDA）</b></td><td class="best">0.0033</td><td class="best">0.016</td><td class="best">0.021</td><td class="best">0.062</td><td class="best">0.036</td><td class="best">0.92</td></tr>
+<tr class="ref"><td>噪声：vLLM 对自己（Triton）</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>1.00</td></tr>
+<tr class="ref"><td>噪声：本引擎 c8001 vs c8192</td><td>0.003</td><td>0.015</td><td>0.019</td><td>0.061</td><td>0.035</td><td>0.92</td></tr>
+</tbody></table></div>
+<ul class="find">
+<li>数值是相对 L2 误差；top-k 重合是最后 8 行的 indexer top-k 重合率。</li>
+<li>决定：vLLM 做精度参照时用 <code>--kda-prefill-backend triton</code>（max_num_batched_tokens 保持在 262,144 以下）；做性能参照时保留 FlashKDA。本引擎的 kernel 不改。</li>
+<li>本引擎在 512k 最慢衰减的 head 上也有很小的漂移（第 1 层 head 45：0.003 → 0.016，约是 FlashKDA 的 1/45），不影响 top-1 和 KL，只记录。</li>
+</ul>
+
+<h3 id="s4-7">4.7 输入要贴近真实</h3>
+<ul class="find">
+<li>默认 profile DB 用的不是真实输入。MoE 的路由分布、indexer 的 top-k 分布这类和数据相关的 kernel，在真实输入下更慢。</li>
+<li>用默认 DB 生成的目标因此偏乐观：同样是 full 档 N = 400，默认 DB 给出 p99 3.80 s，realistic DB 给出 6.91 s。</li>
+<li>改用真实输入重新 profile 之后，真机和 sim 才对上 1–2%。</li>
+</ul>
+
+<div class="simsays"><b>sim 怎么说</b>kernel 层面的吻合是前提，不是结论。它保证了下面几节比较的是调度和存储，而不是 kernel 时间本身。</div>
+
+<h3 id="s4-8">4.8 哪里出了问题</h3>
+<ul class="find">
+<li>v1 handoff 的标题数字（118.8k 新 token/s，TTFT 0.16 / 0.44 / 4.94 s）作废，原因就是默认 DB 偏乐观，以及 v1 还没有整段命中规则。</li>
+<li>超过 32,768 行的 TRTLLM sparse MLA 一次 launch 返回得过快（0.72 ms 而不是约 11.7 ms），需要按行数切分，sim 侧也加了同样的切分（ServingStudioSim <code>7bb224a6</code>）。</li>
+</ul>
+
+<!-- ============================== 5 ============================== -->
+<h2 id="s5"><span class="no">5</span>Prefix cache 与 scheduler</h2>
+<div class="tk"><b>要点</b><ul>
+<li>prefix 命中的 bring-up：40 个两轮 session 全部命中，第 1 轮 token 和不用 cache 时 40/40 相同。</li>
+<li>scheduler 分 5 步搭建，每一步在“26 个请求同时到达”的检查里都和目标逐 microbatch 相同。</li>
+<li>只用 HBM 时，旧 trace 上 M5 的吞吐和 sim 相差 0–1.5%；v3 上 N = 300 已经放不下，要靠 DRAM 和 SSD。</li>
+</ul></div>
+
+<h3 id="s5-1">5.1 Prefix cache</h3>
+<ul class="find">
+<li>每个 session 保留它最新的完整上下文：所有 DSA 层的 KV，加上最后一个 token 处的 KDA state。</li>
+<li>KDA state 只在上下文末尾有效，所以命中规则是整段的：新 prompt 包含整段旧上下文就命中，否则从第一个 token 重算。</li>
+<li>HBM 按 session 做 LRU 淘汰。</li>
+</ul>
+
+<h3 id="s5-2">5.2 Prefix bring-up <span class="tag">合成负载</span></h3>
+<p><b>设置：</b>40 个两轮 session，每个 (P, A) 组合 5 个。第 0 轮是 P token 的 prompt；第 1 轮在 10 s 后到达，带上第 0 轮的 prompt、输出 token 和 A − 1 个新 token。一次只有一个 session，GPU 都是空闲的。应该命中 P、只算 A。</p>
+<figure>
+  <div class="fighead"><span class="q">两轮 session：TTFT 中位数，真机 vs 目标</span>
+    <div class="seg" data-for="f5a" data-key="r"><button data-v="r1">第 1 轮（命中）</button><button data-v="r0">第 0 轮（整段计算）</button></div></div>
+  <div id="f5a" class="chart short" role="img" aria-label="8 个 P 加 A 组合的 TTFT，真机和目标两组柱"></div>
+  <figcaption>job 7404，每组 5 个 session 的中位数。第 0 轮用对数坐标。目标为 handoff v2。<span class="src">measured/prefix_cache.md · prefix_bringup.jsonl</span></figcaption>
+</figure>
+<ul class="find">
+<li><b>命中：</b>40/40 命中 = P。</li>
+<li><b>过关（±10%）：</b>8k + 1k、8k + 8k、32k + 8k、128k + 8k 每一列都过；32k + 1k 只有第 1 轮 TTFT 是 ×1.11。</li>
+<li><b>1k 追加随 P 变慢</b>（×1.07 → 1.11 → 1.24 → 1.75，8k → 512k），而 stage 1–3 在 128k 以内都是 ×0.94–0.98：多出来的是每个请求的主机时间，随 prompt 长度增长（接收和解析 token id；512k 从到达到第一次下发约 27 ms），加上 stage 0 的 ×1.10–1.14。</li>
+<li><b>512k</b>每个 stage ×1.07–1.33，第 0 轮 ×1.16；目标把 512k 的额外时间放在 indexer。后来在完整 pool 上测，512k 第 1 轮 HBM 命中仍比目标高 14%（65.79 对 57.5 ms，<a href="#s6-8">§6.8</a>）。</li>
+</ul>
+<h4>正确性</h4>
+<ul class="find">
+<li><b>cache 开 vs 关</b>（7403）：40 个第 1 轮 prompt 全部命中，40/40 token 和不用 cache 时相同。</li>
+<li><b>不对齐的 P</b>（P 不是 4 的倍数，7569）：命中 40/40，第 1 轮 token 38/40 相同；2 个不同都是近似平局（两边 top-2 是同一对 token，差 0–0.375 nats）。</li>
+<li><b>分块检查</b>（7476、7569）：8,192 token 的分块和整段在 32,768 token 逐位相同；40,000 token 时 8,001 和 8,190 的分块（起点落在 indexer pool 中间、偏离 KDA 的 32-token 网格）在 split-K 噪声的 2 倍以内，KL 8e-6 / 1.5e-5，top-1 相同。</li>
+<li><b>kpool GPU 测试：</b>命中点在 P = 8193 + 1/2/3、各种分块方式下，indexer cache 的字节和不分块的 prefill 逐位相同。</li>
+</ul>
+
+<h3 id="s5-3">5.3 Prefix cache 的 session <span class="tag">旧 trace</span></h3>
+<p><b>设置：</b>旧 trace，20 分钟闭环，只有 HBM，scheduler 是 handoff 的基础版本（M4）。目标是 handoff v2（默认 profile DB）；“sim ×1.06”是把 GPU 时间整体放慢 6% 的 sim（功耗上限，<a href="#s4-5">§4.5</a>）。</p>
+<div class="tbl"><table>
+<thead><tr><th>N</th><th>来源</th><th>r/s</th><th>新 tok/s</th><th>命中份额</th><th>TTFT p50 / p90 / p99 (s)</th></tr></thead>
+<tbody>
+<tr><td>400</td><td>真机 7683</td><td>24.2</td><td>84.4k</td><td>98.28%</td><td>0.64 / 4.43 / 7.57</td></tr>
+<tr class="ref"><td></td><td>目标</td><td>24.9</td><td>87.5k</td><td>98.28%</td><td>0.55 / 3.66 / 5.98</td></tr>
+<tr class="ref"><td></td><td>sim ×1.06</td><td>24.6</td><td>86.3k</td><td>98.35%</td><td>0.75 / 4.25 / 8.22</td></tr>
+<tr class="grp"><td>500</td><td>真机 7693</td><td>21.6</td><td>83.1k</td><td>96.85%</td><td>3.22 / 14.26 / 26.77</td></tr>
+<tr class="ref"><td></td><td>目标</td><td>22.8</td><td>86.6k</td><td>97.01%</td><td>3.01 / 13.03 / 23.93</td></tr>
+<tr class="ref"><td></td><td>sim ×1.06</td><td>22.0</td><td>84.5k</td><td>97.07%</td><td>3.85 / 14.37 / 24.25</td></tr>
+</tbody></table></div>
+<ul class="find">
+<li>真机 r/s 比 sim ×1.06 低约 2%，每秒计算的 token 相差 1% 左右（111.2k 对 112.5k，122.4k 对 121.9k）。</li>
+<li>没有抢占、没有失败的轮；N = 500 时 1,478 个 session 被淘汰，被淘汰后重算 4,080 万 token，和目标一样是设计内的行为。</li>
+<li>满载时每张 GPU 91–96% 的忙碌样本停在功耗上限，stage 2 的 SM 频率最低（N = 500：1577 MHz，其余 1610–1645）。</li>
+</ul>
+<p class="src">measured/prefix_cache.md · prefix_sessions.json · prefix_smoke.json</p>
+
+<h3 id="s5-4">5.4 Scheduler：逐步搭建与检查 <span class="tag">合成负载</span></h3>
+<p>scheduler 照 sim 的实现逐条写（<code>pipelined_chunked_prefill_admission.rs</code>、<code>srpt.rs</code>、<code>fresh_source.rs</code>、<code>prefix_fetch.rs</code>），在基础版本上分 4 步加规则，每一步都有自己的目标：</p>
+<div class="tbl"><table class="wrap">
+<thead><tr><th>步</th><th>规则</th></tr></thead>
+<tbody>
+<tr><td>0 plain</td><td>按到达顺序，每个 microbatch 8,192 token</td></tr>
+<tr><td>1 shortest first</td><td>microbatch 按最短剩余优先组成（SRPT）</td></tr>
+<tr><td>2 load budget</td><td>microbatch 的 budget 跟着 prefill 的 backlog 变化（4,096–32,768 token）</td></tr>
+<tr><td>3 even split</td><td>单独的请求均匀切块</td></tr>
+<tr><td>4 force-schedule</td><td>一个请求等满 60 s 就强制排在最前面</td></tr>
+</tbody></table></div>
+
+<h4>调度检查：26 个请求同时到达</h4>
+<p><b>设置：</b>t = 0 时 26 个请求同时到达（1 × 128k、1 × 32k、8 × 4k、16 × 1k，最长的先到），之后 8k 在 5 s、1k 在 7 s 各自单独到达。这些决定只取决于规则，不取决于时间，所以真机必须组出和目标完全相同的 microbatch。</p>
+<div class="tbl"><table>
+<thead><tr><th>步</th><th>microbatch 真机 / 目标</th><th>逐 chunk 相同</th><th>TTFT 128k (ms)</th><th>32k</th><th>8k 单独</th><th>1k 单独</th><th>最大 TTFT 偏差</th></tr></thead>
+<tbody>
+<tr><td>0 plain</td><td>28 / 28</td><td>是</td><td>1142 vs 1118</td><td>1376 vs 1344</td><td>212 vs 224</td><td>52 vs 52</td><td>5.3%</td></tr>
+<tr><td>1 shortest first</td><td>28 / 28</td><td>是</td><td>1713 vs 1679</td><td>734 vs 729</td><td>209 vs 224</td><td>52 vs 52</td><td>6.5%</td></tr>
+<tr><td>2 load budget</td><td>55 / 55</td><td>是</td><td>1841 vs 1742</td><td>741 vs 711</td><td>154 vs 155</td><td>53 vs 52</td><td>5.7%</td></tr>
+<tr><td>3 even split</td><td>58 / 58</td><td>是</td><td>1847 vs 1742</td><td>743 vs 711</td><td>131 vs 132</td><td>51 vs 51</td><td>6.1%</td></tr>
+<tr><td>4 force-schedule（7932）</td><td>58 / 58</td><td>是</td><td colspan="4">–</td><td>7.6%</td></tr>
+</tbody></table></div>
+<ul class="find">
+<li>每一步都逐 chunk 组出目标的 microbatch，运行中没有 JIT 编译。</li>
+<li>SRPT 把 32k 从 1.34 s 提前到 0.73 s，128k 推后到 1.7 s。budget 让单独的 8k 从 224 ms 降到 155 ms；even split 再把它切成 4 块 2,048 流水，降到 132 ms。两边都一样。</li>
+<li>stage 0 在第一个请求到达后 7.6–9.3 ms 开始第一个 microbatch：26 个请求的提交本身散开 3.5–4.6 ms，128k 的 prompt 读取和解析约 3 ms；目标里 26 个都在 t = 0。</li>
+</ul>
+
+<h4>强制调度检查：32k 被 1k 洪流淹没</h4>
+<p><b>设置：</b>32k 在 t = 0 到达；1k 每秒 200 个，持续 80 s，比 pipeline 算得快，所以队列先涨 80 s，大约 108 s 时清空。</p>
+<figure>
+  <div class="fighead"><span class="q">32k 请求的 TTFT：每一步，真机 vs 目标</span></div>
+  <div id="f5b" class="chart short" role="img" aria-label="SRPT 让 32k 等到约 108 秒，强制调度把它提前到 61 秒，真机和目标相同"></div>
+  <figcaption>步 0 按到达顺序，32k 第一个出来；步 1–3 最短优先，32k 等到队列清空；步 4 等满 60 s 后被强制排在最前面。<span class="src">measured/scheduler.md · force_check.jsonl</span></figcaption>
+</figure>
+<div class="tbl"><table>
+<thead><tr><th>步</th><th>32k TTFT (s)</th><th>1k TTFT p50 / p90 / p99 (s) 真机</th><th>目标</th><th>最后一个 token (s)</th><th>microbatch 真机 / 目标</th><th>过关</th></tr></thead>
+<tbody>
+<tr><td>0 plain</td><td>0.41 vs 0.40</td><td>15.42 / 27.72 / 30.48</td><td>15.26 / 27.13 / 29.80</td><td>110.8 vs 110.1</td><td>2005 / 2004</td><td>是</td></tr>
+<tr><td>1 shortest first</td><td>108.7 vs 110.1</td><td>14.20 / 25.68 / 28.27</td><td>15.08 / 26.95 / 29.62</td><td>108.7 vs 110.1</td><td>2005 / 2004</td><td>是</td></tr>
+<tr><td>2 load budget</td><td>106.1 vs 107.5</td><td>15.15 / 21.80 / 25.36</td><td>14.77 / 23.90 / 26.89</td><td>106.1 vs 107.5</td><td>1349 / 1429</td><td>是</td></tr>
+<tr><td>3 even split</td><td>107.8 vs 107.5</td><td>16.29 / 22.88 / 27.06</td><td>14.77 / 23.90 / 26.89</td><td>107.8 vs 107.5</td><td>1276 / 1429</td><td>p50 ×1.10</td></tr>
+<tr><td>4 force-schedule</td><td>60.9 vs 61.0</td><td>15.23 / 22.06 / 25.68</td><td>14.77 / 24.09 / 27.12</td><td>106.1 vs 107.5</td><td>1342 / 1429</td><td>是</td></tr>
+</tbody></table></div>
+<ul class="find">
+<li>强制规则把 32k 准时提前到 61 s；budget 让 backlog 超过 300 万 token 时 microbatch 长到 32,768，队列早 2.6 s 清空，两边都一样。</li>
+<li>microbatch 个数（1,342–1,353 对 1,429）来自规则本身：同一个引擎在 CPU 上按拟合时间回放，组出 1,355 个。过关规则不含这一项。</li>
+<li>even split 这一步当时的派发是“最多 4 个在途”，1k 被挤进更大的 microbatch，p50 高 10%。之后默认改为 5 个在途加 2 ms pacing。</li>
+</ul>
+
+<h3 id="s5-5">5.5 Scheduler 的 session（M5）<span class="tag">旧 trace</span></h3>
+<p><b>设置：</b>旧 trace，20 分钟闭环，只有 HBM，完整的 scheduler（步 4）。目标是 v2-realistic。</p>
+<figure>
+  <div class="fighead"><span class="q">闭环 session：真机 vs sim</span></div>
+  <div id="f5c" class="chart short" role="img" aria-label="N = 200 到 500 的 rounds/s，真机和 sim 两条线几乎重合"></div>
+  <figcaption>20 分钟闭环 session 的 rounds/s。sim 为 v2-realistic 目标。N = 400 有两次真机运行（7900、7933），取平均画点，两次都列在下表。<span class="src">measured/scheduler.md</span></figcaption>
+</figure>
+<div class="tbl"><table>
+<thead><tr><th>N</th><th>真机 r/s</th><th>sim r/s</th><th>新 tok/s 真机 / sim</th><th>TTFT p50 / p90 / p99 (s) 真机</th><th>sim</th><th>&gt;60 s 真机 / sim</th><th>作业</th></tr></thead>
+<tbody>
+<tr><td>200</td><td>12.12</td><td>12.13</td><td>45.0k / 45.0k</td><td>0.114 / 0.219 / 1.014</td><td>0.11 / 0.22 / 1.00</td><td>0 / 0</td><td>7934</td></tr>
+<tr><td>300</td><td>19.77</td><td>19.78</td><td>66.2k / 66.2k</td><td>0.155 / 0.479 / 3.04</td><td>0.147 / 0.488 / 3.30</td><td>22 / 24</td><td>7902</td></tr>
+<tr><td>400</td><td>24.73 · 24.76</td><td>25.06</td><td>86.4k / 87.3k</td><td>0.18 / 1.19 / 30.07 · 0.18 / 1.18 / 39.96</td><td>0.16 / 1.07 / 25.54</td><td>257 · 273 / 240</td><td>7900 · 7933</td></tr>
+<tr><td>500</td><td>25.06</td><td>25.44</td><td>89.9k / 91.5k</td><td>0.41 / 5.28 / 61.87</td><td>0.39 / 5.43 / 61.73</td><td>1052 / 1008</td><td>7901</td></tr>
+</tbody></table></div>
+<ul class="find">
+<li><b>N = 200、300 几乎完全吻合。</b></li>
+<li><b>N = 400、500 低 1.3–1.5%</b>，超过 60 s 的轮数多 4–7%，和同一份代码两次运行之间约 6% 的差别（7900 对 7907）相当。</li>
+<li><b>N = 400 的 p99 差得最多</b>，因为它正好落在“1% 的轮等满 60 s”这条边界上。</li>
+<li><b>低负载的 TTFT：</b>N = 200 时 p45–p55 的轮真机 118.2 ms、sim 115.4 ms。等待多 5.9 ms（准入 1.5、提前做计划 4.0），pipeline 传输反而少 4.2 ms。</li>
+<li><b>GPU 位置：</b>每组 4 张卡里上面两个插槽热约 10 °C、慢 40–75 MHz（7907 把 GPU 顺序反过来跑）。</li>
+</ul>
+
+<h3 id="s5-6">5.6 只用 HBM 的结果 <span class="tag">v3 trace</span></h3>
+<ul class="find">
+<li>M5 只有 HBM 一层。v3 trace 上，N = 300 时保留的上下文已经超出 HBM 能放下的量：一部分上下文被淘汰，下一轮只能整段重算。</li>
+<li>到 N = 400，重算的 token 比新 token 还多。这就是要加 DRAM 和 SSD 的原因（同一负载上的分层结果见 <a href="#s6-9">§6.9</a>）。</li>
+</ul>
+<div class="tbl"><table>
+<thead><tr><th>N</th><th>真机 r/s</th><th>sim r/s</th><th>重算 / 新 token 真机 / sim</th><th>TTFT p50 / p90 / p99 (s) 真机</th><th>sim</th><th>&gt;60 s 真机 / sim</th><th>作业</th></tr></thead>
+<tbody>
+<tr><td>300</td><td>27.24</td><td>30.03</td><td>0.40 / 0.32</td><td>0.36 / 3.01 / 60.90</td><td>0.20 / 1.99 / 20.47</td><td>188 / 134</td><td>8446</td></tr>
+<tr><td>400</td><td>16.16</td><td>约 16（13.9–19.1）</td><td>1.21 / 约 1.21</td><td>1.90 / 60.84 / 69.3</td><td>2.12 / 60.66 / 64.58</td><td>– / 1222</td><td>8475</td></tr>
+</tbody></table></div>
+<p class="note">第 10–20 分钟，按第一个 token 落在哪个窗口计。N = 300 的真机运行用 8,576 token 的 HBM block（8446）；N = 400 用 128 token 的 HBM 页（8475，见 <a href="#s8-2">§8.2</a>）。N = 400 的 sim TTFT 和超过 60 s 的轮数来自单次运行（19.07 r/s）。sim：wt-pp-staged <code>logs/20261018_11_v3_m6_c300</code>、<code>20261018_9_v3_m6</code>。</p>
+<ul class="find">
+<li><b>N = 400 是双稳态。</b>它正好在容量边缘：sim 只要把速度扰动 ±0.5%，吞吐就在 13.9–19.1 r/s 之间跳，中位数约 16 r/s，重算 / 新 token 约 1.21。真机 16.16 r/s、1.21，和这个中位数一致。</li>
+<li><b>N = 300 真机低 9%，分两部分：</b>
+  <ul>
+  <li>真机每秒算的 token 少 4%（123.1k 对 128.1k），是 stage 2/3 的 GPU 更热造成的；</li>
+  <li>重算多一些（0.40 对 0.32），方向和 block 取整浪费 HBM 一致。两者都在 <a href="#s8-2">§8.2</a>。</li>
+  </ul></li>
+</ul>
+
+<div class="simsays"><b>sim 怎么说</b>因为 scheduler 是照 sim 的流程写的，吻合说明 sim 把 kernel 时间和排队组合起来的方式是对的。它不说明 sim 能独立预测任意一个系统。</div>
+
+<h3 id="s5-7">5.7 哪里出了问题</h3>
+<ul class="find">
+<li><b>低负载 TTFT 偏高：</b>v3 上 N = 100 时 TTFT p50 是 0.09 s，sim 0.08 s。多出来的全部是等待：准入约 1.5 ms，leader 准备 4–5 ms；pipeline 本身的传输时间和 sim 相同。主机时间不再计入在途闸门的等待之后（hostgate，7e391df），N = 300 的 TTFT p50 少 4 ms，吞吐不变。</li>
+<li><b>功耗上限：</b>满载时 B200 停在约 1000 W 的功耗上限。省掉 launch 间隙、拷贝这类只缩短时间的优化，只会让频率降下来，吞吐不变；只有更少的字节或 FLOP 才有用。只记录。</li>
+<li><b>两条 sim 规则真机做不到：</b>trace 里 4,933 轮只保留上一轮的部分上下文（rewind）；sim 在 session 最后一轮出 token 时就释放 slot。两者在设计运行上的影响都不到 1%。</li>
+</ul>
+
+<!-- ============================== 6 ============================== -->
+<h2 id="s6"><span class="no">6</span>DRAM 与 SSD 分层</h2>
+<div class="tk"><b>要点</b><ul>
+<li>每个 block 按 1/4 分给 4 张 GPU 的 PCIe、DRAM 和 SSD，读写只用 copy engine。</li>
+<li>bring-up：DRAM 读只增加读本身的时间；SSD 读在每个长度上达到目标；分层读回逐字节相同。</li>
+<li>v3 三档 session：N = 100 / 300 吞吐和 sim 相差 1% 以内，N = 400 低 4–5%。</li>
+<li>N = 300 / 400 时吞吐是 vLLM 的 3–19 倍；各 N 下 TTFT 都低约一到两个数量级。</li>
+</ul></div>
+
+<h3 id="s6-1">6.1 设计：balanced storage 与两跳</h3>
+<ul class="find">
+<li><b>按 1/4 分摊：</b>每个 block 的每一段字节按 1/4 分给 4 张 GPU，GPU q 负责第 q 份的 PCIe、主机内存和 SSD 文件。数据离开 GPU 前先用 NVLink 汇集好，所以 4 条 PCIe 链路的负载严格相等：每 token 1,499 B，一个 block 每张 GPU 36.9 MB。</li>
+<li><b>不分摊的代价：</b>如果每个 stage 只存自己的字节，stage 0、2、3 的链路比平均多 9%，stage 1 少 27%，最慢的链路决定读完的时间。</li>
+<li><b>两跳：</b>读的时候，GPU q 用自己的 PCIe 把第 q 份 H2D 拷进自己 HBM 的 staging ring，再用 <code>cuMemcpyBatchAsync</code> 走 NVLink 把各层送到对应的 stage。写的时候方向相反。</li>
+<li><b>只用 copy engine：</b>不占 SM。stage 在满载时 SM 全忙，GEMM 8192³ 单独 0.682 ms，4 张 GPU 同时 H2D 时 0.677 ms。</li>
+<li><b>不做逐层流水：</b>一轮在它的 prefix 全部读完后才开始算。DRAM 读 1.7–16 ms，SSD 读 9–82 ms，首轮计算 52–57 ms。</li>
+<li><b>读等待上限：</b>一个读要等超过 1 s 才能开始，这一轮就先跳过，留在队列里。</li>
+</ul>
+
+<h3 id="s6-2">6.2 本机带宽</h3>
+<div class="tbl"><table>
+<thead><tr><th>路径</th><th>1 GPU</th><th>4 GPU 同时</th></tr></thead>
+<tbody>
+<tr><td>H2D，单次拷贝 1 GiB，本地 node</td><td>55.7 GB/s</td><td>48.4 GB/s</td></tr>
+<tr><td>D2H，同上</td><td>55.6</td><td>38.5</td></tr>
+<tr><td>H2D，主机内存在另一个 node</td><td>55.6</td><td>27.2</td></tr>
+<tr><td><code>cuMemcpyBatchAsync</code> H2D，2 MiB 页</td><td>54.3</td><td>47.6</td></tr>
+<tr><td>GPU g 的 copy engine 直接写其他 GPU 的 HBM（batched）</td><td>–</td><td>31.7</td></tr>
+</tbody></table></div>
+<ul class="find">
+<li>主机内存必须在 GPU 自己的 NUMA node 上。</li>
+<li>直接写别的 GPU 的 HBM 比两跳慢 33%，所以改成两跳。</li>
+<li>4 张 GPU 共享一个 socket 的主机侧带宽，读的目标（48.4）在 3% 以内。</li>
+<li>SSD：数据盘是 8 块 KIOXIA CM7 Gen5 的 md RAID0。fio O_DIRECT，io_uring qd 16、4 个 job：顺序读 96.9–99.6 GB/s，顺序写 53.8 GB/s，4 读 4 写同时 45.4 + 25.8 GB/s。节点上没有加载 nvidia-fs，没有 GDS。</li>
+</ul>
+<p class="src">TIERS.md §2.2–§2.3 · job 7916</p>
+
+<h3 id="s6-3">6.3 主机内存安全</h3>
+<p>full 档原来每张 GPU 固定 150 GB DRAM，4 张共 600 GB，必须落在 GPU 所在的 NUMA node 上。这台机器每个 node 约 1,057 GB，和别人共用，node 0 上还有一台最多 512 GiB 的虚拟机。最终的做法：</p>
+<ul class="find">
+<li>每 1 GiB 先检查该 node 的空闲内存加可回收的干净 page cache，够才把这一块 bind 到该 node 再 touch；不够就报错，不溢出到另一个 node。</li>
+<li>启动前按 node 预检（arena 加 115 GB 余量），运行中按 node 盯着空闲内存、PSI 和 D 状态进程，越线就停掉自己的运行。</li>
+<li>进程的 <code>oom_score_adj</code> 设为 1000，真到 OOM 时先杀自己。</li>
+<li>8043 上验证：4 × 150 GB 全部落在 node 1，page cache 从 665 GB 回收到 339 GB，touch 41–43 s。</li>
+</ul>
+
+<h3 id="s6-4">6.4 KV pool 的五层结构</h3>
+<p>分层存储重构成 <code>ssengine/kvpool</code> 下的五层：</p>
+<ul class="find">
+<li><b>layout：</b>字节范围。</li>
+<li><b>placement：</b>balanced 的 1/4 规则。</li>
+<li><b>backends：</b>DRAM arena、SSD 文件。</li>
+<li><b>mover：</b>两跳拷贝。</li>
+<li><b>manager：</b>纯策略：索引、LRU、slot、写回。</li>
+</ul>
+<p>scheduler 只看 <code>lookup</code> / <code>load</code> / <code>store</code> 这几个接口。重构前后 full 档 N = 400 每分钟处理量相差 1% 以内（下图，旧 trace）。</p>
+<figure>
+  <div class="fighead"><span class="q">重构前后：每分钟 stage 0 处理的 token</span></div>
+  <div id="f6a" class="chart short" role="img" aria-label="8043 和 7995 每分钟 stage 0 处理量两条线重合"></div>
+  <figcaption>旧 trace，full 档，DRAM 150 GB，N = 400。7995 是重构前（lane-m6 0dfb39f），8043 是重构后（afda6f3）。最后一分钟只有部分数据。</figcaption>
+</figure>
+
+<h3 id="s6-5">6.5 写入策略的演进</h3>
+<p>handoff 原来的写法是写透：每轮结束，上下文同时写进 DRAM 和 SSD。sim 里做了两步改动：</p>
+<ul class="find">
+<li><b>DRAM 改成 victim：</b>只写 HBM 淘汰的内容。DRAM 不再重复存 HBM 已有的东西，full 档 DRAM 50 GB 就和写透的 150 GB 一样。</li>
+<li><b>SSD 改成 DRAM 的 victim：</b>只写 DRAM 淘汰的内容，增量写，读回后保留干净副本。</li>
+<li><b>合起来</b>是 HBM → DRAM → SSD 的逐级写回。真机上，每一级都在占用超过水位线时提前把 LRU 尾部写到下一级，淘汰时一般不用等写完。</li>
+<li>两级用同一个写回类，scheduler 不知道底下是哪种写法。</li>
+</ul>
+<figure>
+  <div class="fighead"><span class="q">20 分钟里每张 GPU 写进 SSD 的数据量</span></div>
+  <div id="f6b" class="chart short" role="img" aria-label="逐级写回和写透两组柱"></div>
+  <figcaption>sim，旧 trace，realistic DB，SSD 128 GB。写透每轮都写 SSD；逐级写回只写 DRAM 淘汰的内容。实验 wt-pp-dram-victim <code>logs/20261017_7_victim_chain</code>。</figcaption>
+</figure>
+<ul class="find">
+<li>写进 SSD 的数据有 68–82% 后来被读回（Tiers、SSD-heavy）。</li>
+<li>最大的浪费是 session 已经结束才下沉的内容，占 9–17%；full 档几乎全是这种，但量本身很小。</li>
+</ul>
+
+<h3 id="s6-6">6.6 SSD 的 I/O</h3>
+<ul class="find">
+<li>每张 GPU 一个 io_uring：O_DIRECT，DRAM arena 和 staging 注册为固定缓冲区，一个请求一个 slot（12.86 MB），读优先于写回，一个线程负责提交和收完成。</li>
+<li>ring 建不起来就直接报错，没有退回线程方案。</li>
+</ul>
+<div class="tbl"><table>
+<thead><tr><th>方式</th><th>最大读（同时写 3 GB/s）</th><th>CPU 核</th><th>31–60 slot 读 p50 / p99 (ms)</th><th>3–10 slot 读 p99 (ms)</th></tr></thead>
+<tbody>
+<tr class="ref"><td>8 线程 <code>preadv</code>/<code>pwritev</code></td><td>15.2–16.1 GB/s</td><td>1.11–1.15</td><td>26–27 / 100–115</td><td>65–79</td></tr>
+<tr><td><b>io_uring，整 slot，8 读 / 4 写在途</b></td><td class="best">16.8–16.9</td><td class="best">0.49–0.50</td><td>31–32 / <b>62–67</b></td><td class="best">16–18</td></tr>
+<tr><td>io_uring，2 MiB 分片，32 / 8</td><td>16.1–16.3</td><td>0.60–0.62</td><td>34–35 / 61–67</td><td>13–16</td></tr>
+</tbody></table></div>
+<ul class="find">
+<li>数字是每张 GPU 的量，4 个进程同时跑。</li>
+<li>io_uring 带宽多约 5%，CPU 减半，后台写回同时进行时读的 p99 也减半。</li>
+<li>SSD 文件按组保留（<code>set&lt;k&gt;/shard&lt;q&gt;.bin</code>），shard q 存的是成员 q 那 1/4，跨运行复用，每次运行整组加锁。</li>
+<li>文件内容从不被信任：每次启动索引都是空的。</li>
+</ul>
+<p class="src">lane-m6-ssd TIERS.md §2.5 · db48f02 · ceff3dc</p>
+
+<h3 id="s6-7">6.7 三档内存配置</h3>
+<p>full 档的 HBM 放得下大部分最新上下文，命中几乎全在 HBM。为了让 DRAM 和 SSD 真正被用到，另设两档缩小的配置。sim 里扫描 HBM × DRAM（SSD 固定 128 GB），选出：</p>
+<div class="tbl"><table>
+<thead><tr><th>档位</th><th>HBM (GB/GPU)</th><th>--pool-tokens</th><th>DRAM (GB/GPU)</th><th>SSD (GB/GPU)</th><th>目的</th></tr></thead>
+<tbody>
+<tr><td>full</td><td>100.18</td><td>61,258,368</td><td>50</td><td>128</td><td>完整内存</td></tr>
+<tr><td>Tiers</td><td>20</td><td>12,220,800</td><td>20</td><td>128</td><td>三层命中约 1:1:1</td></tr>
+<tr><td>SSD-heavy</td><td>12.5</td><td>7,632,640</td><td>12.5</td><td>128</td><td>以 SSD 为主</td></tr>
+</tbody></table></div>
+<ul class="find">
+<li>victim 模式下，HBM 的大小决定 HBM 的份额，DRAM 的大小决定 DRAM 的份额，剩下的落到 SSD。</li>
+<li>负载越重，HBM 的份额越低：v3 上 Tiers 档的 HBM 份额从 N = 300 的 46% 降到 N = 400 的 18%。所以没有一个配置能在两个 N 下都正好 1:1:1，20/20 是取整后的折中。</li>
+</ul>
+<figure>
+  <div class="fighead"><span class="q">各档的命中来源</span>
+    <div class="seg" data-for="f6c" data-key="n"><button data-v="300">N = 300</button><button data-v="400">N = 400</button></div></div>
+  <div id="f6c" class="chart short" role="img" aria-label="三档配置的命中按 HBM、DRAM、SSD 分成的堆叠条"></div>
+  <figcaption>sim，v3 trace，st10（DRAM 只收 HBM 淘汰的内容，HBM 留 10% 装载区）。按轮计：有上一轮上下文的轮里，从 HBM、DRAM、SSD 读到的份额，剩余是重算。统计第 10–20 分钟。实验 wt-pp-staged <code>logs/20261018_11_v3_m6_c300</code>、<code>20261018_9_v3_m6</code>。</figcaption>
+</figure>
+<p><b>SSD 大小</b>是定档时在 sim 里扫的（旧 trace、默认 DB）。128 GB 时 SSD 被写满并开始淘汰，但被淘汰的几乎都是已结束的 session。N = 400 的 p99：</p>
+<div class="tbl"><table>
+<thead><tr><th>SSD (GB/GPU)</th><th>Tiers p99 (s)</th><th>SSD-heavy p99 (s)</th></tr></thead>
+<tbody>
+<tr><td>256</td><td>2.72</td><td>3.03</td></tr>
+<tr><td><b>128（采用）</b></td><td>2.72</td><td>3.39</td></tr>
+<tr><td>64</td><td>14.69</td><td>29.19</td></tr>
+</tbody></table></div>
+<p>8 小时的 sim 用 8 TB（<a href="#s7-5">§7.5</a>）。</p>
+
+<h3 id="s6-8">6.8 分层 bring-up <span class="tag">合成负载 · 旧 trace</span></h3>
+<h4>字节测试</h4>
+<ul class="find">
+<li><b>做法：</b>在真实 StageModel 上 prefill P = 40,000（最后一个 block 不满，chunk 起点偏离 KDA 的网格），对 4 个 stage 的每页 KV 和 state 拍快照；写进 DRAM，从 HBM 淘汰，把原来的 block 填垃圾，再读回到不同的 block id。</li>
+<li><b>结果：</b>每个字节相等（8041，kvpool 版本）；经 SSD（DRAM 关闭）同样相等（8061，io_uring 加 shard 文件，走两跳路径）。</li>
+<li><b>接着算：</b>分层读回之后第 1 轮（A = 1k）的 logits，和 HBM 命中后的 logits 逐位相同，token 相同。</li>
+</ul>
+
+<h4>读时间：DRAM 和 SSD bring-up</h4>
+<p><b>设置：</b>两轮 session，P ∈ {32k, 128k, 512k}，每个长度 5 个 session 的平均。bring-up 的 pool 只有 123 万 token，所以每个第 1 轮都必须从 DRAM（或 SSD）读。HBM 命中是同样的 bring-up 换成完整 pool（7960）。</p>
+<figure>
+  <div class="fighead"><span class="q">第 1 轮 TTFT：从哪一层读，真机 vs 目标</span>
+    <div class="seg" data-for="f6e" data-key="t"><button data-v="hbm">HBM 命中</button><button data-v="dram">DRAM</button><button data-v="ssd">SSD</button></div></div>
+  <div id="f6e" class="chart short" role="img" aria-label="32k、128k、512k 的第 1 轮 TTFT，真机和目标两组柱"></div>
+  <figcaption>ms。HBM 命中 7960；DRAM 8042（kvpool 重构后）；SSD 8073（DRAM 关闭，SSD 128 GB，GPU 4–7）。目标为 v2-realistic 的分层 bring-up（TIERS.md §10）。</figcaption>
+</figure>
+<div class="tbl"><table>
+<thead><tr><th>上下文</th><th>DRAM 目标 TTFT (ms)</th><th>7966（重构前）</th><th>8042（重构后）</th><th>8042 读 (ms)</th><th>目标读</th></tr></thead>
+<tbody>
+<tr><td>32k</td><td>54.4</td><td>57.43</td><td>61.77</td><td>4.07</td><td>1.72</td></tr>
+<tr><td>128k</td><td>58.4</td><td>62.87</td><td>63.14</td><td>6.46</td><td>4.67</td></tr>
+<tr><td>512k</td><td>73.9</td><td>81.82</td><td>81.55</td><td>17.76</td><td>16.46</td></tr>
+</tbody></table></div>
+<ul class="find">
+<li><b>分层读不拖慢计算：</b>512k 第 1 轮每个 stage 的计算时间有无 DRAM 读都一样（21.76 / 19.67 / 21.14 / 21.64 对 21.86 / 19.69 / 21.18 / 21.64 ms）。</li>
+<li><b>TTFT = HBM 命中 + 读：</b>DRAM 时比本引擎自己的 HBM 命中加目标读时间只多 2.6% / 2.1% / 0.1%。到 DRAM 目标的其余差距是本引擎长上下文的第 1 轮本身（512k HBM 命中 65.79 对 57.5 ms，+14%），属于 M5 的计算差距。</li>
+<li><b>拷贝接近下限：</b>512k 的读在 GPU 上 16.0–16.2 ms，约 52–54 GB/s；32k 的读多出的约 1.3 ms 是 controller 和 worker 之间的消息。</li>
+<li><b>8042 的 32k 多 4.4 ms</b>是当时主机负载 245（7966 时 6.5），kernel 下发变慢，不是重构的问题（<a href="#s6-12">§6.12</a>）。</li>
+</ul>
+<div class="tbl"><table>
+<thead><tr><th>上下文</th><th>SSD 目标 TTFT (ms)</th><th>8073 TTFT</th><th>目标 SSD 读 (ms)</th><th>8073 读</th><th>到达 → 开始读 (ms)</th></tr></thead>
+<tbody>
+<tr><td>32k</td><td>61.3</td><td>61.6</td><td>8.6</td><td>7.5</td><td>2.5</td></tr>
+<tr><td>128k</td><td>77.1</td><td>79.8</td><td>23.3</td><td>23.1</td><td>2.2</td></tr>
+<tr><td>512k</td><td>139.8</td><td>189.9</td><td>82.3</td><td>79.0</td><td>52</td></tr>
+</tbody></table></div>
+<ul class="find">
+<li><b>SSD 读在每个长度上都达到目标：</b>io_uring 读进 staging，每个 slot 落地就 H2D。</li>
+<li><b>512k 的 TTFT 多 50 ms，全部发生在读开始之前：</b>bring-up 的 pool 只有 123 万 token，一个 512k 的轮要占 45%，准入时必须淘汰一个还没写完的上下文，只能等写入完成。</li>
+<li>session 配置的 pool 是 763 万–6,126 万 token，一个 512k 的轮不到 7%。这是写入代价第一次出现，<a href="#s8-2">§8.2</a> 里它在 session 上更明显。</li>
+</ul>
+
+<h4>full 档 session（DRAM 150 GB，写透）<span class="tag">旧 trace</span></h4>
+<p><b>设置：</b>旧 trace，N = 400，完整 HBM pool 加每 GPU 150 GB 写透的 DRAM。目标为 v2-realistic。</p>
+<div class="tbl"><table>
+<thead><tr><th></th><th>r/s</th><th>新 tok/s</th><th>TTFT p50 / p90 / p99 (s)</th><th>&gt;60 s</th><th>DRAM 读 p50 / p90 / p99 (ms)</th></tr></thead>
+<tbody>
+<tr><td>7995（重构前）</td><td>26.10</td><td>90.9k</td><td>0.17 / 0.74 / 6.46</td><td>124</td><td>6.7 / 10.0 / 12.7</td></tr>
+<tr><td>8043（重构后）</td><td>26.08</td><td>90.8k</td><td>0.17 / 0.75 / 6.58</td><td>131</td><td>6.66 / 10.98 / 15.86</td></tr>
+<tr class="ref"><td>sim</td><td>26.10</td><td>90.8k</td><td>0.16 / 0.76 / 6.72</td><td>127</td><td>–</td></tr>
+</tbody></table></div>
+<ul class="find">
+<li>和 sim 在 r/s、新 token/s、TTFT 三个分位上都对得上。</li>
+<li>8043 的命中：HBM 98.97%，DRAM 1.03%，共 237 次 DRAM 读。没有一轮因为等写入被挡，没有一轮因为读等待超过 1 s 被跳过。</li>
+<li>这是写透 DRAM 150 GB 的配置；之后的 full 档改为 victim DRAM 50 GB（<a href="#s6-5">§6.5</a>）。</li>
+</ul>
+
+<h4>只有 DRAM 的压缩配置 <span class="tag">旧 trace</span></h4>
+<p><b>设置：</b>旧 trace，N = 400，没有 SSD，故意压小容量：h25d37（HBM 25 GB + DRAM 37 GB）、h12d19（12 + 19 GB），两次运行同时跑在两组 GPU 上（7969、7970）。sim 和真机都会塌缩：命中归零，每轮整段重算（约每 2 分钟 350 轮），所以按塌缩前的每个窗口和塌缩窗口来比。</p>
+<figure>
+  <div class="fighead"><span class="q">h25d37：每 2 分钟完成的轮数</span></div>
+  <div id="f6f" class="chart short" role="img" aria-label="塌缩前两条线逐窗口重合，第 12 到 14 分钟真机少一些"></div>
+  <figcaption>旧 trace，只有 DRAM，N = 400。真机 7969，sim 为 v2-realistic 的分层目标。<span class="src">TIERS.md §9 step 1b</span></figcaption>
+</figure>
+<ul class="find">
+<li><b>h25d37：</b>塌缩前逐窗口吻合（命中份额 0.83–0.91 对 0.83–0.90；DRAM 读每 2 分钟 9–852 对 10–847）。塌缩窗口 sim 第 14–16 分钟、真机第 12–16 分钟（真机在第 12–14 分钟少一些轮）：r/s −5%，TTFT p90 +44%。</li>
+<li><b>h12d19：</b>真机塌缩晚一个窗口（第 8–10 分钟，sim 第 6–8 分钟），所以 r/s 高 24%。塌缩前真机从 HBM 淘汰得更多、从 DRAM 服务的轮更多。这是一个临界点：读延迟、准入顺序和写入落地都会挪动它。</li>
+<li>这两档不满足 SLO，不作为判定依据；M6 按 full 档和带 SSD 的三档判定。v3 上的塌缩分析见 <a href="#s7">§7</a>。</li>
+</ul>
+
+<h3 id="s6-9">6.9 三档 session <span class="tag">v3 trace</span></h3>
+<p><b>设置：</b></p>
+<ul class="find">
+<li>三档都是 st10：DRAM 只收 HBM 淘汰的内容（exclusive），HBM 留 10% 作装载区，SSD 只收 DRAM 淘汰的内容。</li>
+<li>统计第 10–20 分钟，按第一个 token 落在哪个窗口计。</li>
+<li>命中 H / D / S 按轮计，是有上一轮上下文的轮里从 HBM、DRAM、SSD 读到的份额。</li>
+</ul>
+<figure>
+  <div class="fighead"><span class="q">三档 session：真机 vs sim</span>
+    <div class="seg" data-for="f6d" data-key="n"><button data-v="300">N = 300</button><button data-v="400">N = 400</button></div></div>
+  <div id="f6d" class="chart short" role="img" aria-label="三档配置的 rounds/s，真机和 sim 两组柱"></div>
+  <figcaption>第 10–20 分钟的 rounds/s。sim 为 wt-pp-staged <code>logs/20261018_11_v3_m6_c300</code>（N = 300）、<code>20261018_9_v3_m6</code>（N = 400）。</figcaption>
+</figure>
+<div class="tbl"><table>
+<thead><tr><th>N</th><th>档位</th><th>真机 r/s</th><th>sim r/s</th><th>TTFT p50 / p90 / p99 (s) 真机</th><th>sim</th><th>&gt;60 s 真机 / sim</th><th>H / D / S % 真机</th><th>sim</th><th>作业</th></tr></thead>
+<tbody>
+<tr><td>100</td><td>Tiers</td><td>8.62</td><td>8.62</td><td>0.09 / 0.17 / 0.36</td><td>0.08 / 0.16 / 0.36</td><td>0 / 0</td><td>91 / 9 / 1</td><td>91 / 8 / 0</td><td>8456</td></tr>
+<tr><td>300</td><td>full</td><td>33.70</td><td>33.97</td><td>0.19 / 0.34 / 2.87</td><td>0.15 / 0.25 / 1.65</td><td>15 / 4</td><td>98 / 2 / 0</td><td>98 / 2 / 0</td><td>8447</td></tr>
+<tr><td>300</td><td>Tiers</td><td>33.45</td><td>33.77</td><td>0.22 / 0.42 / 4.36</td><td>0.18 / 0.29 / 1.89</td><td>22 / 6</td><td>44 / 34 / 23</td><td>46 / 33 / 21</td><td>8462</td></tr>
+<tr><td>300</td><td>SSD-heavy</td><td>33.76</td><td>33.80</td><td>0.20 / 0.39 / 3.08</td><td>0.19 / 0.31 / 2.02</td><td>17 / 5</td><td>26 / 32 / 42</td><td>28 / 31 / 41</td><td>8448</td></tr>
+<tr><td>400</td><td>full</td><td>40.51</td><td>42.26</td><td>0.61 / 1.52 / 60.43</td><td>0.48 / 1.30 / 33.28</td><td>249 / 194</td><td>94 / 6 / 1</td><td>95 / 5 / 0</td><td>8451</td></tr>
+<tr><td>400</td><td>Tiers</td><td>37.66</td><td>39.77</td><td>0.84 / 3.81 / 60.66</td><td>0.65 / 2.53 / 44.99</td><td>260 / 218</td><td>13 / 41 / 47</td><td>18 / 42 / 39</td><td>8431</td></tr>
+<tr><td>400</td><td>SSD-heavy</td><td>36.71</td><td>38.36</td><td>0.84 / 3.40 / 60.59</td><td>0.63 / 2.83 / 48.38</td><td>282 / 176</td><td>2 / 21 / 77</td><td>4 / 34 / 62</td><td>8452</td></tr>
+</tbody></table></div>
+<ul class="find">
+<li><b>吞吐：</b>N = 100 时什么都不饱和，每档都是 8.6 r/s，所有到达的轮都被服务。N = 300 真机和 sim 相差 1% 以内，N = 400 低 4–5%（原因见 <a href="#s8-2">§8.2</a>）。</li>
+<li><b>分层保住了吞吐：</b>
+  <ul>
+  <li>N = 300：三档都是 33.5–33.8 r/s，只用 HBM 是 27.2。</li>
+  <li>N = 400：三档 36.7–40.5 r/s，只用 HBM 约 16（<a href="#s5-6">§5.6</a>）。</li>
+  <li>HBM 缩到 763 万 token（SSD-heavy，77% 的命中来自 SSD）在 N = 300 不损失吞吐，N = 400 比 full 低 9%。</li>
+  </ul></li>
+<li><b>命中分布：</b>三层之间的份额两边对得上；N = 400 时真机留在 HBM 的上下文略少，SSD 的份额相应更高。</li>
+<li><b>TTFT：</b>N = 300 / 400 的 p50 真机高 20–30%。N = 400 的 p99 落在 60 s 强制调度的边界上：full 档超过 60 s 的轮占 1.02%，sim 0.77%。</li>
+</ul>
+
+<h3 id="s6-10">6.10 和 vLLM 对比 <span class="tag">v3 trace</span></h3>
+<p><b>设置：</b>同样的 v3 负载、同样 4 张 B200、同样的窗口规则（t = 0 为第一个请求提交；一轮在它的第一个 token 落在窗口内时计入；TTFT = 第一个 token − 提交）。vLLM 跑两种部署：</p>
+<ul class="find">
+<li><b>DP4/EP4：</b>4 个 engine 加 vllm-router 的 cache_aware 路由（按 token 前缀的 radix tree 选 engine），只用 HBM，prefix caching 开，chunked prefill。N = 100 / 400 的 max_num_batched_tokens 是 32768，N = 300 是 16384（32768 在 N = 300 时 OOM）。</li>
+<li><b>TP4：</b>一个 TP4 engine，没有 expert parallel 和 router，只用 HBM，max_num_batched_tokens 32768。</li>
+<li><b>本引擎：</b>§6.9 的 eval 运行。N = 100 只有 Tiers 档；N = 300 / 400 列出 full 和 Tiers。</li>
+</ul>
+<figure>
+  <div class="fighead"><span class="q">本引擎 vs vLLM</span>
+    <div class="segs">
+    <div class="seg" data-for="f6g" data-key="w"><button data-v="w0">0–20 分钟</button><button data-v="w10">10–20 分钟</button></div>
+    <div class="seg" data-for="f6g" data-key="m"><button data-v="rps">r/s</button><button data-v="p50">TTFT p50</button><button data-v="p90">p90</button><button data-v="p99">p99</button></div>
+    </div></div>
+  <div id="f6g" class="chart" role="img" aria-label="三个 N 下本引擎、vLLM DP4/EP4、vLLM TP4 的 r/s 和 TTFT 分位，TTFT 用对数坐标"></div>
+  <figcaption>TTFT 用对数坐标（秒）。N = 100 没有 full 档的真机运行。vLLM 运行：DP4/EP4 8457 / 8280 / 8250，TP4 8458 / 8420 / 8419。<span class="src">measured/eval_m6/summary.md · measured/vllm_dpep/</span></figcaption>
+</figure>
+<div class="tbl"><table>
+<thead><tr><th>N</th><th>窗口（分钟）</th><th>系统</th><th>r/s</th><th>TTFT p50 / p90 / p99 (s)</th><th>&gt;60 s</th></tr></thead>
+<tbody>
+<tr><td>100</td><td>0–20</td><td>本引擎 Tiers</td><td class="best">9.39</td><td class="best">0.11 / 0.23 / 0.94</td><td>1</td></tr>
+<tr class="ref"><td></td><td></td><td>vLLM DP4/EP4</td><td>8.05</td><td>1.77 / 4.22 / 7.92</td><td>0</td></tr>
+<tr class="ref"><td></td><td></td><td>vLLM TP4</td><td>7.46</td><td>2.29 / 7.73 / 13.94</td><td>0</td></tr>
+<tr><td>100</td><td>10–20</td><td>本引擎 Tiers</td><td class="best">8.62</td><td class="best">0.09 / 0.17 / 0.36</td><td>0</td></tr>
+<tr class="ref"><td></td><td></td><td>vLLM DP4/EP4</td><td>7.46</td><td>1.31 / 2.24 / 3.72</td><td>0</td></tr>
+<tr class="ref"><td></td><td></td><td>vLLM TP4</td><td>7.26</td><td>0.76 / 3.81 / 7.92</td><td>0</td></tr>
+<tr class="grp"><td>300</td><td>0–20</td><td>本引擎 full</td><td class="best">32.03</td><td class="best">0.23 / 0.99 / 19.83</td><td>205</td></tr>
+<tr><td></td><td></td><td>本引擎 Tiers</td><td>31.54</td><td>0.26 / 1.14 / 21.91</td><td>217</td></tr>
+<tr class="ref"><td></td><td></td><td>vLLM DP4/EP4</td><td>9.70</td><td>18.86 / 30.68 / 43.02</td><td>0</td></tr>
+<tr class="ref"><td></td><td></td><td>vLLM TP4</td><td>1.81</td><td>68.74 / 289.89 / 303.05</td><td>1400</td></tr>
+<tr><td>300</td><td>10–20</td><td>本引擎 full</td><td class="best">33.70</td><td class="best">0.19 / 0.34 / 2.87</td><td>15</td></tr>
+<tr><td></td><td></td><td>本引擎 Tiers</td><td>33.45</td><td>0.22 / 0.42 / 4.36</td><td>22</td></tr>
+<tr class="ref"><td></td><td></td><td>vLLM DP4/EP4</td><td>10.10</td><td>19.37 / 29.47 / 34.94</td><td>0</td></tr>
+<tr class="ref"><td></td><td></td><td>vLLM TP4</td><td>0.99</td><td>275.57 / 299.96 / 306.23</td><td>594</td></tr>
+<tr class="grp"><td>400</td><td>0–20</td><td>本引擎 full</td><td class="best">36.29</td><td class="best">0.72 / 2.04 / 60.93</td><td>727</td></tr>
+<tr><td></td><td></td><td>本引擎 Tiers</td><td>34.07</td><td>0.99 / 4.70 / 61.00</td><td>707</td></tr>
+<tr class="ref"><td></td><td></td><td>vLLM DP4/EP4</td><td>6.58</td><td>36.23 / 67.53 / 201.68</td><td>910</td></tr>
+<tr class="ref"><td></td><td></td><td>vLLM TP4</td><td>1.78</td><td>147.10 / 333.85 / 346.84</td><td>1374</td></tr>
+<tr><td>400</td><td>10–20</td><td>本引擎 full</td><td class="best">40.51</td><td class="best">0.61 / 1.52 / 60.43</td><td>249</td></tr>
+<tr><td></td><td></td><td>本引擎 Tiers</td><td>37.66</td><td>0.84 / 3.81 / 60.66</td><td>260</td></tr>
+<tr class="ref"><td></td><td></td><td>vLLM DP4/EP4</td><td>4.64</td><td>48.31 / 148.23 / 212.89</td><td>910</td></tr>
+<tr class="ref"><td></td><td></td><td>vLLM TP4</td><td>1.17</td><td>319.95 / 344.78 / 349.48</td><td>702</td></tr>
+</tbody></table></div>
+<ul class="find">
+<li><b>N = 100：</b>三者都服务了所有到达的轮；vLLM 的 r/s 略低，是因为每轮更慢，闭环里的 session 推进得更慢。TTFT 差一个数量级：第 10–20 分钟 p50 / p90 / p99 本引擎 0.09 / 0.17 / 0.36 s，vLLM DP4/EP4 1.31 / 2.24 / 3.72 s，TP4 0.76 / 3.81 / 7.92 s。vLLM 每个新 token 还要重算 1.0–1.4 个旧 token（重算 / 新 token：DP4/EP4 1.39，TP4 0.97），本引擎不重算。</li>
+<li><b>N = 300：</b>本引擎（full）是 DP4/EP4 的 3.3 倍（0–20 分钟 32.03 对 9.70 r/s），TP4 的约 18 倍。第 10–20 分钟 TTFT p50 / p90 / p99：本引擎 0.19 / 0.34 / 2.87 s，DP4/EP4 19.37 / 29.47 / 34.94 s，TP4 275.57 / 299.96 / 306.23 s。</li>
+<li><b>N = 300 的超过 60 s：</b>本引擎 0–20 分钟有 205 轮，几乎都在启动阶段（第 10–20 分钟只有 15 轮）；vLLM DP4/EP4 一轮也没有，但它的 p50 已经是 19 s；TP4 有 1,400 轮。</li>
+<li><b>N = 400：</b>本引擎（Tiers）是 DP4/EP4 的 5.2 倍、TP4 的 19 倍（0–20 分钟 34.07 对 6.58 和 1.78 r/s）；第 10–20 分钟 full 档是 DP4/EP4 的 8.7 倍。第 10–20 分钟 TTFT p50 / p90 / p99：本引擎 full 0.61 / 1.52 / 60.43 s、Tiers 0.84 / 3.81 / 60.66 s，DP4/EP4 48.31 / 148.23 / 212.89 s，TP4 319.95 / 344.78 / 349.48 s。</li>
+<li><b>超过 60 s 的轮：</b>N = 400 时 vLLM DP4/EP4 有 910 轮，全部在第 10–20 分钟（p99 213 s）；本引擎 707–727 轮，p99 停在 60 s 强制边界上（60.4–61.0 s）。</li>
+<li><b>vLLM 慢在重算：</b>DP4/EP4 的命中粒度是 8,576 token（KDA state 只在 block 末尾），每轮都重算尾部；TP4 的 KV 池小 2.8 倍，池子约 270 s 就整个换一遍，上下文等不到下一轮就被淘汰；N = 400 时 HBM 放不下，被淘汰的上下文连同唯一的 KDA state 一起丢掉，重算 / 新 token 到 5.5（DP4/EP4）和 8.0（TP4）。</li>
+<li><b>vLLM 的 CPU offload 没有帮助：</b>DP4/EP4 每 engine 50 GB 的原生 offload 和只用 HBM 相差 3% 以内（N = 300：9.76 r/s，TTFT 18.53 / 32.33 / 44.11 s；N = 400：6.41 r/s，36.25 / 74.09 / 211.36 s，0–20 分钟）。它是写透的，容量（每 engine 830 万 token）比 HBM 还小。</li>
+</ul>
+
+<h3 id="s6-11">6.11 eval 之后的引擎改动</h3>
+<ul class="find">
+<li><b>HBM 按 128 token 分页</b>（lane-m6-pack 8d50066）：消除 block 取整的浪费，见 <a href="#s8-2">§8.2</a>。分层路径不受影响：N = 300 full 33.67 r/s（8476）。</li>
+<li><b>hostgate</b>（7e391df）：主机时间不再计入在途闸门的等待。N = 300 TTFT p50 少 4 ms，N = 400 不变。</li>
+<li><b>提前做计划的时机</b>（9780a2f）：N = 400 Tiers 的第 2–7 分钟里贡献 stage 0 忙碌率约 3 个点（27.87 对 27.31 r/s）。</li>
+<li><b>分层记录的长尾</b>（14bf48b）：p99 291 µs → 15 µs。</li>
+<li>128-token 页和 hostgate 合成下一版 eval 代码 c5d4e09，<a href="#s7-1">§7.1</a> 的两次真机运行用的就是它。</li>
+</ul>
+
+<div class="simsays"><b>sim 怎么说</b>三层都打开时，sim 的吞吐和命中分布都对得上。拉开差距的地方在 sim 认为免费的写入，以及 sim 认为 4 张卡一样快，见 <a href="#s8-2">§8.2</a>。</div>
+
+<h3 id="s6-12">6.12 哪里出了问题</h3>
+<ul class="find">
+<li><b>7996，全局 OOM（10-18 00:43）：</b>full 档 N = 500 用了严格的 NUMA bind，把 node 0 用光，内核的 OOM killer 杀掉了其他用户的进程。之后的规矩：防止主机 OOM 是第一优先，不再盲目严格 bind。</li>
+<li><b>7976，主机内存被挤爆：</b>同一台机器上另一个用户的作业和一台虚拟机占了大量内存，PSI full 到 64%，有 worker 进入 D 状态，运行作废。MADV_HUGEPAGE 让 touch 同步做内存整理，150 GB 花了约 500 s，所以改回 4 KiB 页（7991 测过 4 KiB 和 2 MiB 读带宽相同）。</li>
+<li><b>8036，没启动：</b>预检发现 node 0 不够。别人的作业 GPU 在 4–7，内存却几乎全在 node 0：集群的 Slurm 没有把 CPU 和 GPU 按 node 对齐（gres.conf 没有 Cores=），内存跟着 CPU 走。之后 DRAM 重的运行固定用 GPU 4–7。</li>
+<li><b>8039，溢出到另一个 node：</b>预检把 page cache 算作可用，但 MPOL_PREFERRED 在 zone_reclaim_mode 0 下不会回收 page cache，而是直接去另一个 node 分配，600 GB 里有 365 GB 落在 node 0。改成“逐块检查后再 bind”（<a href="#s6-3">§6.3</a>）。</li>
+<li><b>8042，32k TTFT 多 4.4 ms：</b>读和下发多 1.8 ms，stage 0/1 计算各多约 1 ms，stage 2/3 不变。当时主机负载 245（7966 时 6.5），慢在主机下发 kernel，不是重构的问题。</li>
+<li><b>SSD 的 I/O 换掉了线程方案：</b>8 线程 <code>preadv</code> 能达到带宽，但 CPU 和尾延迟都是 io_uring 的两倍（<a href="#s6-6">§6.6</a>）。</li>
+<li><b>写透设计被替换：</b>最早的设计按 handoff 写透，DRAM 150 GB、SSD 每轮都写。它能对上目标（7995、8043），但主机内存和 SSD 写入都远超需要。</li>
+</ul>
+
+<!-- ============================== 7 ============================== -->
+<h2 id="s7"><span class="no">7</span>不稳定与塌缩</h2>
+<div class="tk"><b>要点</b><ul>
+<li>没有 SSD、容量又不够时，系统会塌缩：命中突然归零，每轮整段重算，之后恢复不了。</li>
+<li>预测量是保留的上下文 W 和容量 C：W 超过 C 后 1–3 个窗口塌缩。sim 和真机塌在同一个窗口。</li>
+<li>对策是容量：带 SSD 的配置在 20 分钟真机和 8 小时 sim 里都稳定。</li>
+</ul></div>
+
+<h3 id="s7-1">7.1 现象 <span class="tag">v3 trace</span></h3>
+<ul class="find">
+<li><b>设置：</b>v3 上做了一组 sim 扫描（22 个配置）和两次真机运行，都是 st10、没有 SSD、N = 400、20 分钟。</li>
+<li><b>两次真机运行只差 DRAM 的大小：</b>h25d50（HBM 25 GB + DRAM 50 GB，容量 C = 4,860 万 token，会塌）和 h25d75（DRAM 75 GB，C = 6,530 万，刚好在边缘）。</li>
+</ul>
+<figure>
+  <div class="fighead"><span class="q">每 2 分钟完成的轮数</span>
+    <div class="seg" data-for="f7a" data-key="s"><button data-v="h25d50">h25d50</button><button data-v="h25d75">h25d75</button></div></div>
+  <div id="f7a" class="chart short" role="img" aria-label="sim 和真机每 2 分钟轮数，塌缩前重合"></div>
+  <figcaption>只有 DRAM，st10，N = 400，v3 trace。真机 8491（h25d50，GPU 组 A）、8492（h25d75，GPU 组 B），代码 c5d4e09。sim wt-pp-staged <code>logs/20261018_15_v3_dramonly</code>。</figcaption>
+</figure>
+<h4>h25d50：两边塌在同一个窗口</h4>
+<ul class="find">
+<li>第 10–12 分钟真机 476 轮、sim 496 轮，命中份额都是 0.72。</li>
+<li>在这之前，每个窗口的命中份额、丢失的轮数、重算的 token 和 W 都吻合；真机在第 4–10 分钟少服务 5–19% 的轮。</li>
+<li>塌缩之后两边落到不同的稳态：sim 完全塌缩，命中归零，每 2 分钟约 150 轮；真机停在 0.60–0.68 的命中，每 2 分钟约 450 轮。</li>
+<li>两边每个窗口重算的 token 一样多，都是约 1,650 万。原因见 <a href="#s8-2">§8.2</a>。</li>
+</ul>
+<div class="tbl"><table>
+<thead><tr><th>h25d50，分钟</th><th>r/s</th><th>重算 / 新 token</th><th>TTFT p50 / p90 / p99 (s)</th><th>&gt;60 s</th></tr></thead>
+<tbody>
+<tr><td>真机 0–20</td><td>13.00</td><td>1.24</td><td>1.98 / 63.7 / 161</td><td>2948</td></tr>
+<tr><td>sim 0–20</td><td>13.34</td><td>1.25</td><td>1.34 / 42.7 / 284</td><td>1448</td></tr>
+<tr><td>真机 10–20</td><td>3.74</td><td>8.47</td><td>65.8 / 159 / 170</td><td>2211</td></tr>
+<tr><td>sim 10–20</td><td>1.83</td><td>15.9</td><td>159 / 286 / 290</td><td>773</td></tr>
+</tbody></table></div>
+<h4>h25d75：两边都稳定</h4>
+<ul class="find">
+<li>每个窗口命中 0.98–0.99，约 1% 的轮丢失上下文。W 的峰值真机 6,410 万、sim 6,460 万，刚好低于 C。</li>
+<li>第 10–20 分钟真机比 sim 低 12.6%：26.36 对 30.15 r/s；TTFT p50 / p90 / p99 1.84 / 11.7 / 62.5 s 对 1.12 / 8.86 / 61.8 s；stage 0 忙碌率 0.855 对 0.992。</li>
+<li>真机受读路径限制，不是计算：83% 的轮从 DRAM 读（sim 76%），留在 HBM 的上下文也更少（15.6% 对 23.1%）。这和 <a href="#s8-2">§8.2</a> 的写入代价是同一类差距。</li>
+</ul>
+
+<h3 id="s7-2">7.2 机制</h3>
+<p>原因在 scheduler，不在淘汰策略。两个量：</p>
+<ul class="find">
+<li><b>W(t)：</b>闭环在 t 时刻需要保留的上下文。每个还有下一轮、而下一轮还没被服务的 session，它最近一轮的 prompt，加上 KDA 末尾 state（约合 24,600 token）。</li>
+<li><b>C：</b>HBM 加 DRAM 的容量。</li>
+</ul>
+<figure>
+  <div class="fighead"><span class="q">保留的上下文 W 和容量 C</span>
+    <div class="seg" data-for="f7b" data-key="s"><button data-v="h25d50">h25d50</button><button data-v="h25d75">h25d75</button></div></div>
+  <div id="f7b" class="chart short" role="img" aria-label="每 2 分钟窗口末的 W，真机和 sim，以及容量 C 的水平线"></div>
+  <figcaption>每个 2 分钟窗口末的 W（百万 token），虚线是 C。h25d50 的 W 在第 6–8 分钟超过 C，三个窗口后塌缩；h25d75 的 W 一直在 C 以下。</figcaption>
+</figure>
+<ul class="find">
+<li><b>丢失翻倍：</b>W 超过 C 后，丢失上下文的轮每个窗口翻一倍左右（h25d50：12 → 43 → 102 → 131）。每次丢失是一次约 11 万 token 的整段重算，等满 60 s 后被强制准入。</li>
+<li><b>自我强化：</b>强制调度按等待时间从老到新，所以每一轮都要排在这些重算后面。重算让排队更长，排队又让更多上下文在 cache 里待不住。这是一个 metastable 循环。</li>
+<li><b>v3 的 W 更大：</b>N = 400 时 W 在第 4 分钟到 3,300 万，第 8–20 分钟到 5,200–6,500 万，比旧 trace 多，涨得也快。</li>
+<li><b>C 越大塌得越晚：</b>扫描里 C ≤ 5,700 万的 N = 400 配置都在 20 分钟内塌缩，比 W 第一次超过 C 晚 1–3 个窗口。C = 4,100 万在第 6–8 分钟，4,860 万在第 12–14 分钟，5,700 万在第 18–20 分钟（命中份额第一次低于 0.5 的窗口）。</li>
+<li><b>W 超过 C 不一定马上塌：</b>h20d75（C = 6,230 万）从第 14 分钟起 W 比 C 多出最多 260 万，仍然撑住；h25d37 在 N = 300 时按原速稳定，GPU 时间放慢 3% 就在第 16–18 分钟塌缩。靠近边缘时，小的速度差就决定塌不塌。</li>
+</ul>
+<p><b>结论：</b></p>
+<ul class="find">
+<li>只靠 DRAM 时，N = 400 需要 C 大约等于 W 的峰值，约 6,500 万 token，也就是每 GPU 25 GB HBM 加 75 GB DRAM。</li>
+<li>旧的 h25d37、h12d19 设置，以及 eval 的 20/20、12.5/12.5 两档，去掉 SSD 后在 v3 上都在第 4–8 分钟塌缩。</li>
+<li>带 SSD 128 GB 时三档都不塌（<a href="#s6-9">§6.9</a>）。</li>
+</ul>
+
+<h3 id="s7-3">7.3 评估过的方法</h3>
+<p class="note">命中优先（hg）和 KDA 检查点是在 v3 上评估的。其余方法的筛选在旧 trace 上做，v3 上没有重跑，这里只保留定性结论。</p>
+<div class="tbl"><table class="wrap">
+<thead><tr><th>方法</th><th>出处</th><th>规则</th><th>结果</th><th>结论</th></tr></thead>
+<tbody>
+<tr><td>命中优先（hg）</td><td>SGLang 的最长前缀匹配优先（Zheng 2024），DLPM（Cao 2024）</td><td>只有当按从老到新服务逾期请求会把某个排队请求的上下文从所有层淘汰时，才让上下文还在的请求先走；其余时候顺序不变；没有新参数</td><td>8 小时只有 DRAM：从 0.6 r/s 提到 21–25 r/s，命中 98%，但仍未命中的轮 TTFT p99 1,360–2,780 s。带 SSD 时从不触发，结果逐位相同</td><td>不启用：部署配置带 SSD，用不上</td></tr>
+<tr><td>关掉 60 s 强制规则</td><td>设计默认值</td><td>无等待上限</td><td>吞吐最高，但有请求永远得不到服务</td><td>否决</td></tr>
+<tr><td>按队列状态淘汰</td><td>ARC / LIRS 的思路</td><td>先淘汰已结束的，再淘汰空闲的，最后才淘汰在排队的</td><td>20 分钟无效；8 小时带 SSD 时吞吐反而下降</td><td>否决</td></tr>
+<tr><td>LFU</td><td>LFU / TinyLFU（Einziger 2017）</td><td>按频率，再按时间</td><td>照样塌缩</td><td>否决</td></tr>
+<tr><td>大的先淘汰</td><td>GreedyDual-Size（Cao &amp; Irani 1997）</td><td>按大小</td><td>照样塌缩；代价和大小成正比时退化为 LRU</td><td>否决</td></tr>
+<tr><td>限制强制调度的份额 0.5 / 0.25</td><td>无</td><td>手调比例</td><td>部分改善</td><td>否决：参数不是推出来的</td></tr>
+<tr><td>LIRS、ARC/CAR、2Q、CLOCK-Pro、LRFU、EELRU、DIP/BIP/RRIP</td><td>Jiang 2002 等</td><td>抗循环访问，固定保护一部分 cache</td><td>未运行</td><td>否决：每次 miss 代价约 30 倍，固定保护一部分等于限制活跃 session，不如在准入时直接做</td></tr>
+<tr><td>LHD、AdaptSize、GDSF</td><td>Beckmann 2018 等</td><td>按单位大小的命中密度</td><td>未运行</td><td>否决：对象大小接近均匀</td></tr>
+<tr><td>工作集准入（load control）</td><td>Denning 1968 / 1980</td><td>限制活跃 session，使 W ≤ C</td><td>未运行</td><td>下一步，涉及公平性</td></tr>
+<tr><td>容量规划 C ≥ W 峰值</td><td>工作集理论</td><td>按测得的 W 定各层大小</td><td>凡带 SSD 的配置都稳定，20 分钟真机和 8 小时 sim 都是</td><td>部署时采用</td></tr>
+<tr><td>每轮结束多存几个 KDA state</td><td>CachedAttention（Gao 2024）、Marconi</td><td>保留最近几轮末尾的 state</td><td>v3 8 小时：k2 把多算的 token 从新 token 的 13–25% 降到 7–10%，r/s +6–14%；20 分钟 eval 几乎不受影响</td><td>采用 k2，真机待做（<a href="#s9-1">§9.1</a>）</td></tr>
+</tbody></table></div>
+
+<h3 id="s7-4">7.4 结论：命中优先与容量</h3>
+<ul class="find">
+<li>部署的三档都带 SSD 128 GB，v3 的 20 分钟真机运行里都不塌缩（<a href="#s6-9">§6.9</a>）。</li>
+<li>8 小时 sim 里 DRAM 150 GB 加 SSD 也全程稳定（<a href="#s7-5">§7.5</a>）。</li>
+<li>hg 只在没有 SSD 时起作用，代价是仍未命中的轮要等上千秒，所以不启用。</li>
+<li>没有 SSD 的部署按 W 的峰值定容量（<a href="#s7-2">§7.2</a>）。</li>
+</ul>
+
+<h3 id="s7-5">7.5 8 小时稳态 <span class="tag">v3 trace · 只有 sim</span></h3>
+<p><b>设置：</b></p>
+<ul class="find">
+<li>sim，v3 8 小时闭环。部署配置：DRAM 150 GB + SSD 8 TB（SSD 是 DRAM 的 victim 层），st10，KDA 检查点 k2（<a href="#s9-1">§9.1</a>）。</li>
+<li>两种口径都报：hb（KV 回填，测试协议：外部 decode 把输出 KV 和这一轮末尾的 state 交回来）和 nohb（不回填：上一轮的输出变成下一轮的新 token；v3 没有现成的 nohb trace，从同一份 v3 来源生成）。</li>
+<li>r/s 按第 2–4、4–6、6–8 小时分窗；TTFT 取最后 2 小时；命中是最后 2 小时里复用了上下文的轮占非首轮的份额；多算 = 第 1–8 小时（算的 token − 新 token）/ 新 token。</li>
+<li>实验 wt-pp-staged <code>logs/20261018_15_v3_8h_steady</code>。</li>
+</ul>
+<div class="tbl"><table>
+<thead><tr><th>口径</th><th>层</th><th>k</th><th>负载</th><th>r/s（每 2 h）</th><th>TTFT p50 / p90 / p99 (s)</th><th>命中</th><th>多算</th><th>r/s 1–8 h</th></tr></thead>
+<tbody>
+<tr><td>hb</td><td>DRAM 150 + SSD 8 TB</td><td>k2</td><td>c1563</td><td>63.7 / 58.2 / 53.0</td><td>3.0 / 16.6 / 63</td><td>99.3%</td><td>7.2%</td><td>58.60</td></tr>
+<tr><td>hb</td><td>DRAM 150 + SSD 8 TB</td><td>k2</td><td>c2000</td><td>63.5 / 57.4 / 53.5</td><td>3.1 / 62.8 / 73</td><td>99.3%</td><td>8.2%</td><td>58.64</td></tr>
+<tr><td>hb</td><td>DRAM 150 + SSD 8 TB</td><td>k2</td><td>c2500</td><td>54.8 / 55.0 / 53.4</td><td>4.2 / 67.1 / 81</td><td>99.3%</td><td>10.3%</td><td>54.94</td></tr>
+<tr class="ref"><td>hb</td><td>DRAM 150 + SSD 8 TB</td><td>k1</td><td>c1563</td><td>60.0 / 56.2 / 51.0</td><td>3.5 / 20.1 / 63</td><td>99.3%</td><td>13.3%</td><td>55.39</td></tr>
+<tr class="ref"><td>hb</td><td>DRAM 150 + SSD 8 TB</td><td>k1</td><td>c2000</td><td>57.5 / 53.7 / 47.9</td><td>4.0 / 64.9 / 80</td><td>99.2%</td><td>19.3%</td><td>53.21</td></tr>
+<tr class="ref"><td>hb</td><td>DRAM 150 + SSD 8 TB</td><td>k1</td><td>c2500</td><td>48.4 / 48.5 / 45.4</td><td>8.3 / 75.5 / 96</td><td>99.2%</td><td>24.8%</td><td>48.14</td></tr>
+<tr><td>nohb</td><td>DRAM 150 + SSD 8 TB</td><td>k1</td><td>c1438</td><td>51.9 / 50.1 / 44.7</td><td>4.9 / 21.9 / 62</td><td>99.3%</td><td>4.6%</td><td>48.91</td></tr>
+<tr><td>nohb</td><td>DRAM 150 + SSD 8 TB</td><td>k1</td><td>c2000</td><td>51.2 / 49.5 / 45.7</td><td>5.3 / 64.0 / 76</td><td>99.4%</td><td>5.8%</td><td>49.18</td></tr>
+<tr><td>hb</td><td>只有 DRAM 150</td><td>k2</td><td>c2000</td><td>0.7 / 0.7 / 0.7</td><td>1746 / 1762 / 1771</td><td>0.0%</td><td>4732%</td><td>0.69</td></tr>
+<tr><td>hb</td><td>只有 DRAM 150</td><td>k2</td><td>c2500</td><td>0.7 / 0.7 / 0.7</td><td>2176 / 2198 / 2211</td><td>0.0%</td><td>4594%</td><td>0.69</td></tr>
+<tr><td>nohb</td><td>只有 DRAM 150</td><td>k1</td><td>c1438</td><td>0.7 / 0.7 / 0.7</td><td>1280 / 1297 / 1306</td><td>0.0%</td><td>5332%</td><td>0.68</td></tr>
+<tr><td>nohb</td><td>只有 DRAM 150</td><td>k1</td><td>c2000</td><td>0.7 / 0.7 / 0.7</td><td>1747 / 1764 / 1774</td><td>0.0%</td><td>4116%</td><td>0.69</td></tr>
+</tbody></table></div>
+<p class="note">nohb 下 KDA 检查点不起作用（没有回填的 decode 末尾），所以只报 k1。灰色行是 k1 的参照。st10 和不留装载区、DRAM inclusive 的 base 模式在 k2 下相差 0.5 r/s 以内。</p>
+<ul class="find">
+<li><b>带 SSD 全程稳定。</b>每个 2 小时窗口的计算量都是 138–141k token/s，命中 99.2–99.4%。8 小时末排队的轮有 330–1,560 个，没有一个等超过 60–86 s。尾部由 60 s 强制规则决定：c2000 / c2500 的 TTFT p90 是 62–76 s。</li>
+<li><b>后段 r/s 下降是轮变大了，不是 cache 失效。</b>每轮的新 token 从第 2–4 小时的 2.08–2.11k 涨到第 6–8 小时的 2.34–2.40k（hb），第 6–8 小时的多算也略多（k2 c2000：7.0% → 10.0%）。r/s 最多低 17%，新 token 吞吐只变 −8% 到 +1%。</li>
+<li><b>SSD 8 小时没写满。</b>8 小时末 SSD 用了 3.1–4.5 TB（k1 39–45%，k2 54–56%），还没有淘汰；SSD 读 4.8–8.3 GB/s，通道是 10 GB/s。超过 8 小时、SSD 开始淘汰之后的稳态没有覆盖。</li>
+<li><b>只有 DRAM 时每种配置都塌。</b>第 2 小时起 0.6–0.7 r/s，几乎零命中，多算的是新 token 的 41–59 倍，TTFT 上千秒。st10 和 k2 都改变不了。hg 能撑在 21–25 r/s（k1，base 模式，命中 98%），但仍未命中的轮 TTFT p99 1,360–2,780 s；带 SSD 时 hg 从不触发，结果和基线逐位相同。</li>
+<li><b>整段命中规则的代价。</b>KDA state 只在保存的位置可用，截断落在上一轮内部的轮不能接着用 cache。在 v3 上这部分代价就是表里的“多算”：hb 下 k1 13–25%，k2 7–10%。k 的取舍和剩下的部分见 <a href="#s9-1">§9.1</a>。</li>
+</ul>
+
+<div class="simsays"><b>sim 怎么说</b>sim 复现了真机的塌缩窗口，也给出了能预测塌缩的量（W 和 C）。它把问题从“换哪种淘汰策略”转成了“容量够不够，以及过载时让谁先走”。8 小时的结论还只来自 sim。</div>
+
+<h3 id="s7-6">7.6 哪里出了问题</h3>
+<ul class="find">
+<li><b>hg 没有移到部署分支：</b>hg 只在 pp-stable 分支（063c85ae）上。移到 pp-staged 时和分阶段装载（<code>fresh_source.rs</code>）冲突，所以 hg 和 st10、k2 的组合没有跑。</li>
+<li><b>没有现成的 nohb trace：</b>v3 只有回填口径的 8 小时 trace。nohb 从同一份 v3 来源重新生成（<code>session_closed_loop.py</code> 加 <code>fold.py</code>），c1438 是新抽的闭环，和 hb 的负载不完全对应。</li>
+<li><b>整段命中规则在 v3 上没有重新归因：</b>要重建规则之前的代码（7bb224a6）再跑 v3。它的代价用 k1 / k2 的多算表示（上面最后一条）。</li>
+</ul>
+
+<!-- ============================== 8 ============================== -->
+<h2 id="s8"><span class="no">8</span>sim 有多准</h2>
+<div class="tk"><b>要点</b><ul>
+<li>从 kernel 到 20 分钟闭环 session，误差没有层层放大：吞吐 1–5%，命中分布和塌缩窗口都对得上。</li>
+<li>偏差有六个，原因都已找到；只有塌缩之后 sim 的读启动规则还没在代码里确认。</li>
+</ul></div>
+
+<h3 id="s8-1">8.1 吻合的部分</h3>
+<ul class="find">
+<li><b>kernel、单步迭代、bring-up：</b>kernel 中位比值 0.95–1.08；单请求和同时到达的饱和测试都在 ±10% 以内；调度检查逐 microbatch 相同；DRAM、SSD 读时间达到目标（<a href="#s4">§4</a>–<a href="#s6-8">§6.8</a>）。</li>
+<li><b>吞吐：</b>旧 trace 只用 HBM（M5）相差 0–1.5%；v3 三档分层，N = 100 / 300 时 rounds/s 相差 1% 以内，N = 400 低 4–5%；命中在 HBM、DRAM、SSD 之间的分布对得上。</li>
+<li><b>长尾：</b>N = 400 的 p99 落在 60 s 强制调度的边界上，超过 60 s 的轮 1.02% 对 0.77%。</li>
+<li><b>动态：</b>只有 DRAM 时，塌缩前每 2 分钟的轮数、命中份额、丢失的轮、重算量和 W 逐窗口吻合，塌缩出现在同一个窗口（旧 trace 和 v3 都是）；边缘配置两边都稳定。只用 HBM、N = 400 的双稳态区，真机落在 sim 扰动范围的中位数上。</li>
+</ul>
+<p>场景本身很复杂：20 分钟闭环、上下文接近 100 万 token、4 级 pipeline、session 级 prefix cache、三层分层读回、SRPT、读等待上限、装载区、60 s 强制规则叠在一起，误差却没有层层放大。</p>
+
+<h3 id="s8-2">8.2 有偏差的部分</h3>
+<div class="tbl"><table class="wrap">
+<thead><tr><th>偏差</th><th>影响</th><th>原因</th><th>处理</th></tr></thead>
+<tbody>
+<tr><td>写入代价</td><td>不留装载区时 N = 400 真机低 12%，sim 不变</td><td>读要等淘汰写入腾出空间，sim 认为写入免费</td><td>部署用 st10（10% 装载区）</td></tr>
+<tr><td>热卡</td><td>N = 400 低 4–5%，TTFT p50 高 20–30%</td><td>第 3、4 张卡更热，功耗上限下频率低 5–7%，stage 2/3 是瓶颈</td><td>只记录，不给 sim 加逐 stage 系数</td></tr>
+<tr><td>block 取整</td><td>只用 HBM、N = 400 时真机 12.97 r/s</td><td>8,576 token 的 block 浪费约 2.4% 的 HBM</td><td>HBM 改成 128 token 一页</td></tr>
+<tr><td>塌缩之后的稳态</td><td>sim 命中归零，真机停在约 65%</td><td>真机在 60 s 边界上就开始逾期轮的 DRAM 读，sim 不开始（推测）</td><td>待在 sim 代码里确认</td></tr>
+<tr><td>主机开销</td><td>TTFT 多几到十几 ms</td><td>sim 里准入、准备、读的提交和完成不花时间</td><td>hostgate 减 4 ms，其余只记录</td></tr>
+<tr><td>短读延迟</td><td>少量 slot 的 SSD 读 p99 16–18 ms</td><td>sim 按 10 GB/s 线性算</td><td>只记录</td></tr>
+</tbody></table></div>
+
+<h4>写入代价</h4>
+<ul class="find">
+<li><b>现象：</b>不留装载区（excl）时，sim 和 st10 一样（N = 400 Tiers 39.79 对 39.77 r/s），真机却低 12%（33.10 对 37.66；8453 对 8431）。N = 300 时吞吐低 1.7%，TTFT p90 0.80 s 对 0.42 s，重算 / 新 token 0.094 对 0.025。</li>
+<li><b>机制：</b>一个等待环。没有装载区，读落地要等淘汰写入腾出 block，而这些写入又在等在途读占着的 DRAM slot。DRAM 读 p50 因此是 217 ms（st10 55 ms），stage 0 忙碌率降到 0.875。</li>
+<li><b>sim 看不到：</b>它不计写入时间。所以装载区是必需的。</li>
+<li><b>同一类差距：</b>SSD bring-up 里 512k 多出的 50 ms（<a href="#s6-8">§6.8</a>）、只有 DRAM 的 h25d75 真机低 12.6%（<a href="#s7-1">§7.1</a>）。</li>
+</ul>
+<h4>热卡</h4>
+<ul class="find">
+<li>两组 4 张 GPU 里，第 3、4 张卡（stage 2、3）都比前两张热 10–14 °C，在 1000 W 的功耗上限下频率低 5–7%。</li>
+<li>stage 2/3 本来就是 pipeline 里最忙的（忙碌率 94–98%），按每千 token 的毫秒数比 sim 慢约 7%。把 GPU 顺序反过来跑，一部分差距跟着 GPU 走。</li>
+<li>同频率下每个 op 的真机 / sim 比值在 4 个 stage 上相同，所以这不是 profile 或代价模型的问题。</li>
+<li>sim 整体放慢 3%（gpu_time_multiplier 1.025–1.035）能复现 N = 400 差距的约 2/3（41.1 r/s，TTFT 0.56 / 1.44 / 54 s）；N = 300 的损失集中在 stage 2/3 接近饱和的时候，整体放慢解释不了多少。N = 300 小请求多出的约 30 ms 也是这个原因。</li>
+<li>不给 sim 加逐 stage 的系数：那等于给 GPU 插槽的位置建模。</li>
+</ul>
+<h4>block 取整</h4>
+<ul class="find">
+<li>HBM 原来按 8,576 token 的 block 分配，每个上下文平均浪费 4.3k token，约 2.4% 的 HBM。</li>
+<li>只用 HBM、N = 400 正好在容量边缘，这 2.4% 就决定了结果：sim 把容量减 2.4% 后给出 11.2–12.7 r/s、重算 / 新 token 约 1.75，和 block 版的真机（12.97 r/s、1.76）一致。</li>
+<li>HBM 改成 128 token 一页后，每个上下文只浪费 63 token，真机 16.16 r/s、重算 / 新 token 1.21，落在 sim 满容量的中位数上（<a href="#s5-6">§5.6</a>）。</li>
+</ul>
+<h4>塌缩之后的稳态</h4>
+<ul class="find">
+<li>h25d50 塌缩之后，sim 命中归零，真机停在约 65% 的 DRAM 命中（<a href="#s7-1">§7.1</a>）。</li>
+<li><b>真机：</b>塌缩窗口中从 DRAM 命中的轮，读在到达后 51 / 62 / 68 s（p10 / p50 / p90）开始，也就是在 60 s 强制边界上；读落地后这一轮先于重算被准入，TTFT 约 64 s，丢失上下文的轮约 163 s。</li>
+<li><b>sim：</b>第 12 分钟后到达的 601 轮中，569 轮到达时上下文还在 DRAM，但到出第一个 token 时一个都不在了：上下文在到达后 163 / 183 / 189 s 被 LRU 淘汰，期间没有开始读。</li>
+<li><b>推测：</b>sim 的分阶段装载在逾期队列前面还有整段重算时，不会启动逾期轮的 DRAM 读。还没在代码里确认（wt-pp-staged 的 <code>fresh_source.rs</code> 中 <code>FreshQueues::stage_loads</code>，<code>prefix_fetch.rs</code> 中 <code>PrefixFetch::stage</code> / <code>load_gate</code>）。</li>
+<li>它只影响塌缩之后，塌缩窗口和之前都吻合。</li>
+</ul>
+<h4>主机开销与短读延迟</h4>
+<ul class="find">
+<li>低负载 TTFT p50 0.09 s 对 0.08 s；512k 首轮 HBM 命中 65.79 ms 对 57.5 ms，主机 11.7 ms 而 sim 为 0；主机负载高时（8042）kernel 下发更慢。</li>
+<li>sim 按 10 GB/s 线性算 SSD 读时间，实测少量 slot 的 p99 是 16–18 ms。</li>
+</ul>
+
+<h3 id="s8-3">8.3 还没验证的部分</h3>
+<ul class="find">
+<li>小时级长跑：只有 sim 结果，没有真机对照。8 小时内 SSD 最多用到 56%，SSD 开始淘汰之后的稳态没覆盖。</li>
+<li>KDA 检查点和 state 压缩：只在 sim 里评估过（<a href="#s9">§9</a>）。</li>
+<li>塌缩之后 sim 的 DRAM 读启动规则（<a href="#s8-2">§8.2</a>）。</li>
+<li>其他模型、并行方式和硬件：只验证了 GLM-5.3-Flash PP4 / B200。</li>
+</ul>
+
+<h3 id="s8-4">8.4 对 sim 的反馈</h3>
+<ul class="find">
+<li>realistic-input profile DB：kernel 输入要用真实分布。</li>
+<li>整段命中规则（<code>1de110c0</code>）：KDA state 只在末尾有效，handoff 因此改为 v2。</li>
+<li>超过 32,768 行的 sparse MLA 切分（<code>7bb224a6</code>）。</li>
+<li>分层写法：<code>dram_tier_writes: hbm-evictions</code>（4b93b396）、<code>ssd_tier_writes: dram-evictions</code> 与它组合（08c0e231、eaab79cd）、exclusive DRAM <code>hbm-evictions-exclusive</code> 加装载区 <code>prefix_tier_loading_area</code>（st10）。</li>
+<li>KDA state：<code>recurrent_state_checkpoints</code>（k，原子条目，c7dc261f；读只搬存活的 state，0d19fb23）、anchor 保留（b0455c55）、<code>tier_state_compression_ratio</code>（d376d8ff）、anchor 原地保留（e4de4292）。</li>
+<li>反抖动：<code>force_schedule_hits_first</code> 与 <code>force_schedule_hits_first_when_at_risk</code>（hg，pp-stable 063c85ae，默认关闭）。</li>
+</ul>
+
+<!-- ============================== 9 ============================== -->
+<h2 id="s9"><span class="no">9</span>待办：KDA state 检查点与压缩</h2>
+<div class="tk"><b>要点</b><ul>
+<li>KDA 层只能从某个确切位置保存下来的 state 接着算，这是带 SSD 时 8 小时 sim 里剩下的最大损失。</li>
+<li>k2（多存最近一轮的 prefill 末尾）性价比最高：多算从 13–25% 降到 7–10%，r/s +6–14%。</li>
+<li>state 压缩约 1.86×，只在和 anchor 一起用时才明显加分。两者都还没在真机上实现。</li>
+</ul></div>
+
+<h3 id="s9-1">9.1 KDA 检查点：k1 / k2 / k4 与 anchor</h3>
+<ul class="find">
+<li><b>两个末尾：</b>每轮有两个可以存 state 的位置：prefill 末尾（prompt 末尾）和回填的 decode 末尾。</li>
+<li><b>k：</b>每个保留上下文存的末尾 state 个数。k1 只存 decode 末尾；k2 再存最近一轮的 prefill 末尾；k4 再加上前一轮的两个末尾。</li>
+<li><b>原子条目：</b>KV 和它的 k 个 state 一起淘汰、一起降级；每个 state 在 DRAM 和 SSD 里按真实字节计，每 GPU 36.9 MB，约合 24,600 token 的 KV。</li>
+<li><b>恢复：</b>一轮从它声明的 prefix 之前最深的 state 接着算，没有就整段重算。</li>
+<li><b>anchor（mNsS）：</b>在 k2 的两个 state 之外再留 N 个 anchor：更早的、轮号是 S 的倍数的那些轮的 prefill 末尾。它针对 k2 之后剩下的那一类轮（见下）。</li>
+</ul>
+<div class="tbl"><table>
+<thead><tr><th>策略</th><th>多算 c1563 / c2000 / c2500</th><th>r/s c1563 / c2000 / c2500</th><th>对 k2</th><th>TTFT p50 / p90 / p99 (s) c2000</th><th>state 写 GB/s c2000</th></tr></thead>
+<tbody>
+<tr class="ref"><td>k1</td><td>13.3 / 19.3 / 24.8%</td><td>55.39 / 53.21 / 48.14</td><td>−5 / −9 / −12%</td><td>3.31 / 62.7 / 75.6</td><td>2.47</td></tr>
+<tr><td><b>k2</b></td><td>7.2 / 8.2 / 10.3%</td><td>58.60 / 58.64 / 54.94</td><td>–</td><td>2.53 / 62.2 / 70.2</td><td>5.64</td></tr>
+<tr><td>k4</td><td>4.3 / 5.1 / 5.9%</td><td>59.63 / 59.63 / 55.88</td><td>+1.8 / +1.7 / +1.7%</td><td>1.76 / 62.1 / 67.9</td><td>–</td></tr>
+<tr><td>m1s2</td><td>3.9 / 4.6 / 5.2%</td><td>60.25 / 60.37 / 56.91</td><td>+2.8 / +2.9 / +3.6%</td><td>1.96 / 62.1 / 68.1</td><td>8.04</td></tr>
+<tr><td>m2s2</td><td>2.6 / 2.8 / 3.0%</td><td>59.79 / 60.22 / 56.92</td><td>+2.0 / +2.7 / +3.6%</td><td>1.28 / 62.0 / 66.6</td><td>9.88</td></tr>
+</tbody></table></div>
+<p class="note">sim，v3 8 小时，hb，DRAM 150 GB + SSD 8 TB，st10，第 1–8 小时。多算 = （算的 token − 新 token）/ 新 token。wt-pp-staged <code>logs/20261018_6_v3_stB</code>（k1 / k2 / k4）、<code>logs/20261018_10_kda_anchors</code>（anchor）。</p>
+<p><b>k1 多算的来源。</b>不到 1% 的轮造成了全部多算。这些轮的上下文约 15 万 token，新 token 只有约 2.2k，所以哪怕 prefix 只丢 0.15%，也相当于新 token 的 13%。按和上一轮的关系分两类（base 模式，c1563 / c2000 / c2500，占新 token 的比例）：</p>
+<ul class="find">
+<li><b>prompt 停在上一轮回填的输出中间</b>（inside_output）：5.5 / 9.1 / 11.5%。prompt 只比 decode 末尾短几个 token，k1 却只能整段重算。k2 存了 prefill 末尾，这一类降到 0.02–0.03%。</li>
+<li><b>prompt 停在上一轮 prompt 中间</b>（inside_prompt）：7.3 / 8.0 / 10.7%。prompt 真的比上一轮短（截断或压缩）。k2 之后剩下的都是这一类；k4 和 anchor 拿回其中一部分。</li>
+<li>其余的轮：0.04%。</li>
+</ul>
+<p><b>取舍。</b></p>
+<ul class="find">
+<li><b>k2 性价比最高。</b>只多存一个 state，多存的 state 在 DRAM + SSD 上约 0.58 TB，就把多算从 13–25% 降到 7–10%，r/s 提高 6 / 10 / 14%。state 写入从约 2.5 GB/s 涨到 5.4–5.6 GB/s，离带宽还远。</li>
+<li><b>k4 只再多 1.7–1.8%。</b>它把多算再减半，但在不留装载区的 base 模式下反而比 k2 慢：每次读要搬 4 个 state，SSD 读到 9.3–9.7 GB/s，接近 10 GB/s 的通道。</li>
+<li><b>anchor 比 k2 多 2–4%。</b>m1s2 拿回离线上限（任意位置都能接着算）收益的 44–51%，m2s2 拿回 64–73%。代价在 I/O：多存的 state 涨到 1.2 TB（m1s2）和 1.7–1.8 TB（m2s2），state 写入涨到 8.0 和 9.5–9.9 GB/s，SSD 读 8.1–9.1 GB/s；m2s2 在 c1563 / c2000 的计算量降到 137.6–138.4k token/s，开始受 I/O 限制。m3s2 不比 m2s2 好。</li>
+<li><b>anchor 原地保留更划算。</b>让 anchor 留在它第一次落入的那一层，不再随条目逐级降级（e4de4292）：m2s2 的 state 写入回到 5.9–6.0 GB/s，和 k2 同一水平，r/s 比 k2 高 4.1 / 5.7 / 7.7%。</li>
+<li><b>20 分钟 eval 用不上。</b>M6 v3 trace 在没有 cache 压力时，k1 多算 1.57%，k2 1.18%，k4 0.88%；m1s2 只省 k1 计算量的 0.46%。所以 <a href="#s6-9">§6.9</a> 的对照不受 k 影响，k 只在长 session、长时间运行时重要。</li>
+</ul>
+<p><b>计划：</b>真机先做 k2（原子条目、按真实字节计费、读只搬存活的 state）。anchor 要和 <a href="#s9-2">§9.2</a> 的压缩或原地保留一起做，否则多出来的 state 写入会吃掉收益。</p>
+
+<h3 id="s9-2">9.2 分层里的 KDA state 压缩</h3>
+<p>KDA state 每层是 fp32 的 [H, 128, 128]。写进 DRAM 和 SSD 时按一条阈值规则压缩：|x| &lt; 0.3 的值存成 fp16(x · 2<sup>16</sup>)（2 的幂缩放，缩放本身无误差），其余保留 fp32。</p>
+<ul class="find">
+<li><b>压缩比和误差。</b>在从 SSEngine SSD shard 里取出的 19 个真实 state 上：压缩比约 1.86×，相对 RMS 误差 1.8e-7，最大的 1% 的值无损。大部分 head 的 max|x| &lt; 0.3，整个 head 可以存成定长的 fp16。</li>
+<li><b>对照：</b>无损压缩（zstd 加 byte shuffle）只有约 1.15×；同样大小的 bf16 误差大 8 倍；不缩放的 fp16 会把约 22% 的值变成零或非规格化数。</li>
+<li><b>误差不会累积。</b>KDA 的更新对 state 误差是非扩张的（k 是单位向量，β、α ∈ (0, 1)），压缩误差在接着算时不会放大。CPU 上接着算的检查显示，误差比 bf16 输入本身的噪声小 10 倍以上。</li>
+<li><b>编解码只在主机 CPU 上做。</b>满载时 stage 的 SM 全忙，分层路径只用 copy engine（<a href="#s6-1">§6.1</a>），所以不用 GPU 编解码。HBM 里的 state 不压缩。</li>
+</ul>
+<div class="tbl"><table>
+<thead><tr><th>策略</th><th>压缩</th><th>r/s c1563 / c2000 / c2500</th><th>对 k2 不压缩</th><th>state 写 GB/s</th><th>SSD 写 / 读 GB/s</th></tr></thead>
+<tbody>
+<tr class="ref"><td>k2</td><td>无</td><td>58.60 / 58.64 / 54.94</td><td>–</td><td>5.42 / 5.64 / 5.40</td><td>1.82–1.99 / 6.90–7.64</td></tr>
+<tr><td>k2</td><td>1.86×</td><td>58.65 / 58.96 / 55.62</td><td>+0.1 / +0.5 / +1.2%</td><td>2.88 / 3.09 / 2.98</td><td>1.05–1.21 / 6.14–7.35</td></tr>
+<tr class="ref"><td>m2s2</td><td>无</td><td>59.79 / 60.22 / 56.92</td><td>+2.0 / +2.7 / +3.6%</td><td>9.73 / 9.88 / 9.48</td><td>2.31–2.40 / 8.68–9.09</td></tr>
+<tr><td>m2s2</td><td>1.86×</td><td>60.94 / 61.58 / 58.60</td><td>+4.0 / +5.0 / +6.7%</td><td>5.59 / 5.67 / 5.48</td><td>1.46–1.50 / 8.23–8.56</td></tr>
+<tr><td>m3s2</td><td>1.86×</td><td>61.01 / 61.42 / 58.24</td><td>+4.1 / +4.7 / +6.0%</td><td>6.65 / 6.71 / 6.44</td><td>1.48–1.51 / 8.54–8.90</td></tr>
+</tbody></table></div>
+<p class="note">sim，v3 8 小时，hb，DRAM 150 GB + SSD 8 TB，st10，第 1–8 小时。sim 只按 1.86 的比例缩小分层里的 state 字节（<code>tier_state_compression_ratio</code>），不计主机 CPU 编解码的时间。wt-pp-staged <code>logs/20261018_12_kda_compress</code>。DRAM 220 GB 时 m2s2 压缩后比 k2 高 2.7–6.9%。</p>
+<ul class="find">
+<li><b>写入减半，读几乎不变。</b>k2 的 state 写入少 47%，SSD 写入少 35–45%。SSD 读以 KV 为主，几乎不变，所以压缩不缓解读带宽。</li>
+<li><b>单独用在 k2 上收益很小</b>（+0.1–1.2%），因为 k2 的写入本来就不是瓶颈。</li>
+<li><b>和 anchor 一起用才有意义。</b>m2s2 压缩后 state 写入回到 k2 不压缩的水平，r/s 比 k2 高 4.0–6.7%（DRAM 150 GB），最多 +6.9%（DRAM 220 GB，c2500）。压缩加在原地保留的 anchor 上几乎不再加分。</li>
+</ul>
+<p><b>还没做：</b></p>
+<ul class="find">
+<li>真实模型上的 logits 对照（压缩后接着算，输出 token 是否不变）。</li>
+<li>主机 CPU 编解码的时间（sim 没建模，要在真机上测）。</li>
+<li>真机实现。</li>
+</ul>
+
+<!-- ============================== 10 ============================== -->
+<h2 id="s10"><span class="no">10</span>结论与下一步</h2>
+<ul class="find">
+<li><b>范围：</b>这个模型和硬件、v3 负载、HBM → DRAM → SSD 三层、不塌缩的配置。</li>
+<li><b>准确度：</b>sim 对吞吐的预测误差在 1–5%，命中在三层间的分布和塌缩的窗口也对得上；每一步 bring-up（kernel、单请求、同时到达、prefix、调度检查、分层读）都和目标对上。</li>
+<li><b>差距都找到了原因：</b>写入代价、热卡、block 取整、主机开销。</li>
+<li><b>比 vLLM 好：</b>同一负载下 N = 400、第 0–20 分钟，吞吐是 vLLM DP4/EP4 的 5.2 倍、TP4 的 19 倍；TTFT p50 / p90 / p99 0.99 / 4.70 / 61.00 s 对 36.23 / 67.53 / 201.68 s（DP4/EP4）和 147.10 / 333.85 / 346.84 s（TP4）。</li>
+<li><b>更重要的是，</b>sim 让我们在动手之前算清了 DRAM、SSD 的大小和写法、装载区的大小，以及哪些优化不必做。</li>
+</ul>
+<p>下一步：</p>
+<ul class="find">
+<li>真机实现 KDA 检查点 k2，再评估 anchor 加 state 压缩（<a href="#s9">§9</a>）。</li>
+<li>在真实模型上验证 state 压缩不改变输出，并测主机 CPU 编解码的时间。</li>
+<li>在 sim 代码里确认塌缩之后逾期轮的 DRAM 读启动规则（<a href="#s8-2">§8.2</a>）。</li>
+<li>超过 8 小时、SSD 开始淘汰之后的稳态（sim）。</li>
+</ul>
+
+<!-- ============================== 11 ============================== -->
+<h2 id="s11"><span class="no">11</span>附录：作业、实验与提交</h2>
+<h3 id="s11-1">11.1 真机作业</h3>
+<div class="tbl"><table class="wrap">
+<thead><tr><th>作业</th><th>内容</th><th>结果</th></tr></thead>
+<tbody>
+<tr><td>7029</td><td>vLLM TP4 + EP 正确性参照（40 个 prompt）</td><td>§3.4</td></tr>
+<tr><td>7068–7070 · 7080</td><td>M2 单层</td><td>§4.3</td></tr>
+<tr><td>7303 · 7304 · 7323</td><td>主机时间 eager / CUDA graph；graph 逐位检查</td><td>§4.4</td></tr>
+<tr><td>7279</td><td>级间传输 A/B：copy engine vs NCCL</td><td>§4.4</td></tr>
+<tr><td>7389 · 7392 · 7396</td><td>饱和时的功耗上限、nsys 对比、GPU 顺序反转</td><td>§4.5</td></tr>
+<tr><td>7444–7451 · 7483 · 7523–7539</td><td>KV 审计（vLLM / 本引擎）、KDA 对 float64、vLLM Triton KDA</td><td>§4.6</td></tr>
+<tr><td>7403 · 7404</td><td>prefix cache 开 / 关；prefix bring-up</td><td>§5.2</td></tr>
+<tr><td>7476 · 7569</td><td>分块检查、不对齐的 P</td><td>§5.2</td></tr>
+<tr><td>7683 · 7693</td><td>M4 session N = 400 / 500（旧 trace）</td><td>§5.3</td></tr>
+<tr><td>7708–7744 · 7932</td><td>调度检查、强制调度检查</td><td>§5.4</td></tr>
+<tr><td>7900 · 7901 · 7902 · 7907 · 7933 · 7934</td><td>M5 session N = 200–500（旧 trace；7907 把 GPU 顺序反过来）</td><td>§5.5，热卡分析 §8.2</td></tr>
+<tr><td>7916</td><td>主机与 GPU 间带宽</td><td>§6.2</td></tr>
+<tr><td>7960 · 7966</td><td>分层 bring-up：完整 pool 的 HBM 命中；DRAM（重构前）</td><td>§6.8</td></tr>
+<tr><td>7969 · 7970</td><td>只有 DRAM 的 h25d37 · h12d19，N = 400（旧 trace）</td><td>§6.8</td></tr>
+<tr><td>7976</td><td>full DRAM N = 400</td><td>取消：主机内存被挤爆</td></tr>
+<tr><td>7995</td><td>full DRAM N = 400（重构前，旧 trace）</td><td>§6.4、§6.8</td></tr>
+<tr><td>7996</td><td>full DRAM N = 500</td><td>全局 OOM</td></tr>
+<tr><td>8036 · 8039</td><td>full DRAM N = 500 重跑</td><td>没启动 · 溢出后取消</td></tr>
+<tr><td>8041</td><td>GPU 字节测试（kvpool）</td><td>通过，§6.8</td></tr>
+<tr><td>8042</td><td>DRAM bring-up（kvpool）</td><td>通过，§6.8</td></tr>
+<tr><td>8043</td><td>full DRAM N = 400（kvpool，旧 trace）</td><td>和 7995 一致，§6.4、§6.8</td></tr>
+<tr><td>8061</td><td>GPU 字节测试（io_uring + shard）</td><td>通过，§6.8</td></tr>
+<tr><td>8073</td><td>SSD bring-up</td><td>读达到目标，§6.8</td></tr>
+<tr><td>8456</td><td>v3 eval N = 100 Tiers</td><td>§6.9</td></tr>
+<tr><td>8447 · 8462 · 8448 · 8466 · 8446</td><td>v3 eval N = 300：full · Tiers · SSD-heavy · excl Tiers · 只用 HBM</td><td>§5.6、§6.9、§8.2</td></tr>
+<tr><td>8451 · 8431 · 8452 · 8453 · 8450</td><td>v3 eval N = 400：full · Tiers · SSD-heavy · excl Tiers · 只用 HBM</td><td>§6.9、§8.2</td></tr>
+<tr><td>8473 · 8474 · 8475 · 8476</td><td>hostgate N = 300 / 400 · 128-token 页 N = 400 只用 HBM / N = 300 full</td><td>§6.11、§8.2</td></tr>
+<tr><td>8491 · 8492</td><td>只有 DRAM，h25d50 · h25d75，N = 400</td><td>塌缩 · 稳定，§7.1</td></tr>
+<tr><td>vLLM 8457 · 8280 · 8250 · 8281 · 8251</td><td>vLLM DP4/EP4 cache-aware，N = 100 / 300 / 400（8281、8251 加 CPU offload）</td><td>§6.10</td></tr>
+<tr><td>vLLM 8458 · 8420 · 8419</td><td>vLLM TP4，N = 100 / 300 / 400</td><td>§6.10</td></tr>
+</tbody></table></div>
+<h3 id="s11-2">11.2 sim 实验目录</h3>
+<ul class="find">
+<li><code>wt-pp-hitrule/logs/20261016_11_realistic_inputs</code>：realistic-input profile DB</li>
+<li><code>wt-pp-dram-victim/logs/20261017_4_dram_victim</code>：victim DRAM 扫描</li>
+<li><code>wt-pp-dram-victim/logs/20261017_5_victim_tier_sizes</code>：三档配置扫描</li>
+<li><code>wt-pp-dram-victim/logs/20261017_7_victim_chain</code>：逐级写回（§6.5 的 SSD 写入量）</li>
+<li><code>wt-pp-staged/logs/20261018_13_v3_m6_c100</code>、<code>20261018_11_v3_m6_c300</code>、<code>20261018_9_v3_m6</code>：v3 eval 的 sim 目标（N = 100 / 300 / 400）</li>
+<li><code>wt-pp-staged/logs/20261018_14_v3_m6_slow</code>：整体放慢 3% 的对照</li>
+<li><code>wt-pp-staged/logs/20261018_15_v3_dramonly</code>：只有 DRAM 的塌缩扫描</li>
+<li><code>wt-pp-staged/logs/20261018_15_v3_8h_steady</code>：8 小时稳态；<code>wt-pp-stable/logs/20261018_0_v3_hg</code>：hg</li>
+<li><code>wt-pp-staged/logs/20261018_1_v3_katomic</code>、<code>20261018_6_v3_stB</code>：KDA 检查点 k1 / k2 / k4</li>
+<li><code>wt-pp-staged/logs/20261018_10_kda_anchors</code>、<code>20261018_12_kda_compress</code>：anchor 与 state 压缩</li>
+</ul>
+<h3 id="s11-3">11.3 代码提交</h3>
+<ul class="find">
+<li>SSEngine：<code>m4-done</code> db6895d，<code>m5-done</code> a167593，lane-m6 afda6f3（kvpool 重构），lane-m6-ssd db48f02 · 016976e · 913eadf · ceff3dc，eval 代码 lanes/m6-eval-run a78dc6f · 9496233（含 9780a2f、14bf48b、ab0099a），lane-m6-pack 8d50066，lane-m6-hostgate 7e391df，lane-m6-next c5d4e09</li>
+<li>ServingStudioSim：handoff v2 5153041a（<code>1de110c0</code>），pp-dram-victim 4b93b396 · 08c0e231 · eaab79cd · ef23e439（handoff 文档），pp-staged c7dc261f · 0d19fb23 · b0455c55 · d376d8ff · e4de4292，pp-stable 063c85ae</li>
+</ul>
+<h3 id="s11-4">11.4 复现</h3>
+<p>sim（只用 CPU）：</p>
+<pre class="src">cd wt-pp-staged
+uv run python -m launcher logs/20261018_9_v3_m6/preset.yaml --no-gpu --no-plot --parallelism 14</pre>
+<p>真机 session（SSEngine eval 树，Slurm）：</p>
+<pre class="src">cd lanes/m6-eval-run
+T=data/tracelab-v3/m6/sessions_2ps_v3.csv
+sbatch -p priority --time=00:30:00 --mem=400G bench/slurm/m6.sbatch sched_good_n400 --trace $T \
+  --pool-tokens 15273856 --dram-gb 50 --ssd-gb none \
+  --tier dram_writes=hbm-evictions-exclusive --tier loading_area=0.10 --run-name do_h25d50_n400
+python measured/eval_m6/eval_table.py real:h25d50=&lt;run dir&gt; sim:h25d50=&lt;sim dir&gt;/h25d50/c400</pre>
+</main>
+
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/echarts/5.5.0/echarts.min.js"></script>
+<script>
+const D = {
+  kern: { names: ["mHC pre norm", "KDA chunk prefill", "mHC post+pre", "GEMM FP4 n24576", "GEMM FP4 n4096 k12288",
+                  "GEMM n2048 k4096", "GEMM n4096 k1536", "GEMM n160", "GEMM n128", "DSA top-k", "sparse MLA",
+                  "NVFP4 MoE", "GEMM n4096 k4096", "GEMM n4096 k2048", "RMSNorm"],
+          rows: [68, 512, 88, 68, 68, 68, 68, 68, 68, 412, 1324, 73, 68, 68, 63],
+          med: [0.989, 1.001, 1.000, 0.964, 0.995, 0.989, 1.009, 1.040, 1.075, 1.001, 1.030, 1.003, 0.973, 0.982, 0.948],
+          min: [0.951, 0.970, 0.972, 0.843, 0.914, 0.877, 0.807, 0.926, 0.873, 0.856, 0.916, 0.953, 0.907, 0.738, 0.897],
+          max: [1.109, 1.022, 1.054, 1.053, 1.107, 1.094, 1.237, 1.264, 1.373, 1.187, 1.197, 1.057, 1.301, 1.240, 1.285] },
+  lens: ["1k", "2k", "4k", "8k", "16k", "32k", "64k", "128k"],
+  one: { span: [0.95, 0.95, 0.94, 0.91, 0.92, 0.92, 0.96, 1.00], ttft: [1.02, 1.01, 0.97, 0.93, 0.93, 0.93, 0.96, 1.01],
+         s0: [1.05, 0.98, 0.94, 0.90, 0.91, 0.92, 0.95, 0.99] },
+  host: { cats: ["1k", "2k", "4k", "8k"], eager: [17.1, 16.9, 17.5, 18.2], graph: [4.7, 4.7, 5.4, 5.6], gpu: [11.8, 16.8, 28, 50] },
+  sat: { tps: { real: [149.2, 146.5, 142.8, 138.4, 136.8, 136.4, 134.2, 129.4], tgt: [149.3, 149.9, 147.5, 143.4, 143.4, 143.0, 141.8, 138.4] },
+         p50: { real: [55.55, 56.88, 58.53, 60.55, 61.25, 61.68, 62.63, 65.29], tgt: [56.34, 56.11, 57.03, 58.65, 58.70, 58.92, 59.55, 61.23] },
+         p99: { real: [110.58, 113.21, 116.21, 120.02, 121.36, 121.80, 123.82, 128.52], tgt: [111.37, 110.91, 112.74, 115.91, 115.96, 116.27, 117.29, 120.15] } },
+  kda: { cats: ["KDA 第 0 层", "第 1 层", "第 2 层"], fi: [0.0038, 0.0034, 0.0026], fk: [0.0049, 0.083, 0.41], tr: [0.0038, 0.0038, 0.0029] },
+  pfx: { cats: ["8k+1k", "8k+8k", "32k+1k", "32k+8k", "128k+1k", "128k+8k", "512k+1k", "512k+8k"],
+         r1: { real: [57.2, 215.7, 59.8, 222.5, 68.4, 251.9, 112.8, 386.3], tgt: [53.3, 223.8, 53.8, 226.4, 55.4, 239.0, 64.3, 287.7] },
+         r0: { real: [210.0, 209.7, 401.2, 401.1, 1185.5, 1180.2, 5110.0, 5117.2], tgt: [223.6, 223.6, 396.8, 396.8, 1118.2, 1118.2, 4408.1, 4408.1] } },
+  force: { cats: ["0 plain", "1 SRPT", "2 budget", "3 even", "4 force"], real: [0.41, 108.71, 106.06, 107.80, 60.90], tgt: [0.40, 110.08, 107.51, 107.51, 61.03] },
+  m5: { n: [200, 300, 400, 500], real: [12.12, 19.77, 24.745, 25.06], sim: [12.13, 19.78, 25.06, 25.44] },
+  rr: { min: [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21],
+        a8043: [4120,6259,7897,8521,8177,5313,4940,6078,4458,6028,5740,6267,6917,7086,7033,7055,7094,7090,7081,7102,7184,7324],
+        a7995: [4103,6284,7916,8518,8177,5278,4946,6086,4454,6088,5740,6204,6916,7102,7053,7070,7110,7109,7102,7128,7230,7306] },
+  ssdw: { cats: ["full N=400", "full N=500", "Tiers N=400", "Tiers N=500", "SSD-heavy N=400", "SSD-heavy N=500"],
+          chain: [94, 156, 479, 625, 686, 830], wt: [1319, 1446, 1319, 1422, 1315, 1413] },
+  hits: { "300": { full: [98.2, 1.6, 0.1], Tiers: [45.7, 32.9, 21.4], "SSD-heavy": [28.4, 30.6, 40.9] },
+          "400": { full: [94.5, 5.1, 0.4], Tiers: [18.3, 42.3, 39.2], "SSD-heavy": [3.8, 33.6, 62.4] } },
+  ev: { cats: ["full", "Tiers", "SSD-heavy"],
+        "300": { real: [33.70, 33.45, 33.76], sim: [33.97, 33.77, 33.80] },
+        "400": { real: [40.51, 37.66, 36.71], sim: [42.26, 39.77, 38.36] } },
+  tierbu: { cats: ["32k", "128k", "512k"],
+            hbm: { real: [54.99, 57.53, 65.79], tgt: [52.7, 53.7, 57.5], rj: "7960" },
+            dram: { real: [61.77, 63.14, 81.55], tgt: [54.4, 58.4, 73.9], rj: "8042" },
+            ssd: { real: [61.6, 79.8, 189.9], tgt: [61.3, 77.1, 139.8], rj: "8073" } },
+  d37: { sim: [1667, 2796, 2765, 3417, 3457, 2404, 1647], real: [1665, 2791, 2745, 3332, 3194, 2325, 1110] },
+  vs: { cats: ["N = 100", "N = 300", "N = 400"],
+        w0: { rps: { tiers: [9.39, 31.54, 34.07], full: [null, 32.03, 36.29], dp: [8.05, 9.70, 6.58], tp: [7.46, 1.81, 1.78] },
+              p50: { tiers: [0.11, 0.26, 0.99], full: [null, 0.23, 0.72], dp: [1.77, 18.86, 36.23], tp: [2.29, 68.74, 147.10] },
+              p90: { tiers: [0.23, 1.14, 4.70], full: [null, 0.99, 2.04], dp: [4.22, 30.68, 67.53], tp: [7.73, 289.89, 333.85] },
+              p99: { tiers: [0.94, 21.91, 61.00], full: [null, 19.83, 60.93], dp: [7.92, 43.02, 201.68], tp: [13.94, 303.05, 346.84] } },
+        w10: { rps: { tiers: [8.62, 33.45, 37.66], full: [null, 33.70, 40.51], dp: [7.46, 10.10, 4.64], tp: [7.26, 0.99, 1.17] },
+               p50: { tiers: [0.09, 0.22, 0.84], full: [null, 0.19, 0.61], dp: [1.31, 19.37, 48.31], tp: [0.76, 275.57, 319.95] },
+               p90: { tiers: [0.17, 0.42, 3.81], full: [null, 0.34, 1.52], dp: [2.24, 29.47, 148.23], tp: [3.81, 299.96, 344.78] },
+               p99: { tiers: [0.36, 4.36, 60.66], full: [null, 2.87, 60.43], dp: [3.72, 34.94, 212.89], tp: [7.92, 306.23, 349.48] } } },
+  coll: { h25d50: { C: 48.6, sim: [2532,2905,3452,3610,2415,496,144,162,143,153], real: [2395,2860,3023,2941,2139,476,402,483,454,427],
+                    wsim: [15.9,33.1,42.8,49.5,52.9,54.1,54.3,54.2,54.3,54.4], wreal: [15.3,32.8,42.7,47.6,50.6,51.7,53.0,53.0,54.5,55.6] },
+          h25d75: { C: 65.3, sim: [2532,2905,3716,4933,4895,4219,3073,3811,3842,3143], real: [2407,2762,3297,4027,4325,3733,3176,2965,2877,3062],
+                    wsim: [15.9,33.1,42.5,51.8,56.8,58.7,59.7,63.4,64.0,64.6], wreal: [15.2,32.6,42.8,49.2,53.3,56.2,57.0,61.3,61.0,64.1] } }
+};
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const charts = {}, state = {};
+function reg(id, init, build) {
+  state[id] = Object.assign({}, init);
+  charts[id] = { build };
+  document.querySelectorAll(`.seg[data-for="${id}"]`).forEach(seg => {
+    const key = seg.dataset.key;
+    seg.querySelectorAll("button").forEach(b => {
+      b.setAttribute("aria-pressed", String(String(state[id][key]) === b.dataset.v));
+      b.addEventListener("click", () => {
+        state[id][key] = b.dataset.v;
+        seg.querySelectorAll("button").forEach(x => x.setAttribute("aria-pressed", String(x === b)));
+        render(id);
+      });
+    });
+  });
+  render(id);
+}
+function render(id) {
+  const el = document.getElementById(id);
+  if (!el || typeof echarts === "undefined") return;
+  let c = charts[id].inst;
+  if (!c) { c = echarts.init(el, null, { renderer: "canvas" }); charts[id].inst = c; }
+  c.setOption(charts[id].build(state[id]), true);
+}
+function renderAll() { for (const id in charts) render(id); }
+window.addEventListener("resize", () => { for (const id in charts) charts[id].inst && charts[id].inst.resize(); });
+try {
+  matchMedia("(prefers-color-scheme: dark)").addEventListener("change", renderAll);
+  new MutationObserver(renderAll).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+} catch (e) {}
+const isNarrow = () => window.innerWidth < 560;
+function base(extra) {
+  const narrow = isNarrow();
+  return Object.assign({
+    animation: false,
+    textStyle: { fontFamily: css("--sans"), color: css("--muted") },
+    grid: { left: narrow ? 58 : 70, right: narrow ? 14 : 24, top: 46, bottom: 52 },
+    tooltip: { trigger: "axis", confine: true, backgroundColor: css("--surface"), borderColor: css("--rule"),
+      textStyle: { color: css("--fg"), fontSize: 12 } },
+    legend: { top: 6, left: 8, textStyle: { color: css("--fg"), fontSize: 12 }, itemWidth: 22, itemHeight: 10 },
+  }, extra || {});
+}
+function ax(type, name, extra) {
+  return Object.assign({
+    type, name, nameLocation: "middle", nameGap: type === "category" ? 30 : 46,
+    nameTextStyle: { color: css("--muted"), fontSize: 12 },
+    axisLine: { lineStyle: { color: css("--rule") } }, axisTick: { lineStyle: { color: css("--rule") } },
+    axisLabel: { color: css("--muted"), fontSize: 11 },
+    splitLine: { lineStyle: { color: css("--grid") } },
+  }, extra || {});
+}
+function ln(name, color, data, o) {
+  o = o || {};
+  return { name, type: "line", data, lineStyle: { color, width: 2, type: o.dash || "solid" }, itemStyle: { color },
+    symbol: "circle", symbolSize: 6, showSymbol: true, connectNulls: false };
+}
+function bar(name, color, data, o) {
+  return Object.assign({ name, type: "bar", data, itemStyle: { color } }, o || {});
+}
+const shadowTip = extra => Object.assign(base().tooltip, { trigger: "axis", axisPointer: { type: "shadow" } }, extra || {});
+const band = (lo, hi, axis) => ({ silent: true, itemStyle: { color: css("--c-alt2"), opacity: 0.16 },
+  data: [[{ [axis]: lo }, { [axis]: hi }]] });
+/* Log-scale bars: ECharts draws log-axis bars from 1, so plot log10(v) − lo on a value axis instead. */
+const lg = (arr, lo) => arr.map(v => v == null ? null : { value: +(Math.log10(v) - lo).toFixed(4), raw: v });
+function logAx(name, lo, hi) {
+  return ax("value", name, { min: 0, max: hi - lo, interval: 1, axisLabel: { color: css("--muted"), fontSize: 11,
+    formatter: x => { const v = Math.pow(10, x + lo); return v >= 1 ? String(Math.round(v)) : String(+v.toPrecision(1)); } } });
+}
+const rawTip = unit => shadowTip({ formatter: ps => ps[0].axisValueLabel + ps.map(q =>
+  `<br>${q.marker}${q.seriesName}：${q.data && q.data.raw != null ? q.data.raw + unit : (typeof q.data === "number" ? q.data + unit : "–")}`).join("") });
+const win = n => Array.from({ length: n }, (_, i) => `${i * 2}–${i * 2 + 2}`);
+
+/* §4 */
+reg("f4a", {}, () => {
+  const k = D.kern, narrow = isNarrow();
+  return base({
+    tooltip: shadowTip({ formatter: ps => {
+      const i = ps[0].dataIndex;
+      return `${k.names[i]}（${k.rows[i]} 行）<br>最小 ${k.min[i]} · 中位 ${k.med[i]} · 最大 ${k.max[i]}`;
+    } }),
+    legend: Object.assign(base().legend, { data: ["最小–最大", "中位比值"] }),
+    grid: { left: narrow ? 128 : 160, right: narrow ? 14 : 24, top: 40, bottom: 48 },
+    yAxis: ax("category", "", { data: k.names, inverse: true, axisLabel: { color: css("--muted"), fontSize: narrow ? 10 : 11 } }),
+    xAxis: ax("value", "真机 ÷ profile DB", { min: 0.7, max: 1.4, nameGap: 30 }),
+    series: [
+      { name: "base", type: "bar", stack: "r", data: k.min, itemStyle: { color: "transparent" }, silent: true, barWidth: 10 },
+      { name: "最小–最大", type: "bar", stack: "r", data: k.max.map((v, i) => +(v - k.min[i]).toFixed(3)),
+        itemStyle: { color: css("--c-alt2"), opacity: 0.55 }, barWidth: 10 },
+      { name: "中位比值", type: "scatter", data: k.med.map((v, i) => [v, k.names[i]]), symbolSize: 10,
+        itemStyle: { color: css("--c-real") }, markArea: band(0.9, 1.1, "xAxis") },
+    ],
+  });
+});
+reg("f4b", {}, () => {
+  const s = ln("GPU 总时间", css("--c-real"), D.one.span);
+  s.markArea = band(0.9, 1.1, "yAxis");
+  return base({
+    xAxis: ax("category", "prompt 长度", { data: D.lens }),
+    yAxis: ax("value", "真机 ÷ 目标", { min: 0.8, max: 1.2 }),
+    series: [s, ln("客户端 TTFT", css("--c-sim"), D.one.ttft, { dash: "dashed" }), ln("stage 0", css("--c-alt2"), D.one.s0, { dash: "dotted" })],
+  });
+});
+reg("f4c", {}, () => base({
+  tooltip: shadowTip({ valueFormatter: v => v + " ms" }),
+  xAxis: ax("category", "prompt 长度", { data: D.host.cats }),
+  yAxis: ax("value", "ms"),
+  series: [
+    bar("主机（eager）", css("--c-alt2"), D.host.eager, { barGap: "10%" }),
+    bar("主机（CUDA graph）", css("--c-real"), D.host.graph),
+    bar("GPU", css("--c-dram"), D.host.gpu),
+  ],
+}));
+reg("f4d", { m: "tps" }, s => {
+  const d = D.sat[s.m];
+  const name = { tps: "prompt token/s（千）", p50: "TTFT p50 (s)", p99: "TTFT p99 (s)" }[s.m];
+  return base({
+    xAxis: ax("category", "prompt 长度（全部在 t = 0 到达）", { data: D.lens }),
+    yAxis: ax("value", name, { scale: true }),
+    series: [ln("真机", css("--c-real"), d.real), ln("目标", css("--c-sim"), d.tgt, { dash: "dashed" })],
+  });
+});
+reg("f4e", {}, () => base({
+  tooltip: rawTip(""),
+  grid: { left: isNarrow() ? 58 : 70, right: isNarrow() ? 14 : 24, top: isNarrow() ? 92 : 50, bottom: 40 },
+  xAxis: ax("category", "", { data: D.kda.cats }),
+  yAxis: logAx("相对误差（对数）", -3, 0),
+  series: [
+    bar("FlashInfer persistent（本引擎）", css("--c-real"), lg(D.kda.fi, -3), { barGap: "10%" }),
+    bar("Triton chunk（vLLM 可选）", css("--c-dram"), lg(D.kda.tr, -3)),
+    bar("FlashKDA（vLLM 默认）", css("--c-sim"), lg(D.kda.fk, -3)),
+  ],
+}));
+
+/* §5 */
+reg("f5a", { r: "r1" }, s => {
+  const d = D.pfx[s.r], narrow = isNarrow();
+  return base({
+    tooltip: rawTip(" ms"),
+    grid: { left: narrow ? 58 : 70, right: narrow ? 14 : 24, top: 46, bottom: narrow ? 70 : 52 },
+    xAxis: ax("category", "", { data: D.pfx.cats, axisLabel: { color: css("--muted"), fontSize: 11, interval: 0, rotate: narrow ? 40 : 0 } }),
+    yAxis: s.r === "r0" ? logAx("TTFT (ms，对数)", 2, 4) : ax("value", "TTFT (ms)"),
+    series: s.r === "r0"
+      ? [bar("真机", css("--c-real"), lg(d.real, 2), { barGap: "10%" }), bar("目标", css("--c-sim"), lg(d.tgt, 2))]
+      : [bar("真机", css("--c-real"), d.real, { barGap: "10%" }), bar("目标", css("--c-sim"), d.tgt)],
+  });
+});
+reg("f5b", {}, () => base({
+  tooltip: shadowTip({ valueFormatter: v => v + " s" }),
+  xAxis: ax("category", "scheduler 步", { data: D.force.cats }),
+  yAxis: ax("value", "32k 的 TTFT (s)"),
+  series: [bar("真机", css("--c-real"), D.force.real, { barGap: "10%" }), bar("目标", css("--c-sim"), D.force.tgt)],
+}));
+reg("f5c", {}, () => base({
+  xAxis: ax("category", "同时活跃的 session 数 N", { data: D.m5.n.map(String) }),
+  yAxis: ax("value", "rounds/s", { min: 10 }),
+  series: [ln("真机", css("--c-real"), D.m5.real), ln("sim", css("--c-sim"), D.m5.sim, { dash: "dashed" })],
+}));
+
+/* §6 */
+reg("f6a", {}, () => base({
+  xAxis: ax("category", "分钟", { data: D.rr.min.map(String) }),
+  yAxis: ax("value", "stage 0 处理的 token（千）"),
+  series: [ln("8043 重构后", css("--c-real"), D.rr.a8043), ln("7995 重构前", css("--c-alt"), D.rr.a7995, { dash: "dashed" })],
+}));
+reg("f6b", {}, () => base({
+  tooltip: shadowTip(),
+  grid: { left: 64, right: 18, top: 46, bottom: 78 },
+  xAxis: ax("category", "", { data: D.ssdw.cats, axisLabel: { color: css("--muted"), fontSize: 11, interval: 0, rotate: isNarrow() ? 40 : 0 } }),
+  yAxis: ax("value", "GB / GPU / 20 分钟"),
+  series: [
+    bar("逐级写回", css("--c-real"), D.ssdw.chain, { barGap: "10%" }),
+    bar("写透", css("--c-alt2"), D.ssdw.wt),
+  ],
+}));
+reg("f6c", { n: "300" }, s => {
+  const h = D.hits[s.n], cats = Object.keys(h);
+  const tier = (i, name, color) => ({ name, type: "bar", stack: "h", data: cats.map(c => h[c][i]), itemStyle: { color }, barWidth: "46%" });
+  return base({
+    tooltip: shadowTip({ valueFormatter: v => v.toFixed(1) + "%" }),
+    xAxis: ax("category", "", { data: cats }),
+    yAxis: ax("value", "命中轮的份额 %", { max: 100 }),
+    series: [tier(0, "HBM", css("--c-hbm")), tier(1, "DRAM", css("--c-dram")), tier(2, "SSD", css("--c-ssd"))],
+  });
+});
+reg("f6d", { n: "300" }, s => {
+  const d = D.ev[s.n];
+  return base({
+    tooltip: shadowTip(),
+    xAxis: ax("category", "", { data: D.ev.cats }),
+    yAxis: ax("value", "rounds/s", { min: 25 }),
+    series: [bar("真机", css("--c-real"), d.real, { barGap: "10%" }), bar("sim", css("--c-sim"), d.sim)],
+  });
+});
+reg("f6e", { t: "dram" }, s => {
+  const d = D.tierbu[s.t];
+  return base({
+    tooltip: shadowTip({ valueFormatter: v => v + " ms" }),
+    xAxis: ax("category", "上下文 P", { data: D.tierbu.cats }),
+    yAxis: ax("value", "第 1 轮 TTFT (ms)", { min: 0 }),
+    series: [bar(`真机 ${d.rj}`, css("--c-real"), d.real, { barGap: "10%" }), bar("目标", css("--c-sim"), d.tgt)],
+  });
+});
+reg("f6f", {}, () => base({
+  xAxis: ax("category", "分钟", { data: win(D.d37.sim.length) }),
+  yAxis: ax("value", "每 2 分钟完成的轮数"),
+  series: [ln("真机 7969", css("--c-real"), D.d37.real), ln("sim", css("--c-sim"), D.d37.sim, { dash: "dashed" })],
+}));
+reg("f6g", { w: "w0", m: "rps" }, s => {
+  const d = D.vs[s.w][s.m], isT = s.m !== "rps";
+  const f = arr => isT ? lg(arr, -2) : arr;
+  return base({
+    tooltip: rawTip(isT ? " s" : " r/s"),
+    legend: Object.assign(base().legend, { top: 4 }),
+    grid: { left: isNarrow() ? 58 : 70, right: isNarrow() ? 14 : 24, top: isNarrow() ? 70 : 52, bottom: 40 },
+    xAxis: ax("category", "", { data: D.vs.cats }),
+    yAxis: isT ? logAx(`TTFT ${s.m}（s，对数）`, -2, 3) : ax("value", "rounds/s", { min: 0 }),
+    series: [
+      bar("本引擎 full", css("--c-real"), f(d.full), { barGap: "8%" }),
+      bar("本引擎 Tiers", css("--c-dram"), f(d.tiers)),
+      bar("vLLM DP4/EP4", css("--c-sim"), f(d.dp)),
+      bar("vLLM TP4", css("--c-alt2"), f(d.tp)),
+    ],
+  });
+});
+
+/* §7 */
+reg("f7a", { s: "h25d50" }, s => {
+  const d = D.coll[s.s];
+  return base({
+    xAxis: ax("category", "分钟", { data: win(d.sim.length) }),
+    yAxis: ax("value", "每 2 分钟完成的轮数"),
+    series: [ln("真机", css("--c-real"), d.real), ln("sim", css("--c-sim"), d.sim, { dash: "dashed" })],
+  });
+});
+reg("f7b", { s: "h25d50" }, s => {
+  const d = D.coll[s.s];
+  const real = ln("真机", css("--c-real"), d.wreal);
+  real.markLine = { symbol: "none", silent: true, label: { formatter: `C = ${d.C}M`, color: css("--muted"), position: "insideEndTop" },
+    lineStyle: { color: css("--slo"), type: "dashed", width: 1.5 }, data: [{ yAxis: d.C }] };
+  return base({
+    xAxis: ax("category", "分钟（窗口末）", { data: win(d.wsim.length) }),
+    yAxis: ax("value", "W（百万 token）", { min: 0, max: 70 }),
+    series: [real, ln("sim", css("--c-sim"), d.wsim, { dash: "dashed" })],
+  });
+});
+</script>
+
+</body></html>

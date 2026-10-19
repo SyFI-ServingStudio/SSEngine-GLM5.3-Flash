@@ -1,6 +1,6 @@
-from ppimpl.config import BLOCK_PAGES, BLOCK_TOKENS, STATE_BLOCKS
-from ppimpl.engine.kv import KvManager, pages_for
-from ppimpl.engine.scheduler import PlainScheduler, Request
+from ssengine.config import BLOCK_PAGES, BLOCK_TOKENS, STATE_BLOCKS
+from ssengine.engine.kv import KvManager, pages_for
+from ssengine.engine.scheduler import PlainScheduler, Request
 
 
 def make(lengths, mb=8192, in_flight=4, ahead=10, blocks=10_000):

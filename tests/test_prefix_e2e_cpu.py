@@ -1,4 +1,4 @@
-"""The prefix cache end to end on CPU (5_prefix_cache.md §2): `python -m ppimpl serve` with `keep_sessions` and
+"""The prefix cache end to end on CPU (5_prefix_cache.md §2): `python -m ssengine serve` with `keep_sessions` and
 FakeStageModel over gloo, sessions sent over HTTP one round at a time, as req-frontend builds them: round k+1 is round
 k's prompt, its output token, then new tokens."""
 
@@ -10,8 +10,8 @@ import pytest
 
 from conftest import free_port_block
 from e2e import Server
-from ppimpl.config import BLOCK_TOKENS, STATE_BLOCKS
-from ppimpl.model.fake import fake_token
+from ssengine.config import BLOCK_TOKENS, STATE_BLOCKS
+from ssengine.model.fake import fake_token
 
 # 30 blocks reported, 29 usable: four 1-block contexts (7 blocks each with their state blocks) fit, a fifth does not.
 CPU = {"device": "cpu", "keep_sessions": True,
@@ -206,8 +206,8 @@ def test_long_prompts_through_the_slab(server):
     exact repeat and the logged prompt hash are the prompt's own after later long prompts reuse the range. (A kept
     view would always read the latest prompt parsed into the range: a prompt that differs inside the kept context
     would then hit.)"""
-    from ppimpl.runtime.controller import prompt_sha256
-    from ppimpl.serve.slab import SLAB_FROM
+    from ssengine.runtime.controller import prompt_sha256
+    from ssengine.serve.slab import SLAB_FROM
 
     srv, c = server
     n = SLAB_FROM // 4 + 500                    # 8 KV blocks: two such contexts fit the pool

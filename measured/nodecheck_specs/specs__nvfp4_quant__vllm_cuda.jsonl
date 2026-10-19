@@ -1,9 +1,0 @@
-{"num_tokens": 1, "hidden_size": 12288, "group_size": 16, "input_dtype": "bf16", "scale_format": "swizzled_e4m3"}
-{"num_tokens": 3584, "hidden_size": 12288, "group_size": 16, "input_dtype": "bf16", "scale_format": "swizzled_e4m3"}
-{"num_tokens": 65536, "hidden_size": 12288, "group_size": 16, "input_dtype": "bf16", "scale_format": "swizzled_e4m3"}
-{"num_tokens": 1, "hidden_size": 4096, "group_size": 16, "input_dtype": "bf16", "scale_format": "linear_e4m3"}
-{"num_tokens": 3584, "hidden_size": 4096, "group_size": 16, "input_dtype": "bf16", "scale_format": "linear_e4m3"}
-{"num_tokens": 65536, "hidden_size": 4096, "group_size": 16, "input_dtype": "bf16", "scale_format": "linear_e4m3"}
-{"num_tokens": 1, "hidden_size": 4096, "group_size": 16, "input_dtype": "bf16", "scale_format": "swizzled_e4m3"}
-{"num_tokens": 3584, "hidden_size": 4096, "group_size": 16, "input_dtype": "bf16", "scale_format": "swizzled_e4m3"}
-{"num_tokens": 65536, "hidden_size": 4096, "group_size": 16, "input_dtype": "bf16", "scale_format": "swizzled_e4m3"}

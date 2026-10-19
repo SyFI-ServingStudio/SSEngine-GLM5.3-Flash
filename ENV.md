@@ -1,6 +1,6 @@
 # Environment
 
-The version record of pp-impl's environment. `env/make_env.sh` builds it from public sources and `env/check_env.py`
+The version record of SSEngine's environment. `env/make_env.sh` builds it from public sources and `env/check_env.py`
 checks it (README, "Reproduce").
 
 ## Layout
@@ -11,14 +11,14 @@ One environment for the repo and every lane worktree under `lanes/`, in the main
 |---|---|
 | `.venv` | Python 3.12 venv (uv), the packages of `env/requirements.lock` |
 | `third_party/vllm` | the vLLM fork at `892da0822f`, installed editable: `import vllm` resolves here |
-| `third_party/handoff` | the frozen handoff in use: `doc/handoff/glm53_flash_pp4_b200_v2` of ServingStudioSim at `5153041a` (`PPIMPL_HANDOFF` overrides it) |
-| `third_party/ServingStudioSim` | ServingStudioSim at `820adda0` (branch `pp-main`): req-frontend (`PPIMPL_SIM` overrides it) |
+| `third_party/handoff` | the frozen handoff in use: `doc/handoff/glm53_flash_pp4_b200_v2` of ServingStudioSim at `5153041a` (`SSENGINE_HANDOFF` overrides it) |
+| `third_party/ServingStudioSim` | ServingStudioSim at `820adda0` (branch `pp-main`): req-frontend (`SSENGINE_SIM` overrides it) |
 | `third_party/sim_7bb224a6/profiling` | the profiler package at the handoff's frozen commit `7bb224a6` (`git archive`): input builders and references for the M1/M2 checks |
-| `third_party/enwik9` | the prompt corpus (`PPIMPL_ENWIK9` overrides it) |
+| `third_party/enwik9` | the prompt corpus (`SSENGINE_ENWIK9` overrides it) |
 | `third_party/wheels` | the causal-conv1d wheel built here, reused when the venv is rebuilt |
 | `third_party/downloads` | downloads, each checked by sha256 |
 
-The weights are in the Hugging Face cache (`HF_HOME`), or at `PPIMPL_CHECKPOINT` (`ppimpl/config.py`).
+The weights are in the Hugging Face cache (`HF_HOME`), or at `SSENGINE_CHECKPOINT` (`ssengine/config.py`).
 
 ## Versions
 
@@ -42,7 +42,7 @@ From `env/check_env.py`, which fails on any other version:
 | libnuma | `libnuma.so.1` (the DRAM tier's NUMA placement, through ctypes) | Ubuntu package `libnuma1` |
 | causal-conv1d (Dao) | 1.7.0, built from the source tag against torch 2.13. The released cu13 wheel is built for torch 2.10 and fails to load with 2.13 (`undefined symbol c10::impl::cow::materialize_cow_storage`). | https://github.com/Dao-AILab/causal-conv1d, tag `v1.7.0` |
 
-Two kernels follow the design rather than the fork (`measured/kernels_identity.md`, Decisions):
+Two kernels follow the design rather than the fork (`research/measured/kernels_identity.md` on the `dev` branch, Decisions):
 - KDA chunked prefill uses FlashInfer `recurrent_kda(backend="cute-dsl-persistent")`. That backend exists only in the
   nightly the rows used, so the venv carries FlashInfer 0.7.2.dev20261008 with cutlass-dsl 4.8.0 instead of the
   fork's pins (0.7.0 / 4.7.1). `uv pip check` reports exactly these two pins as mismatched. The fork imports and
@@ -63,7 +63,7 @@ Two kernels follow the design rather than the fork (`measured/kernels_identity.m
    repo's measurements ran on. To compile instead, see the fork's `docs/contributing/incremental_build.md`.
 3. Builds causal-conv1d 1.7.0 from the source tag into `third_party/wheels/` (`uv build --no-build-isolation`, CUDA
    13 toolkit at `CUDA_HOME`, `MAX_JOBS` default 16: about 10 minutes) and installs it.
-3b. `install`: installs this repo editable (`uv pip install --no-deps -e .`): the `ppimpl` command in `.venv/bin`.
+3b. `install`: installs this repo editable (`uv pip install --no-deps -e .`): the `ssengine` command in `.venv/bin`.
 3c. `jit`: `env/bake_jit.py` builds FlashInfer's JIT modules for sm_100a (`fp4_quantization_100`, `fmha_gen`,
    `fused_moe_trtllm_sm100`) with FlashInfer's own JIT specs and `/usr/bin/ninja`, and downloads every trtllm-gen cubin
    of the kernel families serving dispatches to (MoE NVFP4 batched GEMMs, FP8 token-sparse MLA decode) into
@@ -79,16 +79,16 @@ Two kernels follow the design rather than the fork (`measured/kernels_identity.m
 `sim client corpus` (4, 4b, 5) the bench's, `check` step 6. The Docker image (`docker/Dockerfile`, README "Docker")
 runs the serving steps one per layer on `nvidia/cuda:13.0.2-devel-ubuntu24.04` (with `apt` `git curl liburing2
 libnuma1 ninja-build g++` and uv 0.8.19), drops the downloads and ends with `env/check_env.py`; the versions above hold there
-too, at `/opt/ppimpl`. The `jit` step's cache and the GPU seed (README "Docker") are in `/opt/ppimpl/jit-seed`.
+too, at `/opt/ssengine`. The `jit` step's cache and the GPU seed (README "Docker") are in `/opt/ssengine/jit-seed`.
 
-Run it as the normal user, never as root (`PPIMPL_ALLOW_ROOT=1` is for the container build only), with a short `TMPDIR`: vLLM's zmq ipc path is `TMPDIR` + a uuid and must fit
-in 107 characters (`bench/slurm/env.sh` makes one short TMPDIR per job under `PPIMPL_TMP`).
+Run it as the normal user, never as root (`SSENGINE_ALLOW_ROOT=1` is for the container build only), with a short `TMPDIR`: vLLM's zmq ipc path is `TMPDIR` + a uuid and must fit
+in 107 characters (`benchmarks/jobs/env.sh` makes one short TMPDIR per job under `SSENGINE_TMP`).
 
 ## Other tools
 
-- `cargo` (Rust): `bench/run.py` builds req-frontend's `session_runner` on first use.
+- `cargo` (Rust): `benchmarks/run.py` builds req-frontend's `session_runner` on first use.
 - `/usr/bin/ninja` 1.11.1 for FlashInfer's JIT: processes that share `~/.cache/flashinfer` with another ninja version
   hash build commands differently and rebuild every object. `check_env.py` warns when another ninja is first on PATH.
-- The M1 kernel re-measure (`bench/slurm/kernels_*.sbatch`) runs the ServingStudioSim profiler from
+- The M1 kernel re-measure (`research/bench/slurm/kernels_*.sbatch`, `dev` branch) runs the ServingStudioSim profiler from
   `third_party/ServingStudioSim` with that checkout's own uv project env (`uv sync` there) and its CUPTI extension
   (`MOESIM_CUPTI_BUILD_DIR`); see the profiler's README.

@@ -2,9 +2,9 @@
 
 import pytest
 
-from ppimpl.config import BLOCK_PAGES, BLOCK_TOKENS, PAGE_TOKENS, SchedulerConfig
-from ppimpl.engine.kv import STATE_TOKENS, KvManager, kv_pages_for, pages_for
-from ppimpl.engine.scheduler import Request, Scheduler
+from ssengine.config import BLOCK_PAGES, BLOCK_TOKENS, PAGE_TOKENS, SchedulerConfig
+from ssengine.engine.kv import STATE_TOKENS, KvManager, kv_pages_for, pages_for
+from ssengine.engine.scheduler import Request, Scheduler
 
 
 def rnd(name, session, prefix, new, token_ids=None):
@@ -169,11 +169,11 @@ def test_waiting_size_counts_what_is_cached_at_arrival():
 
 
 def test_run_watch_stops_the_client_at_the_first_fault(tmp_path):
-    """bench/run.py fails fast: a worker traceback, a failed client step or a dead server stops the client."""
+    """benchmarks/run.py fails fast: a worker traceback, a failed client step or a dead server stops the client."""
     import subprocess
     import sys
 
-    from bench.run import run_fault, watch
+    from benchmarks.run import run_fault, watch
 
     def procs():
         server = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
@@ -201,16 +201,16 @@ def test_run_watch_stops_the_client_at_the_first_fault(tmp_path):
 
 
 def test_window_metrics_match_the_handoff_metrics_script(tmp_path):
-    """bench.prefix's port of data/metrics.py gives its numbers over 20 minutes (req-frontend log, v12: post = submit),
+    """benchmarks.prefix's port of data/metrics.py gives its numbers over 20 minutes (req-frontend log, v12: post = submit),
     and a shorter window counts only rounds whose first token comes inside it."""
     import json
     import subprocess
     import sys
 
-    from bench.common import HANDOFF
+    from benchmarks.common import HANDOFF
     import numpy as np
 
-    from bench.prefix import real_arrays, window_metrics
+    from benchmarks.prefix import real_arrays, window_metrics
 
     rng = np.random.default_rng(1)
     lines = []

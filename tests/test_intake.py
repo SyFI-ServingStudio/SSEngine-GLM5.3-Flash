@@ -2,7 +2,7 @@ import msgspec
 import numpy as np
 import pytest
 
-from ppimpl.serve.intake import RawRequest, parse_ids
+from ssengine.serve.intake import RawRequest, parse_ids
 
 
 def ids_of(body: bytes) -> np.ndarray:
@@ -18,10 +18,10 @@ def test_parse_ids():
 
 
 def test_fast_path_equals_the_old_one():
-    """ppimpl/serve/ids.py: the same ids as msgspec + numpy, for long arrays (split over threads) and short ones,
+    """ssengine/serve/ids.py: the same ids as msgspec + numpy, for long arrays (split over threads) and short ones,
     and every body it does not take goes to the old path with the old answer or error."""
-    from ppimpl.serve import ids as ids_mod
-    from ppimpl.serve.intake import Intake, parse_body
+    from ssengine.serve import ids as ids_mod
+    from ssengine.serve.intake import Intake, parse_body
 
     rng = np.random.default_rng(0)
     it = Intake.__new__(Intake)
@@ -56,8 +56,8 @@ def test_fast_path_equals_the_old_one():
 def test_stream_parser_equals_the_fast_path():
     """ids.StreamParser (the ids parsed while the body arrives) gives parse_fast's answer for any chunking, and gives
     up (None: the caller parses the whole body) on every body parse_fast does not take."""
-    from ppimpl.serve import ids as ids_mod
-    from ppimpl.serve.intake import Intake
+    from ssengine.serve import ids as ids_mod
+    from ssengine.serve.intake import Intake
 
     it = Intake.__new__(Intake)
     Intake.__init__(it, None, 0)

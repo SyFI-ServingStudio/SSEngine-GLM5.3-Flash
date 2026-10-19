@@ -1,0 +1,1643 @@
+<!doctype html><html lang="en"><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}html{scroll-padding-top:env(safe-area-inset-top,0px)}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#fff;color:#000}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style></head><body>
+<title>From Simulation to Hardware</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Noto+Sans:wght@400;500;700&family=Noto+Serif:wght@600;700&family=Noto+Sans+SC:wght@400;500;700&family=Noto+Serif+SC:wght@600;700&display=swap">
+<style>
+/* Layout: one reading column (~46rem), figures and tables in the column; the engineering-notebook look of the
+   companion note (Pipeline Parallelism for Long-Context Prefill). Colors: cool paper ground, ink text, cobalt accent = real system,
+   a warm second hue = simulator; pending blocks in the warn tone. */
+:root {
+  --bg: #f5f6f8; --surface: #ffffff; --fg: #18202e; --muted: #5a6476; --rule: #d9dee7; --grid: #e6e9ef;
+  --accent: #2f4fc4; --slo: #b0322a; --tag: #eef1f8; --warn: #8a5a00; --warnbg: #fbf3e2;
+  --c-real: #2f4fc4; --c-sim: #c2503c; --c-hbm: #2f4fc4; --c-dram: #2c8a6e; --c-ssd: #b8862a; --c-miss: #b9c0cc;
+  --c-alt: #8b4fb3; --c-alt2: #7f8aa0;
+  --serif: "Noto Serif", "Noto Serif SC", "Songti SC", "SimSun", serif;
+  --sans: "Noto Sans", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #12161d; --surface: #1a1f28; --fg: #e4e8ef; --muted: #9aa4b5; --rule: #2d3442; --grid: #232a36;
+    --accent: #8ea2ff; --slo: #ff8a7a; --tag: #222a38; --warn: #f0c36a; --warnbg: #2b2416;
+    --c-real: #8ea2ff; --c-sim: #ef7e68; --c-hbm: #8ea2ff; --c-dram: #5cc7a5; --c-ssd: #e0b45a; --c-miss: #4a5262;
+    --c-alt: #c08ae6; --c-alt2: #9aa5bb;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #12161d; --surface: #1a1f28; --fg: #e4e8ef; --muted: #9aa4b5; --rule: #2d3442; --grid: #232a36;
+  --accent: #8ea2ff; --slo: #ff8a7a; --tag: #222a38; --warn: #f0c36a; --warnbg: #2b2416;
+  --c-real: #8ea2ff; --c-sim: #ef7e68; --c-hbm: #8ea2ff; --c-dram: #5cc7a5; --c-ssd: #e0b45a; --c-miss: #4a5262;
+  --c-alt: #c08ae6; --c-alt2: #9aa5bb;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.85 var(--sans); }
+main { max-width: 46rem; margin: 0 auto; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); padding-block: 40px 96px; }
+h1, h2, h3, h4 { font-family: var(--serif); text-wrap: balance; line-height: 1.35; }
+h1 { font-size: 2.05rem; margin: 0.4em 0 0.3em; letter-spacing: 0.01em; }
+h2 { font-size: 1.42rem; margin: 3.2em 0 0.6em; padding-top: 1.1em; border-top: 1px solid var(--rule); }
+h2 .no { font-family: var(--mono); font-weight: 500; font-size: 0.8em; color: var(--accent); margin-right: 0.5em; }
+h3 { font-size: 1.08rem; margin: 2em 0 0.4em; }
+h4 { font-size: 0.98rem; margin: 1.7em 0 0.3em; }
+p { margin: 0.75em 0; }
+a { color: var(--accent); }
+a:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.lede { font-size: 1.08rem; }
+.kicker { font-family: var(--mono); font-size: 0.78rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.byline { color: var(--muted); font-size: 0.9rem; }
+.alpha { background: var(--warnbg); color: var(--warn); border-radius: 6px; padding: 10px 14px; font-size: 0.9rem; line-height: 1.7; margin: 1.4em 0; }
+.num { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 0.94em; }
+code { font-family: var(--mono); font-size: 0.86em; background: var(--tag); padding: 0.1em 0.35em; border-radius: 4px; overflow-wrap: anywhere; }
+ul.find { padding-left: 1.2em; }
+ul.find li { margin: 0.35em 0; }
+ul.find ul { padding-left: 1.1em; margin: 0.2em 0; }
+nav.toc { font-size: 0.92rem; margin: 1.6em 0; }
+nav.toc ol { padding-left: 1.6em; margin: 0.3em 0; columns: 2 18rem; column-gap: 2rem; }
+nav.toc li { margin: 0.15em 0; break-inside: avoid; }
+nav.toc a { color: var(--fg); text-decoration: none; border-bottom: 1px solid var(--rule); }
+nav.toc a:hover, nav.toc a:focus-visible { border-bottom-color: var(--accent); }
+figure { margin: 1.8em 0 2em; }
+.fighead { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 6px 16px; margin-bottom: 6px; }
+.fighead .q { font-weight: 700; font-size: 0.98rem; }
+.fighead .segs { display: flex; flex-wrap: wrap; gap: 6px; }
+.seg { display: inline-flex; border: 1px solid var(--rule); border-radius: 6px; overflow: hidden; background: var(--surface); }
+.seg button { font: 500 0.78rem/1 var(--sans); color: var(--muted); background: transparent; border: 0; padding: 7px 10px; cursor: pointer; }
+.seg button + button { border-left: 1px solid var(--rule); }
+.seg button[aria-pressed="true"] { background: var(--accent); color: var(--surface); }
+.chart { width: 100%; height: 380px; background: var(--surface); border: 1px solid var(--rule); border-radius: 8px; }
+.chart.short { height: 320px; }
+.chart.tall { height: 500px; }
+figcaption { font-size: 0.86rem; color: var(--muted); line-height: 1.7; margin-top: 8px; }
+.tbl { overflow-x: auto; margin: 1.2em 0; }
+table { border-collapse: collapse; width: 100%; font-size: 0.86rem; }
+th, td { text-align: right; padding: 6px 10px; border-bottom: 1px solid var(--rule); white-space: nowrap; font-variant-numeric: tabular-nums; vertical-align: top; }
+th:first-child, td:first-child { text-align: left; }
+th { font-weight: 500; color: var(--muted); }
+td.best { color: var(--accent); font-weight: 700; }
+tr.ref td { color: var(--muted); }
+tr.grp td { border-top: 2px solid var(--rule); }
+table.wrap td, table.wrap th { white-space: normal; text-align: left; min-width: 7.5em; }
+table.wrap td:first-child { min-width: 9em; }
+.note { font-size: 0.9rem; color: var(--muted); border-left: 2px solid var(--rule); padding-left: 12px; }
+.simsays { font-size: 0.92rem; background: var(--surface); border: 1px solid var(--rule); border-radius: 8px; padding: 10px 14px; margin: 1.4em 0; }
+.simsays b:first-child { color: var(--c-sim); font-family: var(--mono); font-size: 0.78rem; letter-spacing: 0.06em; margin-right: 0.6em; }
+.tk { font-size: 0.95rem; background: var(--surface); border: 1px solid var(--rule); border-left: 3px solid var(--accent); border-radius: 6px; padding: 8px 14px; margin: 0.8em 0 1.4em; }
+.tk > b { font-family: var(--mono); font-size: 0.76rem; letter-spacing: 0.06em; color: var(--accent); }
+.tk ul { margin: 0.2em 0 0; padding-left: 1.2em; }
+.tk li { margin: 0.2em 0; }
+.tag { display: inline-block; font: 500 0.7rem/1.6 var(--mono); background: var(--tag); color: var(--muted); border-radius: 4px; padding: 0 6px; margin-left: 6px; vertical-align: 0.15em; letter-spacing: 0; }
+.pending { display: inline-block; font: 500 0.78rem/1.6 var(--mono); color: var(--warn); background: var(--warnbg); border-radius: 4px; padding: 1px 8px; }
+.src { font-size: 0.8rem; color: var(--muted); font-family: var(--mono); overflow-wrap: anywhere; }
+pre.src { white-space: pre-wrap; }
+.flow { display: grid; grid-template-columns: repeat(auto-fit, minmax(9.5rem, 1fr)); gap: 10px; margin: 1.2em 0 0.6em; font-size: 0.84rem; }
+.flow div { background: var(--surface); border: 1px solid var(--rule); border-radius: 8px; padding: 10px 12px; min-width: 0; }
+.flow div b { display: block; font-size: 0.92rem; }
+.flow div .num { color: var(--muted); }
+.flow div.hl { border-color: var(--accent); }
+@media (max-width: 34rem) { body { font-size: 15.5px; } h1 { font-size: 1.6rem; } .chart { height: 330px; } .chart.tall { height: 470px; } }
+@media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto; } }
+nav.lang { display: flex; justify-content: flex-end; margin: 0 0 4px; }
+nav.lang .pill { display: inline-flex; border: 1px solid var(--rule); border-radius: 6px; overflow: hidden; background: var(--surface); }
+nav.lang a { font: 500 0.78rem/1 var(--sans); color: var(--muted); text-decoration: none; padding: 7px 10px; }
+nav.lang a + a { border-left: 1px solid var(--rule); }
+nav.lang a[aria-current="page"] { background: var(--accent); color: var(--surface); }
+</style>
+<main>
+<nav class="lang" aria-label="Language"><span class="pill"><a href="index.html" hreflang="zh" lang="zh">中文</a><a href="en.html" hreflang="en" lang="en" aria-current="page">English</a></span></nav>
+<script>(function () {
+  var links = document.querySelectorAll("nav.lang a");
+  function sync() { links.forEach(function (a) { a.href = a.getAttribute("href").split("#")[0] + location.hash; }); }
+  links.forEach(function (a) { a.addEventListener("click", function () {
+    sync(); try { localStorage.setItem("sim-to-real-lang", a.getAttribute("hreflang")); } catch (e) {}
+  }); });
+  sync(); window.addEventListener("hashchange", sync);
+})();</script>
+<p class="kicker">ServingStudio · research notes · draft</p>
+<h1>From sim to real engine: implementing and aligning GLM-5.3-Flash NVFP4 PP4 on B200</h1>
+<p class="byline">GLM-5.3-Flash NVFP4 · 4 × B200 PP4 · TraceLab coding-agent sessions · targets from the ServingStudio sim, measurements from SSEngine</p>
+
+<div class="alpha"><b>Draft v3.</b> Written after the M6 eval completed.
+<ul class="find">
+<li>The final comparison (§5.6, §6.9–§6.10, §7) uses the TraceLab v3 (new model) trace: the 20-minute closed loop is used for the real-engine comparison, the 8-hour closed loop only runs in sim.</li>
+<li>The engine bring-up step by step (sections marked "synthetic load" or "old trace" in §4–§6) used the synthetic load and old trace of that time; what is recorded is the final result of each step.</li>
+<li>Real-engine numbers come from <code>SSEngine</code> (each section notes the Slurm job id); sim numbers come from the ServingStudioSim handoff <code>glm53_flash_pp4_b200_v2</code> and the experiment directories after it (the v3 part is in wt-pp-staged).</li>
+<li>Unfinished work is collected in <a href="#s9">§9</a>.</li>
+</ul></div>
+
+<p class="lede">The previous note used the ServingStudio simulator to pick a design for GLM-5.3-Flash: 4 B200s in a 4-stage pipeline, a scheduler that groups microbatches by shortest remaining first, and session context kept in three tiers: HBM, DRAM and SSD. This note records the process of implementing that design step by step on the real engine and answers two questions:</p>
+<ul class="find">
+<li>If we build it following the sim design, do we reach the performance the sim predicted?</li>
+<li>Where does the gap come from?</li>
+</ul>
+
+<h3 id="s0-1">Setting</h3>
+<ul class="find">
+<li>Same as the previous note: prefill only, decode runs on other GPUs.</li>
+<li>Load: 20-minute closed-loop coding-agent sessions, at most N concurrent sessions (N = 400 is the SLO point, 500 is the overload point).</li>
+<li>SLO: p99 TTFT ≤ 6 s.</li>
+</ul>
+
+<h3 id="s0-2">Method</h3>
+<ul class="find">
+<li>The real engine is called SSEngine: a small engine we wrote ourselves (scheduler, KV/prefix cache, DRAM/SSD tiering, pipeline runtime, server).</li>
+<li>Kernel and model layer code reuse a vLLM fork.</li>
+<li>The sim gives the target for each stage (handoff); the real engine chases the target stage by stage, and only moves to the next stage once one stage passes.</li>
+</ul>
+
+<h3 id="s0-3">Conclusions (summary)</h3>
+<ul class="find">
+<li><b>It matches the sim.</b> With all three tiers HBM → DRAM → SSD enabled, real-engine and sim throughput differ by less than 1% at N = 100 / 300 and by 4–5% at N = 400. This holds for all three memory settings (full, Tiers, SSD-heavy), and the distribution of hits across the three tiers also matches (<a href="#s6-9">§6.9</a>).</li>
+<li><b>Much faster than vLLM, with TTFT one to two orders of magnitude lower.</b> Same v3 load, same 4 B200s, minutes 0–20:
+  <ul>
+  <li>N = 400: this engine (Tiers) 34.07 r/s, TTFT p50 / p90 / p99 0.99 / 4.70 / 61.00 s, 707 rounds over 60 s; vLLM DP4/EP4 6.58 r/s, 36.23 / 67.53 / 201.68 s, 910 rounds; vLLM TP4 1.78 r/s, 147.10 / 333.85 / 346.84 s, 1,374 rounds. Throughput is 5.2x and 19x respectively.</li>
+  <li>N = 300: this engine (full) 32.03 r/s, 0.23 / 0.99 / 19.83 s, 205 rounds; vLLM DP4/EP4 9.70 r/s, 18.86 / 30.68 / 43.02 s, 0 rounds (3.3x throughput); vLLM TP4 1.81 r/s, 68.74 / 289.89 / 303.05 s, 1,400 rounds.</li>
+  <li>N = 100: all three served every arriving round, but for minutes 10–20 TTFT p50 / p90 / p99 is 0.09 / 0.17 / 0.36 s for this engine, 1.31 / 2.24 / 3.72 s for vLLM DP4/EP4, and 0.76 / 3.81 / 7.92 s for TP4 (none had rounds over 60 s). See <a href="#s6-10">§6.10</a>.</li>
+  </ul></li>
+<li><b>Tiering is where the throughput comes from.</b> At N = 400 the three tiers keep these 4 GPUs at 37–41 r/s (minutes 10–20); with HBM only it is about 16 r/s (<a href="#s5-6">§5.6</a>).</li>
+<li><b>Every bring-up step met its target.</b> Kernel, single layer, single request, the saturation test with all requests arriving at once at t = 0, prefix hits, the scheduler's step-by-step checks, and DRAM/SSD reads are all within ±10% of target or have a known cause (<a href="#s4">§4</a>–<a href="#s6">§6</a>).</li>
+<li><b>The sim also decided many design points:</b> DRAM cut from 150 GB to 50 GB, SSD writes only what DRAM evicts, SSD sized at 128 GB, and which optimizations are not worth doing (<a href="#s2">§2</a>).</li>
+<li><b>Insufficient capacity causes collapse.</b> Without SSD, hits suddenly drop to zero and every round recomputes the whole context. The collapse window predicted by the sim matches the real engine, and the per-window match holds before collapse; after collapse the two settle into different steady states (<a href="#s7">§7</a>).</li>
+<li><b>The remaining gap has four sources, all located:</b> the sim does not count write cost; GPUs on stage 2/3 run hotter and at lower clocks; KV block rounding wastes HBM; host overhead (<a href="#s8">§8</a>).</li>
+<li><b>In the 8-hour sim the configuration with SSD is stable throughout.</b> KDA state is only usable at a few positions; storing more checkpoints and compressing state have not been done on the real engine yet (<a href="#s7-5">§7.5</a>, <a href="#s9">§9</a>).</li>
+</ul>
+
+<h3 id="s0-4">Structure of the article</h3>
+<ul class="find">
+<li>§1: model, load, targets, and what "alignment" means.</li>
+<li>§2: the main thread of the article. What the sim decided, and how it turned out on the real engine.</li>
+<li>§3–§6: a walk through the implementation order. Engine structure → kernel and single-step iteration → prefix cache and scheduler → DRAM/SSD tiering. Each step has bring-up tests, settings, real engine vs target, and figures.</li>
+<li>§7: collapse, anti-thrashing and the 8-hour steady state. §8: how accurate the sim is. §9: KDA state checkpointing and state compression, still unfinished.</li>
+<li>Each section starts with "Key points", ends with "What the sim says", plus "What went wrong" (failed attempts and incidents).</li>
+</ul>
+
+<nav class="toc" aria-label="Table of contents"><b>Table of contents</b>
+<ol start="1">
+<li><a href="#s1">Background and targets</a></li>
+<li><a href="#s2">How the sim guided the implementation</a></li>
+<li><a href="#s3">Implementation: SSEngine</a></li>
+<li><a href="#s4">Kernel and single-step iteration</a></li>
+<li><a href="#s5">Prefix cache and scheduler</a></li>
+<li><a href="#s6">DRAM and SSD tiering</a></li>
+<li><a href="#s7">Instability and collapse</a></li>
+<li><a href="#s8">How accurate the sim is</a></li>
+<li><a href="#s9">To do: KDA state checkpoints and compression</a></li>
+<li><a href="#s10">Conclusions and next steps</a></li>
+<li><a href="#s11">Appendix: jobs, experiments and commits</a></li>
+</ol></nav>
+
+<!-- ============================== 1 ============================== -->
+<h2 id="s1"><span class="no">1</span>Background and targets</h2>
+<div class="tk"><b>Key points</b><ul>
+<li>The 45-layer GLM-5.3-Flash is cut into a 4-stage pipeline, each stage holds whole layers, no TP/EP within a stage.</li>
+<li>The sim freezes the design into a handoff, split into 7 milestones, each with target numbers and pass rules.</li>
+<li>Each milestone first passes with a synthetic bring-up load, then moves on to the session load.</li>
+</ul></div>
+
+<h3 id="s1-1">1.1 Model and deployment</h3>
+<ul class="find">
+<li><b>Layers:</b> 45 layers in total, hidden size 4096. 11 layers are DSA (sparse MLA + indexer, layers 3, 7, …, 43), 34 layers are KDA (linear attention).</li>
+<li><b>FFN:</b> the first 3 layers are dense FFN, the remaining 42 layers are MoE (288 routed experts, top-8).</li>
+<li><b>Precision:</b> dense FFN and routed experts use NVFP4; attention, router, shared expert and lm_head stay BF16; KV cache is FP8.</li>
+<li><b>Partitioning:</b> 4-stage pipeline, layer split is [12, 11, 11, 11]. 4 residual streams are passed between stages, 32 KiB per token.</li>
+</ul>
+<div class="tbl"><table>
+<thead><tr><th>Stage</th><th>Layers</th><th>DSA layers</th><th>KV B/token</th></tr></thead>
+<tbody>
+<tr><td>0</td><td>0–11</td><td>3, 7, 11</td><td>1,635</td></tr>
+<tr><td>1</td><td>12–22</td><td>15, 19</td><td>1,090</td></tr>
+<tr><td>2</td><td>23–33</td><td>23, 27, 31</td><td>1,635</td></tr>
+<tr><td>3</td><td>34–44</td><td>35, 39, 43</td><td>1,635</td></tr>
+</tbody></table></div>
+<ul class="find">
+<li>KV per GPU is 100.18 GB. The whole pipeline shares one block pool, computed by the stage with 3 DSA layers, holding 61.26 million tokens (pool 61,258,368 tokens).</li>
+<li>DRAM and SSD store in blocks of 8,576 tokens; KV in HBM is allocated in pages of 128 tokens (the reason for the rounding is in <a href="#s8-2">§8.2</a>).</li>
+</ul>
+
+<h3 id="s1-2">1.2 Load</h3>
+<h4>v3 trace (final comparison)</h4>
+<ul class="find">
+<li>TraceLab v3: coding-agent sessions collected under the new model. The real-engine comparison uses the 20-minute version (<code>data/tracelab-v3/m6/sessions_2ps_v3.csv</code>).</li>
+<li>New sessions arrive at 2 per second for 20 minutes, 2,457 sessions in total, 261k rounds; at most N are active at once, the rest queue for a slot. Each run starts from an empty cache.</li>
+<li>The prompt of each round = the previous round's prompt + the previous round's output + new tokens. Occasionally the agent first truncates the end of the context, or compresses the context.</li>
+<li>The average context per round is about 169k tokens, new tokens 2.7k, 98% is the session's own prefix; the longest context is close to 1M tokens.</li>
+<li>These 4 GPUs only count the prefill plus the first output token of each round. The next round arrives after the decode time (80 token/s) plus the tool wait.</li>
+<li>The hour-scale steady state only runs in sim: 8-hour closed loop, with 1,563 / 2,000 / 2,500 concurrent sessions (<code>data/tracelab-v3/traces/closed_c*_s0.csv</code>), see <a href="#s7-5">§7.5</a>.</li>
+</ul>
+<h4>bring-up load (setup process)</h4>
+<p>Each step of M3–M6 first passes with the load below. The synthetic load's prompts are enwik9 tokens, truncated by a fixed rule; the "old trace" is the handoff's own <code>data/sessions_2ps.csv</code>, likewise 2 per second, 20 minutes, 2,457 sessions, and all M4–M6 sessions before v3 use it.</p>
+<div class="tbl"><table class="wrap">
+<thead><tr><th>Load</th><th>Requests</th><th>Arrival</th><th>What is checked</th><th>See</th></tr></thead>
+<tbody>
+<tr><td>Single request</td><td>5 per length L (1k–128k), no prefix, 1 output token</td><td>10 s apart, GPU idle</td><td>Per-stage time, inter-stage send, TTFT</td><td><a href="#s4-4">§4.4</a></td></tr>
+<tr><td>Saturated (simultaneous arrival)</td><td>2<sup>24</sup> tokens per length: 16,384 at 1k, …, 128 at 128k</td><td><b>all at t = 0</b></td><td>Full-load throughput, queueing-determined TTFT, stage busy rate</td><td><a href="#s4-5">§4.5</a></td></tr>
+<tr><td>prefix bring-up</td><td>40 two-round sessions: P ∈ {8k, 32k, 128k, 512k} × A ∈ {1k, 8k}</td><td>one every 30 s</td><td>hit = P, round 1 computes only A</td><td><a href="#s5-2">§5.2</a></td></tr>
+<tr><td>Scheduling check</td><td>28 prompts: 1 × 128k, 1 × 32k, 8 × 4k, 16 × 1k, then 8k and 1k separately</td><td><b>26 at t = 0</b>, 8k at 5 s, 1k at 7 s</td><td>each microbatch identical chunk by chunk</td><td><a href="#s5-4">§5.4</a></td></tr>
+<tr><td>Forced scheduling check</td><td>1 × 32k, 16,000 × 1k</td><td>32k at t = 0; 1k at 200 per second for 80 s</td><td>60 s forced rule, budget</td><td><a href="#s5-4">§5.4</a></td></tr>
+<tr><td>Tiering bring-up</td><td>two-round sessions, P ∈ {32k, 128k, 512k}, small pool so round 1 must read from DRAM or SSD</td><td>one at a time</td><td>read time, TTFT</td><td><a href="#s6-8">§6.8</a></td></tr>
+<tr><td>session (old trace)</td><td>2,457 sessions</td><td>2 per second, at most N active</td><td>r/s, TTFT, hit</td><td><a href="#s5-3">§5.3</a>, <a href="#s5-5">§5.5</a>, <a href="#s6-8">§6.8</a></td></tr>
+</tbody></table></div>
+
+<h3 id="s1-3">1.3 Design and targets given by the sim</h3>
+<ul class="find">
+<li>The sim freezes the design into a handoff (v2, <code>1de110c0</code> of ServingStudioSim).</li>
+<li>The handoff has 7 files, one per milestone: conventions, kernel, single layer, single-step iteration, prefix cache, scheduler, DRAM/SSD tiering. Each milestone has its own target numbers and pass rules.</li>
+<li>The real engine follows in order from M1 to M6.</li>
+<li>The target numbers were initially generated with the default profile DB; later the kernels were re-profiled with real inputs (realistic-input DB), and the real engine is compared against the latter, denoted v2-realistic (reason in <a href="#s4-7">§4.7</a>).</li>
+<li>After switching to the v3 trace, the sim targets were re-run in wt-pp-staged with the same settings (<code>logs/20261018_9_v3_m6</code> etc., see <a href="#s11-2">§11.2</a>).</li>
+</ul>
+
+<h3 id="s1-4">1.4 What "aligned" means</h3>
+<ul class="find">
+<li><b>kernel, single layer, single-step iteration:</b> for each kernel configuration and each stage's time, the deviation from the row in the profile or from the target is within ±10%, otherwise the reason must be written in <code>issues.md</code>.</li>
+<li><b>session:</b> compare rounds/s, new tokens/s, TTFT p50 / p90 / p99, and the number of rounds exceeding 60 s. p99 sits near the boundary of "1% of rounds wait the full 60 s" and is extremely sensitive, so the number of rounds exceeding 60 s and the tokens per minute are compared first.</li>
+<li><b>dynamics:</b> rounds per 2-minute window, hit share, read/write counts per tier. For a collapsed configuration, only the windows before the collapse are compared.</li>
+<li><b>correctness:</b> after reading back through cache or tiering, the output tokens must match those without cache, and the bytes read back through tiering must be bit-identical.</li>
+</ul>
+
+<!-- ============================== 2 ============================== -->
+<h2 id="s2"><span class="no">2</span>How the sim guides the implementation</h2>
+<div class="tk"><b>Key points</b><ul>
+<li>The value of the sim is not only accurate prediction, but that many design decisions can be settled before writing any code.</li>
+<li>An 8-hour closed-loop simulation takes under 2 minutes (c1000 75.7 s, c1438 48.8 s, c2000 66.8 s), so every choice is first swept over parameters, then verified on the real engine.</li>
+</ul></div>
+<p>The table below lists the things in this project that the sim decided directly.</p>
+
+<div class="tbl"><table class="wrap">
+<thead><tr><th>Decision</th><th>Basis from the sim</th><th>Result on the real engine</th><th>Details</th></tr></thead>
+<tbody>
+<tr><td>How to write the scheduler</td><td>Implement the sim's scheduling flow item by item: SRPT, budget based on backlog, admission, 60 s forced scheduling</td><td>Scheduling check identical microbatch by microbatch; v3 eval: throughput error within 1% at N = 100 / 300, 4–5% at N = 400</td><td><a href="#s5-4">§5.4</a>, <a href="#s6-9">§6.9</a></td></tr>
+<tr><td>No layer-by-layer pipeline loading</td><td>DRAM read 1.7–16 ms, first-round compute 52–57 ms, reads are not on the critical path</td><td>Real engine DRAM read 6.66 / 10.98 / 15.86 ms (p50/p90/p99)</td><td><a href="#s6-1">§6.1</a></td></tr>
+<tr><td>How large DRAM must be</td><td>Write-through mode needs 150 GB; after switching to victim (only writing what HBM evicts), 50 GB suffices</td><td>400 GB less host memory pinned per NUMA node</td><td><a href="#s6-5">§6.5</a></td></tr>
+<tr><td>When to write SSD</td><td>Write only what DRAM evicts, SSD writes drop to 7–60% of write-through, targets unchanged or slightly better</td><td>Adopted cascading writeback HBM → DRAM → SSD</td><td><a href="#s6-5">§6.5</a></td></tr>
+<tr><td>How large SSD must be</td><td>TTFT is almost the same at 128 GB and 256 GB; at 64 GB the p99 of Tiers / SSD-heavy reaches 15–29 s</td><td>Set to 128 GB per GPU</td><td><a href="#s6-7">§6.7</a></td></tr>
+<tr><td>Three memory settings</td><td>Sweep HBM × DRAM to find the point where the three tiers hit about 1:1:1 and the SSD-dominated point</td><td>Tiers 20/20, SSD-heavy 12.5/12.5</td><td><a href="#s6-7">§6.7</a></td></tr>
+<tr><td>How fast SSD I/O must be</td><td>Demand is 0.7–1.8 GB/s read per GPU (10 s peak up to 4.7), 0.08–0.69 GB/s write</td><td>io_uring measures 16.8 GB/s, over 3x headroom</td><td><a href="#s6-6">§6.6</a></td></tr>
+<tr><td>Read wait cap 1 s</td><td>Rule and value in the sim</td><td>Used directly on the real engine</td><td><a href="#s6-1">§6.1</a></td></tr>
+<tr><td>Reserve 10% of HBM as loading area (st10)</td><td>Landed reads must wait in HBM until the next batch before admission; by Little's law the loading area needs 0–7.5% of HBM (SSD-heavy at most); in the 8-hour sim 5% starves the pipeline under high load, so 10% is used</td><td>With no loading area on the real engine, throughput at N = 400 is 12% lower (both are identical in the sim, reason in <a href="#s8-2">§8.2</a>)</td><td><a href="#s6-9">§6.9</a></td></tr>
+<tr><td>Cause of collapse and countermeasures</td><td>Use the relation between total retained context W and capacity C to predict which setting collapses and when</td><td>On v3, h25d50 real engine and sim collapse in the same 2-minute window; h25d75 is stable on both</td><td><a href="#s7">§7</a></td></tr>
+<tr><td>Which optimizations need not be done</td><td>Read time is far less than compute, and host read-request submission cost is hidden by transfer</td><td>C++ Mover and the read completion notification path are only recorded, not implemented</td><td><a href="#s6-9">§6.9</a></td></tr>
+</tbody></table></div>
+
+<p>There are also places where the sim cannot say or says it wrong:</p>
+<ul class="find">
+<li><b>Write cost:</b> the sim treats writes as free, so it sees no difference without a loading area; on the real engine reads must wait for evicted writes to free space, and throughput at N = 400 is 12% lower (<a href="#s8-2">§8.2</a>).</li>
+<li><b>GPU placement:</b> cards 3 and 4 run hotter and drop 5–7% in frequency under the power cap, making stage 2/3 the bottleneck. In the sim all 4 cards are equally fast (<a href="#s8-2">§8.2</a>).</li>
+<li><b>Host overhead:</b> in the sim, admission, leader preparation, and read request submission and completion take no time. On the real engine TTFT p50 is therefore higher, more so when the host is busy (<a href="#s8-2">§8.2</a>).</li>
+<li><b>Steady state after collapse:</b> the collapse window matches on both sides, but afterwards the sim collapses completely while the real engine settles at about 65% hit (<a href="#s7-1">§7.1</a>).</li>
+<li><b>Default profile DB is optimistic:</b> kernel times profiled with non-real inputs are too short (<a href="#s4-7">§4.7</a>).</li>
+</ul>
+
+<!-- ============================== 3 ============================== -->
+<h2 id="s3"><span class="no">3</span>Implementation: SSEngine</h2>
+<div class="tk"><b>Key points</b><ul>
+<li>The engine is written in-house; kernels and model layers are imported as a library from the vLLM fork, and no kernel is copied.</li>
+<li>One controller plus 4 stage workers; inter-stage activations go over the copy engine and do not use SMs.</li>
+<li>The correctness reference is the vLLM fork's TP4 + EP single instance.</li>
+</ul></div>
+
+<h3 id="s3-1">3.1 Reuse boundary</h3>
+<ul class="find">
+<li>Kernels and model layers reuse the vLLM fork (<code>892da0822f</code>, <code>vllm/models/glm5next</code>), imported as a library. No kernel is copied into SSEngine.</li>
+<li>vLLM's engine, scheduler, model runner, or KV manager are not run. vLLM serves only as an independent correctness reference (<a href="#s3-4">§3.4</a>).</li>
+</ul>
+<p>The fork has two PP incompatibilities, overridden with small patches in <code>ssengine/model/pp_patch.py</code>:</p>
+<ul class="find">
+<li><b>mHC stage boundary:</b> the fork disables PP for glm5next, and the stage boundary would lose mHC's delay state. The sender first finishes the last layer's <code>hc_post</code> and sends the full 4-way residual; the receiver does <code>hc_pre</code> separately in its first layer. This is 0.03 ms (8k) to 0.32 ms (128k) slower per boundary than the fused post+pre in the target, under 0.06% of a stage.</li>
+<li><b>Prefill only, one token out:</b> no decode path, no MTP, stage 3 does greedy sampling.</li>
+</ul>
+<h3 id="s3-2">3.2 Process model</h3>
+<div class="flow">
+<div class="hl"><b>controller</b><span class="num">host of stage 0</span><br>scheduler, KV allocation, prefix cache, tiered index; up to 4 microbatches in flight</div>
+<div><b>stage 0</b><span class="num">GPU 0, layers 0–11</span><br>embedding, dense FFN</div>
+<div><b>stage 1–2</b><span class="num">GPU 1–2, layers 12–33</span></div>
+<div><b>stage 3</b><span class="num">GPU 3, layers 34–44</span><br>final norm, lm_head, greedy</div>
+</div>
+<ul class="find">
+<li>The controller sends each microbatch's plan to all 4 workers at the same time.</li>
+<li>Inter-stage activations are copied into the next GPU's ring with the copy engine (CUDA IPC), ordered by flags on the stream, with no kernel and no host handshake (<a href="#s4-4">§4.4</a>).</li>
+<li>Planning and metadata construction for the next microbatch overlap with the current microbatch's compute.</li>
+<li>Requests are replayed from a trace by req-frontend.</li>
+</ul>
+
+<h3 id="s3-3">3.3 Milestones</h3>
+<div class="tbl"><table class="wrap">
+<thead><tr><th>Milestone</th><th>Content</th><th>Status</th></tr></thead>
+<tbody>
+<tr><td>M1 kernel</td><td>35 kernel configs: call-path comparison, line-by-line comparison with profile rows</td><td>Done (<a href="#s4-1">§4.1</a>–<a href="#s4-2">§4.2</a>)</td></tr>
+<tr><td>M2 single layer · M3 single-step iteration</td><td>Every layer, every stage; single request and saturation test with all requests arriving at once</td><td>Done (<a href="#s4-3">§4.3</a>–<a href="#s4-5">§4.5</a>)</td></tr>
+<tr><td>M4 prefix cache</td><td>session-level retention, full-segment hit</td><td>Done, tag <code>m4-done</code> = db6895d (<a href="#s5-2">§5.2</a>–<a href="#s5-3">§5.3</a>)</td></tr>
+<tr><td>M5 scheduler</td><td>schedule check, forced schedule check, closed-loop session N = 200–500</td><td>Accepted 10-17 15:45, tag <code>m5-done</code> = a167593 (<a href="#s5-4">§5.4</a>–<a href="#s5-5">§5.5</a>)</td></tr>
+<tr><td>M6 DRAM/SSD</td><td>tiered storage, three settings, N = 100 / 300 / 400 comparison on v3 trace</td><td>eval done (eval code lanes/m6-eval-run a78dc6f / 9496233); next version c5d4e09 adds 128-token pages and hostgate (<a href="#s6">§6</a>)</td></tr>
+</tbody></table></div>
+
+<h3 id="s3-4">3.4 Correctness reference <span class="tag">synthetic load</span></h3>
+<ul class="find">
+<li><b>Reference:</b> vLLM fork single instance TP4 + EP, fp8 KV, prefix cache off, greedy, 1 output token, no MTP (job 7029).</li>
+<li><b>Prompts:</b> 8 lengths (1k–128k) × 5 requests, cut from the enwik9 token pool by a deterministic rule; each prompt's sha256 matches the rebuilt one.</li>
+<li><b>Criterion:</b> passes if the output token matches the reference. When the reference's top-2 logprob gap is less than 3 nats it counts as an approximate tie and is not judged (in-batch values can flip, see <a href="#s4-5">§4.5</a>).</li>
+<li><b>Long context:</b> for KV and numerical comparison, the vLLM reference uses its Triton KDA prefill (<a href="#s4-6">§4.6</a>).</li>
+</ul>
+<p class="src">measured/reference.md · reference.jsonl</p>
+
+<!-- ============================== 4 ============================== -->
+<h2 id="s4"><span class="no">4</span>Kernels and single-step iteration</h2>
+<div class="tk"><b>Key points</b><ul>
+<li>Kernels were re-measured in the SSEngine environment; the median ratio for the 15 configs is 0.95–1.08; every stage of a single layer and single request is within ±10% of the target.</li>
+<li>When all requests arrive at t = 0 simultaneously, saturated throughput is 0.93–1.00x the target, and the TTFT distribution matches the target.</li>
+<li>KV cache matches vLLM within noise; the long-context difference comes from vLLM's KDA kernel, not from SSEngine.</li>
+</ul></div>
+
+<h3 id="s4-1">4.1 Call-path comparison</h3>
+<p>For the 35 kernel configs in the handoff, compare by reading the code one by one: which function the profile row times, and which one the fork calls at the same point.</p>
+<div class="tbl"><table>
+<thead><tr><th>Verdict</th><th>Meaning</th><th>Configs</th></tr></thead>
+<tbody>
+<tr><td>SAME</td><td>Same function, same arguments and layout</td><td>24</td></tr>
+<tr><td>ARGS</td><td>Same function, but arguments or layout affecting launch differ</td><td>6</td></tr>
+<tr><td>DIFF</td><td>The fork calls a different function</td><td>5</td></tr>
+</tbody></table></div>
+<ul class="find">
+<li><b>14 configs are covered directly</b> (same function and equivalent library version); 21 need re-measurement in the SSEngine environment.</li>
+<li><b>DIFF configs follow the design, not the fork:</b> KDA prefill uses FlashInfer's persistent <code>recurrent_kda</code>, KDA short conv uses Dao's channel-last implementation, each mHC boundary uses DeepGEMM's <code>mega_mhc</code>, and indexer top-k picks DeepSelect or <code>top_k_per_row_prefill</code> by shape.</li>
+<li><b>Where the target over-computes:</b> the target computes the router GEMM twice per MoE layer, the fork only once, so the target is slightly slower (recorded in <code>issues.md</code>).</li>
+</ul>
+<p class="src">measured/kernels_identity.md · identity_notes/</p>
+
+<h3 id="s4-2">4.2 Kernel re-measurement</h3>
+<ul class="find">
+<li><b>Method:</b> re-measure the profile DB rows with ServingStudioSim profiler's own runner in the SSEngine environment (cold L2, no DB writes).</li>
+<li><b>Full re-measurement:</b> all 3,084 rows of the 15 configs needing re-measurement were re-measured. Per-config median ratios fall between 0.95 and 1.08, most between 0.96 and 1.01, e.g. KDA chunk prefill 1.001, mHC fused post+pre 1.000, NVFP4 MoE 1.003.</li>
+<li><b>Of the 154 rows beyond ±10%</b>, 149 are under 20 µs with an absolute difference of at most 2.3 µs; the other 5 GEMMs of 21–101 µs are 10–16% faster. Swapping these rows into the target changes stage time by at most 0.35%, so the target is unchanged.</li>
+<li><b>Local spot check:</b> the smallest, median and largest row for each of the 35 configs, 105 rows in total, median ratio 0.999; most of the 27 rows beyond ±10% are tiny launch-limited shapes. Weighted by call count, the effect on a stage is −0.2% to −0.6%.</li>
+</ul>
+<figure>
+  <div class="fighead"><span class="q">15 configs re-measured: real engine ÷ profile DB</span></div>
+  <div id="f4a" class="chart tall" role="img" aria-label="Median ratio and min-to-max range for each kernel config; medians all fall between 0.95 and 1.08"></div>
+  <figcaption>The dot is the median ratio over all rows of each config, the bar is min to max, the gray band is ±10%. Both ends of the range come from small shapes of a few µs.<span class="src">measured/kernels.md · kernels.jsonl</span></figcaption>
+</figure>
+
+<h3 id="s4-3">4.3 Single layer <span class="tag">synthetic load</span></h3>
+<ul class="find">
+<li><b>Result:</b> no layer type is more than 10% slower than the target at any prompt length, except two heads at sizes of tens of µs: <code>input_head</code> 1k ×1.13 (0.016 vs 0.014 ms), <code>output_head</code> 1k ×1.10 (0.250 vs 0.227 ms), both less than 0.2% of a stage.</li>
+<li><b>More than 10% faster than the target (recorded, not counted as failure):</b> KDA layer ×0.77–0.94. FlashInfer persistent KDA's chunk prefill takes only half the profile row's time (8k: 0.40 vs 0.84 ms), and the BF16 GEMM is also faster than the cold-L2 row.</li>
+<li><b>Stage total</b> is 0.87–0.99x the target's single-request stage time.</li>
+<li><b>Fixes found by position-by-position comparison:</b> TRTLLM sparse MLA with more than 32,768 rows must be split by row count (<a href="#s4-8">§4.8</a>); short prefill of ≤ 2,048 tokens stays on sparse MLA, matching the target's structure.</li>
+</ul>
+<p class="src">measured/issues.md "M2 results" · jobs 7068–7070, 7080</p>
+
+<h3 id="s4-4">4.4 Single request <span class="tag">synthetic load</span></h3>
+<p><b>Setup:</b> 5 requests per length, 10 s apart, each request taking the idle pipeline exclusively. The target is the handoff's single-request time.</p>
+<figure>
+  <div class="fighead"><span class="q">Single request: real engine ÷ target</span></div>
+  <div id="f4b" class="chart short" role="img" aria-label="From 1k to 128k, the ratios of total GPU time and TTFT both fall between 0.91 and 1.02"></div>
+  <figcaption>Average of 5 requests per length. Total GPU time = stage 0 start to stage 3 end; TTFT is measured at the client. The gray band is ±10%.<span class="src">measured/iteration.md</span></figcaption>
+</figure>
+<ul class="find">
+<li><b>Total GPU time</b> is 0.91–1.00x the target; at 1k–32k the real engine is actually faster: the target computes the router GEMM an extra time, and the output head only computes the returned rows.</li>
+<li><b>TTFT</b> is 0.93–1.02x the target. Host time is 0 in the target; in the real engine the host part is 3.9 ms at 1k and 18.8 ms at 128k (mostly receiving and parsing the prompt).</li>
+<li><b>Inter-stage send</b> costs about 0.11 ms more per hop than the target; on short requests (1k, 2k) the ratio reaches 1.8–4x, but the absolute value is tiny and is not pursued further.</li>
+</ul>
+<h4>Inter-stage transfer: copy engine instead of NCCL</h4>
+<div class="tbl"><table>
+<thead><tr><th>A/B (job 7279)</th><th>copy engine</th><th>NCCL (8 channels)</th><th>Target</th></tr></thead>
+<tbody>
+<tr><td>per hop, single request, 1k (ms)</td><td class="best">0.17–0.28</td><td>0.34–0.42</td><td>0.068</td></tr>
+<tr><td>per hop, single request, 8k (ms)</td><td class="best">0.47–0.65</td><td>1.14–1.27</td><td>0.482</td></tr>
+<tr><td>saturated 8k (tok/s)</td><td class="best">139.6k</td><td>136.1k</td><td>143.4k</td></tr>
+<tr><td>saturated 1k (tok/s)</td><td class="best">150.0k</td><td>144.2k</td><td>149.3k</td></tr>
+</tbody></table></div>
+<ul class="find">
+<li>The sender's <code>cudaMemcpyAsync</code> writes directly into the receiver's K-slot ring (CUDA IPC), ordered with <code>cuStreamWaitValue32</code> / <code>cuStreamWriteValue32</code>.</li>
+<li>Byte-identical to NCCL (10 microbatches of 1–4096 rows, including ring wraparound and slow consumers). The copy engine is the only GPU transfer.</li>
+</ul>
+<h4>Host time and CUDA graph</h4>
+<figure>
+  <div class="fighead"><span class="q">stage 0 single forward: host time vs GPU time</span></div>
+  <div id="f4c" class="chart short" role="img" aria-label="With eager, host time is about 17 ms, higher than the GPU time at 1k and 2k; CUDA graph brings it down to about 5 ms"></div>
+  <figcaption>Median, ms. eager 7303, CUDA graph 7304; GPU time from job 7091.<span class="src">measured/issues.md "M2 results" · measured/host/</span></figcaption>
+</figure>
+<ul class="find">
+<li><b>Problem:</b> with eager, one stage 0 forward issues about 390 kernels, host time about 17 ms, longer than GPU time below 2.5k tokens.</li>
+<li><b>Approach:</b> capture CUDA graphs per token bucket (powers of 2 starting at 128, up to 8,192), pad inputs to the bucket size; break at DSA attention, indexer and KDA prefill, everything else (MoE, mHC, linear, norm, quant, KV write) stays in the graph.</li>
+<li><b>Result:</b> host time 1k 17.1 → 4.7 ms, 8k 18.2 → 5.6 ms. Replay of each bucket is bit-identical to equally padded eager.</li>
+<li><b>Other:</b> FlashInfer tactic persistence, warm-up drops from about 180 s to 6 s; eval code dropped the 32k graph, graph memory 26 → 10 GiB, no throughput loss.</li>
+</ul>
+
+<h3 id="s4-5">4.5 Saturation: all requests arrive at once at t = 0 <span class="tag">Synthetic load</span></h3>
+<p><b>Setting:</b> one run per length, 2<sup>24</sup> tokens total, all arriving at t = 0 (16,384 at 1k, 128 at 128k). In the target each run is 2,048 microbatches of 8,192 tokens, stage 0 is the busiest and sets the pace; TTFT is determined by the request's position in the queue, p50 is about half of the whole run.</p>
+<figure>
+  <div class="fighead"><span class="q">Simultaneous arrival: real engine vs target</span>
+    <div class="seg" data-for="f4d" data-key="m"><button data-v="tps">Throughput</button><button data-v="p50">TTFT p50</button><button data-v="p99">TTFT p99</button></div></div>
+  <div id="f4d" class="chart short" role="img" aria-label="Saturated throughput and TTFT for each length; the real engine and target lines are close"></div>
+  <figcaption>Throughput = prompt token/s over the middle 80% of the run; TTFT counts all requests.<span class="src">measured/iteration.md · saturated.jsonl</span></figcaption>
+</figure>
+<div class="tbl"><table>
+<thead><tr><th>Length</th><th>Requests</th><th>Real engine tok/s</th><th>Target</th><th>Ratio</th><th>TTFT p50 / p90 / p99 (s) real engine</th><th>Target</th><th>stage busy rate 0 / 1 / 2 / 3 (%)</th></tr></thead>
+<tbody>
+<tr><td>1k</td><td>16,384</td><td>149.2k</td><td>149.3k</td><td>1.00</td><td>55.5 / 100.6 / 110.6</td><td>56.3 / 101.3 / 111.4</td><td>96.3 / 96.3 / 99.9 / 98.6</td></tr>
+<tr><td>2k</td><td>8,192</td><td>146.5k</td><td>149.9k</td><td>0.98</td><td>56.9 / 102.9 / 113.2</td><td>56.1 / 100.9 / 110.9</td><td>95.7 / 94.5 / 99.9 / 98.1</td></tr>
+<tr><td>4k</td><td>4,096</td><td>142.8k</td><td>147.5k</td><td>0.97</td><td>58.5 / 105.6 / 116.2</td><td>57.0 / 102.5 / 112.7</td><td>95.6 / 92.9 / 99.9 / 98.1</td></tr>
+<tr><td>8k</td><td>2,048</td><td>138.4k</td><td>143.4k</td><td>0.96</td><td>60.5 / 109.1 / 120.0</td><td>58.7 / 105.4 / 115.9</td><td>95.9 / 92.6 / 99.9 / 98.1</td></tr>
+<tr><td>16k</td><td>1,024</td><td>136.8k</td><td>143.4k</td><td>0.95</td><td>61.2 / 110.3 / 121.4</td><td>58.7 / 105.4 / 116.0</td><td>95.9 / 92.2 / 99.8 / 97.6</td></tr>
+<tr><td>32k</td><td>512</td><td>136.4k</td><td>143.0k</td><td>0.95</td><td>61.7 / 110.8 / 121.8</td><td>58.9 / 105.7 / 116.3</td><td>97.2 / 92.9 / 99.8 / 98.9</td></tr>
+<tr><td>64k</td><td>256</td><td>134.2k</td><td>141.8k</td><td>0.95</td><td>62.6 / 112.6 / 123.8</td><td>59.6 / 106.7 / 117.3</td><td>97.4 / 92.7 / 99.8 / 98.2</td></tr>
+<tr><td>128k</td><td>128</td><td>129.4k</td><td>138.4k</td><td>0.93</td><td>65.3 / 116.9 / 128.5</td><td>61.2 / 109.3 / 120.1</td><td>96.3 / 89.9 / 99.8 / 97.9</td></tr>
+</tbody></table></div>
+<ul class="find">
+<li><b>Throughput</b> is 0.93–1.00x of the target, TTFT percentiles follow the run duration (ratio 0.99–1.07).</li>
+<li><b>The bottleneck is stage 2:</b> in the real engine stage 2 busy rate is 99.8–99.9%, in the target it is stage 0 (100%). The cause is the power cap:
+  <ul>
+  <li>The same 8k microbatch alone is about 51 ms/stage, back-to-back it is 55–59 ms. Every GPU sits at the 1000 W cap (cannot be raised further), SM clock drops from 1965 to about 1590 MHz within 3 microbatches.</li>
+  <li>The profile rows were measured at sustained power-limited clocks anyway, so at saturation stage 0 and 1 match the target (57.0 / 55.0 vs 57.1 / 54.1 ms); the 0.90x for a single request is a "cold card".</li>
+  <li>stage 2 and 3 are 7% and 4% slower than the target: these two GPUs run about 10 °C hotter. Putting the stages in reverse order on the GPUs (7396), about 1.2 ms follows the GPU.</li>
+  </ul></li>
+<li><b>First TTFT:</b> 1.37 s vs 0.215 s at 1k. Submitting 16,384 requests itself spreads over 2.3 s, while in the target all are at t = 0; this item is not in the pass rules.</li>
+<li><b>Output tokens:</b> every length matches the reference or is a near tie. At 1k one request (reference top-2 gap 2.0 nats) flips within the batch: the model's output depends on the microbatch's total token count (mHC's split count varies with T, NVFP4 amplifies the difference), vLLM flips the same request when batching; no race, and no residual state (checked bit by bit).</li>
+</ul>
+
+<h3 id="s4-6">4.6 KV cache and numerics: against vLLM <span class="tag">Synthetic load</span></h3>
+<p><b>Setting:</b> the same enwik9 prompt goes through this engine and vLLM (TP4 + EP, eager, no prefix cache); after prefill both export each layer's MLA latent, indexer K, KDA state and conv state in the same format. This engine also tests chunking (8192, unaligned starts such as 3001/8001) and prefix hits. The noise baseline is vLLM against itself, and this engine's chunked run against the full segment.</p>
+<ul class="find">
+<li><b>Within 32k everything is within noise:</b> no pool, block or layer offset is systematically wrong. The worst is layer 43 MLA 0.24, noise 0.18 (vLLM) / 0.24 (this engine).</li>
+<li><b>Chunking-invariant:</b> the 8,192 chunk and the full segment are bit-identical at 32k and 128k; unaligned starts are within noise.</li>
+<li><b>Prefix hits are within noise:</b> including tiny decode-level appends (A = 3, 256).</li>
+<li><b>Final logits have identical top-1 at every length</b>; at 512k KL is at most 6e-4 (noise 2e-4).</li>
+<li><b>Beyond 128k, a few long-memory KDA heads drift with length.</b> The cause is in vLLM: its FlashKDA stores the state as bf16 after every 16-token tile. Three kernels fed the same input, compared against float64:</li>
+</ul>
+<figure>
+  <div class="fighead"><span class="q">KDA output relative error (vs float64, end of 512k)</span></div>
+  <div id="f4e" class="chart short" role="img" aria-label="This engine's FlashInfer persistent and Triton are about 0.003 at all three layers, FlashKDA reaches 0.08 and 0.41 at layers 1 and 2"></div>
+  <figcaption>Log scale. KDA layers 0–2, output relative error of the last of 16 position bins (all heads). FlashKDA is vLLM's pin b59532f. job 7539.<span class="src">measured/kvaudit-notes.md finding 6</span></figcaption>
+</figure>
+<p>After vLLM switched to the Triton KDA prefill (job 7530), this engine falls within noise at every layer at 512k:</p>
+<div class="tbl"><table>
+<thead><tr><th>512k comparison</th><th>L0 state</th><th>L1 state</th><th>L2 state</th><th>L3 MLA</th><th>L3 indexer</th><th>L3 top-k overlap</th></tr></thead>
+<tbody>
+<tr><td>This engine vs vLLM (FlashKDA, default)</td><td>0.0099</td><td>0.208</td><td>0.301</td><td>0.278</td><td>0.299</td><td>0.56</td></tr>
+<tr><td><b>This engine vs vLLM (Triton KDA)</b></td><td class="best">0.0033</td><td class="best">0.016</td><td class="best">0.021</td><td class="best">0.062</td><td class="best">0.036</td><td class="best">0.92</td></tr>
+<tr class="ref"><td>Noise: vLLM vs itself (Triton)</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>1.00</td></tr>
+<tr class="ref"><td>Noise: this engine c8001 vs c8192</td><td>0.003</td><td>0.015</td><td>0.019</td><td>0.061</td><td>0.035</td><td>0.92</td></tr>
+</tbody></table></div>
+<ul class="find">
+<li>Values are relative L2 error; top-k overlap is the indexer top-k overlap rate over the last 8 rows.</li>
+<li>Decision: use <code>--kda-prefill-backend triton</code> when vLLM is the accuracy reference (keep max_num_batched_tokens below 262,144); keep FlashKDA when it is the performance reference. This engine's kernels are unchanged.</li>
+<li>This engine also has a small drift on the slowest-decaying head at 512k (layer 1 head 45: 0.003 → 0.016, about 1/45 of FlashKDA); it does not affect top-1 or KL, recorded only.</li>
+</ul>
+
+<h3 id="s4-7">4.7 Inputs must be close to real</h3>
+<ul class="find">
+<li>The default profile DB does not use real inputs. Data-dependent kernels such as the MoE routing distribution and the indexer's top-k distribution are slower on real inputs.</li>
+<li>The target generated from the default DB is therefore optimistic: with the same full setting N = 400, the default DB gives p99 3.80 s, the realistic DB gives 6.91 s.</li>
+<li>Only after re-profiling with real inputs do the real engine and the sim match to 1–2%.</li>
+</ul>
+<div class="simsays"><b>What the sim says</b>Matching at the kernel level is a precondition, not a conclusion. It guarantees that the following sections compare scheduling and storage, not kernel time itself.</div>
+
+<h3 id="s4-8">4.8 What went wrong</h3>
+<ul class="find">
+<li>The headline numbers of the v1 handoff (118.8k new token/s, TTFT 0.16 / 0.44 / 4.94 s) are void, because the default DB was too optimistic and v1 did not yet have the whole-segment hit rule.</li>
+<li>A single launch of TRTLLM sparse MLA with more than 32,768 rows returned too fast (0.72 ms instead of about 11.7 ms); it needs to be split by row count, and the same split was added on the sim side (ServingStudioSim <code>7bb224a6</code>).</li>
+</ul>
+
+<!-- ============================== 5 ============================== -->
+<h2 id="s5"><span class="no">5</span>Prefix cache and scheduler</h2>
+<div class="tk"><b>Key points</b><ul>
+<li>Prefix-hit bring-up: all 40 two-round sessions hit, and round 1 tokens match 40/40 with the no-cache run.</li>
+<li>The scheduler was built in 5 steps, and every step matches the target microbatch by microbatch in the "26 requests arrive at once" check.</li>
+<li>With HBM only, M5 throughput on the old trace is within 0–1.5% of the sim; on v3, N = 300 no longer fits and needs DRAM and SSD.</li>
+</ul></div>
+
+<h3 id="s5-1">5.1 Prefix cache</h3>
+<ul class="find">
+<li>Each session keeps its latest full context: the KV of all DSA layers, plus the KDA state at the last token.</li>
+<li>The KDA state is only valid at the end of the context, so the hit rule is whole-segment: if the new prompt contains the entire old context it hits, otherwise it recomputes from the first token.</li>
+<li>HBM evicts by session with LRU.</li>
+</ul>
+
+<h3 id="s5-2">5.2 Prefix bring-up <span class="tag">Synthetic load</span></h3>
+<p><b>Setup:</b> 40 two-round sessions, 5 per (P, A) combination. Round 0 is a prompt of P tokens; round 1 arrives 10 s later, carrying round 0's prompt, output tokens and A − 1 new tokens. Only one session runs at a time and the GPUs are idle. It should hit P and compute only A.</p>
+<figure>
+  <div class="fighead"><span class="q">Two-round sessions: median TTFT, real engine vs target</span>
+    <div class="seg" data-for="f5a" data-key="r"><button data-v="r1">round 1 (hit)</button><button data-v="r0">round 0 (full compute)</button></div></div>
+  <div id="f5a" class="chart short" role="img" aria-label="TTFT for the 8 P plus A combinations, two bar groups: real engine and target"></div>
+  <figcaption>job 7404, median of 5 sessions per group. Round 0 uses a log scale. Target is handoff v2.<span class="src">measured/prefix_cache.md · prefix_bringup.jsonl</span></figcaption>
+</figure>
+<ul class="find">
+<li><b>Hit:</b> 40/40 hit = P.</li>
+<li><b>Pass (±10%):</b> 8k + 1k, 8k + 8k, 32k + 8k and 128k + 8k pass in every column; for 32k + 1k only round 1 TTFT is ×1.11.</li>
+<li><b>The 1k append slows down with P</b> (×1.07 → 1.11 → 1.24 → 1.75, 8k → 512k), while stages 1–3 are all ×0.94–0.98 up to 128k: the extra is per-request host time, which grows with prompt length (receiving and parsing token ids; at 512k about 27 ms from arrival to the first dispatch), plus ×1.10–1.14 in stage 0.</li>
+<li><b>512k</b> is ×1.07–1.33 per stage and ×1.16 in round 0; the target puts the extra 512k time in the indexer. Measured later on the full pool, the 512k round 1 HBM hit is still 14% above the target (65.79 vs 57.5 ms, <a href="#s6-8">§6.8</a>).</li>
+</ul>
+<h4>Correctness</h4>
+<ul class="find">
+<li><b>cache on vs off</b> (7403): all 40 round 1 prompts hit, and 40/40 tokens match the no-cache run.</li>
+<li><b>Unaligned P</b> (P not a multiple of 4, 7569): 40/40 hit, round 1 tokens match 38/40; both mismatches are near-ties (the top-2 on both sides are the same pair of tokens, differing by 0–0.375 nats).</li>
+<li><b>Chunking check</b> (7476, 7569): at 32,768 tokens the 8,192-token chunks are bit-identical to the whole segment; at 40,000 tokens the 8,001 and 8,190 chunks (starting in the middle of the indexer pool, off the KDA 32-token grid) are within 2x of split-K noise, KL 8e-6 / 1.5e-5, same top-1.</li>
+<li><b>kpool GPU test:</b> with hit points at P = 8193 + 1/2/3 and various chunkings, the indexer cache bytes are bit-identical to the unchunked prefill.</li>
+</ul>
+
+<h3 id="s5-3">5.3 Prefix cache sessions <span class="tag">Old trace</span></h3>
+<p><b>Setup:</b> old trace, 20-minute closed loop, HBM only, scheduler is the base version from the handoff (M4). The target is handoff v2 (default profile DB); "sim ×1.06" is the sim with all GPU time slowed by 6% (power cap, <a href="#s4-5">§4.5</a>).</p>
+<div class="tbl"><table>
+<thead><tr><th>N</th><th>Source</th><th>r/s</th><th>new tok/s</th><th>hit share</th><th>TTFT p50 / p90 / p99 (s)</th></tr></thead>
+<tbody>
+<tr><td>400</td><td>real engine 7683</td><td>24.2</td><td>84.4k</td><td>98.28%</td><td>0.64 / 4.43 / 7.57</td></tr>
+<tr class="ref"><td></td><td>target</td><td>24.9</td><td>87.5k</td><td>98.28%</td><td>0.55 / 3.66 / 5.98</td></tr>
+<tr class="ref"><td></td><td>sim ×1.06</td><td>24.6</td><td>86.3k</td><td>98.35%</td><td>0.75 / 4.25 / 8.22</td></tr>
+<tr class="grp"><td>500</td><td>real engine 7693</td><td>21.6</td><td>83.1k</td><td>96.85%</td><td>3.22 / 14.26 / 26.77</td></tr>
+<tr class="ref"><td></td><td>target</td><td>22.8</td><td>86.6k</td><td>97.01%</td><td>3.01 / 13.03 / 23.93</td></tr>
+<tr class="ref"><td></td><td>sim ×1.06</td><td>22.0</td><td>84.5k</td><td>97.07%</td><td>3.85 / 14.37 / 24.25</td></tr>
+</tbody></table></div>
+<ul class="find">
+<li>Real-engine r/s is about 2% below sim ×1.06, and tokens computed per second differ by about 1% (111.2k vs 112.5k, 122.4k vs 121.9k).</li>
+<li>No preemption and no failed rounds; at N = 500, 1,478 sessions were evicted and 40.8 million tokens were recomputed after eviction, the same designed behavior as the target.</li>
+<li>At full load, 91–96% of busy samples on every GPU sit at the power cap, and stage 2 has the lowest SM clock (N = 500: 1577 MHz, the rest 1610–1645).</li>
+</ul>
+<p class="src">measured/prefix_cache.md · prefix_sessions.json · prefix_smoke.json</p>
+
+<h3 id="s5-4">5.4 Scheduler: step-by-step build and checks <span class="tag">Synthetic load</span></h3>
+<p>The scheduler was written rule by rule following the sim implementation (<code>pipelined_chunked_prefill_admission.rs</code>, <code>srpt.rs</code>, <code>fresh_source.rs</code>, <code>prefix_fetch.rs</code>), adding rules to the base version in 4 steps, each with its own target:</p>
+<div class="tbl"><table class="wrap">
+<thead><tr><th>Step</th><th>Rule</th></tr></thead>
+<tbody>
+<tr><td>0 plain</td><td>in arrival order, 8,192 tokens per microbatch</td></tr>
+<tr><td>1 shortest first</td><td>microbatches are formed shortest-remaining-first (SRPT)</td></tr>
+<tr><td>2 load budget</td><td>the microbatch budget follows the prefill backlog (4,096–32,768 tokens)</td></tr>
+<tr><td>3 even split</td><td>a lone request is split evenly into chunks</td></tr>
+<tr><td>4 force-schedule</td><td>a request that has waited 60 s is forced to the front</td></tr>
+</tbody></table></div>
+
+<h4>Scheduling check: 26 requests arrive at once</h4>
+<p><b>Setup:</b> at t = 0, 26 requests arrive at once (1 × 128k, 1 × 32k, 8 × 4k, 16 × 1k, longest first), then a single 8k arrives at 5 s and a single 1k at 7 s. These decisions depend only on the rules, not on timing, so the real engine must form exactly the same microbatches as the target.</p>
+<div class="tbl"><table>
+<thead><tr><th>Step</th><th>microbatches real engine / target</th><th>identical chunk by chunk</th><th>TTFT 128k (ms)</th><th>32k</th><th>8k alone</th><th>1k alone</th><th>max TTFT deviation</th></tr></thead>
+<tbody>
+<tr><td>0 plain</td><td>28 / 28</td><td>yes</td><td>1142 vs 1118</td><td>1376 vs 1344</td><td>212 vs 224</td><td>52 vs 52</td><td>5.3%</td></tr>
+<tr><td>1 shortest first</td><td>28 / 28</td><td>yes</td><td>1713 vs 1679</td><td>734 vs 729</td><td>209 vs 224</td><td>52 vs 52</td><td>6.5%</td></tr>
+<tr><td>2 load budget</td><td>55 / 55</td><td>yes</td><td>1841 vs 1742</td><td>741 vs 711</td><td>154 vs 155</td><td>53 vs 52</td><td>5.7%</td></tr>
+<tr><td>3 even split</td><td>58 / 58</td><td>yes</td><td>1847 vs 1742</td><td>743 vs 711</td><td>131 vs 132</td><td>51 vs 51</td><td>6.1%</td></tr>
+<tr><td>4 force-schedule (7932)</td><td>58 / 58</td><td>yes</td><td colspan="4">–</td><td>7.6%</td></tr>
+</tbody></table></div>
+<ul class="find">
+<li>Every step forms the target microbatches chunk by chunk, with no JIT compilation during the run.</li>
+<li>SRPT moves the 32k from 1.34 s up to 0.73 s and pushes the 128k back to 1.7 s. The budget brings the lone 8k from 224 ms down to 155 ms; even split then cuts it into 4 chunks of 2,048 pipelined, down to 132 ms. Both sides are the same.</li>
+<li>Stage 0 starts the first microbatch 7.6–9.3 ms after the first request arrives: submitting the 26 requests alone spreads over 3.5–4.6 ms, and reading and parsing the 128k prompt takes about 3 ms; in the target all 26 are at t = 0.</li>
+</ul>
+
+<h4>Force-schedule check: 32k drowned by a 1k flood</h4>
+<p><b>Setup:</b> the 32k arrives at t = 0; 1k requests arrive at 200 per second for 80 s, faster than the pipeline computes, so the queue grows for 80 s and drains at about 108 s.</p>
+<figure>
+  <div class="fighead"><span class="q">TTFT of the 32k request: each step, real engine vs target</span></div>
+  <div id="f5b" class="chart short" role="img" aria-label="SRPT makes 32k wait about 108 seconds, force-schedule moves it up to 61 seconds, real engine and target agree"></div>
+  <figcaption>Step 0 follows arrival order, 32k comes out first; steps 1–3 shortest first, 32k waits until the queue drains; at step 4, after waiting the full 60 s, it is force-scheduled to the very front.<span class="src">measured/scheduler.md · force_check.jsonl</span></figcaption>
+</figure>
+<div class="tbl"><table>
+<thead><tr><th>Step</th><th>32k TTFT (s)</th><th>1k TTFT p50 / p90 / p99 (s) real engine</th><th>target</th><th>Last token (s)</th><th>microbatch real engine / target</th><th>Pass</th></tr></thead>
+<tbody>
+<tr><td>0 plain</td><td>0.41 vs 0.40</td><td>15.42 / 27.72 / 30.48</td><td>15.26 / 27.13 / 29.80</td><td>110.8 vs 110.1</td><td>2005 / 2004</td><td>yes</td></tr>
+<tr><td>1 shortest first</td><td>108.7 vs 110.1</td><td>14.20 / 25.68 / 28.27</td><td>15.08 / 26.95 / 29.62</td><td>108.7 vs 110.1</td><td>2005 / 2004</td><td>yes</td></tr>
+<tr><td>2 load budget</td><td>106.1 vs 107.5</td><td>15.15 / 21.80 / 25.36</td><td>14.77 / 23.90 / 26.89</td><td>106.1 vs 107.5</td><td>1349 / 1429</td><td>yes</td></tr>
+<tr><td>3 even split</td><td>107.8 vs 107.5</td><td>16.29 / 22.88 / 27.06</td><td>14.77 / 23.90 / 26.89</td><td>107.8 vs 107.5</td><td>1276 / 1429</td><td>p50 ×1.10</td></tr>
+<tr><td>4 force-schedule</td><td>60.9 vs 61.0</td><td>15.23 / 22.06 / 25.68</td><td>14.77 / 24.09 / 27.12</td><td>106.1 vs 107.5</td><td>1342 / 1429</td><td>yes</td></tr>
+</tbody></table></div>
+<ul class="find">
+<li>The force rule moves 32k up to 61 s on time; the budget lets microbatch grow to 32,768 when backlog exceeds 3 million tokens, and the queue drains 2.6 s earlier, the same on both sides.</li>
+<li>The microbatch count (1,342–1,353 vs 1,429) comes from the rule itself: the same engine replaying the fitted times on CPU assembles 1,355. The pass rule does not include this item.</li>
+<li>At the even split step the dispatch at the time was "at most 4 in flight", so 1k was squeezed into larger microbatches and p50 was 10% higher. The default later changed to 5 in flight plus 2 ms pacing.</li>
+</ul>
+
+<h3 id="s5-5">5.5 Scheduler session (M5)<span class="tag">old trace</span></h3>
+<p><b>Setting:</b> old trace, 20-minute closed loop, HBM only, full scheduler (step 4). The target is v2-realistic.</p>
+<figure>
+  <div class="fighead"><span class="q">Closed-loop session: real engine vs sim</span></div>
+  <div id="f5c" class="chart short" role="img" aria-label="rounds/s for N = 200 to 500, the real engine and sim lines almost overlap"></div>
+  <figcaption>rounds/s for the 20-minute closed-loop session. sim is the v2-realistic target. N = 400 has two real runs (7900, 7933); the point is plotted as their average and both are listed in the table below.<span class="src">measured/scheduler.md</span></figcaption>
+</figure>
+<div class="tbl"><table>
+<thead><tr><th>N</th><th>real engine r/s</th><th>sim r/s</th><th>new tok/s real engine / sim</th><th>TTFT p50 / p90 / p99 (s) real engine</th><th>sim</th><th>&gt;60 s real engine / sim</th><th>job</th></tr></thead>
+<tbody>
+<tr><td>200</td><td>12.12</td><td>12.13</td><td>45.0k / 45.0k</td><td>0.114 / 0.219 / 1.014</td><td>0.11 / 0.22 / 1.00</td><td>0 / 0</td><td>7934</td></tr>
+<tr><td>300</td><td>19.77</td><td>19.78</td><td>66.2k / 66.2k</td><td>0.155 / 0.479 / 3.04</td><td>0.147 / 0.488 / 3.30</td><td>22 / 24</td><td>7902</td></tr>
+<tr><td>400</td><td>24.73 · 24.76</td><td>25.06</td><td>86.4k / 87.3k</td><td>0.18 / 1.19 / 30.07 · 0.18 / 1.18 / 39.96</td><td>0.16 / 1.07 / 25.54</td><td>257 · 273 / 240</td><td>7900 · 7933</td></tr>
+<tr><td>500</td><td>25.06</td><td>25.44</td><td>89.9k / 91.5k</td><td>0.41 / 5.28 / 61.87</td><td>0.39 / 5.43 / 61.73</td><td>1052 / 1008</td><td>7901</td></tr>
+</tbody></table></div>
+<ul class="find">
+<li><b>N = 200, 300 match almost exactly.</b></li>
+<li><b>N = 400, 500 are 1.3–1.5% lower</b>, with 4–7% more rounds over 60 s, comparable to the roughly 6% difference between two runs of the same code (7900 vs 7907).</li>
+<li><b>The p99 at N = 400 differs the most</b>, because it lands exactly on the "1% of rounds wait the full 60 s" boundary.</li>
+<li><b>TTFT at low load:</b> at N = 200, rounds at p45–p55 are 118.2 ms on the real engine and 115.4 ms in sim. The wait is 5.9 ms longer (1.5 admission, 4.0 planning ahead), while pipeline transfer is 4.2 ms less.</li>
+<li><b>GPU position:</b> in each group of 4 cards the top two slots run about 10 °C hotter and 40–75 MHz slower (7907 ran the GPUs in reverse order).</li>
+</ul>
+
+<h3 id="s5-6">5.6 HBM-only results<span class="tag">v3 trace</span></h3>
+<ul class="find">
+<li>M5 has only one tier, HBM. On the v3 trace at N = 300 the retained context already exceeds what HBM can hold: some context is evicted and the next round has to recompute the whole span.</li>
+<li>By N = 400, recomputed tokens outnumber new tokens. This is why DRAM and SSD were added (tiering results on the same load are in <a href="#s6-9">§6.9</a>).</li>
+</ul>
+<div class="tbl"><table>
+<thead><tr><th>N</th><th>real engine r/s</th><th>sim r/s</th><th>recompute / new token real engine / sim</th><th>TTFT p50 / p90 / p99 (s) real engine</th><th>sim</th><th>&gt;60 s real engine / sim</th><th>job</th></tr></thead>
+<tbody>
+<tr><td>300</td><td>27.24</td><td>30.03</td><td>0.40 / 0.32</td><td>0.36 / 3.01 / 60.90</td><td>0.20 / 1.99 / 20.47</td><td>188 / 134</td><td>8446</td></tr>
+<tr><td>400</td><td>16.16</td><td>about 16 (13.9–19.1)</td><td>1.21 / about 1.21</td><td>1.90 / 60.84 / 69.3</td><td>2.12 / 60.66 / 64.58</td><td>– / 1222</td><td>8475</td></tr>
+</tbody></table></div>
+<p class="note">Counted by which window the first token falls into during minutes 10–20. The N = 300 real run uses 8,576-token HBM blocks (8446); N = 400 uses 128-token HBM pages (8475, see <a href="#s8-2">§8.2</a>). The N = 400 sim TTFT and rounds over 60 s come from a single run (19.07 r/s). sim: wt-pp-staged <code>logs/20261018_11_v3_m6_c300</code>, <code>20261018_9_v3_m6</code>.</p>
+<ul class="find">
+<li><b>N = 400 is bistable.</b> It sits exactly on the capacity edge: perturbing sim speed by only ±0.5% makes throughput jump between 13.9 and 19.1 r/s, with a median around 16 r/s and recompute / new token around 1.21. The real engine's 16.16 r/s and 1.21 agree with that median.</li>
+<li><b>N = 300 real engine is 9% lower, in two parts:</b>
+  <ul>
+  <li>the real engine computes 4% fewer tokens per second (123.1k vs 128.1k), caused by hotter GPUs in stages 2/3;</li>
+  <li>more recompute (0.40 vs 0.32), the same direction as HBM wasted on block rounding. Both are in <a href="#s8-2">§8.2</a>.</li>
+  </ul></li>
+</ul>
+
+<div class="simsays"><b>What sim says</b>Because the scheduler was written following sim's flow, the agreement shows that sim combines kernel time and queueing the right way. It does not show that sim can independently predict any arbitrary system.</div>
+
+<h3 id="s5-7">5.7 What went wrong</h3>
+<ul class="find">
+<li><b>Low-load TTFT is high:</b> on v3 at N = 100, TTFT p50 is 0.09 s in the real engine and 0.08 s in sim. The entire excess is waiting: about 1.5 ms admission and 4–5 ms leader preparation; pipeline transfer time itself matches sim. After host time stopped counting toward in-flight gate waits (hostgate, 7e391df), TTFT p50 at N = 300 dropped by 4 ms with no change in throughput.</li>
+<li><b>Power cap:</b> under full load the B200 sits at a power cap of about 1000 W. Optimizations that only shorten time, like removing launch gaps or copies, just lower the clock and leave throughput unchanged; only fewer bytes or FLOPs help. Recorded only.</li>
+<li><b>Two sim rules the real engine cannot do:</b> in the trace, 4,933 rounds retain only the previous round's partial context (rewind); sim releases the slot as soon as the session's last round emits a token. Both affect the design run by less than 1%.</li>
+</ul>
+
+<!-- ============================== 6 ============================== -->
+<h2 id="s6"><span class="no">6</span>DRAM and SSD tiering</h2>
+<div class="tk"><b>Key points</b><ul>
+<li>Each block is split 1/4 across the 4 GPUs' PCIe, DRAM and SSD, and reads and writes use only copy engines.</li>
+<li>Bring-up: a DRAM read adds only the read time itself; SSD reads meet target at every length; tiered read-back is byte-for-byte identical.</li>
+<li>v3 three-setting sessions: throughput is within 1% of sim at N = 100 / 300 and 4–5% lower at N = 400.</li>
+<li>At N = 300 / 400 throughput is 3–19x vLLM; TTFT is about one to two orders of magnitude lower at every N.</li>
+</ul></div>
+
+<h3 id="s6-1">6.1 Design: balanced storage and two hops</h3>
+<ul class="find">
+<li><b>Split by 1/4:</b> every byte range of every block is split 1/4 across the 4 GPUs, and GPU q owns the PCIe, host memory and SSD files for share q. Data is gathered over NVLink before leaving the GPU, so the 4 PCIe links carry exactly equal load: 1,499 B per token, 36.9 MB per GPU per block.</li>
+<li><b>Cost of not splitting:</b> if each stage stored only its own bytes, the stage 0, 2 and 3 links would carry 9% above average and stage 1 27% below, and the slowest link determines read completion time.</li>
+<li><b>Two hops:</b> on a read, GPU q copies share q H2D over its own PCIe into a staging ring in its own HBM, then uses <code>cuMemcpyBatchAsync</code> over NVLink to send each layer to the corresponding stage. Writes go the other way.</li>
+<li><b>Copy engines only:</b> no SMs used. At full load the stage has all SMs busy: GEMM 8192³ alone takes 0.682 ms, and 0.677 ms with 4 GPUs doing H2D at the same time.</li>
+<li><b>No per-layer pipelining:</b> a round starts computing only after its entire prefix is read. DRAM reads take 1.7–16 ms, SSD reads 9–82 ms, first-round compute 52–57 ms.</li>
+<li><b>Read wait limit:</b> if a read would have to wait more than 1 s to start, the round is skipped for now and left in the queue.</li>
+</ul>
+<h3 id="s6-2">6.2 Local bandwidth</h3>
+<div class="tbl"><table>
+<thead><tr><th>Path</th><th>1 GPU</th><th>4 GPUs concurrent</th></tr></thead>
+<tbody>
+<tr><td>H2D, single copy of 1 GiB, local node</td><td>55.7 GB/s</td><td>48.4 GB/s</td></tr>
+<tr><td>D2H, same as above</td><td>55.6</td><td>38.5</td></tr>
+<tr><td>H2D, host memory on another node</td><td>55.6</td><td>27.2</td></tr>
+<tr><td><code>cuMemcpyBatchAsync</code> H2D, 2 MiB pages</td><td>54.3</td><td>47.6</td></tr>
+<tr><td>GPU g's copy engine writes directly to another GPU's HBM (batched)</td><td>–</td><td>31.7</td></tr>
+</tbody></table></div>
+<ul class="find">
+<li>Host memory must be on the GPU's own NUMA node.</li>
+<li>Writing directly to another GPU's HBM is 33% slower than two hops, so we switched to two hops.</li>
+<li>4 GPUs share one socket's host-side bandwidth; the target (48.4) is within 3%.</li>
+<li>SSD: the data file system is an md RAID0 of 8 KIOXIA CM7 Gen5 drives. fio O_DIRECT, io_uring qd 16, 4 jobs: sequential read 96.9–99.6 GB/s, sequential write 53.8 GB/s, 4 reads plus 4 writes concurrently 45.4 + 25.8 GB/s. nvidia-fs is not loaded on the node, so no GDS.</li>
+</ul>
+<p class="src">TIERS.md §2.2–§2.3 · job 7916</p>
+
+<h3 id="s6-3">6.3 Host memory safety</h3>
+<p>The full setting originally pinned 150 GB DRAM per GPU, 600 GB across 4 GPUs, and it must land on the NUMA node where the GPU sits. The node has about 1,057 GB per node and is shared with others; node 0 also hosts a VM of up to 512 GiB. The final approach:</p>
+<ul class="find">
+<li>For each 1 GiB, first check the node's free memory plus reclaimable clean page cache; only if it is enough, bind that block to the node and then touch it; if not, raise an error and do not spill over to the other node.</li>
+<li>Pre-check per node before start (arena plus 115 GB headroom); at runtime, watch free memory, PSI and D-state processes per node, and stop our own run when a threshold is crossed.</li>
+<li>Set the process's <code>oom_score_adj</code> to 1000, so that on a real OOM it kills itself first.</li>
+<li>Verified on 8043: all 4 × 150 GB landed on node 1, page cache was reclaimed from 665 GB down to 339 GB, touch took 41–43 s.</li>
+</ul>
+
+<h3 id="s6-4">6.4 The five-layer KV pool structure</h3>
+<p>Tiered storage was restructured into five layers under <code>ssengine/kvpool</code>:</p>
+<ul class="find">
+<li><b>layout:</b> byte ranges.</li>
+<li><b>placement:</b> the balanced 1/4 rule.</li>
+<li><b>backends:</b> DRAM arena, SSD files.</li>
+<li><b>mover:</b> two-hop copy.</li>
+<li><b>manager:</b> pure policy: index, LRU, slot, writeback.</li>
+</ul>
+<p>The scheduler only sees the <code>lookup</code> / <code>load</code> / <code>store</code> interfaces. Before and after the refactor, the full setting at N = 400 differs by less than 1% in per-minute throughput (figure below, old trace).</p>
+<figure>
+  <div class="fighead"><span class="q">Before and after the refactor: tokens processed by stage 0 per minute</span></div>
+  <div id="f6a" class="chart short" role="img" aria-label="The two lines for stage 0 throughput per minute on 8043 and 7995 overlap"></div>
+  <figcaption>Old trace, full setting, DRAM 150 GB, N = 400. 7995 is before the refactor (lane-m6 0dfb39f), 8043 is after (afda6f3). The last minute has only partial data.</figcaption>
+</figure>
+
+<h3 id="s6-5">6.5 Evolution of the write policy</h3>
+<p>handoff originally used write-through: at the end of every round, the context was written to both DRAM and SSD. Two changes were made in the sim:</p>
+<ul class="find">
+<li><b>DRAM becomes a victim:</b> only write what HBM evicts. DRAM no longer duplicates what HBM already holds, so the full setting's 50 GB DRAM behaves like 150 GB of write-through.</li>
+<li><b>SSD becomes DRAM's victim:</b> only write what DRAM evicts, as incremental writes, keeping a clean copy after reading back.</li>
+<li><b>Together</b> this is staged writeback HBM → DRAM → SSD. In the real engine, each level proactively writes the LRU tail to the next level when its occupancy exceeds the watermark, so eviction generally does not wait for the write to finish.</li>
+<li>Both levels use the same writeback class; the scheduler does not know which variant is underneath.</li>
+</ul>
+<figure>
+  <div class="fighead"><span class="q">Data written to SSD per GPU over 20 minutes</span></div>
+  <div id="f6b" class="chart short" role="img" aria-label="Two groups of bars: staged writeback and write-through"></div>
+  <figcaption>sim, old trace, realistic DB, SSD 128 GB. Write-through writes to SSD every round; staged writeback only writes what DRAM evicts. Experiment wt-pp-dram-victim <code>logs/20261017_7_victim_chain</code>.</figcaption>
+</figure>
+<ul class="find">
+<li>68–82% of the data written to SSD is later read back (Tiers, SSD-heavy).</li>
+<li>The biggest waste is content demoted after its session has already ended, accounting for 9–17%; in the full setting it is almost all of this kind, but the volume itself is small.</li>
+</ul>
+
+<h3 id="s6-6">6.6 SSD I/O</h3>
+<ul class="find">
+<li>One io_uring per GPU: O_DIRECT, DRAM arena and staging registered as fixed buffers, one slot per request (12.86 MB), reads prioritized over writeback, a single thread handles submission and completion.</li>
+<li>If the ring cannot be created, it errors out immediately; there is no fallback to the thread approach.</li>
+</ul>
+<div class="tbl"><table>
+<thead><tr><th>Method</th><th>Max read (with 3 GB/s concurrent write)</th><th>CPU cores</th><th>31–60 slot read p50 / p99 (ms)</th><th>3–10 slot read p99 (ms)</th></tr></thead>
+<tbody>
+<tr class="ref"><td>8 threads <code>preadv</code>/<code>pwritev</code></td><td>15.2–16.1 GB/s</td><td>1.11–1.15</td><td>26–27 / 100–115</td><td>65–79</td></tr>
+<tr><td><b>io_uring, whole slot, 8 reads / 4 writes in flight</b></td><td class="best">16.8–16.9</td><td class="best">0.49–0.50</td><td>31–32 / <b>62–67</b></td><td class="best">16–18</td></tr>
+<tr><td>io_uring, 2 MiB fragments, 32 / 8</td><td>16.1–16.3</td><td>0.60–0.62</td><td>34–35 / 61–67</td><td>13–16</td></tr>
+</tbody></table></div>
+<ul class="find">
+<li>The numbers are per GPU, with 4 processes running concurrently.</li>
+<li>io_uring gives about 5% more bandwidth, halves CPU, and halves read p99 when background writeback runs concurrently.</li>
+<li>SSD files are kept per group (<code>set&lt;k&gt;/shard&lt;q&gt;.bin</code>); shard q stores the 1/4 belonging to member q, reused across runs, with the whole group locked per run.</li>
+<li>File contents are never trusted: the index is empty on every start.</li>
+</ul>
+<p class="src">lane-m6-ssd TIERS.md §2.5 · db48f02 · ceff3dc</p>
+
+<h3 id="s6-7">6.7 The three memory settings</h3>
+<p>The full setting's HBM holds most of the latest contexts, so hits are almost all in HBM. To actually exercise DRAM and SSD, two smaller settings are provided. In the sim we swept HBM × DRAM (SSD fixed at 128 GB) and picked:</p>
+<div class="tbl"><table>
+<thead><tr><th>Setting</th><th>HBM (GB/GPU)</th><th>--pool-tokens</th><th>DRAM (GB/GPU)</th><th>SSD (GB/GPU)</th><th>Purpose</th></tr></thead>
+<tbody>
+<tr><td>full</td><td>100.18</td><td>61,258,368</td><td>50</td><td>128</td><td>Full memory</td></tr>
+<tr><td>Tiers</td><td>20</td><td>12,220,800</td><td>20</td><td>128</td><td>Three-tier hits about 1:1:1</td></tr>
+<tr><td>SSD-heavy</td><td>12.5</td><td>7,632,640</td><td>12.5</td><td>128</td><td>Mostly SSD</td></tr>
+</tbody></table></div>
+<ul class="find">
+<li>In victim mode, the HBM size determines HBM's share, the DRAM size determines DRAM's share, and the rest goes to SSD.</li>
+<li>The heavier the load, the lower HBM's share: on v3 the Tiers setting's HBM share drops from 46% at N = 300 to 18% at N = 400. So no single configuration is exactly 1:1:1 at both N; 20/20 is a rounded compromise.</li>
+</ul>
+<figure>
+  <div class="fighead"><span class="q">Hit sources for each setting</span>
+    <div class="seg" data-for="f6c" data-key="n"><button data-v="300">N = 300</button><button data-v="400">N = 400</button></div></div>
+  <div id="f6c" class="chart short" role="img" aria-label="Stacked bars splitting hits into HBM, DRAM, SSD for the three settings"></div>
+  <figcaption>sim, v3 trace, st10 (DRAM only takes what HBM evicts, HBM keeps a 10% loading area). Counted per round: among rounds that have the previous round's context, the share read from HBM, DRAM, SSD; the remainder is recompute. Statistics over minutes 10–20. Experiments wt-pp-staged <code>logs/20261018_11_v3_m6_c300</code>, <code>20261018_9_v3_m6</code>.</figcaption>
+</figure>
+<p><b>SSD size</b> was swept in the sim when fixing the settings (old trace, default DB). At 128 GB the SSD fills up and starts evicting, but almost everything evicted is from sessions that have already ended. p99 at N = 400:</p>
+<div class="tbl"><table>
+<thead><tr><th>SSD (GB/GPU)</th><th>Tiers p99 (s)</th><th>SSD-heavy p99 (s)</th></tr></thead>
+<tbody>
+<tr><td>256</td><td>2.72</td><td>3.03</td></tr>
+<tr><td><b>128 (adopted)</b></td><td>2.72</td><td>3.39</td></tr>
+<tr><td>64</td><td>14.69</td><td>29.19</td></tr>
+</tbody></table></div>
+<p>An 8-hour sim uses 8 TB (<a href="#s7-5">§7.5</a>).</p>
+
+<h3 id="s6-8">6.8 Tiering bring-up <span class="tag">synthetic load · old trace</span></h3>
+<h4>Byte test</h4>
+<ul class="find">
+<li><b>Method:</b> on a real StageModel, prefill P = 40,000 (the last block is not full, so the chunk start deviates from KDA's grid), snapshot every page of KV and state for the 4 stages; write them to DRAM, evict from HBM, fill the original blocks with garbage, then read back into different block ids.</li>
+<li><b>Result:</b> every byte is equal (8041, kvpool version); via SSD (DRAM disabled) also equal (8061, io_uring plus shard files, going through the two-hop path).</li>
+<li><b>Then compute:</b> after the tiered read-back, the logits of round 1 (A = 1k) are bit-identical to the logits after an HBM hit, and the tokens are the same.</li>
+</ul>
+<h4>Read time: DRAM and SSD bring-up</h4>
+<p><b>Setting:</b> two-round session, P ∈ {32k, 128k, 512k}, averaged over 5 sessions per length. The bring-up pool is only 1.23M tokens, so every round 1 must read from DRAM (or SSD). HBM hit is the same bring-up with the full pool (7960).</p>
+<figure>
+  <div class="fighead"><span class="q">Round 1 TTFT: which tier it reads from, real engine vs target</span>
+    <div class="seg" data-for="f6e" data-key="t"><button data-v="hbm">HBM hit</button><button data-v="dram">DRAM</button><button data-v="ssd">SSD</button></div></div>
+  <div id="f6e" class="chart short" role="img" aria-label="Round 1 TTFT for 32k, 128k, 512k, two bar groups: real engine and target"></div>
+  <figcaption>ms. HBM hit 7960; DRAM 8042 (after kvpool refactor); SSD 8073 (DRAM off, SSD 128 GB, GPUs 4–7). Target is the v2-realistic tiered bring-up (TIERS.md §10).</figcaption>
+</figure>
+<div class="tbl"><table>
+<thead><tr><th>Context</th><th>DRAM target TTFT (ms)</th><th>7966 (before refactor)</th><th>8042 (after refactor)</th><th>8042 read (ms)</th><th>Target read</th></tr></thead>
+<tbody>
+<tr><td>32k</td><td>54.4</td><td>57.43</td><td>61.77</td><td>4.07</td><td>1.72</td></tr>
+<tr><td>128k</td><td>58.4</td><td>62.87</td><td>63.14</td><td>6.46</td><td>4.67</td></tr>
+<tr><td>512k</td><td>73.9</td><td>81.82</td><td>81.55</td><td>17.76</td><td>16.46</td></tr>
+</tbody></table></div>
+<ul class="find">
+<li><b>Tiered reads do not slow down compute:</b> for the 512k round 1, per-stage compute time is the same with or without DRAM read (21.76 / 19.67 / 21.14 / 21.64 vs 21.86 / 19.69 / 21.18 / 21.64 ms).</li>
+<li><b>TTFT = HBM hit + read:</b> with DRAM it is only 2.6% / 2.1% / 0.1% more than this engine's own HBM hit plus the target read time. The rest of the gap to the DRAM target is this engine's own round 1 for long context (512k HBM hit 65.79 vs 57.5 ms, +14%), which belongs to the M5 compute gap.</li>
+<li><b>Copy is close to the lower bound:</b> the 512k read takes 16.0–16.2 ms on the GPU, about 52–54 GB/s; the extra ~1.3 ms in the 32k read is messaging between controller and worker.</li>
+<li><b>8042's 32k is 4.4 ms higher</b> because host load was 245 at the time (6.5 for 7966), so kernel dispatch got slower; not a problem with the refactor (<a href="#s6-12">§6.12</a>).</li>
+</ul>
+<div class="tbl"><table>
+<thead><tr><th>Context</th><th>SSD target TTFT (ms)</th><th>8073 TTFT</th><th>Target SSD read (ms)</th><th>8073 read</th><th>Arrival → read start (ms)</th></tr></thead>
+<tbody>
+<tr><td>32k</td><td>61.3</td><td>61.6</td><td>8.6</td><td>7.5</td><td>2.5</td></tr>
+<tr><td>128k</td><td>77.1</td><td>79.8</td><td>23.3</td><td>23.1</td><td>2.2</td></tr>
+<tr><td>512k</td><td>139.8</td><td>189.9</td><td>82.3</td><td>79.0</td><td>52</td></tr>
+</tbody></table></div>
+<ul class="find">
+<li><b>SSD reads hit the target at every length:</b> io_uring reads into staging, H2D as each slot lands.</li>
+<li><b>The 512k TTFT is 50 ms higher, all of it before the read starts:</b> the bring-up pool is only 1.23M tokens, a 512k round takes 45%, so admission must evict a context that is not yet fully written and can only wait for the write to finish.</li>
+<li>The session configuration's pool is 7.63M–61.26M tokens, and a 512k round is under 7%. This is the first appearance of the write cost; in <a href="#s8-2">§8.2</a> it is more pronounced on sessions.</li>
+</ul>
+
+<h4>full setting session (DRAM 150 GB, write-through)<span class="tag">old trace</span></h4>
+<p><b>Setting:</b> old trace, N = 400, full HBM pool plus 150 GB write-through DRAM per GPU. Target is v2-realistic.</p>
+<div class="tbl"><table>
+<thead><tr><th></th><th>r/s</th><th>new tok/s</th><th>TTFT p50 / p90 / p99 (s)</th><th>&gt;60 s</th><th>DRAM read p50 / p90 / p99 (ms)</th></tr></thead>
+<tbody>
+<tr><td>7995 (before refactor)</td><td>26.10</td><td>90.9k</td><td>0.17 / 0.74 / 6.46</td><td>124</td><td>6.7 / 10.0 / 12.7</td></tr>
+<tr><td>8043 (after refactor)</td><td>26.08</td><td>90.8k</td><td>0.17 / 0.75 / 6.58</td><td>131</td><td>6.66 / 10.98 / 15.86</td></tr>
+<tr class="ref"><td>sim</td><td>26.10</td><td>90.8k</td><td>0.16 / 0.76 / 6.72</td><td>127</td><td>–</td></tr>
+</tbody></table></div>
+<ul class="find">
+<li>Matches the sim on r/s, new token/s, and all three TTFT percentiles.</li>
+<li>8043 hits: HBM 98.97%, DRAM 1.03%, 237 DRAM reads in total. No round was blocked waiting for a write, and no round was skipped because the read wait exceeded 1 s.</li>
+<li>This is the write-through DRAM 150 GB configuration; later full settings use victim DRAM 50 GB (<a href="#s6-5">§6.5</a>).</li>
+</ul>
+
+<h4>DRAM-only compressed configuration <span class="tag">old trace</span></h4>
+<p><b>Setting:</b> old trace, N = 400, no SSD, capacities deliberately shrunk: h25d37 (HBM 25 GB + DRAM 37 GB), h12d19 (12 + 19 GB), both runs executed at the same time on two GPU sets (7969, 7970). Both the sim and the real engine collapse: hits drop to zero and every round recomputes the whole context (about 350 rounds per 2 minutes), so we compare per window before collapse and the collapse window.</p>
+<figure>
+  <div class="fighead"><span class="q">h25d37: rounds completed per 2 minutes</span></div>
+  <div id="f6f" class="chart short" role="img" aria-label="before collapse the two lines overlap window by window; in minutes 12 to 14 the real engine is a bit lower"></div>
+  <figcaption>Old trace, DRAM only, N = 400. Real engine 7969, sim is the v2-realistic tiered target.<span class="src">TIERS.md §9 step 1b</span></figcaption>
+</figure>
+<ul class="find">
+<li><b>h25d37:</b> matches window by window before collapse (hit share 0.83–0.91 vs 0.83–0.90; DRAM reads 9–852 vs 10–847 per 2 minutes). Collapse window: sim minutes 14–16, real engine minutes 12–16 (the real engine has fewer rounds in minutes 12–14): r/s −5%, TTFT p90 +44%.</li>
+<li><b>h12d19:</b> the real engine collapses one window later (minutes 8–10, sim minutes 6–8), so r/s is 24% higher. Before collapse the real engine evicts more from HBM and serves more rounds from DRAM. This is a tipping point: read latency, admission order and write landings all move it.</li>
+<li>These two settings do not meet SLO and are not used as a basis for judgment; M6 is judged on the full setting and the three settings with SSD. See <a href="#s7">§7</a> for the collapse analysis on v3.</li>
+</ul>
+
+<h3 id="s6-9">6.9 Three-setting session <span class="tag">v3 trace</span></h3>
+<p><b>Setting:</b></p>
+<ul class="find">
+<li>All three settings are st10: DRAM only takes what HBM evicts (exclusive), HBM keeps 10% as loading area, SSD only takes what DRAM evicts.</li>
+<li>Stats cover minutes 10–20, counted by which window the first token falls in.</li>
+<li>Hits H / D / S are counted by round: the share of rounds that have previous-round context and read from HBM, DRAM, SSD.</li>
+</ul>
+<figure>
+  <div class="fighead"><span class="q">Three-setting session: real engine vs sim</span>
+    <div class="seg" data-for="f6d" data-key="n"><button data-v="300">N = 300</button><button data-v="400">N = 400</button></div></div>
+  <div id="f6d" class="chart short" role="img" aria-label="rounds/s for the three configurations, two bar groups: real engine and sim"></div>
+  <figcaption>rounds/s for minutes 10–20. sim is wt-pp-staged <code>logs/20261018_11_v3_m6_c300</code> (N = 300), <code>20261018_9_v3_m6</code> (N = 400).</figcaption>
+</figure>
+<div class="tbl"><table>
+<thead><tr><th>N</th><th>Setting</th><th>Real engine r/s</th><th>sim r/s</th><th>TTFT p50 / p90 / p99 (s) real engine</th><th>sim</th><th>&gt;60 s real engine / sim</th><th>H / D / S % real engine</th><th>sim</th><th>Job</th></tr></thead>
+<tbody>
+<tr><td>100</td><td>Tiers</td><td>8.62</td><td>8.62</td><td>0.09 / 0.17 / 0.36</td><td>0.08 / 0.16 / 0.36</td><td>0 / 0</td><td>91 / 9 / 1</td><td>91 / 8 / 0</td><td>8456</td></tr>
+<tr><td>300</td><td>full</td><td>33.70</td><td>33.97</td><td>0.19 / 0.34 / 2.87</td><td>0.15 / 0.25 / 1.65</td><td>15 / 4</td><td>98 / 2 / 0</td><td>98 / 2 / 0</td><td>8447</td></tr>
+<tr><td>300</td><td>Tiers</td><td>33.45</td><td>33.77</td><td>0.22 / 0.42 / 4.36</td><td>0.18 / 0.29 / 1.89</td><td>22 / 6</td><td>44 / 34 / 23</td><td>46 / 33 / 21</td><td>8462</td></tr>
+<tr><td>300</td><td>SSD-heavy</td><td>33.76</td><td>33.80</td><td>0.20 / 0.39 / 3.08</td><td>0.19 / 0.31 / 2.02</td><td>17 / 5</td><td>26 / 32 / 42</td><td>28 / 31 / 41</td><td>8448</td></tr>
+<tr><td>400</td><td>full</td><td>40.51</td><td>42.26</td><td>0.61 / 1.52 / 60.43</td><td>0.48 / 1.30 / 33.28</td><td>249 / 194</td><td>94 / 6 / 1</td><td>95 / 5 / 0</td><td>8451</td></tr>
+<tr><td>400</td><td>Tiers</td><td>37.66</td><td>39.77</td><td>0.84 / 3.81 / 60.66</td><td>0.65 / 2.53 / 44.99</td><td>260 / 218</td><td>13 / 41 / 47</td><td>18 / 42 / 39</td><td>8431</td></tr>
+<tr><td>400</td><td>SSD-heavy</td><td>36.71</td><td>38.36</td><td>0.84 / 3.40 / 60.59</td><td>0.63 / 2.83 / 48.38</td><td>282 / 176</td><td>2 / 21 / 77</td><td>4 / 34 / 62</td><td>8452</td></tr>
+</tbody></table></div>
+<ul class="find">
+<li><b>Throughput:</b> at N = 100 nothing saturates, every setting is 8.6 r/s, and all arriving rounds are served. At N = 300 real engine and sim are within 1%, at N = 400 it is 4–5% lower (see <a href="#s8-2">§8.2</a> for the reason).</li>
+<li><b>Tiering preserves throughput:</b>
+  <ul>
+  <li>N = 300: all three settings are 33.5–33.8 r/s, HBM only is 27.2.</li>
+  <li>N = 400: the three settings are 36.7–40.5 r/s, HBM only about 16 (<a href="#s5-6">§5.6</a>).</li>
+  <li>Shrinking HBM to 7.63M tokens (SSD-heavy, 77% of hits from SSD) loses no throughput at N = 300 and is 9% below full at N = 400.</li>
+  </ul></li>
+<li><b>Hit distribution:</b> the shares across the three tiers match on both sides; at N = 400 the real engine keeps slightly less context in HBM, with a correspondingly higher SSD share.</li>
+<li><b>TTFT:</b> at N = 300 / 400 the p50 is 20–30% higher on the real engine. The N = 400 p99 sits on the 60 s forced-scheduling boundary: in the full setting, rounds over 60 s account for 1.02%, sim 0.77%.</li>
+</ul>
+<h3 id="s6-10">6.10 Comparison with vLLM <span class="tag">v3 trace</span></h3>
+<p><b>Setup:</b> Same v3 load, same 4 B200s, same window rules (t = 0 is the commit of the first request; a round counts when its first token lands inside the window; TTFT = first token − commit). vLLM runs two deployments:</p>
+<ul class="find">
+<li><b>DP4/EP4:</b> 4 engines plus vllm-router's cache_aware routing (picks an engine by the radix tree of the token prefix), HBM only, prefix caching on, chunked prefill. max_num_batched_tokens is 32768 for N = 100 / 400 and 16384 for N = 300 (32768 OOMs at N = 300).</li>
+<li><b>TP4:</b> one TP4 engine, no expert parallel and no router, HBM only, max_num_batched_tokens 32768.</li>
+<li><b>This engine:</b> the eval run of §6.9. N = 100 has only the Tiers setting; N = 300 / 400 list both full and Tiers.</li>
+</ul>
+<figure>
+  <div class="fighead"><span class="q">This engine vs vLLM</span>
+    <div class="segs">
+    <div class="seg" data-for="f6g" data-key="w"><button data-v="w0">minutes 0–20</button><button data-v="w10">minutes 10–20</button></div>
+    <div class="seg" data-for="f6g" data-key="m"><button data-v="rps">r/s</button><button data-v="p50">TTFT p50</button><button data-v="p90">p90</button><button data-v="p99">p99</button></div>
+    </div></div>
+  <div id="f6g" class="chart" role="img" aria-label="r/s and TTFT percentiles for this engine, vLLM DP4/EP4 and vLLM TP4 at three N, TTFT on a log scale"></div>
+  <figcaption>TTFT on a log scale (seconds). N = 100 has no real-engine run of the full setting. vLLM runs: DP4/EP4 8457 / 8280 / 8250, TP4 8458 / 8420 / 8419.<span class="src">measured/eval_m6/summary.md · measured/vllm_dpep/</span></figcaption>
+</figure>
+<div class="tbl"><table>
+<thead><tr><th>N</th><th>Window (minutes)</th><th>System</th><th>r/s</th><th>TTFT p50 / p90 / p99 (s)</th><th>&gt;60 s</th></tr></thead>
+<tbody>
+<tr><td>100</td><td>0–20</td><td>This engine Tiers</td><td class="best">9.39</td><td class="best">0.11 / 0.23 / 0.94</td><td>1</td></tr>
+<tr class="ref"><td></td><td></td><td>vLLM DP4/EP4</td><td>8.05</td><td>1.77 / 4.22 / 7.92</td><td>0</td></tr>
+<tr class="ref"><td></td><td></td><td>vLLM TP4</td><td>7.46</td><td>2.29 / 7.73 / 13.94</td><td>0</td></tr>
+<tr><td>100</td><td>10–20</td><td>This engine Tiers</td><td class="best">8.62</td><td class="best">0.09 / 0.17 / 0.36</td><td>0</td></tr>
+<tr class="ref"><td></td><td></td><td>vLLM DP4/EP4</td><td>7.46</td><td>1.31 / 2.24 / 3.72</td><td>0</td></tr>
+<tr class="ref"><td></td><td></td><td>vLLM TP4</td><td>7.26</td><td>0.76 / 3.81 / 7.92</td><td>0</td></tr>
+<tr class="grp"><td>300</td><td>0–20</td><td>This engine full</td><td class="best">32.03</td><td class="best">0.23 / 0.99 / 19.83</td><td>205</td></tr>
+<tr><td></td><td></td><td>This engine Tiers</td><td>31.54</td><td>0.26 / 1.14 / 21.91</td><td>217</td></tr>
+<tr class="ref"><td></td><td></td><td>vLLM DP4/EP4</td><td>9.70</td><td>18.86 / 30.68 / 43.02</td><td>0</td></tr>
+<tr class="ref"><td></td><td></td><td>vLLM TP4</td><td>1.81</td><td>68.74 / 289.89 / 303.05</td><td>1400</td></tr>
+<tr><td>300</td><td>10–20</td><td>This engine full</td><td class="best">33.70</td><td class="best">0.19 / 0.34 / 2.87</td><td>15</td></tr>
+<tr><td></td><td></td><td>This engine Tiers</td><td>33.45</td><td>0.22 / 0.42 / 4.36</td><td>22</td></tr>
+<tr class="ref"><td></td><td></td><td>vLLM DP4/EP4</td><td>10.10</td><td>19.37 / 29.47 / 34.94</td><td>0</td></tr>
+<tr class="ref"><td></td><td></td><td>vLLM TP4</td><td>0.99</td><td>275.57 / 299.96 / 306.23</td><td>594</td></tr>
+<tr class="grp"><td>400</td><td>0–20</td><td>This engine full</td><td class="best">36.29</td><td class="best">0.72 / 2.04 / 60.93</td><td>727</td></tr>
+<tr><td></td><td></td><td>This engine Tiers</td><td>34.07</td><td>0.99 / 4.70 / 61.00</td><td>707</td></tr>
+<tr class="ref"><td></td><td></td><td>vLLM DP4/EP4</td><td>6.58</td><td>36.23 / 67.53 / 201.68</td><td>910</td></tr>
+<tr class="ref"><td></td><td></td><td>vLLM TP4</td><td>1.78</td><td>147.10 / 333.85 / 346.84</td><td>1374</td></tr>
+<tr><td>400</td><td>10–20</td><td>This engine full</td><td class="best">40.51</td><td class="best">0.61 / 1.52 / 60.43</td><td>249</td></tr>
+<tr><td></td><td></td><td>This engine Tiers</td><td>37.66</td><td>0.84 / 3.81 / 60.66</td><td>260</td></tr>
+<tr class="ref"><td></td><td></td><td>vLLM DP4/EP4</td><td>4.64</td><td>48.31 / 148.23 / 212.89</td><td>910</td></tr>
+<tr class="ref"><td></td><td></td><td>vLLM TP4</td><td>1.17</td><td>319.95 / 344.78 / 349.48</td><td>702</td></tr>
+</tbody></table></div>
+<ul class="find">
+<li><b>N = 100:</b> All three served every round that arrived; vLLM's r/s is slightly lower because each round is slower and sessions in the closed loop advance more slowly. TTFT differs by an order of magnitude: for minutes 10–20, p50 / p90 / p99 is 0.09 / 0.17 / 0.36 s for this engine, 1.31 / 2.24 / 3.72 s for vLLM DP4/EP4, and 0.76 / 3.81 / 7.92 s for TP4. vLLM also recomputes 1.0–1.4 old tokens per new token (recompute / new token: 1.39 for DP4/EP4, 0.97 for TP4), while this engine does no recompute.</li>
+<li><b>N = 300:</b> This engine (full) is 3.3x DP4/EP4 (32.03 vs 9.70 r/s for minutes 0–20) and about 18x TP4. TTFT p50 / p90 / p99 for minutes 10–20: 0.19 / 0.34 / 2.87 s for this engine, 19.37 / 29.47 / 34.94 s for DP4/EP4, and 275.57 / 299.96 / 306.23 s for TP4.</li>
+<li><b>Over 60 s at N = 300:</b> This engine has 205 rounds in minutes 0–20, almost all during startup (only 15 rounds in minutes 10–20); vLLM DP4/EP4 has none, but its p50 is already 19 s; TP4 has 1,400 rounds.</li>
+<li><b>N = 400:</b> This engine (Tiers) is 5.2x DP4/EP4 and 19x TP4 (34.07 vs 6.58 and 1.78 r/s for minutes 0–20); for minutes 10–20 the full setting is 8.7x DP4/EP4. TTFT p50 / p90 / p99 for minutes 10–20: this engine full 0.61 / 1.52 / 60.43 s, Tiers 0.84 / 3.81 / 60.66 s, DP4/EP4 48.31 / 148.23 / 212.89 s, TP4 319.95 / 344.78 / 349.48 s.</li>
+<li><b>Rounds over 60 s:</b> At N = 400, vLLM DP4/EP4 has 910 rounds, all in minutes 10–20 (p99 213 s); this engine has 707–727 rounds, with p99 pinned at the 60 s hard boundary (60.4–61.0 s).</li>
+<li><b>vLLM is slow because of recompute:</b> DP4/EP4's hit granularity is 8,576 tokens (KDA state only at the end of a block), so every round recomputes the tail; TP4's KV pool is 2.8x smaller, the whole pool turns over in about 270 s, and a context is evicted before the next round can use it; at N = 400 HBM cannot hold it, and an evicted context is lost along with its only KDA state, so recompute / new token reaches 5.5 (DP4/EP4) and 8.0 (TP4).</li>
+<li><b>vLLM's CPU offload does not help:</b> DP4/EP4's native offload of 50 GB per engine is within 3% of HBM only (N = 300: 9.76 r/s, TTFT 18.53 / 32.33 / 44.11 s; N = 400: 6.41 r/s, 36.25 / 74.09 / 211.36 s, minutes 0–20). It is write-through, and its capacity (8.3 million tokens per engine) is even smaller than HBM.</li>
+</ul>
+
+<h3 id="s6-11">6.11 Engine changes after the eval</h3>
+<ul class="find">
+<li><b>HBM paged at 128 tokens</b> (lane-m6-pack 8d50066): eliminates block rounding waste, see <a href="#s8-2">§8.2</a>. The tiering path is unaffected: N = 300 full 33.67 r/s (8476).</li>
+<li><b>hostgate</b> (7e391df): host time no longer counts toward waiting on the in-flight gate. N = 300 TTFT p50 is 4 ms lower, N = 400 unchanged.</li>
+<li><b>Timing of early planning</b> (9780a2f): contributes about 3 points of stage 0 busy rate in minutes 2–7 at N = 400 Tiers (27.87 vs 27.31 r/s).</li>
+<li><b>Tiering-record tail</b> (14bf48b): p99 291 µs → 15 µs.</li>
+<li>The 128-token pages and hostgate combine into the next eval code version c5d4e09, which the two real-engine runs of <a href="#s7-1">§7.1</a> use.</li>
+</ul>
+
+<div class="simsays"><b>What the sim says</b> With all three tiers on, the sim's throughput and hit distribution both match. The gaps open up where the sim treats writes as free and treats the 4 cards as equally fast, see <a href="#s8-2">§8.2</a>.</div>
+
+<h3 id="s6-12">6.12 What went wrong</h3>
+<ul class="find">
+<li><b>7996, global OOM (10-18 00:43):</b> full setting N = 500 used a strict NUMA bind, exhausted node 0, and the kernel's OOM killer killed other users' processes. Rule since then: preventing host OOM is the top priority, no more blind strict binds.</li>
+<li><b>7976, host memory blown up:</b> another user's job on the same machine plus a VM took a large amount of memory, PSI full reached 64%, some workers entered D state, and the run was voided. MADV_HUGEPAGE makes touch do memory compaction synchronously, so 150 GB took about 500 s; switched back to 4 KiB pages (7991 measured the same read bandwidth for 4 KiB and 2 MiB).</li>
+<li><b>8036, did not start:</b> the precheck found node 0 was insufficient. Another job's GPUs were on 4–7 but almost all its memory was on node 0: the cluster's Slurm does not align CPU and GPU by node (gres.conf has no Cores=), and memory follows the CPU. Since then DRAM-heavy runs are pinned to GPU 4–7.</li>
+<li><b>8039, spilled to another node:</b> the precheck counted page cache as available, but MPOL_PREFERRED with zone_reclaim_mode 0 does not reclaim page cache and allocates directly on another node instead, so 365 GB of the 600 GB landed on node 0. Changed to "check chunk by chunk, then bind" (<a href="#s6-3">§6.3</a>).</li>
+<li><b>8042, 32k TTFT 4.4 ms higher:</b> reads and dispatch 1.8 ms higher, stage 0/1 compute about 1 ms higher each, stage 2/3 unchanged. Host load was 245 at the time (6.5 at 7966); the slowness was in the host dispatching kernels, not a problem with the refactor.</li>
+<li><b>SSD I/O replaced the thread approach:</b> 8-thread <code>preadv</code> reaches the bandwidth, but CPU and tail latency are both twice io_uring's (<a href="#s6-6">§6.6</a>).</li>
+<li><b>Write-through design was replaced:</b> the earliest design wrote through on handoff, DRAM 150 GB and SSD every round. It met the target (7995, 8043), but host memory and SSD writes both far exceeded what was needed.</li>
+</ul>
+<!-- ============================== 7 ============================== -->
+<h2 id="s7"><span class="no">7</span>Instability and collapse</h2>
+<div class="tk"><b>Key points</b><ul>
+<li>Without SSD and with insufficient capacity, the system collapses: hits suddenly drop to zero, the full segment is recomputed every round, and it never recovers.</li>
+<li>The predicted quantities are the retained context W and the capacity C: once W exceeds C, collapse follows within 1–3 windows. sim and the real engine collapse in the same window.</li>
+<li>The remedy is capacity: configurations with SSD are stable in both the 20-minute real run and the 8-hour sim.</li>
+</ul></div>
+
+<h3 id="s7-1">7.1 Symptoms <span class="tag">v3 trace</span></h3>
+<ul class="find">
+<li><b>Setting:</b> a sim sweep on v3 (22 configurations) plus 2 real runs, all st10, no SSD, N = 400, 20 minutes.</li>
+<li><b>The 2 real runs differ only in DRAM size:</b> h25d50 (HBM 25 GB + DRAM 50 GB, capacity C = 48.6M token, collapses) and h25d75 (DRAM 75 GB, C = 65.3M, right at the edge).</li>
+</ul>
+<figure>
+  <div class="fighead"><span class="q">Rounds completed per 2 minutes</span>
+    <div class="seg" data-for="f7a" data-key="s"><button data-v="h25d50">h25d50</button><button data-v="h25d75">h25d75</button></div></div>
+  <div id="f7a" class="chart short" role="img" aria-label="sim and real engine rounds per 2 minutes, overlapping before collapse"></div>
+  <figcaption>DRAM only, st10, N = 400, v3 trace. Real engine 8491 (h25d50, GPU group A), 8492 (h25d75, GPU group B), code c5d4e09. sim wt-pp-staged <code>logs/20261018_15_v3_dramonly</code>.</figcaption>
+</figure>
+<h4>h25d50: both sides collapse in the same window</h4>
+<ul class="find">
+<li>Minutes 10–12: real engine 476 rounds, sim 496 rounds, hit share 0.72 on both.</li>
+<li>Before that, the per-window hit share, lost rounds, recomputed token and W all match; the real engine serves 5–19% fewer rounds in minutes 4–10.</li>
+<li>After the collapse the two sides land in different steady states: sim collapses completely, hits go to zero, about 150 rounds per 2 minutes; the real engine settles at a hit share of 0.60–0.68, about 450 rounds per 2 minutes.</li>
+<li>Both sides recompute the same number of token per window, about 16.5M. The reason is in <a href="#s8-2">§8.2</a>.</li>
+</ul>
+<div class="tbl"><table>
+<thead><tr><th>h25d50, minutes</th><th>r/s</th><th>recompute / new token</th><th>TTFT p50 / p90 / p99 (s)</th><th>&gt;60 s</th></tr></thead>
+<tbody>
+<tr><td>real engine 0–20</td><td>13.00</td><td>1.24</td><td>1.98 / 63.7 / 161</td><td>2948</td></tr>
+<tr><td>sim 0–20</td><td>13.34</td><td>1.25</td><td>1.34 / 42.7 / 284</td><td>1448</td></tr>
+<tr><td>real engine 10–20</td><td>3.74</td><td>8.47</td><td>65.8 / 159 / 170</td><td>2211</td></tr>
+<tr><td>sim 10–20</td><td>1.83</td><td>15.9</td><td>159 / 286 / 290</td><td>773</td></tr>
+</tbody></table></div>
+<h4>h25d75: both sides stable</h4>
+<ul class="find">
+<li>Hit share 0.98–0.99 in every window, about 1% of rounds lose their context. Peak W is 64.1M on the real engine and 64.6M in sim, just below C.</li>
+<li>In minutes 10–20 the real engine is 12.6% lower than sim: 26.36 vs 30.15 r/s; TTFT p50 / p90 / p99 1.84 / 11.7 / 62.5 s vs 1.12 / 8.86 / 61.8 s; stage 0 busy rate 0.855 vs 0.992.</li>
+<li>The real engine is limited by the read path, not by compute: 83% of rounds read from DRAM (sim 76%), and less context stays in HBM (15.6% vs 23.1%). This is the same kind of gap as the write cost in <a href="#s8-2">§8.2</a>.</li>
+</ul>
+
+<h3 id="s7-2">7.2 Mechanism</h3>
+<p>The cause is in the scheduler, not in the eviction policy. Two quantities:</p>
+<ul class="find">
+<li><b>W(t):</b> the context the closed-loop must retain at time t. For every session that still has a next round and whose next round has not been served yet, its most recent round's prompt plus the KDA tail state (about 24,600 token).</li>
+<li><b>C:</b> the capacity of HBM plus DRAM.</li>
+</ul>
+<figure>
+  <div class="fighead"><span class="q">Retained context W and capacity C</span>
+    <div class="seg" data-for="f7b" data-key="s"><button data-v="h25d50">h25d50</button><button data-v="h25d75">h25d75</button></div></div>
+  <div id="f7b" class="chart short" role="img" aria-label="W at the end of each 2-minute window, real engine and sim, plus the horizontal line for capacity C"></div>
+  <figcaption>W at the end of each 2-minute window (million token), dashed line is C. W for h25d50 exceeds C at minutes 6–8 and collapses three windows later; W for h25d75 stays below C throughout.</figcaption>
+</figure>
+<ul class="find">
+<li><b>Losses double:</b> after W exceeds C, rounds that lose their context roughly double every window (h25d50: 12 → 43 → 102 → 131). Each loss is a full-segment recompute of about 110K token, which is force-admitted after waiting the full 60 s.</li>
+<li><b>Self-reinforcing:</b> forced scheduling goes from oldest to newest by wait time, so every round has to queue behind these recomputes. Recompute makes the queue longer, and the longer queue makes more contexts unable to stay in cache. This is a metastable loop.</li>
+<li><b>v3 has a larger W:</b> at N = 400, W reaches 33M at minute 4 and 52–65M in minutes 8–20, more than the old trace and rising faster.</li>
+<li><b>Larger C collapses later:</b> in the sweep, all N = 400 configurations with C ≤ 57M collapse within 20 minutes, 1–3 windows after W first exceeds C. C = 41M at minutes 6–8, 48.6M at minutes 12–14, 57M at minutes 18–20 (the window where hit share first drops below 0.5).</li>
+<li><b>W exceeding C does not always collapse immediately:</b> h20d75 (C = 62.3M) has W exceeding C by up to 2.6M from minute 14 onward and still holds; h25d37 is stable at N = 300 at the original speed, and collapses at minutes 16–18 when GPU time is slowed by 3%. Near the edge, a small speed difference decides whether it collapses.</li>
+</ul>
+<p><b>Conclusions:</b></p>
+<ul class="find">
+<li>With DRAM only, N = 400 needs C roughly equal to the peak of W, about 65M token, that is 25 GB HBM plus 75 GB DRAM per GPU.</li>
+<li>The old h25d37 and h12d19 settings, and the eval's 20/20 and 12.5/12.5 settings, all collapse at minutes 4–8 on v3 once SSD is removed.</li>
+<li>With SSD 128 GB none of the three settings collapses (<a href="#s6-9">§6.9</a>).</li>
+</ul>
+
+<h3 id="s7-3">7.3 Evaluated methods</h3>
+<p class="note">Hit-priority (hg) and KDA checkpoints were evaluated on v3. The remaining methods were screened on the old trace and not rerun on v3; only the qualitative conclusions are kept here.</p>
+<div class="tbl"><table class="wrap">
+<thead><tr><th>Method</th><th>Source</th><th>Rule</th><th>Result</th><th>Conclusion</th></tr></thead>
+<tbody>
+<tr><td>hit-priority (hg)</td><td>SGLang's longest prefix match first (Zheng 2024), DLPM (Cao 2024)</td><td>Only when serving overdue requests from oldest to newest would evict some queued request's context from all tiers, let requests whose context is still present go first; otherwise the order is unchanged; no new parameters</td><td>8 hours DRAM only: from 0.6 r/s to 21–25 r/s, 98% hits, but rounds that still miss have TTFT p99 1,360–2,780 s. Never triggers with SSD, results bit-identical</td><td>Not enabled: the deployment configuration has SSD, so it is not needed</td></tr>
+<tr><td>Turn off the 60 s forced rule</td><td>design default</td><td>no wait limit</td><td>highest throughput, but some requests are never served</td><td>Rejected</td></tr>
+<tr><td>Evict by queue state</td><td>the ARC / LIRS idea</td><td>evict finished ones first, then idle ones, and only then queued ones</td><td>no effect in 20 minutes; throughput actually drops in 8 hours with SSD</td><td>Rejected</td></tr>
+<tr><td>LFU</td><td>LFU / TinyLFU (Einziger 2017)</td><td>by frequency, then by time</td><td>collapses all the same</td><td>Rejected</td></tr>
+<tr><td>Evict larger first</td><td>GreedyDual-Size (Cao &amp; Irani 1997)</td><td>by size</td><td>collapses all the same; degenerates to LRU when cost is proportional to size</td><td>Rejected</td></tr>
+<tr><td>Limit the forced-scheduling share to 0.5 / 0.25</td><td>none</td><td>hand-tuned ratio</td><td>partial improvement</td><td>Rejected: the parameter is not derived</td></tr>
+<tr><td>LIRS, ARC/CAR, 2Q, CLOCK-Pro, LRFU, EELRU, DIP/BIP/RRIP</td><td>Jiang 2002 et al.</td><td>resistant to cyclic access, permanently protect part of the cache</td><td>not run</td><td>Rejected: each miss costs about 30x, permanently protecting part of the cache amounts to limiting active sessions, better done directly at admission</td></tr>
+<tr><td>LHD, AdaptSize, GDSF</td><td>Beckmann 2018 et al.</td><td>by hit density per unit size</td><td>not run</td><td>Rejected: object sizes are close to uniform</td></tr>
+<tr><td>Working-set admission (load control)</td><td>Denning 1968 / 1980</td><td>limit active sessions so that W ≤ C</td><td>not run</td><td>Next step, involves fairness</td></tr>
+<tr><td>Capacity planning C ≥ peak W</td><td>working-set theory</td><td>size each tier by the measured W</td><td>every configuration with SSD is stable, both the 20-minute real run and the 8-hour sim</td><td>Adopted in deployment</td></tr>
+<tr><td>Store a few more KDA state per round end</td><td>CachedAttention (Gao 2024), Marconi</td><td>keep the tail state of the most recent few rounds</td><td>v3 8 hours: k2 cuts extra computed token from 13–25% of new token to 7–10%, r/s +6–14%; the 20-minute eval is barely affected</td><td>Adopt k2, real engine pending (<a href="#s9-1">§9.1</a>)</td></tr>
+</tbody></table></div>
+
+<h3 id="s7-4">7.4 Conclusion: hit priority and capacity</h3>
+<ul class="find">
+<li>All three deployed settings have SSD 128 GB and none collapses in the 20-minute real runs on v3 (<a href="#s6-9">§6.9</a>).</li>
+<li>In the 8-hour sim, DRAM 150 GB plus SSD is also stable throughout (<a href="#s7-5">§7.5</a>).</li>
+<li>hg only helps when there is no SSD, and the cost is that rounds that still miss wait thousands of seconds, so it is not enabled.</li>
+<li>Deployments without SSD size capacity by the peak of W (<a href="#s7-2">§7.2</a>).</li>
+</ul>
+<h3 id="s7-5">7.5 8-hour steady state <span class="tag">v3 trace · sim only</span></h3>
+<p><b>Setup:</b></p>
+<ul class="find">
+<li>sim, v3 8-hour closed loop. Deployment configuration: DRAM 150 GB + SSD 8 TB (SSD is the victim tier of DRAM), st10, KDA checkpoint k2 (<a href="#s9-1">§9.1</a>).</li>
+<li>Both accounting modes are reported: hb (KV backfill; test protocol: external decode returns the output KV and the state at the end of the round) and nohb (no backfill: the previous round's output becomes the next round's new tokens; v3 has no ready-made nohb trace, generated from the same v3 source).</li>
+<li>r/s binned by hours 2–4, 4–6, 6–8; TTFT from the last 2 hours; hit is the share of non-first rounds in the last 2 hours that reused context; overcompute = hours 1–8 (computed tokens − new tokens) / new tokens.</li>
+<li>Experiment wt-pp-staged <code>logs/20261018_15_v3_8h_steady</code>.</li>
+</ul>
+<div class="tbl"><table>
+<thead><tr><th>Accounting</th><th>Tier</th><th>k</th><th>Load</th><th>r/s (per 2 h)</th><th>TTFT p50 / p90 / p99 (s)</th><th>Hit</th><th>Overcompute</th><th>r/s 1–8 h</th></tr></thead>
+<tbody>
+<tr><td>hb</td><td>DRAM 150 + SSD 8 TB</td><td>k2</td><td>c1563</td><td>63.7 / 58.2 / 53.0</td><td>3.0 / 16.6 / 63</td><td>99.3%</td><td>7.2%</td><td>58.60</td></tr>
+<tr><td>hb</td><td>DRAM 150 + SSD 8 TB</td><td>k2</td><td>c2000</td><td>63.5 / 57.4 / 53.5</td><td>3.1 / 62.8 / 73</td><td>99.3%</td><td>8.2%</td><td>58.64</td></tr>
+<tr><td>hb</td><td>DRAM 150 + SSD 8 TB</td><td>k2</td><td>c2500</td><td>54.8 / 55.0 / 53.4</td><td>4.2 / 67.1 / 81</td><td>99.3%</td><td>10.3%</td><td>54.94</td></tr>
+<tr class="ref"><td>hb</td><td>DRAM 150 + SSD 8 TB</td><td>k1</td><td>c1563</td><td>60.0 / 56.2 / 51.0</td><td>3.5 / 20.1 / 63</td><td>99.3%</td><td>13.3%</td><td>55.39</td></tr>
+<tr class="ref"><td>hb</td><td>DRAM 150 + SSD 8 TB</td><td>k1</td><td>c2000</td><td>57.5 / 53.7 / 47.9</td><td>4.0 / 64.9 / 80</td><td>99.2%</td><td>19.3%</td><td>53.21</td></tr>
+<tr class="ref"><td>hb</td><td>DRAM 150 + SSD 8 TB</td><td>k1</td><td>c2500</td><td>48.4 / 48.5 / 45.4</td><td>8.3 / 75.5 / 96</td><td>99.2%</td><td>24.8%</td><td>48.14</td></tr>
+<tr><td>nohb</td><td>DRAM 150 + SSD 8 TB</td><td>k1</td><td>c1438</td><td>51.9 / 50.1 / 44.7</td><td>4.9 / 21.9 / 62</td><td>99.3%</td><td>4.6%</td><td>48.91</td></tr>
+<tr><td>nohb</td><td>DRAM 150 + SSD 8 TB</td><td>k1</td><td>c2000</td><td>51.2 / 49.5 / 45.7</td><td>5.3 / 64.0 / 76</td><td>99.4%</td><td>5.8%</td><td>49.18</td></tr>
+<tr><td>hb</td><td>DRAM 150 only</td><td>k2</td><td>c2000</td><td>0.7 / 0.7 / 0.7</td><td>1746 / 1762 / 1771</td><td>0.0%</td><td>4732%</td><td>0.69</td></tr>
+<tr><td>hb</td><td>DRAM 150 only</td><td>k2</td><td>c2500</td><td>0.7 / 0.7 / 0.7</td><td>2176 / 2198 / 2211</td><td>0.0%</td><td>4594%</td><td>0.69</td></tr>
+<tr><td>nohb</td><td>DRAM 150 only</td><td>k1</td><td>c1438</td><td>0.7 / 0.7 / 0.7</td><td>1280 / 1297 / 1306</td><td>0.0%</td><td>5332%</td><td>0.68</td></tr>
+<tr><td>nohb</td><td>DRAM 150 only</td><td>k1</td><td>c2000</td><td>0.7 / 0.7 / 0.7</td><td>1747 / 1764 / 1774</td><td>0.0%</td><td>4116%</td><td>0.69</td></tr>
+</tbody></table></div>
+<p class="note">Under nohb, the KDA checkpoint has no effect (there is no backfilled decode end), so only k1 is reported. Gray rows are the k1 reference. st10 and the base mode with no loading area and DRAM inclusive differ by 0.5 r/s or less under k2.</p>
+<ul class="find">
+<li><b>Stable throughout with SSD.</b> Compute volume in every 2-hour window is 138–141k token/s, hit 99.2–99.4%. At the end of 8 hours there are 330–1,560 queued rounds, none waiting more than 60–86 s. The tail is determined by the 60 s forced rule: TTFT p90 for c2000 / c2500 is 62–76 s.</li>
+<li><b>The r/s drop in later segments is because rounds got larger, not because cache failed.</b> New tokens per round rose from 2.08–2.11k in hours 2–4 to 2.34–2.40k in hours 6–8 (hb), and overcompute in hours 6–8 is also slightly higher (k2 c2000: 7.0% → 10.0%). r/s is at most 17% lower, new-token throughput changes only −8% to +1%.</li>
+<li><b>SSD was not filled after 8 hours.</b> At the end of 8 hours SSD used 3.1–4.5 TB (k1 39–45%, k2 54–56%), with no eviction yet; SSD reads 4.8–8.3 GB/s, the channel is 10 GB/s. Steady state beyond 8 hours, after SSD starts evicting, is not covered.</li>
+<li><b>With DRAM only, every configuration collapses.</b> From hour 2, 0.6–0.7 r/s, almost zero hit, overcompute is 41–59x new tokens, TTFT in the thousands of seconds. Neither st10 nor k2 changes this. hg can hold at 21–25 r/s (k1, base mode, hit 98%), but rounds that still miss have TTFT p99 1,360–2,780 s; with SSD, hg never triggers and results are bit-identical to baseline.</li>
+<li><b>Cost of the whole-segment hit rule.</b> KDA state is only available at saved positions; rounds whose truncation falls inside the previous round cannot keep using cache. On v3 this cost is the "overcompute" in the table: under hb, k1 13–25%, k2 7–10%. The trade-off for k and the remaining parts are in <a href="#s9-1">§9.1</a>.</li>
+</ul>
+
+<div class="simsays"><b>What sim says</b>sim reproduced the real engine's collapse window and also gave quantities that can predict collapse (W and C). It shifted the question from "which eviction policy to switch to" to "whether capacity is sufficient, and who goes first under overload". The 8-hour conclusions still come only from sim.</div>
+
+<h3 id="s7-6">7.6 What went wrong</h3>
+<ul class="find">
+<li><b>hg was not moved to the deployment branch:</b> hg is only on the pp-stable branch (063c85ae). Moving it to pp-staged conflicts with staged loading (<code>fresh_source.rs</code>), so the combination of hg with st10 and k2 was not run.</li>
+<li><b>No ready-made nohb trace:</b> v3 only has the 8-hour trace in backfill mode. nohb was regenerated from the same v3 source (<code>session_closed_loop.py</code> plus <code>fold.py</code>); c1438 is a newly sampled closed loop and does not fully correspond to the hb load.</li>
+<li><b>The whole-segment hit rule was not re-attributed on v3:</b> this requires rebuilding the pre-rule code (7bb224a6) and rerunning v3. Its cost is represented by k1 / k2 overcompute (last item above).</li>
+</ul>
+
+<!-- ============================== 8 ============================== -->
+<h2 id="s8"><span class="no">8</span>How accurate is sim</h2>
+<div class="tk"><b>Key points</b><ul>
+<li>From kernel to 20-minute closed-loop session, errors did not amplify layer by layer: throughput 1–5%, hit distribution and collapse window both match.</li>
+<li>There are six deviations, and all causes have been found; only sim's read-start rule after collapse has not yet been confirmed in code.</li>
+</ul></div>
+
+<h3 id="s8-1">8.1 Where it matches</h3>
+<ul class="find">
+<li><b>kernel, single-step iteration, bring-up:</b> kernel median ratio 0.95–1.08; single-request and simultaneous-arrival saturation tests are within ±10%; scheduling checks are identical per microbatch; DRAM and SSD read times meet target (<a href="#s4">§4</a>–<a href="#s6-8">§6.8</a>).</li>
+<li><b>Throughput:</b> old trace with HBM only (M5) differs by 0–1.5%; v3 three-tier, at N = 100 / 300 rounds/s are within 1%, at N = 400 4–5% lower; hit distribution among HBM, DRAM, and SSD matches.</li>
+<li><b>Tail:</b> p99 at N = 400 falls on the boundary of 60 s forced scheduling; rounds over 60 s are 1.02% vs 0.77%.</li>
+<li><b>Dynamics:</b> with DRAM only, before collapse the number of rounds per 2 minutes, hit share, lost rounds, recompute amount, and W match window by window; collapse appears in the same window (both old trace and v3); edge configurations are stable on both sides. In the HBM-only, N = 400 bistable region, the real engine falls on the median of sim's perturbation range.</li>
+</ul>
+<p>The scenario itself is complex: 20-minute closed loop, context approaching 1M tokens, 4-stage pipeline, session-level prefix cache, three-tier read-back, SRPT, read wait cap, loading area, and the 60 s forced rule all stacked together, yet errors did not amplify layer by layer.</p>
+
+<h3 id="s8-2">8.2 Where it deviates</h3>
+<div class="tbl"><table class="wrap">
+<thead><tr><th>Deviation</th><th>Impact</th><th>Cause</th><th>Handling</th></tr></thead>
+<tbody>
+<tr><td>Write cost</td><td>With no loading area, N = 400 real engine is 12% lower, sim unchanged</td><td>Reads must wait for eviction writes to free space; sim treats writes as free</td><td>Deployment uses st10 (10% loading area)</td></tr>
+<tr><td>Hot cards</td><td>N = 400 4–5% lower, TTFT p50 20–30% higher</td><td>Cards 3 and 4 are hotter; frequency is 5–7% lower under the power cap; stages 2/3 are the bottleneck</td><td>Record only; do not add per-stage coefficients to sim</td></tr>
+<tr><td>Block rounding</td><td>HBM only, at N = 400 real engine 12.97 r/s</td><td>8,576-token blocks waste about 2.4% of HBM</td><td>Changed HBM to 128-token pages</td></tr>
+<tr><td>Steady state after collapse</td><td>sim hit drops to zero, real engine stays at about 65%</td><td>The real engine starts DRAM reads for overdue rounds at the 60 s boundary; sim does not (presumed)</td><td>To be confirmed in sim code</td></tr>
+<tr><td>Host overhead</td><td>TTFT several to a dozen-plus ms higher</td><td>In sim, admission, preparation, read submission, and completion take no time</td><td>hostgate reduced by 4 ms, the rest recorded only</td></tr>
+<tr><td>Short-read latency</td><td>SSD read p99 16–18 ms for a small number of slots</td><td>sim computes linearly at 10 GB/s</td><td>Record only</td></tr>
+</tbody></table></div>
+
+<h4>Write cost</h4>
+<ul class="find">
+<li><b>Phenomenon:</b> With no loading area (excl), sim is the same as st10 (N = 400 Tiers 39.79 vs 39.77 r/s), but the real engine is 12% lower (33.10 vs 37.66; 8453 vs 8431). At N = 300 throughput is 1.7% lower, TTFT p90 0.80 s vs 0.42 s, recompute / new token 0.094 vs 0.025.</li>
+<li><b>Mechanism:</b> A wait loop. With no loading area, read placement must wait for eviction writes to free blocks, and these writes wait for DRAM slots occupied by in-flight reads. DRAM read p50 is therefore 217 ms (st10 55 ms), and stage 0 busy rate drops to 0.875.</li>
+<li><b>What sim cannot see:</b> it does not account for write time. So the loading area is necessary.</li>
+<li><b>Same class of gap:</b> the extra 50 ms for 512k in SSD bring-up (<a href="#s6-8">§6.8</a>), the DRAM-only h25d75 real engine 12.6% lower (<a href="#s7-1">§7.1</a>).</li>
+</ul>
+<h4>Hot cards</h4>
+<ul class="find">
+<li>Across the two groups of 4 GPUs, cards 3 and 4 (stage 2, 3) run 10–14 °C hotter than the first two and clock 5–7% lower under the 1000 W power cap.</li>
+<li>stage 2/3 are already the busiest in the pipeline (busy rate 94–98%), running about 7% slower than sim in ms per thousand tokens. Running the GPUs in reverse order moves part of the gap with the GPU.</li>
+<li>At the same clock, the real engine / sim ratio per op is identical across the 4 stages, so this is not a profile or cost-model issue.</li>
+<li>Slowing sim down by 3% overall (gpu_time_multiplier 1.025–1.035) reproduces about 2/3 of the N = 400 gap (41.1 r/s, TTFT 0.56 / 1.44 / 54 s); the N = 300 loss is concentrated when stage 2/3 are near saturation, and an overall slowdown explains little of it. The extra ~30 ms on N = 300 small requests is also from this.</li>
+<li>Do not add per-stage factors to sim: that amounts to modeling GPU slot position.</li>
+</ul>
+<h4>block rounding</h4>
+<ul class="find">
+<li>HBM was allocated in 8,576-token blocks, wasting an average of 4.3k tokens per context, about 2.4% of HBM.</li>
+<li>With HBM only and N = 400 right at the capacity edge, this 2.4% decides the result: reducing sim capacity by 2.4% gives 11.2–12.7 r/s and recompute / new token about 1.75, matching the block version on the real engine (12.97 r/s, 1.76).</li>
+<li>After changing HBM to 128-token pages, each context wastes only 63 tokens; the real engine gives 16.16 r/s and recompute / new token 1.21, landing on the median of sim at full capacity (<a href="#s5-6">§5.6</a>).</li>
+</ul>
+<h4>Steady state after collapse</h4>
+<ul class="find">
+<li>After h25d50 collapses, sim hits drop to zero, while the real engine stays at about 65% DRAM hit rate (<a href="#s7-1">§7.1</a>).</li>
+<li><b>Real engine:</b> in the collapse window, rounds that hit DRAM start reading 51 / 62 / 68 s after arrival (p10 / p50 / p90), i.e. right at the 60 s forced boundary; once the read lands, this round is admitted before recompute, TTFT is about 64 s, and rounds that lost their context take about 163 s.</li>
+<li><b>sim:</b> of the 601 rounds arriving after minute 12, 569 still had their context in DRAM on arrival, but by the time they produced the first token none were left: the context was evicted by LRU 163 / 183 / 189 s after arrival, and no read had started in the meantime.</li>
+<li><b>Hypothesis:</b> when sim's staged loading has a whole recompute segment ahead of the overdue queue, it does not start the DRAM read for the overdue round. Not yet confirmed in code (<code>FreshQueues::stage_loads</code> in wt-pp-staged <code>fresh_source.rs</code>, <code>PrefixFetch::stage</code> / <code>load_gate</code> in <code>prefix_fetch.rs</code>).</li>
+<li>It only affects the period after collapse; the collapse window and everything before match.</li>
+</ul>
+<h4>Host overhead and short-read latency</h4>
+<ul class="find">
+<li>Low-load TTFT p50 0.09 s vs 0.08 s; 512k first-round HBM hit 65.79 ms vs 57.5 ms, host 11.7 ms vs sim 0; under high host load (8042) kernel dispatch is slower.</li>
+<li>sim computes SSD read time linearly at 10 GB/s; measured p99 for a small number of slots is 16–18 ms.</li>
+</ul>
+
+<h3 id="s8-3">8.3 Parts not yet validated</h3>
+<ul class="find">
+<li>Hour-scale long runs: only sim results, no real-engine comparison. Within 8 hours SSD is used at most 56%, and the steady state after SSD starts evicting is not covered.</li>
+<li>KDA checkpoints and state compression: evaluated only in sim (<a href="#s9">§9</a>).</li>
+<li>sim's DRAM read start rule after collapse (<a href="#s8-2">§8.2</a>).</li>
+<li>Other models, parallelism schemes, and hardware: only GLM-5.3-Flash PP4 / B200 validated.</li>
+</ul>
+
+<h3 id="s8-4">8.4 Feedback to sim</h3>
+<ul class="find">
+<li>realistic-input profile DB: kernel inputs must use real distributions.</li>
+<li>Whole-segment hit rule (<code>1de110c0</code>): KDA state is only valid at the end, so handoff was changed to v2.</li>
+<li>Sparse MLA splitting above 32,768 rows (<code>7bb224a6</code>).</li>
+<li>Tiering syntax: <code>dram_tier_writes: hbm-evictions</code> (4b93b396), <code>ssd_tier_writes: dram-evictions</code> combined with it (08c0e231, eaab79cd), exclusive DRAM <code>hbm-evictions-exclusive</code> plus loading area <code>prefix_tier_loading_area</code> (st10).</li>
+<li>KDA state: <code>recurrent_state_checkpoints</code> (k, atomic entries, c7dc261f; reads move only surviving state, 0d19fb23), anchor retention (b0455c55), <code>tier_state_compression_ratio</code> (d376d8ff), anchor in-place retention (e4de4292).</li>
+<li>Anti-thrashing: <code>force_schedule_hits_first</code> and <code>force_schedule_hits_first_when_at_risk</code> (hg, pp-stable 063c85ae, off by default).</li>
+</ul>
+
+<!-- ============================== 9 ============================== -->
+<h2 id="s9"><span class="no">9</span>To do: KDA state checkpoints and compression</h2>
+<div class="tk"><b>Key points</b><ul>
+<li>KDA layers can only continue from a state saved at an exact position; this is the largest remaining loss in the 8-hour sim with SSD.</li>
+<li>k2 (also store the end of the most recent round's prefill) is the best value: recompute drops from 13–25% to 7–10%, r/s +6–14%.</li>
+<li>State compression is about 1.86x and only clearly helps when used together with anchor. Neither is implemented on the real engine yet.</li>
+</ul></div>
+
+<h3 id="s9-1">9.1 KDA checkpoints: k1 / k2 / k4 and anchor</h3>
+<ul class="find">
+<li><b>Two ends:</b> each round has two positions where state can be saved: the end of prefill (end of prompt) and the end of the backfilled decode.</li>
+<li><b>k:</b> the number of end states stored per retained context. k1 stores only the decode end; k2 also stores the end of the most recent round's prefill; k4 additionally stores the two ends of the previous round.</li>
+<li><b>Atomic entries:</b> KV and its k states are evicted and demoted together; each state is counted in real bytes in DRAM and SSD, 36.9 MB per GPU, about 24,600 tokens of KV.</li>
+<li><b>Resume:</b> a round continues from the deepest state before its declared prefix, or recomputes the whole segment if there is none.</li>
+<li><b>anchor (mNsS):</b> keep N additional anchors beyond k2's two states: the prefill ends of earlier rounds whose round number is a multiple of S. This targets the class of rounds left after k2 (see below).</li>
+</ul>
+<div class="tbl"><table>
+<thead><tr><th>Strategy</th><th>Recompute c1563 / c2000 / c2500</th><th>r/s c1563 / c2000 / c2500</th><th>vs k2</th><th>TTFT p50 / p90 / p99 (s) c2000</th><th>State writes GB/s c2000</th></tr></thead>
+<tbody>
+<tr class="ref"><td>k1</td><td>13.3 / 19.3 / 24.8%</td><td>55.39 / 53.21 / 48.14</td><td>−5 / −9 / −12%</td><td>3.31 / 62.7 / 75.6</td><td>2.47</td></tr>
+<tr><td><b>k2</b></td><td>7.2 / 8.2 / 10.3%</td><td>58.60 / 58.64 / 54.94</td><td>–</td><td>2.53 / 62.2 / 70.2</td><td>5.64</td></tr>
+<tr><td>k4</td><td>4.3 / 5.1 / 5.9%</td><td>59.63 / 59.63 / 55.88</td><td>+1.8 / +1.7 / +1.7%</td><td>1.76 / 62.1 / 67.9</td><td>–</td></tr>
+<tr><td>m1s2</td><td>3.9 / 4.6 / 5.2%</td><td>60.25 / 60.37 / 56.91</td><td>+2.8 / +2.9 / +3.6%</td><td>1.96 / 62.1 / 68.1</td><td>8.04</td></tr>
+<tr><td>m2s2</td><td>2.6 / 2.8 / 3.0%</td><td>59.79 / 60.22 / 56.92</td><td>+2.0 / +2.7 / +3.6%</td><td>1.28 / 62.0 / 66.6</td><td>9.88</td></tr>
+</tbody></table></div>
+<p class="note">sim, v3 8 hours, hb, DRAM 150 GB + SSD 8 TB, st10, hours 1–8. Recompute = (tokens computed − new tokens) / new tokens. wt-pp-staged <code>logs/20261018_6_v3_stB</code> (k1 / k2 / k4), <code>logs/20261018_10_kda_anchors</code> (anchor).</p>
+<p><b>Where k1's recompute comes from.</b> Fewer than 1% of rounds cause all the recompute. These rounds have about 150k tokens of context and only about 2.2k new tokens, so even losing 0.15% of the prefix equals 13% of new tokens. Split into two classes by relation to the previous round (base mode, c1563 / c2000 / c2500, as a share of new tokens):</p>
+<ul class="find">
+<li><b>prompt stops in the middle of the previous round's backfilled output</b> (inside_output): 5.5 / 9.1 / 11.5%. The prompt is only a few tokens shorter than the decode end, yet k1 can only recompute the whole segment. k2 stores the prefill end, dropping this class to 0.02–0.03%.</li>
+<li><b>prompt stops in the middle of the previous round's prompt</b> (inside_prompt): 7.3 / 8.0 / 10.7%. The prompt really is shorter than the previous round (truncation or compression). Everything left after k2 is in this class; k4 and anchor recover part of it.</li>
+<li>Other rounds: 0.04%.</li>
+</ul>
+<p><b>Trade-offs.</b></p>
+<ul class="find">
+<li><b>k2 is the best value.</b> Storing just one more state, about 0.58 TB of extra state on DRAM + SSD, cuts recompute from 13–25% to 7–10% and raises r/s by 6 / 10 / 14%. State writes rise from about 2.5 GB/s to 5.4–5.6 GB/s, still far from the bandwidth limit.</li>
+<li><b>k4 adds only another 1.7–1.8%.</b> It halves recompute again, but in base mode without a loading area it is actually slower than k2: each read moves 4 states, SSD reads reach 9.3–9.7 GB/s, close to the 10 GB/s channel.</li>
+<li><b>anchor adds 2–4% over k2.</b> m1s2 recovers 44–51% of the offline upper bound (resume from any position), m2s2 recovers 64–73%. The cost is in I/O: extra state grows to 1.2 TB (m1s2) and 1.7–1.8 TB (m2s2), state writes rise to 8.0 and 9.5–9.9 GB/s, SSD reads 8.1–9.1 GB/s; m2s2's compute at c1563 / c2000 drops to 137.6–138.4k token/s and starts to be I/O-bound. m3s2 is no better than m2s2.</li>
+<li><b>anchor in-place retention is more cost-effective.</b> Keeping anchor in the tier where it first lands instead of demoting it step by step with the entry (e4de4292): m2s2's state writes return to 5.9–6.0 GB/s, on par with k2, and r/s is 4.1 / 5.7 / 7.7% higher than k2.</li>
+<li><b>Not useful for the 20-minute eval.</b> With the M6 v3 trace and no cache pressure, k1 recompute is 1.57%, k2 1.18%, k4 0.88%; m1s2 saves only 0.46% of k1's compute. So the comparison in <a href="#s6-9">§6.9</a> is unaffected by k; k only matters for long sessions and long runs.</li>
+</ul>
+<p><b>Plan:</b> On the real engine, do k2 first (atomic entries, billed by real bytes, reads move only live state). The anchor must be done together with the compression or in-place retention in <a href="#s9-2">§9.2</a>, otherwise the extra state writes will eat the gain.</p>
+
+<h3 id="s9-2">9.2 KDA state compression in tiering</h3>
+<p>Each layer's KDA state is fp32 [H, 128, 128]. When written to DRAM and SSD it is compressed by a threshold rule: values with |x| &lt; 0.3 are stored as fp16(x · 2<sup>16</sup>) (a power-of-2 scale, the scaling itself is lossless), the rest stay fp32.</p>
+<ul class="find">
+<li><b>Compression ratio and error.</b> On 19 real states taken from the SSEngine SSD shard: compression ratio about 1.86x, relative RMS error 1.8e-7, the largest 1% of values lossless. Most heads have max|x| &lt; 0.3, so the whole head can be stored as fixed-length fp16.</li>
+<li><b>Comparison:</b> lossless compression (zstd plus byte shuffle) only gives about 1.15x; bf16 of the same size has 8x the error; fp16 without scaling turns about 22% of values into zeros or subnormals.</li>
+<li><b>Error does not accumulate.</b> The KDA update is non-expansive with respect to state error (k is a unit vector, β, α ∈ (0, 1)), so compression error is not amplified during the subsequent compute. Checks of the subsequent CPU compute show the error is more than 10x smaller than the noise of the bf16 input itself.</li>
+<li><b>Encoding and decoding happen only on the host CPU.</b> At full load the stage's SMs are all busy, and the tiering path uses only the copy engine (<a href="#s6-1">§6.1</a>), so no GPU encode/decode is used. State in HBM is not compressed.</li>
+</ul>
+<div class="tbl"><table>
+<thead><tr><th>Policy</th><th>Compression</th><th>r/s c1563 / c2000 / c2500</th><th>vs k2 uncompressed</th><th>state write GB/s</th><th>SSD write / read GB/s</th></tr></thead>
+<tbody>
+<tr class="ref"><td>k2</td><td>none</td><td>58.60 / 58.64 / 54.94</td><td>–</td><td>5.42 / 5.64 / 5.40</td><td>1.82–1.99 / 6.90–7.64</td></tr>
+<tr><td>k2</td><td>1.86x</td><td>58.65 / 58.96 / 55.62</td><td>+0.1 / +0.5 / +1.2%</td><td>2.88 / 3.09 / 2.98</td><td>1.05–1.21 / 6.14–7.35</td></tr>
+<tr class="ref"><td>m2s2</td><td>none</td><td>59.79 / 60.22 / 56.92</td><td>+2.0 / +2.7 / +3.6%</td><td>9.73 / 9.88 / 9.48</td><td>2.31–2.40 / 8.68–9.09</td></tr>
+<tr><td>m2s2</td><td>1.86x</td><td>60.94 / 61.58 / 58.60</td><td>+4.0 / +5.0 / +6.7%</td><td>5.59 / 5.67 / 5.48</td><td>1.46–1.50 / 8.23–8.56</td></tr>
+<tr><td>m3s2</td><td>1.86x</td><td>61.01 / 61.42 / 58.24</td><td>+4.1 / +4.7 / +6.0%</td><td>6.65 / 6.71 / 6.44</td><td>1.48–1.51 / 8.54–8.90</td></tr>
+</tbody></table></div>
+<p class="note">sim, v3 8 hours, hb, DRAM 150 GB + SSD 8 TB, st10, hours 1–8. The sim only shrinks the state bytes in tiering by the 1.86 ratio (<code>tier_state_compression_ratio</code>), it does not account for host CPU encode/decode time. wt-pp-staged <code>logs/20261018_12_kda_compress</code>. At DRAM 220 GB, m2s2 compressed is 2.7–6.9% higher than k2.</p>
+<ul class="find">
+<li><b>Writes halved, reads almost unchanged.</b> k2's state writes are 47% lower, SSD writes 35–45% lower. SSD reads are dominated by KV and are almost unchanged, so compression does not relieve read bandwidth.</li>
+<li><b>Used on k2 alone the gain is very small</b> (+0.1–1.2%), because k2's writes were not the bottleneck to begin with.</li>
+<li><b>It only makes sense together with the anchor.</b> With m2s2 compression, state writes return to k2's uncompressed level, and r/s is 4.0–6.7% higher than k2 (DRAM 150 GB), up to +6.9% (DRAM 220 GB, c2500). Compression on top of the in-place retention anchor adds almost nothing more.</li>
+</ul>
+<p><b>Not done yet:</b></p>
+<ul class="find">
+<li>Logits comparison on the real model (whether the output tokens are unchanged after the compressed subsequent compute).</li>
+<li>Host CPU encode/decode time (not modeled in the sim, must be measured on the real engine).</li>
+<li>Real-engine implementation.</li>
+</ul>
+
+<!-- ============================== 10 ============================== -->
+<h2 id="s10"><span class="no">10</span>Conclusions and next steps</h2>
+<ul class="find">
+<li><b>Scope:</b> this model and hardware, the v3 load, the HBM → DRAM → SSD three tiers, the non-collapsing configuration.</li>
+<li><b>Accuracy:</b> the sim's throughput prediction error is 1–5%, and the distribution of hits across the three tiers and the collapse window also line up; every step of bring-up (kernel, single request, simultaneous arrival, prefix, scheduling check, tiered read) matches the target.</li>
+<li><b>All gaps were traced to a cause:</b> write cost, hot card, block rounding, host overhead.</li>
+<li><b>Better than vLLM:</b> under the same load at N = 400, minutes 0–20, throughput is 5.2x vLLM DP4/EP4 and 19x TP4; TTFT p50 / p90 / p99 0.99 / 4.70 / 61.00 s vs 36.23 / 67.53 / 201.68 s (DP4/EP4) and 147.10 / 333.85 / 346.84 s (TP4).</li>
+<li><b>More importantly,</b> the sim let us work out the DRAM and SSD sizes and write patterns, the loading area size, and which optimizations we did not need to do, all before touching anything.</li>
+</ul>
+<p>Next steps:</p>
+<ul class="find">
+<li>Implement KDA checkpoint k2 on the real engine, then evaluate the anchor plus state compression (<a href="#s9">§9</a>).</li>
+<li>Verify on the real model that state compression does not change the output, and measure host CPU encode/decode time.</li>
+<li>Confirm in the sim code the DRAM read launch rule for overdue rounds after collapse (<a href="#s8-2">§8.2</a>).</li>
+<li>Steady state beyond 8 hours, after SSD starts evicting (sim).</li>
+</ul>
+
+<!-- ============================== 11 ============================== -->
+<h2 id="s11"><span class="no">11</span>Appendix: jobs, experiments and commits</h2>
+<h3 id="s11-1">11.1 Real-engine jobs</h3>
+<div class="tbl"><table class="wrap">
+<thead><tr><th>Job</th><th>Content</th><th>Result</th></tr></thead>
+<tbody>
+<tr><td>7029</td><td>vLLM TP4 + EP correctness reference (40 prompts)</td><td>§3.4</td></tr>
+<tr><td>7068–7070 · 7080</td><td>M2 single layer</td><td>§4.3</td></tr>
+<tr><td>7303 · 7304 · 7323</td><td>Host time eager / CUDA graph; bitwise graph check</td><td>§4.4</td></tr>
+<tr><td>7279</td><td>Inter-stage transfer A/B: copy engine vs NCCL</td><td>§4.4</td></tr>
+<tr><td>7389 · 7392 · 7396</td><td>Power cap at saturation, nsys comparison, GPU order reversal</td><td>§4.5</td></tr>
+<tr><td>7444–7451 · 7483 · 7523–7539</td><td>KV audit (vLLM / this engine), KDA vs float64, vLLM Triton KDA</td><td>§4.6</td></tr>
+<tr><td>7403 · 7404</td><td>prefix cache on / off; prefix bring-up</td><td>§5.2</td></tr>
+<tr><td>7476 · 7569</td><td>Block check, unaligned P</td><td>§5.2</td></tr>
+<tr><td>7683 · 7693</td><td>M4 session N = 400 / 500 (old trace)</td><td>§5.3</td></tr>
+<tr><td>7708–7744 · 7932</td><td>Scheduling check, forced scheduling check</td><td>§5.4</td></tr>
+<tr><td>7900 · 7901 · 7902 · 7907 · 7933 · 7934</td><td>M5 session N = 200–500 (old trace; 7907 reverses GPU order)</td><td>§5.5, hot card analysis §8.2</td></tr>
+<tr><td>7916</td><td>Host-to-GPU bandwidth</td><td>§6.2</td></tr>
+<tr><td>7960 · 7966</td><td>Tiering bring-up: HBM hit for the full pool; DRAM (before refactor)</td><td>§6.8</td></tr>
+<tr><td>7969 · 7970</td><td>DRAM-only h25d37 · h12d19, N = 400 (old trace)</td><td>§6.8</td></tr>
+<tr><td>7976</td><td>full DRAM N = 400</td><td>Canceled: host memory blown up</td></tr>
+<tr><td>7995</td><td>full DRAM N = 400 (before refactor, old trace)</td><td>§6.4, §6.8</td></tr>
+<tr><td>7996</td><td>full DRAM N = 500</td><td>Global OOM</td></tr>
+<tr><td>8036 · 8039</td><td>full DRAM N = 500 rerun</td><td>Did not start · canceled after overflow</td></tr>
+<tr><td>8041</td><td>GPU byte test (kvpool)</td><td>Passed, §6.8</td></tr>
+<tr><td>8042</td><td>DRAM bring-up (kvpool)</td><td>Passed, §6.8</td></tr>
+<tr><td>8043</td><td>full DRAM N = 400 (kvpool, old trace)</td><td>Consistent with 7995, §6.4, §6.8</td></tr>
+<tr><td>8061</td><td>GPU byte test (io_uring + shard)</td><td>Passed, §6.8</td></tr>
+<tr><td>8073</td><td>SSD bring-up</td><td>Read reached target, §6.8</td></tr>
+<tr><td>8456</td><td>v3 eval N = 100 Tiers</td><td>§6.9</td></tr>
+<tr><td>8447 · 8462 · 8448 · 8466 · 8446</td><td>v3 eval N = 300: full · Tiers · SSD-heavy · excl Tiers · HBM only</td><td>§5.6, §6.9, §8.2</td></tr>
+<tr><td>8451 · 8431 · 8452 · 8453 · 8450</td><td>v3 eval N = 400: full · Tiers · SSD-heavy · excl Tiers · HBM only</td><td>§6.9, §8.2</td></tr>
+<tr><td>8473 · 8474 · 8475 · 8476</td><td>hostgate N = 300 / 400 · 128-token page N = 400 HBM only / N = 300 full</td><td>§6.11, §8.2</td></tr>
+<tr><td>8491 · 8492</td><td>DRAM only, h25d50 · h25d75, N = 400</td><td>Collapse · stable, §7.1</td></tr>
+<tr><td>vLLM 8457 · 8280 · 8250 · 8281 · 8251</td><td>vLLM DP4/EP4 cache-aware, N = 100 / 300 / 400 (8281, 8251 add CPU offload)</td><td>§6.10</td></tr>
+<tr><td>vLLM 8458 · 8420 · 8419</td><td>vLLM TP4, N = 100 / 300 / 400</td><td>§6.10</td></tr>
+</tbody></table></div>
+<h3 id="s11-2">11.2 sim experiment directories</h3>
+<ul class="find">
+<li><code>wt-pp-hitrule/logs/20261016_11_realistic_inputs</code>: realistic-input profile DB</li>
+<li><code>wt-pp-dram-victim/logs/20261017_4_dram_victim</code>: victim DRAM sweep</li>
+<li><code>wt-pp-dram-victim/logs/20261017_5_victim_tier_sizes</code>: three-setting configuration sweep</li>
+<li><code>wt-pp-dram-victim/logs/20261017_7_victim_chain</code>: tier-by-tier writeback (SSD write volume in §6.5)</li>
+<li><code>wt-pp-staged/logs/20261018_13_v3_m6_c100</code>, <code>20261018_11_v3_m6_c300</code>, <code>20261018_9_v3_m6</code>: sim targets for the v3 eval (N = 100 / 300 / 400)</li>
+<li><code>wt-pp-staged/logs/20261018_14_v3_m6_slow</code>: control with everything slowed down by 3%</li>
+<li><code>wt-pp-staged/logs/20261018_15_v3_dramonly</code>: DRAM-only collapse sweep</li>
+<li><code>wt-pp-staged/logs/20261018_15_v3_8h_steady</code>: 8-hour steady state; <code>wt-pp-stable/logs/20261018_0_v3_hg</code>: hg</li>
+<li><code>wt-pp-staged/logs/20261018_1_v3_katomic</code>, <code>20261018_6_v3_stB</code>: KDA checkpoints k1 / k2 / k4</li>
+<li><code>wt-pp-staged/logs/20261018_10_kda_anchors</code>, <code>20261018_12_kda_compress</code>: anchor and state compression</li>
+</ul>
+<h3 id="s11-3">11.3 Commit</h3>
+<ul class="find">
+<li>SSEngine: <code>m4-done</code> db6895d, <code>m5-done</code> a167593, lane-m6 afda6f3 (kvpool refactor), lane-m6-ssd db48f02 · 016976e · 913eadf · ceff3dc, eval code lanes/m6-eval-run a78dc6f · 9496233 (including 9780a2f, 14bf48b, ab0099a), lane-m6-pack 8d50066, lane-m6-hostgate 7e391df, lane-m6-next c5d4e09</li>
+<li>ServingStudioSim: handoff v2 5153041a (<code>1de110c0</code>), pp-dram-victim 4b93b396 · 08c0e231 · eaab79cd · ef23e439 (handoff doc), pp-staged c7dc261f · 0d19fb23 · b0455c55 · d376d8ff · e4de4292, pp-stable 063c85ae</li>
+</ul>
+<h3 id="s11-4">11.4 Reproduction</h3>
+<p>sim (CPU only):</p>
+<pre class="src">cd wt-pp-staged
+uv run python -m launcher logs/20261018_9_v3_m6/preset.yaml --no-gpu --no-plot --parallelism 14</pre>
+<p>Real engine session (SSEngine eval tree, Slurm):</p>
+<pre class="src">cd lanes/m6-eval-run
+T=data/tracelab-v3/m6/sessions_2ps_v3.csv
+sbatch -p priority --time=00:30:00 --mem=400G bench/slurm/m6.sbatch sched_good_n400 --trace $T \
+  --pool-tokens 15273856 --dram-gb 50 --ssd-gb none \
+  --tier dram_writes=hbm-evictions-exclusive --tier loading_area=0.10 --run-name do_h25d50_n400
+python measured/eval_m6/eval_table.py real:h25d50=&lt;run dir&gt; sim:h25d50=&lt;sim dir&gt;/h25d50/c400</pre>
+</main>
+
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/echarts/5.5.0/echarts.min.js"></script>
+<script>
+const D = {
+  kern: { names: ["mHC pre norm", "KDA chunk prefill", "mHC post+pre", "GEMM FP4 n24576", "GEMM FP4 n4096 k12288",
+                  "GEMM n2048 k4096", "GEMM n4096 k1536", "GEMM n160", "GEMM n128", "DSA top-k", "sparse MLA",
+                  "NVFP4 MoE", "GEMM n4096 k4096", "GEMM n4096 k2048", "RMSNorm"],
+          rows: [68, 512, 88, 68, 68, 68, 68, 68, 68, 412, 1324, 73, 68, 68, 63],
+          med: [0.989, 1.001, 1.000, 0.964, 0.995, 0.989, 1.009, 1.040, 1.075, 1.001, 1.030, 1.003, 0.973, 0.982, 0.948],
+          min: [0.951, 0.970, 0.972, 0.843, 0.914, 0.877, 0.807, 0.926, 0.873, 0.856, 0.916, 0.953, 0.907, 0.738, 0.897],
+          max: [1.109, 1.022, 1.054, 1.053, 1.107, 1.094, 1.237, 1.264, 1.373, 1.187, 1.197, 1.057, 1.301, 1.240, 1.285] },
+  lens: ["1k", "2k", "4k", "8k", "16k", "32k", "64k", "128k"],
+  one: { span: [0.95, 0.95, 0.94, 0.91, 0.92, 0.92, 0.96, 1.00], ttft: [1.02, 1.01, 0.97, 0.93, 0.93, 0.93, 0.96, 1.01],
+         s0: [1.05, 0.98, 0.94, 0.90, 0.91, 0.92, 0.95, 0.99] },
+  host: { cats: ["1k", "2k", "4k", "8k"], eager: [17.1, 16.9, 17.5, 18.2], graph: [4.7, 4.7, 5.4, 5.6], gpu: [11.8, 16.8, 28, 50] },
+  sat: { tps: { real: [149.2, 146.5, 142.8, 138.4, 136.8, 136.4, 134.2, 129.4], tgt: [149.3, 149.9, 147.5, 143.4, 143.4, 143.0, 141.8, 138.4] },
+         p50: { real: [55.55, 56.88, 58.53, 60.55, 61.25, 61.68, 62.63, 65.29], tgt: [56.34, 56.11, 57.03, 58.65, 58.70, 58.92, 59.55, 61.23] },
+         p99: { real: [110.58, 113.21, 116.21, 120.02, 121.36, 121.80, 123.82, 128.52], tgt: [111.37, 110.91, 112.74, 115.91, 115.96, 116.27, 117.29, 120.15] } },
+  kda: { cats: ["KDA layer 0", "layer 1", "layer 2"], fi: [0.0038, 0.0034, 0.0026], fk: [0.0049, 0.083, 0.41], tr: [0.0038, 0.0038, 0.0029] },
+  pfx: { cats: ["8k+1k", "8k+8k", "32k+1k", "32k+8k", "128k+1k", "128k+8k", "512k+1k", "512k+8k"],
+         r1: { real: [57.2, 215.7, 59.8, 222.5, 68.4, 251.9, 112.8, 386.3], tgt: [53.3, 223.8, 53.8, 226.4, 55.4, 239.0, 64.3, 287.7] },
+         r0: { real: [210.0, 209.7, 401.2, 401.1, 1185.5, 1180.2, 5110.0, 5117.2], tgt: [223.6, 223.6, 396.8, 396.8, 1118.2, 1118.2, 4408.1, 4408.1] } },
+  force: { cats: ["0 plain", "1 SRPT", "2 budget", "3 even", "4 force"], real: [0.41, 108.71, 106.06, 107.80, 60.90], tgt: [0.40, 110.08, 107.51, 107.51, 61.03] },
+  m5: { n: [200, 300, 400, 500], real: [12.12, 19.77, 24.745, 25.06], sim: [12.13, 19.78, 25.06, 25.44] },
+  rr: { min: [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21],
+        a8043: [4120,6259,7897,8521,8177,5313,4940,6078,4458,6028,5740,6267,6917,7086,7033,7055,7094,7090,7081,7102,7184,7324],
+        a7995: [4103,6284,7916,8518,8177,5278,4946,6086,4454,6088,5740,6204,6916,7102,7053,7070,7110,7109,7102,7128,7230,7306] },
+  ssdw: { cats: ["full N=400", "full N=500", "Tiers N=400", "Tiers N=500", "SSD-heavy N=400", "SSD-heavy N=500"],
+          chain: [94, 156, 479, 625, 686, 830], wt: [1319, 1446, 1319, 1422, 1315, 1413] },
+  hits: { "300": { full: [98.2, 1.6, 0.1], Tiers: [45.7, 32.9, 21.4], "SSD-heavy": [28.4, 30.6, 40.9] },
+          "400": { full: [94.5, 5.1, 0.4], Tiers: [18.3, 42.3, 39.2], "SSD-heavy": [3.8, 33.6, 62.4] } },
+  ev: { cats: ["full", "Tiers", "SSD-heavy"],
+        "300": { real: [33.70, 33.45, 33.76], sim: [33.97, 33.77, 33.80] },
+        "400": { real: [40.51, 37.66, 36.71], sim: [42.26, 39.77, 38.36] } },
+  tierbu: { cats: ["32k", "128k", "512k"],
+            hbm: { real: [54.99, 57.53, 65.79], tgt: [52.7, 53.7, 57.5], rj: "7960" },
+            dram: { real: [61.77, 63.14, 81.55], tgt: [54.4, 58.4, 73.9], rj: "8042" },
+            ssd: { real: [61.6, 79.8, 189.9], tgt: [61.3, 77.1, 139.8], rj: "8073" } },
+  d37: { sim: [1667, 2796, 2765, 3417, 3457, 2404, 1647], real: [1665, 2791, 2745, 3332, 3194, 2325, 1110] },
+  vs: { cats: ["N = 100", "N = 300", "N = 400"],
+        w0: { rps: { tiers: [9.39, 31.54, 34.07], full: [null, 32.03, 36.29], dp: [8.05, 9.70, 6.58], tp: [7.46, 1.81, 1.78] },
+              p50: { tiers: [0.11, 0.26, 0.99], full: [null, 0.23, 0.72], dp: [1.77, 18.86, 36.23], tp: [2.29, 68.74, 147.10] },
+              p90: { tiers: [0.23, 1.14, 4.70], full: [null, 0.99, 2.04], dp: [4.22, 30.68, 67.53], tp: [7.73, 289.89, 333.85] },
+              p99: { tiers: [0.94, 21.91, 61.00], full: [null, 19.83, 60.93], dp: [7.92, 43.02, 201.68], tp: [13.94, 303.05, 346.84] } },
+        w10: { rps: { tiers: [8.62, 33.45, 37.66], full: [null, 33.70, 40.51], dp: [7.46, 10.10, 4.64], tp: [7.26, 0.99, 1.17] },
+               p50: { tiers: [0.09, 0.22, 0.84], full: [null, 0.19, 0.61], dp: [1.31, 19.37, 48.31], tp: [0.76, 275.57, 319.95] },
+               p90: { tiers: [0.17, 0.42, 3.81], full: [null, 0.34, 1.52], dp: [2.24, 29.47, 148.23], tp: [3.81, 299.96, 344.78] },
+               p99: { tiers: [0.36, 4.36, 60.66], full: [null, 2.87, 60.43], dp: [3.72, 34.94, 212.89], tp: [7.92, 306.23, 349.48] } } },
+  coll: { h25d50: { C: 48.6, sim: [2532,2905,3452,3610,2415,496,144,162,143,153], real: [2395,2860,3023,2941,2139,476,402,483,454,427],
+                    wsim: [15.9,33.1,42.8,49.5,52.9,54.1,54.3,54.2,54.3,54.4], wreal: [15.3,32.8,42.7,47.6,50.6,51.7,53.0,53.0,54.5,55.6] },
+          h25d75: { C: 65.3, sim: [2532,2905,3716,4933,4895,4219,3073,3811,3842,3143], real: [2407,2762,3297,4027,4325,3733,3176,2965,2877,3062],
+                    wsim: [15.9,33.1,42.5,51.8,56.8,58.7,59.7,63.4,64.0,64.6], wreal: [15.2,32.6,42.8,49.2,53.3,56.2,57.0,61.3,61.0,64.1] } }
+};
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const charts = {}, state = {};
+function reg(id, init, build) {
+  state[id] = Object.assign({}, init);
+  charts[id] = { build };
+  document.querySelectorAll(`.seg[data-for="${id}"]`).forEach(seg => {
+    const key = seg.dataset.key;
+    seg.querySelectorAll("button").forEach(b => {
+      b.setAttribute("aria-pressed", String(String(state[id][key]) === b.dataset.v));
+      b.addEventListener("click", () => {
+        state[id][key] = b.dataset.v;
+        seg.querySelectorAll("button").forEach(x => x.setAttribute("aria-pressed", String(x === b)));
+        render(id);
+      });
+    });
+  });
+  render(id);
+}
+function render(id) {
+  const el = document.getElementById(id);
+  if (!el || typeof echarts === "undefined") return;
+  let c = charts[id].inst;
+  if (!c) { c = echarts.init(el, null, { renderer: "canvas" }); charts[id].inst = c; }
+  c.setOption(charts[id].build(state[id]), true);
+}
+function renderAll() { for (const id in charts) render(id); }
+window.addEventListener("resize", () => { for (const id in charts) charts[id].inst && charts[id].inst.resize(); });
+try {
+  matchMedia("(prefers-color-scheme: dark)").addEventListener("change", renderAll);
+  new MutationObserver(renderAll).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+} catch (e) {}
+const isNarrow = () => window.innerWidth < 560;
+function base(extra) {
+  const narrow = isNarrow();
+  return Object.assign({
+    animation: false,
+    textStyle: { fontFamily: css("--sans"), color: css("--muted") },
+    grid: { left: narrow ? 58 : 70, right: narrow ? 14 : 24, top: 46, bottom: 52 },
+    tooltip: { trigger: "axis", confine: true, backgroundColor: css("--surface"), borderColor: css("--rule"),
+      textStyle: { color: css("--fg"), fontSize: 12 } },
+    legend: { top: 6, left: 8, textStyle: { color: css("--fg"), fontSize: 12 }, itemWidth: 22, itemHeight: 10 },
+  }, extra || {});
+}
+function ax(type, name, extra) {
+  return Object.assign({
+    type, name, nameLocation: "middle", nameGap: type === "category" ? 30 : 46,
+    nameTextStyle: { color: css("--muted"), fontSize: 12 },
+    axisLine: { lineStyle: { color: css("--rule") } }, axisTick: { lineStyle: { color: css("--rule") } },
+    axisLabel: { color: css("--muted"), fontSize: 11 },
+    splitLine: { lineStyle: { color: css("--grid") } },
+  }, extra || {});
+}
+function ln(name, color, data, o) {
+  o = o || {};
+  return { name, type: "line", data, lineStyle: { color, width: 2, type: o.dash || "solid" }, itemStyle: { color },
+    symbol: "circle", symbolSize: 6, showSymbol: true, connectNulls: false };
+}
+function bar(name, color, data, o) {
+  return Object.assign({ name, type: "bar", data, itemStyle: { color } }, o || {});
+}
+const shadowTip = extra => Object.assign(base().tooltip, { trigger: "axis", axisPointer: { type: "shadow" } }, extra || {});
+const band = (lo, hi, axis) => ({ silent: true, itemStyle: { color: css("--c-alt2"), opacity: 0.16 },
+  data: [[{ [axis]: lo }, { [axis]: hi }]] });
+/* Log-scale bars: ECharts draws log-axis bars from 1, so plot log10(v) − lo on a value axis instead. */
+const lg = (arr, lo) => arr.map(v => v == null ? null : { value: +(Math.log10(v) - lo).toFixed(4), raw: v });
+function logAx(name, lo, hi) {
+  return ax("value", name, { min: 0, max: hi - lo, interval: 1, axisLabel: { color: css("--muted"), fontSize: 11,
+    formatter: x => { const v = Math.pow(10, x + lo); return v >= 1 ? String(Math.round(v)) : String(+v.toPrecision(1)); } } });
+}
+const rawTip = unit => shadowTip({ formatter: ps => ps[0].axisValueLabel + ps.map(q =>
+  `<br>${q.marker}${q.seriesName}: ${q.data && q.data.raw != null ? q.data.raw + unit : (typeof q.data === "number" ? q.data + unit : "–")}`).join("") });
+const win = n => Array.from({ length: n }, (_, i) => `${i * 2}–${i * 2 + 2}`);
+
+/* §4 */
+reg("f4a", {}, () => {
+  const k = D.kern, narrow = isNarrow();
+  return base({
+    tooltip: shadowTip({ formatter: ps => {
+      const i = ps[0].dataIndex;
+      return `${k.names[i]} (${k.rows[i]} rows)<br>Min ${k.min[i]} · Median ${k.med[i]} · Max ${k.max[i]}`;
+    } }),
+    legend: Object.assign(base().legend, { data: ["Min–Max", "Median ratio"] }),
+    grid: { left: narrow ? 128 : 160, right: narrow ? 14 : 24, top: 40, bottom: 48 },
+    yAxis: ax("category", "", { data: k.names, inverse: true, axisLabel: { color: css("--muted"), fontSize: narrow ? 10 : 11 } }),
+    xAxis: ax("value", "Real engine ÷ profile DB", { min: 0.7, max: 1.4, nameGap: 30 }),
+    series: [
+      { name: "base", type: "bar", stack: "r", data: k.min, itemStyle: { color: "transparent" }, silent: true, barWidth: 10 },
+      { name: "Min–Max", type: "bar", stack: "r", data: k.max.map((v, i) => +(v - k.min[i]).toFixed(3)),
+        itemStyle: { color: css("--c-alt2"), opacity: 0.55 }, barWidth: 10 },
+      { name: "Median ratio", type: "scatter", data: k.med.map((v, i) => [v, k.names[i]]), symbolSize: 10,
+        itemStyle: { color: css("--c-real") }, markArea: band(0.9, 1.1, "xAxis") },
+    ],
+  });
+});
+reg("f4b", {}, () => {
+  const s = ln("GPU total time", css("--c-real"), D.one.span);
+  s.markArea = band(0.9, 1.1, "yAxis");
+  return base({
+    xAxis: ax("category", "prompt length", { data: D.lens }),
+    yAxis: ax("value", "Real engine ÷ target", { min: 0.8, max: 1.2 }),
+    series: [s, ln("client TTFT", css("--c-sim"), D.one.ttft, { dash: "dashed" }), ln("stage 0", css("--c-alt2"), D.one.s0, { dash: "dotted" })],
+  });
+});
+reg("f4c", {}, () => base({
+  tooltip: shadowTip({ valueFormatter: v => v + " ms" }),
+  xAxis: ax("category", "prompt length", { data: D.host.cats }),
+  yAxis: ax("value", "ms"),
+  series: [
+    bar("Host (eager)", css("--c-alt2"), D.host.eager, { barGap: "10%" }),
+    bar("Host (CUDA graph)", css("--c-real"), D.host.graph),
+    bar("GPU", css("--c-dram"), D.host.gpu),
+  ],
+}));
+reg("f4d", { m: "tps" }, s => {
+  const d = D.sat[s.m];
+  const name = { tps: "prompt token/s (thousands)", p50: "TTFT p50 (s)", p99: "TTFT p99 (s)" }[s.m];
+  return base({
+    xAxis: ax("category", "prompt length (all arrive at t = 0)", { data: D.lens }),
+    yAxis: ax("value", name, { scale: true }),
+    series: [ln("Real engine", css("--c-real"), d.real), ln("Target", css("--c-sim"), d.tgt, { dash: "dashed" })],
+  });
+});
+reg("f4e", {}, () => base({
+  tooltip: rawTip(""),
+  grid: { left: isNarrow() ? 58 : 70, right: isNarrow() ? 14 : 24, top: isNarrow() ? 92 : 50, bottom: 40 },
+  xAxis: ax("category", "", { data: D.kda.cats }),
+  yAxis: logAx("Relative error (log)", -3, 0),
+  series: [
+    bar("FlashInfer persistent (this engine)", css("--c-real"), lg(D.kda.fi, -3), { barGap: "10%" }),
+    bar("Triton chunk (vLLM optional)", css("--c-dram"), lg(D.kda.tr, -3)),
+    bar("FlashKDA (vLLM default)", css("--c-sim"), lg(D.kda.fk, -3)),
+  ],
+}));
+
+/* §5 */
+reg("f5a", { r: "r1" }, s => {
+  const d = D.pfx[s.r], narrow = isNarrow();
+  return base({
+    tooltip: rawTip(" ms"),
+    grid: { left: narrow ? 58 : 70, right: narrow ? 14 : 24, top: 46, bottom: narrow ? 70 : 52 },
+    xAxis: ax("category", "", { data: D.pfx.cats, axisLabel: { color: css("--muted"), fontSize: 11, interval: 0, rotate: narrow ? 40 : 0 } }),
+    yAxis: s.r === "r0" ? logAx("TTFT (ms, log)", 2, 4) : ax("value", "TTFT (ms)"),
+    series: s.r === "r0"
+      ? [bar("Real engine", css("--c-real"), lg(d.real, 2), { barGap: "10%" }), bar("Target", css("--c-sim"), lg(d.tgt, 2))]
+      : [bar("Real engine", css("--c-real"), d.real, { barGap: "10%" }), bar("Target", css("--c-sim"), d.tgt)],
+  });
+});
+reg("f5b", {}, () => base({
+  tooltip: shadowTip({ valueFormatter: v => v + " s" }),
+  xAxis: ax("category", "scheduler step", { data: D.force.cats }),
+  yAxis: ax("value", "TTFT at 32k (s)"),
+  series: [bar("Real engine", css("--c-real"), D.force.real, { barGap: "10%" }), bar("Target", css("--c-sim"), D.force.tgt)],
+}));
+reg("f5c", {}, () => base({
+  xAxis: ax("category", "Concurrent active sessions N", { data: D.m5.n.map(String) }),
+  yAxis: ax("value", "rounds/s", { min: 10 }),
+  series: [ln("Real engine", css("--c-real"), D.m5.real), ln("sim", css("--c-sim"), D.m5.sim, { dash: "dashed" })],
+}));
+
+/* §6 */
+reg("f6a", {}, () => base({
+  xAxis: ax("category", "minutes", { data: D.rr.min.map(String) }),
+  yAxis: ax("value", "tokens processed by stage 0 (thousands)"),
+  series: [ln("8043 after refactor", css("--c-real"), D.rr.a8043), ln("7995 before refactor", css("--c-alt"), D.rr.a7995, { dash: "dashed" })],
+}));
+reg("f6b", {}, () => base({
+  tooltip: shadowTip(),
+  grid: { left: 64, right: 18, top: 46, bottom: 78 },
+  xAxis: ax("category", "", { data: D.ssdw.cats, axisLabel: { color: css("--muted"), fontSize: 11, interval: 0, rotate: isNarrow() ? 40 : 0 } }),
+  yAxis: ax("value", "GB / GPU / 20 minutes"),
+  series: [
+    bar("Stepwise write-back", css("--c-real"), D.ssdw.chain, { barGap: "10%" }),
+    bar("Write-through", css("--c-alt2"), D.ssdw.wt),
+  ],
+}));
+reg("f6c", { n: "300" }, s => {
+  const h = D.hits[s.n], cats = Object.keys(h);
+  const tier = (i, name, color) => ({ name, type: "bar", stack: "h", data: cats.map(c => h[c][i]), itemStyle: { color }, barWidth: "46%" });
+  return base({
+    tooltip: shadowTip({ valueFormatter: v => v.toFixed(1) + "%" }),
+    xAxis: ax("category", "", { data: cats }),
+    yAxis: ax("value", "Share of hit rounds %", { max: 100 }),
+    series: [tier(0, "HBM", css("--c-hbm")), tier(1, "DRAM", css("--c-dram")), tier(2, "SSD", css("--c-ssd"))],
+  });
+});
+reg("f6d", { n: "300" }, s => {
+  const d = D.ev[s.n];
+  return base({
+    tooltip: shadowTip(),
+    xAxis: ax("category", "", { data: D.ev.cats }),
+    yAxis: ax("value", "rounds/s", { min: 25 }),
+    series: [bar("Real engine", css("--c-real"), d.real, { barGap: "10%" }), bar("sim", css("--c-sim"), d.sim)],
+  });
+});
+reg("f6e", { t: "dram" }, s => {
+  const d = D.tierbu[s.t];
+  return base({
+    tooltip: shadowTip({ valueFormatter: v => v + " ms" }),
+    xAxis: ax("category", "Context P", { data: D.tierbu.cats }),
+    yAxis: ax("value", "Round 1 TTFT (ms)", { min: 0 }),
+    series: [bar(`Real engine ${d.rj}`, css("--c-real"), d.real, { barGap: "10%" }), bar("Target", css("--c-sim"), d.tgt)],
+  });
+});
+reg("f6f", {}, () => base({
+  xAxis: ax("category", "minutes", { data: win(D.d37.sim.length) }),
+  yAxis: ax("value", "Rounds completed per 2 minutes"),
+  series: [ln("Real engine 7969", css("--c-real"), D.d37.real), ln("sim", css("--c-sim"), D.d37.sim, { dash: "dashed" })],
+}));
+reg("f6g", { w: "w0", m: "rps" }, s => {
+  const d = D.vs[s.w][s.m], isT = s.m !== "rps";
+  const f = arr => isT ? lg(arr, -2) : arr;
+  return base({
+    tooltip: rawTip(isT ? " s" : " r/s"),
+    legend: Object.assign(base().legend, { top: 4 }),
+    grid: { left: isNarrow() ? 58 : 70, right: isNarrow() ? 14 : 24, top: isNarrow() ? 70 : 52, bottom: 40 },
+    xAxis: ax("category", "", { data: D.vs.cats }),
+    yAxis: isT ? logAx(`TTFT ${s.m} (s, log)`, -2, 3) : ax("value", "rounds/s", { min: 0 }),
+    series: [
+      bar("this engine full", css("--c-real"), f(d.full), { barGap: "8%" }),
+      bar("this engine Tiers", css("--c-dram"), f(d.tiers)),
+      bar("vLLM DP4/EP4", css("--c-sim"), f(d.dp)),
+      bar("vLLM TP4", css("--c-alt2"), f(d.tp)),
+    ],
+  });
+});
+/* §7 */
+reg("f7a", { s: "h25d50" }, s => {
+  const d = D.coll[s.s];
+  return base({
+    xAxis: ax("category", "minutes", { data: win(d.sim.length) }),
+    yAxis: ax("value", "Rounds completed per 2 minutes"),
+    series: [ln("Real engine", css("--c-real"), d.real), ln("sim", css("--c-sim"), d.sim, { dash: "dashed" })],
+  });
+});
+reg("f7b", { s: "h25d50" }, s => {
+  const d = D.coll[s.s];
+  const real = ln("Real engine", css("--c-real"), d.wreal);
+  real.markLine = { symbol: "none", silent: true, label: { formatter: `C = ${d.C}M`, color: css("--muted"), position: "insideEndTop" },
+    lineStyle: { color: css("--slo"), type: "dashed", width: 1.5 }, data: [{ yAxis: d.C }] };
+  return base({
+    xAxis: ax("category", "minutes (end of window)", { data: win(d.wsim.length) }),
+    yAxis: ax("value", "W (million tokens)", { min: 0, max: 70 }),
+    series: [real, ln("sim", css("--c-sim"), d.wsim, { dash: "dashed" })],
+  });
+});
+</script>
+
+</body></html>

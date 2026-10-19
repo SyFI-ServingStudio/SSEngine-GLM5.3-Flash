@@ -1,4 +1,4 @@
-"""The host media (ppimpl/kvpool/backends.py) on CPU: the arena, the SSD file's slot round trip, lock and reuse, and
+"""The host media (ssengine/kvpool/backends.py) on CPU: the arena, the SSD file's slot round trip, lock and reuse, and
 the OOM guards of TIERS.md §14.1 (preferred NUMA placement, oom_score_adj, residency per node, cgroup peak)."""
 
 import ctypes
@@ -7,8 +7,8 @@ import os
 import numpy as np
 import pytest
 
-from ppimpl.kvpool import backends as bk
-from ppimpl.kvpool import shards
+from ssengine.kvpool import backends as bk
+from ssengine.kvpool import shards
 
 
 def test_arena_is_plain_memory_on_cpu():
@@ -118,7 +118,7 @@ def _prefer_and_check(numa, n, node):
 def test_oom_first_and_cgroup_peak():
     import subprocess
     import sys
-    out = subprocess.run([sys.executable, "-c", "from ppimpl.kvpool.backends import oom_first; oom_first(); "
+    out = subprocess.run([sys.executable, "-c", "from ssengine.kvpool.backends import oom_first; oom_first(); "
                           "print(open('/proc/self/oom_score_adj').read())"], capture_output=True, text=True, check=True)
     assert out.stdout.strip() == "1000"
     pk = bk.cgroup_peak_gb()

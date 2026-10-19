@@ -1,9 +1,0 @@
-{
- "rounds": 80,
- "missing_in_off": 0,
- "round1": 40,
- "round1_hit": 40,
- "round1_match": 40,
- "all_match": 80,
- "mismatches": []
-}

@@ -1,5 +1,5 @@
 """KV pool bytes on 4 GPUs (lanes/m6 TIERS.md §8): real StageModels joined by the serving pipe, a PoolMember per
-worker (ppimpl/kvpool/member.py); the ranges come from the real StageKV (layout.from_stage_kv).
+worker (ssengine/kvpool/member.py); the ranges come from the real StageKV (layout.from_stage_kv).
 
 Round 0 (P = 40,000 tokens: a partial last block, chunk starts off KDA's 64-token grid) on blocks K0. Every worker
 writes its quarter of all four stages' KV and state to its DRAM arena (peer stages' KV over NVLink). Fresh blocks
@@ -10,7 +10,7 @@ the file into other DRAM slots (a loading area) and moved on from there into K4 
 (an HBM hit) and on K1 (after the tier read): the logits are bitwise equal. The workers run with expandable segments,
 as the server's do (the KV is allocated IPC-shareable regardless). Run through Slurm:
 
-    sbatch -p main --gres=gpu:4 --time=00:20:00 -o measured/logs/%j.out bench/slurm/gtest.sbatch kvpool_bytes
+    sbatch -p <partition> --gres=gpu:4 --time=00:20:00 -o runs/logs/%j.out benchmarks/jobs/gtest.sbatch kvpool_bytes
 """
 
 import json
@@ -18,7 +18,7 @@ from types import SimpleNamespace as NS
 
 import pytest
 
-from ppimpl.engine.kv import block_pages
+from ssengine.engine.kv import block_pages
 
 from conftest import free_port_block
 
@@ -39,11 +39,11 @@ def _plans(name, toks, start, sizes, kv, st, mb0):
 
 
 def _run(m, pipe, rank, plans):
-    """The plans through the pipeline (as bench/kvaudit/ours.py); rank 3 returns the last chunk's logits."""
+    """The plans through the pipeline (as research/bench/kvaudit/ours.py); rank 3 returns the last chunk's logits."""
     import torch
     from vllm.forward_context import set_forward_context
 
-    from ppimpl.config import HIDDEN_WIDTH
+    from ssengine.config import HIDDEN_WIDTH
 
     logits = None
     for plan in plans:
@@ -71,7 +71,7 @@ def _views(ranges, dev, kv, st, b_lo=0):
     """This stage's bytes of a context: each range's rows of blocks kv[b_lo:] / its state block."""
     import torch
 
-    from ppimpl.runtime.transport import _DevMem
+    from ssengine.runtime.transport import _DevMem
 
     out = []
     for r in ranges:
@@ -88,10 +88,10 @@ def _worker(rank: int, port: int, out_dir: str):
     import torch.distributed as dist
     import zmq
 
-    from ppimpl.config import HIDDEN_WIDTH, RunConfig, SchedulerConfig, TierConfig
-    from ppimpl.model.stage import StageModel, bench_config
-    from ppimpl.kvpool.member import PoolMember
-    from ppimpl.runtime.transport import TierMove, open_pipe
+    from ssengine.config import HIDDEN_WIDTH, RunConfig, SchedulerConfig, TierConfig
+    from ssengine.model.stage import StageModel, bench_config
+    from ssengine.kvpool.member import PoolMember
+    from ssengine.runtime.transport import TierMove, open_pipe
 
     dev = torch.device("cuda", rank)
     torch.cuda.set_device(dev)
@@ -184,7 +184,7 @@ def test_tier_round_trip_is_bitwise(tmp_path):
         pytest.skip("needs 4 GPUs")
     import torch.multiprocessing as mp
 
-    from ppimpl.kvpool.shards import create
+    from ssengine.kvpool.shards import create
     create(str(tmp_path), 1, 4, 1.0)
     mp.start_processes(_worker, args=(free_port_block(), str(tmp_path)), nprocs=4, start_method="spawn")
     res = [json.loads((tmp_path / f"rank{r}.json").read_text()) for r in range(4)]

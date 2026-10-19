@@ -1,11 +1,11 @@
-"""The controller's dispatch rule (ppimpl/runtime/dispatch.py): forming ahead of a projected start, with the in-flight
+"""The controller's dispatch rule (ssengine/runtime/dispatch.py): forming ahead of a projected start, with the in-flight
 limit on the GPU (stage 0 waits for microbatch k-4's exit)."""
 
 import heapq
 
 import pytest
 
-from ppimpl.runtime.dispatch import NO, NOW, WAIT, DispatchRule, StagePredictor
+from ssengine.runtime.dispatch import NO, NOW, WAIT, DispatchRule, StagePredictor
 
 MS = 1_000_000
 
@@ -291,7 +291,7 @@ def test_host_time_leaves_out_the_in_flight_gate_wait():
 
 def test_plans_form_by_the_host_time_bound_at_the_recent_largest_size():
     """Forming allows the host time's mean plus two deviations, at the largest of the last few plans' sizes."""
-    from ppimpl.runtime.dispatch import DispatchRule, HostPredictor
+    from ssengine.runtime.dispatch import DispatchRule, HostPredictor
     h = HostPredictor()
     for ns in (10 * MS, 20 * MS, 10 * MS, 20 * MS):
         h.observe(32768, ns)

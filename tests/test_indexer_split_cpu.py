@@ -1,6 +1,6 @@
 """pp_patch.split_indexer_prefill_chunks: the fork's indexer prefill split with query rows cut in multiples of 512."""
 
-from ppimpl.model.pp_patch import split_indexer_prefill_chunks
+from ssengine.model.pp_patch import split_indexer_prefill_chunks
 
 MB = 1 << 20
 

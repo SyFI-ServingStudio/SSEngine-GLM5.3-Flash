@@ -1,4 +1,4 @@
-"""bench/nsys_trace.py on a synthetic Nsight SQLite export (the tables and columns `nsys export --type sqlite` writes)."""
+"""benchmarks/nsys_trace.py on a synthetic Nsight SQLite export (the tables and columns `nsys export --type sqlite` writes)."""
 
 import json
 import sqlite3
@@ -7,8 +7,8 @@ import types
 
 import pytest
 
-from bench import nsys_trace as tr
-from bench import report
+from benchmarks import nsys_trace as tr
+from benchmarks import report
 from test_report import outcome, write_run
 
 MS = 1_000_000
@@ -104,9 +104,9 @@ def test_manifest_classes_via_kernels_check_trace(tmp_path, monkeypatch):
     fake = types.SimpleNamespace(
         check_trace=lambda names, stage: TC(names[0]),
         by_config=lambda c: types.SimpleNamespace(config=c, layer_types=("dsa_moe",), positions=("dsa.q_b_proj",)))
-    monkeypatch.setitem(sys.modules, "ppimpl.kernels", fake)
-    import ppimpl
-    monkeypatch.setattr(ppimpl, "kernels", fake, raising=False)
+    monkeypatch.setitem(sys.modules, "ssengine.kernels", fake)
+    import ssengine
+    monkeypatch.setattr(ssengine, "kernels", fake, raising=False)
     db = tmp_path / "trace.sqlite"
     build_db(db, nmb=1)
     k = {(x["stage"], x["name"]): x for x in tr.analyze(db)["kernels"]}

@@ -1,0 +1,58 @@
+#!/bin/bash
+# M6 (7_offloading.md, TIERS.md) runs on one 4-GPU server, into OUT (default runs/m6). Usage, from the repo
+# root (one run per job; the benchmarks/run.py options follow the name):
+#   mkdir -p runs/m6/slurm
+#   sbatch -p <partition> -J ppm6 --time=00:20:00 --mem=300G -o runs/m6/slurm/%j.out benchmarks/jobs/m6.sbatch \
+#     tier_bringup --dram-gb 48 --ssd-gb none --run-name tier_bringup_dram
+# SSD shard sets (ssengine/kvpool/shards.py: set<k>/shard<q>.bin, 128 GB per shard) live in SSENGINE_SSD_DIR, default
+# <main tree>/tmp/ssd_tier, kept across runs; the run takes the first free set. Create a set once, before the first
+# SSD run: $PY -m ssengine.kvpool.shards create --sets 1 --shards 4 --gb 128. df of the repo's file system is printed
+# before and after.
+# Memory guards: benchmarks/jobs/memguard.py (start only with MemAvailable > pinned + 100 GB and memory PSI < 5%; a timed
+# part that thrashes is stopped and marked INVALID.txt).
+# GPU samples (SM clock, power, temperature, throttle reasons) every 200 ms go to the run dir's gpu_samples.csv (as
+# m4.sbatch SAMPLE=1; benchmarks.prefix gpu_samples); SAMPLE=0 turns them off. A session run on another trace: --trace PATH.
+# HOP2=1 runs research/bench/tier_hop2.py (two-hop rates, GEMM and stage-edge interference) before the run.
+#SBATCH --gres=gpu:4
+set -uo pipefail
+{   # one brace group: bash parses it whole before running, so editing this file mid-job cannot break the job
+source "${SLURM_SUBMIT_DIR:-$(dirname "$0")/../..}/benchmarks/jobs/env.sh"
+R=$ROOT/${OUT:-runs/m6}
+mkdir -p "$R/slurm"
+export CUDA_DEVICE_ORDER=PCI_BUS_ID
+G=${CUDA_VISIBLE_DEVICES:-0,1,2,3}
+P=${SSENGINE_PORT:-$((20000 + ${SLURM_JOB_ID:-0} % 120 * 100))}   # SSENGINE_PORT: two runs in one job (ab8.sbatch)
+export SSENGINE_SSD_DIR=${SSENGINE_SSD_DIR:-$MAIN/tmp/ssd_tier}
+export SSENGINE_HANDOFF=${SSENGINE_HANDOFF:-$MAIN/third_party/handoff_v2_realistic}   # v2-realistic targets
+trap 'rm -rf "$TMPDIR"; echo "== df after: $(df -h "$ROOT" | tail -1)"' EXIT
+WHAT=${1:?run name (benchmarks/run.py)}; shift
+echo "== $(date -Is) gpus $G port $P: $WHAT $* (ssd dir $SSENGINE_SSD_DIR)"
+echo "== df before: $(df -h "$ROOT" | tail -1)"
+nvidia-smi --query-gpu=index,pci.bus_id,memory.used --format=csv,noheader
+if [ -n "${HOP2:-}" ]; then                # HOP2=1: the two-hop probe (research/bench/tier_hop2.py) first; stop if it fails
+  $PY -m research.bench.tier_hop2 --out "$R/tier_hop2/$JOB" ${HOP2_TESTS:+--tests $HOP2_TESTS} || { echo "== tier_hop2 failed"; exit 1; }
+fi
+# memory guards (benchmarks/jobs/memguard.py): do not start on a host short of memory or thrashing; stop the timed part
+# (marked INVALID.txt) if it starts thrashing
+$PY benchmarks/jobs/memguard.py precheck -- "$@" || { echo "== not started: host memory (see memguard line)"; exit 0; }
+RUN=$WHAT; for ((i = 1; i <= $#; i++)); do [ "${!i}" = --run-name ] && { j=$((i + 1)); RUN=${!j}; }; done
+if [ "${SAMPLE:-1}" != 0 ]; then
+  nvidia-smi -i "$G" --query-gpu=timestamp,index,clocks.sm,clocks.max.sm,power.draw,power.limit,temperature.gpu,utilization.gpu,clocks_throttle_reasons.active \
+    --format=csv,nounits -lms 200 > "$R/slurm/gpu_samples_${SLURM_JOB_ID:-local}_$RUN.csv" 2>&1 &
+  SAMPLER=$!
+fi
+setsid $PY -m benchmarks.run "$WHAT" --inline --gpus "$G" --port "$P" --out-root "$R" "$@" &
+RUNPID=$!
+$PY benchmarks/jobs/memguard.py watch --pid $RUNPID --run-dir "$R/$RUN" &
+WD=$!
+wait $RUNPID; rc=$?
+kill $WD 2>/dev/null; wait $WD 2>/dev/null
+if [ -n "${SAMPLER:-}" ]; then
+  kill $SAMPLER 2>/dev/null; wait $SAMPLER 2>/dev/null
+  [ -d "$R/$RUN" ] && cp "$R/slurm/gpu_samples_${SLURM_JOB_ID:-local}_$RUN.csv" "$R/$RUN/gpu_samples.csv"
+fi
+[ -f "$R/$RUN/INVALID.txt" ] && { echo "== run invalid: $(cat "$R/$RUN/INVALID.txt")"; rc=4; }
+uptime
+echo "== done $(date -Is) rc=$rc"
+exit $rc
+}

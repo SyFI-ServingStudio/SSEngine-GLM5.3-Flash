@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 import torch
 
-from ppimpl.model import pp_patch
+from ssengine.model import pp_patch
 
 KPOOL, HD = 4, 8
 
@@ -155,7 +155,7 @@ def test_kpool_expand_installs():
     change there fails here and at start-up, not silently)."""
     import vllm.models.glm5next.nvidia.sparse_indexer as si
 
-    from ppimpl.model import kpool_fast
+    from ssengine.model import kpool_fast
 
     before = si.sparse_attn_indexer_kpool
     pp_patch.install_kpool_expand()

@@ -1,4 +1,4 @@
-"""Import every kernel library pp-impl uses, check its version against ENV.md, and check that the custom ops and the
+"""Import every kernel library SSEngine uses, check its version against ENV.md, and check that the custom ops and the
 FlashInfer KDA backend the manifest names are registered (CPU only; no kernel launches). Exits non-zero on any miss.
 
     .venv/bin/python env/check_env.py [--markdown]
@@ -108,7 +108,7 @@ NINJA = "/usr/bin/ninja"
 
 
 def libnuma() -> str:
-    """The DRAM tier (ppimpl/kvpool/backends.py HostTier) places pages with libnuma.so.1 (Ubuntu package libnuma1)."""
+    """The DRAM tier (ssengine/kvpool/backends.py HostTier) places pages with libnuma.so.1 (Ubuntu package libnuma1)."""
     import ctypes
 
     ctypes.CDLL("libnuma.so.1")
@@ -116,7 +116,7 @@ def libnuma() -> str:
 
 
 def liburing() -> str:
-    """The SSD tier's io_uring (ppimpl/kvpool/uring.py) loads liburing-ffi.so.2 (Ubuntu package liburing2)."""
+    """The SSD tier's io_uring (ssengine/kvpool/uring.py) loads liburing-ffi.so.2 (Ubuntu package liburing2)."""
     import ctypes
 
     ctypes.CDLL("liburing-ffi.so.2")

@@ -1,4 +1,4 @@
-"""Balanced storage, 1/n per GPU (ppimpl/kvpool/placement.py) on CPU: n fake stages' cache views in one process, n
+"""Balanced storage, 1/n per GPU (ssengine/kvpool/placement.py) on CPU: n fake stages' cache views in one process, n
 GPUs' host arenas, n = 4 (PP4) and 8 (PP8). A context written out by all n shares and read back into other pages
 (the same on every stage, or each stage its own; whole blocks in order or pages scattered over blocks) is byte-equal,
 every byte of every range is covered exactly once, and each GPU stores the same bytes per block."""
@@ -10,11 +10,11 @@ import numpy as np
 import pytest
 import torch
 
-from ppimpl.config import BLOCK_PAGES as P, BLOCK_TOKENS as B
-from ppimpl.engine.kv import block_pages, kv_pages_for
-from ppimpl.kvpool.layout import ViewRange
-from ppimpl.kvpool.manager import TierOp
-from ppimpl.kvpool.placement import ALIGN, BalancedPlacement
+from ssengine.config import BLOCK_PAGES as P, BLOCK_TOKENS as B
+from ssengine.engine.kv import block_pages, kv_pages_for
+from ssengine.kvpool.layout import ViewRange
+from ssengine.kvpool.manager import TierOp
+from ssengine.kvpool.placement import ALIGN, BalancedPlacement
 
 NB = 12                                  # logical blocks per fake stage
 

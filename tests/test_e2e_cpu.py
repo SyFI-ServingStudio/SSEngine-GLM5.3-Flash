@@ -1,4 +1,4 @@
-"""End to end on CPU: `python -m ppimpl serve` with FakeStageModel over gloo, driven over HTTP and by req-frontend."""
+"""End to end on CPU: `python -m ssengine serve` with FakeStageModel over gloo, driven over HTTP and by req-frontend."""
 
 import asyncio
 import json
@@ -6,14 +6,14 @@ from pathlib import Path
 
 import pytest
 
-from bench import run as bench_run
+from benchmarks import run as bench_run
 from conftest import free_port_block
 from e2e import Server, blocks_per_request, check_microbatches, check_responses, send_all
 
 CPU = {"device": "cpu", "fake": {"us_per_token": 2.0, "hidden_width": 64, "num_blocks": 30}}
 
 
-# lanes/measure/measured/reference.jsonl, id one_1k_0: row 0 of a trace, 1,024 tokens of enwik9 (GLM tokenizer).
+# lanes/measure/benchmarks/data/reference.jsonl, id one_1k_0: row 0 of a trace, 1,024 tokens of enwik9 (GLM tokenizer).
 ONE_1K_0_SHA256 = "bf4c22dedc655d529f3c205732200a134076384f6cc1df3545d8cb2952ea3abb"
 
 
@@ -88,7 +88,7 @@ def test_req_frontend_cpu(tmp_path, monkeypatch):
         o = r["outcome"]
         assert o["status"] == "SUCCESS", o
         assert o["server_usage"]["prompt_tokens"] == prompts[o["request_id"]] and o["output_len_actual"] == 1
-    # The server logs the prompt's sha256 (int32 little-endian), the key of measured/reference.jsonl.
+    # The server logs the prompt's sha256 (int32 little-endian), the key of benchmarks/data/reference.jsonl.
     sreq = {r["id"]: r for r in map(json.loads, (run_dir / "server_requests.jsonl").read_text().splitlines())}
     assert sreq["independent_uni_tiny_0"]["prompt_sha256"] == ONE_1K_0_SHA256
     assert len({r["prompt_sha256"] for r in sreq.values()}) == n
@@ -138,7 +138,7 @@ def test_worker_failure_stops_server(tmp_path, request):
     srv = Server(tmp_path / "run", port, **CPU)
     request.addfinalizer(srv.kill_group)                     # also when an assert or the wait below fails
     srv.wait_ready()
-    workers = subprocess.run(["pgrep", "-P", str(srv.proc.pid), "-f", "ppimpl worker"], capture_output=True,
+    workers = subprocess.run(["pgrep", "-P", str(srv.proc.pid), "-f", "ssengine worker"], capture_output=True,
                              text=True).stdout.split()
     assert len(workers) == 4
     subprocess.run(["kill", "-9", workers[2]])
@@ -166,7 +166,7 @@ def test_start_failure_reports_its_cause(tmp_path):
 def test_free_port_block_skips_held_ports():
     import socket
 
-    from bench.common import free_port_block as pick
+    from benchmarks.common import free_port_block as pick
 
     base = free_port_block(10)
     with socket.socket() as hold:

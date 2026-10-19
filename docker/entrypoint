@@ -1,9 +1,9 @@
 #!/bin/bash
 # The image's entry point (docker/Dockerfile), like vllm/vllm-openai's but with the subcommand:
-#   <image> [serve] [<model>] [options] the server (`ppimpl serve --help`); no arguments or options alone serve
-#                                       nvidia/GLM-5.3-Flash-NVFP4; any other ppimpl subcommand too
+#   <image> [serve] [<model>] [options] the server (`ssengine serve --help`); no arguments or options alone serve
+#                                       nvidia/GLM-5.3-Flash-NVFP4; any other ssengine subcommand too
 #   <image> check-env                   env/check_env.py (no GPU needed)
-#   <image> <command> [args]            anything else runs as is (bash, python -m ppimpl.kvpool.shards create ...)
+#   <image> <command> [args]            anything else runs as is (bash, python -m ssengine.kvpool.shards create ...)
 set -euo pipefail
 # vLLM's zmq ipc path is TMPDIR + "/" + a uuid and must fit in 107 characters (ENV.md)
 export TMPDIR=${TMPDIR:-/tmp}
@@ -12,17 +12,17 @@ mkdir -p "$TMPDIR"
 # The image's JIT kernels (docker/Dockerfile): copy what /root/.cache lacks, so a fresh or mounted cache volume starts
 # without compiling; files already there (a volume's own, maybe newer) are kept.
 seed() {
-  [ -d /opt/ppimpl/jit-seed ] || return 0
-  mkdir -p /root/.cache && cp -a --update=none /opt/ppimpl/jit-seed/. /root/.cache/ \
-    || echo "ppimpl: could not seed /root/.cache from /opt/ppimpl/jit-seed: the first start compiles the kernels" >&2
+  [ -d /opt/ssengine/jit-seed ] || return 0
+  mkdir -p /root/.cache && cp -a --update=none /opt/ssengine/jit-seed/. /root/.cache/ \
+    || echo "ssengine: could not seed /root/.cache from /opt/ssengine/jit-seed: the first start compiles the kernels" >&2
 }
 case "${1:-}" in
-  "") seed; exec ppimpl serve ;;
-  -h|--help|serve|worker|intake) seed; exec ppimpl "$@" ;;
-  -*) seed; exec ppimpl serve "$@" ;;
+  "") seed; exec ssengine serve ;;
+  -h|--help|serve|worker|intake) seed; exec ssengine "$@" ;;
+  -*) seed; exec ssengine serve "$@" ;;
   check-env)   # without --gpus there is no libcuda.so.1: the toolkit's stub lets the extensions load (no kernel runs)
     shift
     ldconfig -p | grep -q 'libcuda\.so\.1 ' || export LD_LIBRARY_PATH=/opt/cuda-stub${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
-    exec python /opt/ppimpl/env/check_env.py "$@" ;;
+    exec python /opt/ssengine/env/check_env.py "$@" ;;
   *) exec "$@" ;;
 esac

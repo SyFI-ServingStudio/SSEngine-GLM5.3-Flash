@@ -1,4 +1,4 @@
-"""The SSD tier's file I/O backends on CPU, io_uring (ppimpl/kvpool/uring.py) and Linux AIO (aio.py), the same tests
+"""The SSD tier's file I/O backends on CPU, io_uring (ssengine/kvpool/uring.py) and Linux AIO (aio.py), the same tests
 for both: requests cut into pieces at the piece size and at a buffer's end, byte-exact round trips, reads ahead of
 queued writes, errors on the request's future, and memory outside the buffers refused."""
 
@@ -8,7 +8,7 @@ import os
 import numpy as np
 import pytest
 
-from ppimpl.kvpool import aio, uring
+from ssengine.kvpool import aio, uring
 
 BACKENDS = {"uring": uring.UringFile, "aio": aio.AioFile}
 
@@ -92,7 +92,7 @@ def test_aio_probe_and_unaligned_o_direct_fails_on_the_future(tmp_path):
     """io_setup is allowed here; an O_DIRECT piece at an unaligned file offset fails its request, not the thread."""
     assert aio.probe() == 0
     _a, pa, _va = aligned(8192)
-    from ppimpl.kvpool.backends import open_direct
+    from ssengine.kvpool.backends import open_direct
     p = tmp_path / "d.bin"
     p.write_bytes(bytes(1 << 16))
     fd, direct = open_direct(str(p))

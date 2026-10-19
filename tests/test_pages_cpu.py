@@ -1,4 +1,4 @@
-"""The g0 page table on CPU (ppimpl/model/metadata.py `g0_table`): KV in 128-token pages (`config.PAGE_TOKENS`)
+"""The g0 page table on CPU (ssengine/model/metadata.py `g0_table`): KV in 128-token pages (`config.PAGE_TOKENS`)
 addresses the same kernel blocks and slots as the block layout did when the pages are whole blocks in order, and
 vLLM's indexer builder (every second column // 2: its 128-token storage pages) recovers the pages themselves."""
 
@@ -6,9 +6,9 @@ import random
 
 import numpy as np
 
-from ppimpl.config import BLOCK_PAGES, BLOCK_TOKENS as B, PAGE_TOKENS as P
-from ppimpl.engine.kv import block_pages, kv_pages_for
-from ppimpl.model.metadata import KERNEL_BLOCK, g0_table
+from ssengine.config import BLOCK_PAGES, BLOCK_TOKENS as B, PAGE_TOKENS as P
+from ssengine.engine.kv import block_pages, kv_pages_for
+from ssengine.model.metadata import KERNEL_BLOCK, g0_table
 
 KPB = B // KERNEL_BLOCK                 # 134 kernel blocks per block
 
