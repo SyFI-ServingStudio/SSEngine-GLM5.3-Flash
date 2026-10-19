@@ -141,7 +141,7 @@ class DispatchRule:
         ends[stage] = end_ns
         if stage == 0:
             if host_ns is not None:
-                self.host.observe(tokens, self._host_time(dispatch_ns, start_ns, host_ns))
+                self.host.observe(tokens, self._host_time(mb_id, dispatch_ns, start_ns, host_ns))
             else:                                    # no stamps: only a plan that found stage 0 ready shows host time
                 ready = max(self.last_end_ns or 0, self._exit_known(mb_id - self.max_in_flight) or 0)
                 if ready <= dispatch_ns and self._exit_known(mb_id - self.max_in_flight) is not False:
@@ -153,14 +153,19 @@ class DispatchRule:
             for old in [k for k in self.exits if k < mb_id - 2 * self.max_in_flight]:
                 del self.exits[old]
 
-    def _host_time(self, dispatch_ns: int, start_ns: int, host_ns: tuple) -> int:
+    def _host_time(self, mb_id: int, dispatch_ns: int, start_ns: int, host_ns: tuple) -> int:
         """Forming -> stage-0 start were stage 0 free all along: the plan's delivery (formed -> received), the worker's
-        host side (prepare call -> prepared) and its launch (start mark, or stage 0's previous end if later -> first
-        kernel). Waits for the GPU (run-ahead, the previous microbatch still computing) are left out, so every
-        microbatch is a sample, not only the few that found stage 0 ready (a saturated pipeline gave almost none and
-        the estimate stayed at its early value: 8 ms planned vs 19 ms taken at v3 minutes 6-8, job 8242)."""
+        host side (prepare call -> prepared) and its launch (start mark, or the latest GPU wait if later -> first
+        kernel). Waits for the GPU are left out, so every microbatch is a sample, not only the few that found stage 0
+        ready (a saturated pipeline gave almost none and the estimate stayed at its early value: 8 ms planned vs 19 ms
+        taken at v3 minutes 6-8, job 8242). The GPU waits: stage 0's previous microbatch (run-ahead) and the in-flight
+        gate, microbatch mb_id - `max_in_flight` leaving the last stage. The projection already starts the plan at the
+        gate (`project`), so counting the gate wait here too formed plans early by it: with stages 2/3 the pipeline's
+        slowest the gate set 84% of stage-0 starts, launch p50 2.7 ms counted vs 0.01 ms net, lead 14.4 vs ~10 ms
+        needed, 39% of arrivals missing the next microbatch (ev_st10_full_n300, job 8447)."""
         plan, call, prep, ready = host_ns[:4]
-        launch = start_ns - max(ready, self.last_end_ns or 0)
+        gate = self._exit_known(mb_id - self.max_in_flight)
+        launch = start_ns - max(ready, self.last_end_ns or 0, gate or 0)
         return max(plan - dispatch_ns, 0) + max(prep - call, 0) + max(launch, 0)
 
     def _exit_known(self, mb_id: int):

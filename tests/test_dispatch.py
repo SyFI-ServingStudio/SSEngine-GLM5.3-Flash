@@ -271,6 +271,24 @@ def test_host_time_from_worker_stamps_on_every_microbatch():
     assert r.host.predict_ns(8192) == pytest.approx(0.75 * 20 * MS + 0.25 * 22 * MS)
 
 
+def test_host_time_leaves_out_the_in_flight_gate_wait():
+    """A stage-0 start set by the gate (microbatch k - max_in_flight leaving the last stage) is a GPU wait: the
+    projection already starts the plan there, so the host time does not count it (ev_st10_full_n300: the gate set 84%
+    of starts and inflated the lead 14.4 -> ~10 ms needed)."""
+    r = DispatchRule(4, 3.0)
+    for k in range(4):
+        r.dispatched(k, k * int(MS), 4096)
+    for k in range(4):                                # stage 0 reports, no stamps
+        r.stage_done(0, k, int((10 + 30 * k) * MS), int((40 + 30 * k) * MS))
+    r.stage_done(3, 0, int(150 * MS), int(200 * MS))  # mb 0 leaves the pipeline at 200 ms
+    r.dispatched(4, int(150 * MS), 4096)              # prepared by 155; stage 0 free at 130; the gate opens at 200
+    before = r.host.predict_ns(4096)
+    r.stage_done(0, 4, int(200 * MS) + 10_000, int(230 * MS), (int(151 * MS), int(151 * MS), int(155 * MS), int(155 * MS), 0))
+    # 1 delivery + 4 prepare + 0.01 launch after the gate, not + 45 ms waiting for it
+    want = int(1 * MS) + int(4 * MS) + 10_000
+    assert r.host.predict_ns(4096) == pytest.approx(want if before is None else 0.75 * before + 0.25 * want)
+
+
 def test_plans_form_by_the_host_time_bound_at_the_recent_largest_size():
     """Forming allows the host time's mean plus two deviations, at the largest of the last few plans' sizes."""
     from ppimpl.runtime.dispatch import DispatchRule, HostPredictor
