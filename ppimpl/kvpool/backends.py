@@ -16,7 +16,8 @@ other node once the node's free pages reach the low watermark (8039: 365 of 600 
 662 GB of page cache).
 
 SSD (`SsdTier`): the member's shard file of a shard set (`shards.py`), kept across runs, O_DIRECT reads and writes of
-whole slots through one io_uring (`uring.py`), the host arenas registered as its fixed buffers, reads ahead of writes.
+whole slots through one io_uring (`uring.py`, the host arenas registered as its fixed buffers) or one Linux AIO
+context (`aio.py`), as `tiers.ssd_backend` names; reads ahead of writes.
 """
 
 from __future__ import annotations
@@ -31,6 +32,7 @@ from concurrent.futures import Future
 
 import numpy as np
 
+from ppimpl.kvpool.aio import AioFile
 from ppimpl.kvpool.uring import UringFile
 
 MADV_HUGEPAGE = 14
@@ -43,8 +45,9 @@ REGISTER_CHUNK = 1 << 30      # cudaHostRegister per ~1 GiB of whole slots, from
 TOUCH_THREADS = 16           # first-touch threads per arena, on the job's CPUs of the arena's node (page-cache reclaim
                              # runs in the touching threads: 4 threads on the worker's 2 cores were the limit)
 HUGEPAGE = os.environ.get("PPIMPL_TIER_HUGEPAGE", "0") == "1"
-SSD_READ_DEPTH = 8            # SSD I/O, one io_uring request per slot (TIERS.md §2.5): reads in the kernel at once
+SSD_READ_DEPTH = 8            # SSD I/O, one request per slot (TIERS.md §2.5): reads in the kernel at once
 SSD_WRITE_DEPTH = 4           # writes: fewer, so a write-back never fills the device's queues in front of a read
+SSD_BACKENDS = {"uring": UringFile, "aio": AioFile}   # tiers.ssd_backend: the one used, never a fallback
 
 
 def num_slots(capacity_gb: float | None, slot_bytes: int) -> int:
@@ -308,15 +311,18 @@ class HostTier:
 class SsdTier:
     """One member's SSD tier: its shard file of a shard set (`shards.py`: shard q holds member q's quarter of every
     slot, whichever GPU the member runs on), read and written with O_DIRECT (buffered where the file system has no
-    O_DIRECT, as tmpfs) through one io_uring (`uring.UringFile`) into and out of host slots of the arenas in
-    `buffers`, which the ring registers as fixed buffers. One request per slot; reads go before writes
-    (`SSD_READ_DEPTH` / `SSD_WRITE_DEPTH` in the kernel at once).
+    O_DIRECT, as tmpfs) through `backend` (`SSD_BACKENDS`: one io_uring, `uring.UringFile`, whose fixed buffers are
+    the arenas in `buffers`; or one Linux AIO context, `aio.AioFile`) into and out of host slots of those arenas. One
+    request per slot; reads go before writes (`SSD_READ_DEPTH` / `SSD_WRITE_DEPTH` in the kernel at once).
 
     The file must exist with `nbytes` (written in full once by `shards.py create`); it is kept at close. Its contents
     are never trusted: the slot index (`TierManager`) starts empty every run, so only slots this run wrote are read."""
 
-    def __init__(self, path: str, nbytes: int, slot_bytes: int, buffers: list[tuple[int, int]]):
-        self.path, self.slot_bytes, self.fd = path, slot_bytes, None
+    def __init__(self, path: str, nbytes: int, slot_bytes: int, buffers: list[tuple[int, int]],
+                 backend: str = "uring"):
+        if backend not in SSD_BACKENDS:
+            raise ValueError(f"SSD backend {backend!r}: one of {sorted(SSD_BACKENDS)}")
+        self.path, self.slot_bytes, self.backend, self.fd = path, slot_bytes, backend, None
         if not os.path.exists(path) or os.path.getsize(path) != nbytes:
             raise RuntimeError(f"SSD shard {path}: " + (f"{os.path.getsize(path)} B" if os.path.exists(path) else
                                "missing") + f", the run needs {nbytes} B; create the set with "
@@ -324,15 +330,17 @@ class SsdTier:
         self.fd, self.direct = open_direct(path)
         try:
             piece = -(-slot_bytes // 4096) * 4096              # a whole slot (cut only at a fixed buffer's end)
-            self.io = UringFile(self.fd, buffers, piece, SSD_READ_DEPTH, SSD_WRITE_DEPTH, "tier-uring")
+            self.io = SSD_BACKENDS[backend](self.fd, buffers, piece, SSD_READ_DEPTH, SSD_WRITE_DEPTH, f"tier-{backend}")
         except BaseException:
             os.close(self.fd)
             raise
 
     @property
     def info(self) -> str:
-        return (f"ssd shard {self.path} (O_DIRECT {self.direct}, io_uring {self.io.registered_bytes / 1e9:.1f} GB "
-                f"registered in {self.io.register_s:.1f} s, depth read {SSD_READ_DEPTH} / write {SSD_WRITE_DEPTH})")
+        io = (f"io_uring {self.io.registered_bytes / 1e9:.1f} GB registered in {self.io.register_s:.1f} s"
+              if self.backend == "uring" else f"aio over {self.io.registered_bytes / 1e9:.1f} GB")
+        return (f"ssd shard {self.path} (O_DIRECT {self.direct}, {io}, depth read {SSD_READ_DEPTH} / write "
+                f"{SSD_WRITE_DEPTH})")
 
     def read(self, slots: list[int], host_ptrs: list[int]) -> list[Future]:
         """File slots -> host addresses, one future per slot, queued in order."""
@@ -343,7 +351,7 @@ class SsdTier:
         return [self.io.submit("w", s * self.slot_bytes, p, self.slot_bytes) for s, p in zip(slots, host_ptrs)]
 
     def close(self):
-        """Stop the ring and close the file (kept for the next run)."""
+        """Stop the ring or context and close the file (kept for the next run)."""
         if self.fd is None:
             return
         self.io.close()
