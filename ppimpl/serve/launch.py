@@ -134,6 +134,6 @@ def add_arguments(s) -> None:
     s.add_argument("--max-model-len", type=int, help=f"longest prompt + output (default and maximum {MAX_MODEL_LEN})")
     s.add_argument("--dram-gb", type=float, help="DRAM tier per GPU in GB (the evaluation's full setting: 50)")
     s.add_argument("--ssd-gb", type=float, help="SSD tier per GPU in GB (128); needs a shard set in --ssd-dir")
-    s.add_argument("--ssd-backend", choices=("uring", "aio"), help="the SSD tier's file I/O: io_uring (default) or "
-                   "Linux AIO (Docker's default seccomp profile allows it, not io_uring)")
+    s.add_argument("--ssd-backend", choices=("aio", "uring"), help="the SSD tier's file I/O: Linux AIO (default; "
+                   "Docker's default seccomp profile allows it) or io_uring (needs a seccomp profile that allows it)")
     s.add_argument("--ssd-dir", help="the SSD tier's shard sets (default $PPIMPL_SSD_DIR)")

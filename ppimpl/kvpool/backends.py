@@ -16,8 +16,8 @@ other node once the node's free pages reach the low watermark (8039: 365 of 600 
 662 GB of page cache).
 
 SSD (`SsdTier`): the member's shard file of a shard set (`shards.py`), kept across runs, O_DIRECT reads and writes of
-whole slots through one io_uring (`uring.py`, the host arenas registered as its fixed buffers) or one Linux AIO
-context (`aio.py`), as `tiers.ssd_backend` names; reads ahead of writes.
+whole slots through one Linux AIO context (`aio.py`, the default) or one io_uring (`uring.py`, the host arenas
+registered as its fixed buffers), as `tiers.ssd_backend` names; reads ahead of writes.
 """
 
 from __future__ import annotations
@@ -311,15 +311,15 @@ class HostTier:
 class SsdTier:
     """One member's SSD tier: its shard file of a shard set (`shards.py`: shard q holds member q's quarter of every
     slot, whichever GPU the member runs on), read and written with O_DIRECT (buffered where the file system has no
-    O_DIRECT, as tmpfs) through `backend` (`SSD_BACKENDS`: one io_uring, `uring.UringFile`, whose fixed buffers are
-    the arenas in `buffers`; or one Linux AIO context, `aio.AioFile`) into and out of host slots of those arenas. One
+    O_DIRECT, as tmpfs) through `backend` (`SSD_BACKENDS`: one Linux AIO context, `aio.AioFile`; or one io_uring,
+    `uring.UringFile`, whose fixed buffers are the arenas in `buffers`) into and out of host slots of those arenas. One
     request per slot; reads go before writes (`SSD_READ_DEPTH` / `SSD_WRITE_DEPTH` in the kernel at once).
 
     The file must exist with `nbytes` (written in full once by `shards.py create`); it is kept at close. Its contents
     are never trusted: the slot index (`TierManager`) starts empty every run, so only slots this run wrote are read."""
 
     def __init__(self, path: str, nbytes: int, slot_bytes: int, buffers: list[tuple[int, int]],
-                 backend: str = "uring"):
+                 backend: str = "aio"):
         if backend not in SSD_BACKENDS:
             raise ValueError(f"SSD backend {backend!r}: one of {sorted(SSD_BACKENDS)}")
         self.path, self.slot_bytes, self.backend, self.fd = path, slot_bytes, backend, None

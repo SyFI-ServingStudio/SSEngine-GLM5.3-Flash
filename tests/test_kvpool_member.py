@@ -132,8 +132,8 @@ def drive(pool, mems):
     return done
 
 
-@pytest.mark.parametrize("ring", [dict(), dict(ring_depth=2, ring_chunk_slots=1), dict(ssd_backend="aio")],
-                         ids=["default", "chunk1", "aio"])
+@pytest.mark.parametrize("ring", [dict(), dict(ring_depth=2, ring_chunk_slots=1), dict(ssd_backend="uring")],
+                         ids=["default", "chunk1", "uring"])
 def test_ssd_demote_and_staging_are_byte_equal(tmp_path, ring):
     """DRAM holds one 2-block context: Y's write-back demotes X to SSD (DRAM slots -> file, io_uring or AIO); X's read comes
     back through the staging arena into other HBM blocks, Y's from DRAM. SSD only: writes and reads through the

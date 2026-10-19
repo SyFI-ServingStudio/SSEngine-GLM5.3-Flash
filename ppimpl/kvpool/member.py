@@ -14,7 +14,7 @@ eviction waits for it) yields at each ring chunk to the reads queued or in fligh
 does not run ahead of its previous chunk. No wait on the compute stream: a write's blocks are final and pinned until it
 is done, a read's blocks are held by a request that computes only after all n `TierDone`s.
 
-SSD ops run on two threads, their file I/O on `SsdTier`'s io_uring or AIO context (reads first in the kernel), into and out of host
+SSD ops run on two threads, their file I/O on `SsdTier`'s AIO context or io_uring (reads first in the kernel), into and out of host
 slots: DRAM's (a demote) or a staging arena's (every SSD read; a write-back to SSD without
 DRAM, or of a context larger than DRAM). The file is shard q (this member's quarter of every
 slot) of the set the leader took (`shards.py`), kept for the next run; its contents are never trusted. A read's

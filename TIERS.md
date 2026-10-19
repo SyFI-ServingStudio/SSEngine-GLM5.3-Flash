@@ -11,7 +11,7 @@ refactor into them. Branch lane-m6 from m5-done (a167593).
 | Balanced storage | Every HBM byte range a context owns (each KV page of each DSA layer of each stage, each KDA state of each stage) is cut into 4 equal contiguous quarters; GPU q stores and moves quarter q of every range. Each GPU then holds and reads exactly 1/4 of every context (1,499 B/token + 36.9 MB on average, `7_offloading.md` §2), 3/4 of it to or from the other stages' HBM over NVLink in a second hop through a staging ring in GPU q's HBM (direct peer writes from host run at 2/3 of the rate, §2.3). |
 | Copy mechanism | Copy engine only (no SMs): one `cuMemcpyBatchAsync` per tier op per GPU (vLLM `ops.swap_blocks_batch`), source and destination lists built from a per-GPU pointer table of all 4 stages' KV views (CUDA IPC, opened once at start-up). |
 | DRAM | Pinned host memory per GPU on that GPU's NUMA node (libnuma + `cudaHostRegister`, not torch's power-of-2 pinned allocator), cut into fixed slots of one KV block's quarter; same slot ids on all 4 GPUs, owned by the controller's index. |
-| SSD | One shard file per pool member, kept across runs: `$PPIMPL_SSD_DIR/set<k>/shard<q>.bin` (default `<main tree>/tmp/ssd_tier`, md RAID0 of 8 NVMe; shard q = member q's quarter of every slot, §5), same slot layout; O_DIRECT, one io_uring per worker (fixed file, the host arenas as fixed buffers, one request per slot, 8 reads / 4 writes in the kernel, reads first; §2.5). Written only with DRAM's victims (§5); read SSD -> staging slots -> HBM, pipelined per slot. No GDS (nvidia-fs is not loaded on this node). |
+| SSD | One shard file per pool member, kept across runs: `$PPIMPL_SSD_DIR/set<k>/shard<q>.bin` (default `<main tree>/tmp/ssd_tier`, md RAID0 of 8 NVMe; shard q = member q's quarter of every slot, §5), same slot layout; O_DIRECT, one Linux AIO context per worker (`tiers.ssd_backend: aio`, the default; or one io_uring with the file and the host arenas fixed, `uring`), one request per slot, 8 reads / 4 writes in the kernel, reads first; §2.5. Written only with DRAM's victims (§5); read SSD -> staging slots -> HBM, pipelined per slot. No GDS (nvidia-fs is not loaded on this node). |
 | Writes | The victim chain HBM -> DRAM -> SSD (§5): a tier takes only what the level above lets go of. One write-back class (`kvpool/writeback.py`) for both levels: HBM writes its least recently used kept contexts ahead of need, keeping free + clean HBM above the largest demand of two write times (measured, no knob), so eviction finds them clean; DRAM demotes to SSD only at eviction. Background, never waited on by compute; only what the tier below lacks. HBM cannot evict a kept context (and its next round cannot take over its blocks) until all 4 GPUs reported its write done. |
 | Reads | As `7_offloading.md` §2 and the scheduler already does: HBM footprint reserved at read start, read-wait bound 1 s, one read at a time per tier per GPU, landed rounds admitted first in landing order. A read lands when all 4 GPUs report it. |
 | Eviction | LRU whole sessions per tier; a level evicts only entries the level below holds whole (else it waits, counted); DRAM slots of a session being demoted to SSD are reused only when the demote is done. |
@@ -184,9 +184,9 @@ Taken now, each with the 7916 number that confirms it or switches to the fallbac
 | page_first host layout (a slot = one block's quarter of all layers and stages, contiguous) | one host run per slot; host side never the small piece | - | - |
 | No layer-wise load pipelining | the round computes only after the whole prefix landed (target model); DRAM reads 1.7-16 ms | - | - |
 | Host memory on the GPU's NUMA node, registered by `cudaHostRegister` (not torch pin_memory) | torch rounds pins to powers of 2; remote NUMA caps lower | **confirmed**: 4 GPUs from the other node 27.2 / 19.4 GB/s vs 48.4 / 38.5 | preferred-local allocation, remote spill logged |
-| SSD: O_DIRECT through one io_uring per GPU, one shard file per member | §2.5: at the same throughput as 8 `preadv` threads, half the CPU and half the p99 read latency under write-back; no GDS on this node (nvidia-fs not loaded) | **confirmed** (§2.5, 4 processes on node 0) | - |
+| SSD: O_DIRECT through one AIO context (default) or one io_uring per GPU, one shard file per member | §2.5: io_uring at the same throughput as 8 `preadv` threads, half the CPU and half the p99 read latency under write-back; AIO equal to io_uring on reads, writes and sessions at ~1.8x its CPU, and allowed by Docker's default seccomp profile; no GDS on this node (nvidia-fs not loaded) | **confirmed** (§2.5, 4 processes on node 0) | - |
 
-### 2.5 SSD I/O: io_uring (bench/ssd_io.py, 2026-10-17)
+### 2.5 SSD I/O: io_uring and Linux AIO (bench/ssd_io.py, 2026-10-17 and 2026-10-19)
 
 `SsdTier` drives its file through `kvpool/uring.py`: one ring per worker (liburing-ffi through ctypes), the file
 registered (IOSQE_FIXED_FILE) and every host arena it reads into or writes from (DRAM and staging) registered as
@@ -272,6 +272,8 @@ order): read GB/s per process, CPU cores, read ms by session size p50 / p99, wri
   The runs differ by their GPUs' clocks, not by the backend: at the 1000 W cap (SW power cap, ~950 W, ~1600 MHz) all
   four runs give 32.83-32.91 r/s, whichever backend; the GPUs that ran uncapped (~800 W, ~1890 MHz: all of set A in
   8530, s2/s3 in 8534) give 34.07 and 33.12. SSD reads and writes take the same time on both.
+- Decision: AIO is the default (`TierConfig.ssd_backend`): equal on reads, write-backs and the session metrics, and
+  it runs in Docker with the default seccomp profile. io_uring stays a config choice (`ssd_backend: uring`).
 
 Note: own-stage storage (each GPU stores and moves its own stage's bytes) is not balanced. At PP4, stages 0, 2 and 3
 hold 3 DSA layers each (14.02 MB per block, 1,635 B/token: 9% above the mean of 1,499) and stage 1 holds 2 (9.35 MB,
@@ -360,10 +362,10 @@ reaches DRAM only on its way out of HBM.
   (`blocked_by_write`) while `make_room` writes them. `fits` does not count a resuming round's own kept context twice
   (in its footprint and as held back).
 - **DRAM level** (`TierManager`, `_TierLevel`): entries = DRAM's entries (charge: slots), fixed 0, at eviction only.
-  A write is a `demote` (DRAM slots -> SSD slots, one io_uring write per slot). DRAM evicts at once when it needs
+  A write is a `demote` (DRAM slots -> SSD slots, one file write per slot). DRAM evicts at once when it needs
   slots: a dirty victim's demote is emitted then, and the op that reuses the slots waits for it through `SlotGuard`
   (`evict_waits`). A member's SSD write thread does not wait for a write's or demote's file writes: many are in
-  flight in the io_uring at once (reads first), each reported when its last slot is written.
+  flight in the SSD backend at once (reads first), each reported when its last slot is written.
 - **What moves.** Only what the tier below lacks: a context that the tier holds whole (same content) is only
   refreshed there (`hbm_evicted`), a longer one keeps its full blocks' slots. A read back into HBM leaves the tier's
   copy in place (clean). When a session's next round is admitted, its entries that the round does not resume from
@@ -403,7 +405,7 @@ reaches DRAM only on its way out of HBM.
   concurrent runs).
 - **Worker.** A tier thread builds the pointer lists and copies on a write stream (copy engine only, no SM, no
   wait on the compute stream: a kept context's blocks are final). SSD writes and demotes run on the worker's SSD
-  write thread through the io_uring (§2.5).
+  write thread through the SSD backend (AIO or io_uring, §2.5).
 
 ## 6. Reads (DRAM/SSD -> HBM)
 
@@ -411,7 +413,7 @@ reaches DRAM only on its way out of HBM.
   queue, landed first in landing order. Only the blocks HBM lacks (from the block holding HBM's last token) + state.
 - **DRAM read.** One `swap_blocks_batch` per GPU on the read stream (H2D; the writes are D2H, the other PCIe
   direction). Reads of one tier on one GPU run one after another (one stream).
-- **SSD read.** The io_uring reads the session's SSD slots into staging slots (`staging_gb`, not DRAM: the victim
+- **SSD read.** The SSD backend (§2.5) reads the session's SSD slots into staging slots (`staging_gb`, not DRAM: the victim
   chain puts nothing in DRAM that HBM did not let go of), and as each slot lands the tier thread enqueues its H2D:
   read time ~ max(SSD, H2D) + one slot.
 - **Landing.** `read_landed` when all 4 `TierDone`s are in. The index's channel clock (when the tier is free, for the
@@ -596,7 +598,7 @@ or SGLang's scheduler; wiring them to balanced striping and our scheduler would 
 | Pinned host memory | libnuma first-touch on the GPU's node + `cudaHostRegister` (portable, mapped), chunked | the pattern of LMCache `csrc/cuda/mem_alloc.cpp` (mmap + mbind + register) and vLLM `kv_offload/cpu/shared_offload_region.py` (mmap + register in <= 64 GB chunks) | torch `pin_memory` rounds to a power of 2 (150 -> 256 GB); vLLM's region is one `/dev/shm` file with per-worker rows and no mbind (NUMA by first touch only): we need each GPU's slice bound to its node and need no shared file (each worker maps only its own slice; peer bytes go over NVLink, not through another worker's host memory) |
 | Host layout | page_first: a slot holds one block of all layers (and all stages, quartered) contiguously | the idea of HiCache `page_first_direct` `(2, pages, L, page, H, D)` and vLLM 0.12's cross-layer block | HiCache's `layer_first` and per-token `page_first` give small copies (10.8 GB/s sustained in Strata's measurement); the HBM side stays vLLM's per-layer layout (changing it would touch every attention kernel), so pieces are per (layer, block) quarters there |
 | O_DIRECT probe | `probe_o_direct` | vLLM fork `kv_offload/tiering/fs/io.py` | - |
-| SSD file I/O | own: one shard file per member (kept across runs, §5), slot-addressed O_DIRECT through one io_uring per GPU (liburing, fixed file and buffers; `kvpool/uring.py`, §2.5) | pattern of Dynamo KVBM's single fallocated O_DIRECT file per worker; io_uring as NIXL's POSIX backend | vLLM fs tier and LMCache/HiCache file backends write one file per block or chunk (temp file + rename, or buffered I/O): 10k+ files per GPU and an open/close per 12.9 MB; `fs_io_C` loops serially in C. GDS (LMCache cuFile, NIXL) is not available (nvidia-fs not loaded) |
+| SSD file I/O | own: one shard file per member (kept across runs, §5), slot-addressed O_DIRECT through one Linux AIO context per GPU (raw syscalls, `kvpool/aio.py`; default) or one io_uring (liburing, fixed file and buffers; `kvpool/uring.py`), §2.5 | pattern of Dynamo KVBM's single fallocated O_DIRECT file per worker; io_uring as NIXL's POSIX backend | vLLM fs tier and LMCache/HiCache file backends write one file per block or chunk (temp file + rename, or buffered I/O): 10k+ files per GPU and an open/close per 12.9 MB; `fs_io_C` loops serially in C. GDS (LMCache cuFile, NIXL) is not available (nvidia-fs not loaded) |
 | Index, LRU, read-wait bound, scheduler | own (`ppimpl/kvpool/manager.py`, was `engine/tiers.py`; `scheduler.py`, already written for M5 replay) | - | the handoff's rules (whole-session LRU per tier, write-back to SSD, read-wait bound, landed rounds first) are not any of these systems' policies |
 
 ## 12. Differences from the target to record
@@ -726,7 +728,7 @@ backends.py, mover.py, manager.py, member.py}`; `engine/tiers.py`, `runtime/tier
   3. If DRAM is full: the LRU victim gets a demote op, emitted before the write that reuses its slots.
   4. Member q: `Mover` batch-copies D2D from the stages to the ring, then D2H per slot.
   5. When all n are done, the caller's blocks are unpinned.
-- **SSD write-back (demote).** Member q: `SsdTier.write(slots, DRAM slot pointers)` through its io_uring. When all n
+- **SSD write-back (demote).** Member q: `SsdTier.write(slots, DRAM slot pointers)` through its SSD backend. When all n
   are done, the DRAM slots return to the free list.
 - **SSD load.** `prepare_load` allocates staging slots (as built: never DRAM, §6). Member q:
   1. `SsdTier.read` of all the entry's slots into those host slots;
@@ -769,8 +771,9 @@ Where it differs from §13.1-§13.2, and why:
   `OwnStagePlacement` is not built: it needs per-GPU slot sizes in the index.
 - **Layer 3.** `HostTier.ptr(slot)` once `register(slot_bytes)` fixed the slot size; slot counts stay
   `backends.num_slots(gb, slot_bytes)` (no `capacity_slots` attribute). `SsdTier(path, nbytes, slot_bytes,
-  buffers)` opens its shard of the run's set (`shards.py`, §5) and owns its io_uring (`uring.UringFile`, §2.5);
-  `buffers` are the host arenas to register.
+  buffers, backend)` opens its shard of the run's set (`shards.py`, §5) and owns its AIO context (`aio.AioFile`) or
+  io_uring (`uring.UringFile`, §2.5); `buffers` are the host arenas it reads into and writes from (the ring registers
+  them).
 - **Layer 4.** `Mover(device, slot_bytes, hops, ring_depth, ring_chunk_slots)`, `transfer_async(direction,
   segments, ready, tr) -> (event, bytes)`. A segment is host slot pointers plus the pieces in them; the mover cuts
   each segment into ring chunks (KV and state never share a chunk, as before) or, direct, puts all pieces in one
@@ -824,7 +827,7 @@ reuse after the demote (`evicting`).
 
 cudaHostRegister stays in `attach` (`HostTier.register`: ~1 GiB chunks of whole slots from 4 threads): its chunks
 must be whole slots, and the slot size is known only once the model is loaded, so it cannot run on the touch thread
-while the model loads. The io_uring's buffer registration comes after it (its time is in the worker's start-up line).
+while the model loads. With `ssd_backend: uring`, the ring's buffer registration comes after it (its time is in the worker's start-up line).
 
 ### 13.6 Exclusive DRAM and staged loading (lane-m6-staged)
 
