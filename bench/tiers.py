@@ -19,19 +19,19 @@ from pathlib import Path
 
 import numpy as np
 
-from bench.common import HANDOFF
+from bench.common import HANDOFF, ROOT
 from bench.prefix import bringup, server_rows
 from bench.report import read_jsonl
 
 VARIANTS = ("hbm_hit", "hbm", "dram", "ssd", "dram_unbal", "ssd_unbal")
 
 # Victim-chain settings (HBM -> DRAM -> SSD, TIERS.md §5): name -> (sim run, HBM GB, `--pool-tokens`, DRAM GB per
-# GPU); SSD 128 GB per GPU. Targets: the simulator's rows of these runs (PPIMPL_VICTIM_TARGETS overrides the path).
+# GPU); SSD 128 GB per GPU. Targets: the simulator's rows of these runs, copied from the sim run 20261017_7_victim_chain
+# (PPIMPL_VICTIM_TARGETS overrides the path).
 VICTIM_SETTINGS = {"full": ("full_d50", 100.18, None, 50.0),
                    "tiers": ("h20_d20", 20.0, 12_220_800, 20.0),
                    "ssd_heavy": ("h12p5_d12p5", 12.5, 7_632_640, 12.5)}
-VICTIM_TARGETS = Path(os.environ.get("PPIMPL_VICTIM_TARGETS") or "/raid/kanzhu/ServingStudio/wt-pp-dram-victim/logs/"
-                      "20261017_7_victim_chain/rows.jsonl")
+VICTIM_TARGETS = Path(os.environ.get("PPIMPL_VICTIM_TARGETS") or ROOT / "measured" / "victim_chain_rows.jsonl")
 
 
 def victim_target(setting: str, n: int, rows: Path = VICTIM_TARGETS) -> dict | None:

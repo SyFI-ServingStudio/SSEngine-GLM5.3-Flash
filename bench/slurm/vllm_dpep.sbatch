@@ -7,7 +7,7 @@
 #   N=400 OFFLOAD_GB=50 sbatch ... --mem=450G ...         # B: native CPU offload, 50 GB (1e9 B) per GPU
 #   SMOKE=1 N=8 sbatch -p priority --time=00:30:00 ...    # smoke: 3 min of client
 #   TP=4 N=400 sbatch ...                                 # pure tensor parallel: one TP4 engine, no EP, no router
-# Variables: N (client --max-concurrency), TRACE (default the v3 trace data/tracelab-v3/m6/sessions_2ps_v3.csv), OFFLOAD_GB (per GPU; --kv-offloading-size is per DP engine in GiB, since
+# Variables: N (client --max-concurrency), TRACE (the session trace csv, required; the M6 runs used the v3 sessions_2ps_v3.csv), OFFLOAD_GB (per GPU; --kv-offloading-size is per DP engine in GiB, since
 # CPUOffloadingSpec divides by the engine's world size = TP x PP = 1), CLIENT_TIMEOUT (default 22m; SMOKE 3m),
 # OUT (default <main tree>/measured/vllm_dpep), RUN (run name), VLLM_EXTRA (extra server args),
 # POLICY (vllm-router policy in front of the server, default cache_aware = prefix-aware; none = no router, the client
@@ -36,16 +36,15 @@ set -uo pipefail
 source "${SLURM_SUBMIT_DIR:-$(dirname "$0")/../..}/bench/slurm/env.sh"
 echo 1000 > /proc/self/oom_score_adj
 export CUDA_DEVICE_ORDER=PCI_BUS_ID PATH=/usr/bin:$PATH   # /usr/bin/ninja first (FlashInfer JIT, notes.md)
-export HF_HOME=/raid/hf
-CKPT=/raid/hf/hub/models--nvidia--GLM-5.3-Flash-NVFP4/snapshots/da920bb0b9f4a06727223a349e55468e38352348
-H=/raid/kanzhu/ServingStudio/wt-pp-hitrule/doc/handoff/glm53_flash_pp4_b200_v2/data
+CKPT=$($PY -c 'from ppimpl.config import CHECKPOINT; print(CHECKPOINT)')   # PPIMPL_CHECKPOINT, else the HF_HOME snapshot
+H=${PPIMPL_HANDOFF:-$MAIN/third_party/handoff}/data
 # The M6 runs' req-frontend (8723d90) with one change, bench/vllm_dpep_client_preflight.patch: the prefix-cache
 # preflight probe is 32768 tokens, not 8192. vLLM's hybrid KV for this model at TP1 has an 8576-token block (attention
 # page padded to the KDA state page), so an 8192-token probe can never hit and the unpatched client refuses to start
 # (job 8191). The workload path is unchanged. Build: clone third_party/req-frontend at 8723d90, apply the patch,
 # cargo build --release --features runtime --bin session_runner (CARGO_TARGET_DIR below).
 CLIENT=${CLIENT:-$MAIN/tmp/vllm_dpep_client/build/release/session_runner}
-TRACE=${TRACE:-/raid/kanzhu/ServingStudio/data/tracelab-v3/m6/sessions_2ps_v3.csv}   # v3 new-model trace (A/B)
+TRACE=${TRACE:?TRACE (session trace csv, e.g. the v3 sessions_2ps_v3.csv)}
 N=${N:?N (client max concurrency)}
 OFF=${OFFLOAD_GB:-}
 POLICY=${POLICY:-cache_aware}
@@ -137,7 +136,7 @@ fi
 # --- client: exactly the M6 command (client_command.txt of runs_m6/st_tiers_n400) but base URL and paths
 CT=${CLIENT_TIMEOUT:-$([ -n "${SMOKE:-}" ] && echo 3m || echo 22m)}
 CMD=(timeout "$CT" "$CLIENT" --trace "$TRACE" --input-file-format text-generation-session-execution-v2
-     --text-file /raid/kanzhu/ServingStudio/data/corpus/enwik9 --tokenizer "$CKPT/tokenizer.json"
+     --text-file "${PPIMPL_ENWIK9:-$MAIN/third_party/enwik9}" --tokenizer "$CKPT/tokenizer.json"
      --model glm53-flash-pp4 --backend vllm-tokens --base-url "$URL" --temperature 0
      --arrival-mode trace-timed --stream-idle-timeout-secs 600 --stop-session-on-error true --timeline true
      --log-path "$RD/requests.jsonl" --summary-path "$RD/summary.json" --timeline-path "$RD/timeline.parquet"

@@ -3,7 +3,7 @@
 and from vLLM's /metrics snapshots (prom/*.prom, one a minute) the counter deltas over the client's minutes 10-20:
 local prefix cache and connector (CPU offload) hits, preemptions, offload transfer bytes, plus the peak queue.
 
-    python -m bench.vllm_dpep_summary measured/vllm_dpep/<run> [--trace CSV]    # writes <run>/dpep_summary.json and prints it
+    python -m bench.vllm_dpep_summary measured/vllm_dpep/<run> --trace CSV    # writes <run>/dpep_summary.json and prints it
 """
 
 from __future__ import annotations
@@ -17,7 +17,6 @@ from pathlib import Path
 
 from bench.prefix import real_arrays, window_metrics
 
-TRACE = Path("/raid/kanzhu/ServingStudio/data/tracelab-v3/m6/sessions_2ps_v3.csv")
 LINE = re.compile(r'^([a-zA-Z_:][a-zA-Z0-9_:]*)(\{[^}]*\})?\s+([-+0-9.eEinfNa]+)$')
 
 
@@ -61,7 +60,7 @@ def counters(run: Path) -> dict:
     return {"from_s": t, "to": "end", "delta": {k: v for k, v in delta.items() if v}, "peak_sum_over_engines": peaks}
 
 
-def inside_rounds(run: Path, trace: Path = TRACE) -> dict:
+def inside_rounds(run: Path, trace: Path) -> dict:
     """Rounds arriving in minutes 10-20 (successful, first token < 20 min) split into "inside" rounds (round > 0 whose
     declared 0 < prefix_len < the previous round's prefix + input + output: a context cutoff, resumable only from a
     state inside the old context) and the rest ("extending"; includes prefix 0). Per class: rounds, prefix tokens,
@@ -161,7 +160,7 @@ def router(run: Path) -> dict:
             "late": late}
 
 
-def main(run: Path, trace: Path = TRACE) -> dict:
+def main(run: Path, trace: Path) -> dict:
     rows = real_arrays(run / "requests.jsonl")
     arr = rows[0]
     late = tuple(a[(arr >= 600e3)] for a in rows)            # rounds arriving in minutes 10-20, first token < 20 min
@@ -192,6 +191,6 @@ if __name__ == "__main__":
 
     ap = argparse.ArgumentParser()
     ap.add_argument("run", type=Path)
-    ap.add_argument("--trace", type=Path, default=TRACE, help="the run's session trace (inside-round classification)")
+    ap.add_argument("--trace", type=Path, required=True, help="the run's session trace (inside-round classification)")
     a = ap.parse_args()
     print(json.dumps(main(a.run, a.trace), indent=1))
