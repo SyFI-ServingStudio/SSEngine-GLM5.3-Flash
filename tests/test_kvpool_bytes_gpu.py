@@ -18,6 +18,8 @@ from types import SimpleNamespace as NS
 
 import pytest
 
+from ppimpl.engine.kv import block_pages
+
 from conftest import free_port_block
 
 pytestmark = pytest.mark.gpu
@@ -29,7 +31,7 @@ N_KV, N_ST = -(-(P + A) // B), 6
 def _plans(name, toks, start, sizes, kv, st, mb0):
     plans, s = [], start
     for j, n in enumerate(sizes):
-        plans.append(NS(mb_id=mb0 + len(plans), chunks=[NS(req_id=name, start=s, num_tokens=n, kv_blocks=kv,
+        plans.append(NS(mb_id=mb0 + len(plans), chunks=[NS(req_id=name, start=s, num_tokens=n, kv_pages=block_pages(kv),
                                                              state_blocks=st, is_last=j == len(sizes) - 1,
                                                              token_ids=toks[s:s + n])]))
         s += n

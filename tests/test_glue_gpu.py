@@ -9,6 +9,8 @@ on the same buffers (`replay=False`, the exactness reference): every sent row bi
 
 import pytest
 
+from ppimpl.engine.kv import block_pages
+
 pytestmark = pytest.mark.gpu
 
 
@@ -26,7 +28,7 @@ def test_edge_send_after_replay_matches_eager(stage):
     assert not model.last
 
     def chunk(rid, start, n, kv):
-        return NS(req_id=rid, start=start, num_tokens=n, kv_blocks=[kv], is_last=True,
+        return NS(req_id=rid, start=start, num_tokens=n, kv_pages=block_pages([kv]), is_last=True,
                   state_blocks=list(range(kv + 1, kv + 7)), token_ids=[(7 * i + 11) % 50000 + 1 for i in range(n)])
 
     plans = [NS(mb_id=0, chunks=[chunk("a", 0, 4096, 1)]),                         # fresh, exactly the bucket
@@ -82,7 +84,7 @@ def test_indexer_float_matches_torch_cast():
         m.register_forward_hook(lambda mod, args, out: seen.append(out.clone()))
 
     def chunk(rid, start, n, kv):
-        return NS(req_id=rid, start=start, num_tokens=n, kv_blocks=[kv], is_last=True,
+        return NS(req_id=rid, start=start, num_tokens=n, kv_pages=block_pages([kv]), is_last=True,
                   state_blocks=list(range(kv + 1, kv + 7)), token_ids=None)
 
     plans = [NS(mb_id=0, chunks=[chunk("a", 0, 4096, 1)]),
