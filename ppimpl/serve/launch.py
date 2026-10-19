@@ -102,6 +102,10 @@ def build_config(a) -> RunConfig:
         if not raw.get("tiers"):
             raise SystemExit("--ssd-dir without an SSD tier: give --ssd-gb")
         raw["tiers"]["ssd_dir"] = a.ssd_dir
+    if a.ssd_backend:
+        if not (raw.get("tiers") and raw["tiers"].get("ssd_gb")):
+            raise SystemExit("--ssd-backend without an SSD tier: give --ssd-gb")
+        raw["tiers"]["ssd_backend"] = a.ssd_backend
     if raw.get("tiers") and raw["tiers"].get("ssd_gb") and not (raw["tiers"].get("ssd_dir")
                                                                 or os.environ.get("PPIMPL_SSD_DIR")):
         raise SystemExit("the SSD tier needs --ssd-dir (or PPIMPL_SSD_DIR): a directory with a shard set, made once by "
@@ -130,4 +134,6 @@ def add_arguments(s) -> None:
     s.add_argument("--max-model-len", type=int, help=f"longest prompt + output (default and maximum {MAX_MODEL_LEN})")
     s.add_argument("--dram-gb", type=float, help="DRAM tier per GPU in GB (the evaluation's full setting: 50)")
     s.add_argument("--ssd-gb", type=float, help="SSD tier per GPU in GB (128); needs a shard set in --ssd-dir")
+    s.add_argument("--ssd-backend", choices=("uring", "aio"), help="the SSD tier's file I/O: io_uring (default) or "
+                   "Linux AIO (Docker's default seccomp profile allows it, not io_uring)")
     s.add_argument("--ssd-dir", help="the SSD tier's shard sets (default $PPIMPL_SSD_DIR)")

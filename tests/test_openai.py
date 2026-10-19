@@ -90,6 +90,11 @@ def test_build_config_is_the_design_setting(tmp_path):
                                                      "port": 1234}))
     cfg = launch.build_config(args(str(d), config=str(tmp_path / "o.yaml"), port=4321))
     assert (cfg.pool_tokens, cfg.scheduler.mb_tokens, cfg.scheduler.order, cfg.port) == (1000, 8192, "srpt", 4321)
+    assert cfg.tiers is None or cfg.tiers.ssd_backend == "uring"
+    cfg = launch.build_config(args(str(d), dram_gb=50.0, ssd_gb=128.0, ssd_dir="/ssd", ssd_backend="aio"))
+    assert cfg.tiers.ssd_backend == "aio"
+    with pytest.raises(SystemExit, match="--ssd-backend without an SSD tier"):
+        launch.build_config(args(str(d), dram_gb=20.0, ssd_backend="aio"))
     with pytest.raises(SystemExit, match="SSD tier needs --ssd-dir"):
         launch.build_config(args(str(d), ssd_gb=128.0))
     with pytest.raises(SystemExit, match="at most 1048576"):

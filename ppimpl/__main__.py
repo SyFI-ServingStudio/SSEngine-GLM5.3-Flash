@@ -30,7 +30,7 @@ def main():
     a = ap.parse_args()
     if a.cmd == "serve":
         if a.config and not a.model:
-            if any(v is not None for v in (a.revision, a.dram_gb, a.ssd_gb, a.ssd_dir)):
+            if any(v is not None for v in (a.revision, a.dram_gb, a.ssd_gb, a.ssd_dir, a.ssd_backend)):
                 s.error("--revision and the tier options need a model; with --config alone, set them in the YAML")
             cfg = load_config(a.config, port=a.port, run_dir=a.run_dir, host=a.host,
                               served_model_name=a.served_model_name, max_model_len=a.max_model_len)
