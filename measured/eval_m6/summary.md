@@ -59,7 +59,8 @@ HBM only, MNBT 32768. Ours: the eval rows above (N100 st10 tiers 8456; N300/N400
 | 400 | 10-20 | vLLM DP4/EP4 | hbm_cache_aware_n400_8250 | 4.64 | 48.31/148.23/212.89 | 910 |
 | 400 | 10-20 | vLLM TP4 | tp4_hbm_n400_8419 | 1.17 | 319.95/344.78/349.48 | 702 |
 
-vLLM DP4/EP4 with its CPU offload (50 GB per engine) is the same within 3%: N300 8281 9.76 / 10.12 r/s, TTFT
+vLLM DP4/EP4 with its CPU offload (50 GB per engine), r/s vs HBM only: N300 +0.6% (0-20) / +0.2% (10-20), N400
+-2.6% (0-20) / -5.8% (10-20, 4.37 vs 4.64). N300 8281 9.76 / 10.12 r/s, TTFT
 18.53/32.33/44.11 and 18.40/32.84/41.85 s; N400 8251 6.41 / 4.37 r/s, 36.25/74.09/211.36 and 53.12/144.37/237.29 s
 (0-20 / 10-20). recompute/new in 10-20: DP4/EP4 1.39 (N100), 1.60 (N300), 5.51 (N400); TP4 0.97, 8.74, 8.01.
 
