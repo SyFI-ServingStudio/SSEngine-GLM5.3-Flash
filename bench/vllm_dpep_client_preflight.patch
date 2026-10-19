@@ -1,0 +1,13 @@
+diff --git a/src/runner.rs b/src/runner.rs
+index 8ceeac8..e8f75ca 100644
+--- a/src/runner.rs
++++ b/src/runner.rs
+@@ -234,7 +234,7 @@ async fn run_pass(args: Args, corpus: &mut CorpusCache, is_warmup: bool) -> Resu
+         // short to cache. 8k clears any block size in practice while staying
+         // bounded, so a long-context workload does not pay for two extra
+         // full-length prefills.
+-        const PREFLIGHT_PROBE_TOKENS: usize = 8192;
++        const PREFLIGHT_PROBE_TOKENS: usize = 32768;
+         let probe_len = token_pool.len().min(PREFLIGHT_PROBE_TOKENS);
+         client
+             .preflight_cache_check(&token_pool[token_pool.len() - probe_len..])
