@@ -250,7 +250,7 @@ class Scheduler:
         self._seq = 0
         self._chunks: list[ChunkSpec] = []
         self._room_blocked: Request | None = None   # the waiting round whose footprint did not fit at the last check
-        self.stats = dict(microbatches=0, passed_over=0, reads=0, blocked_reads=0, busy_waits=0)
+        self.stats = dict(microbatches=0, passed_over=0, reads=0, reads_gone=0, blocked_reads=0, busy_waits=0)
         self.staged = False
         self.waiting_hop: deque[Request] = deque()     # staged: fetched into DRAM's area, waiting for HBM's
         self._load_dirty = True
@@ -709,10 +709,16 @@ class Scheduler:
         r.alloc = self.kv.held[r.req_id]
         h = self.pool.load(r.session, hit, KVViews(r.alloc.kv_blocks, r.alloc.state_blocks, hit.tokens, r.hbm_tokens),
                            now_ns, r.req_id)
+        r.read_start_ns = now_ns
+        if h is None:       # the tier copy went while HBM made room (its own evictions): the round lands at once
+            r.cached = r.hbm_tokens     # with what HBM held and computes the rest
+            r.tier, r.tier_tokens, r.read_land_ns = None, 0, now_ns
+            self.landed.append(r)
+            self.stats["reads_gone"] += 1
+            return "read"
         r.cached = hit.tokens
         r.tier = hit.tier
         r.tier_tokens = hit.tokens - r.hbm_tokens
-        r.read_start_ns = now_ns
         r.read_land_ns = h.eta_ns
         self.reading[r.req_id] = r
         self.stats["reads"] += 1
