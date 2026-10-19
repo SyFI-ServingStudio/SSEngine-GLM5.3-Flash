@@ -94,8 +94,9 @@ class Threads:
 class Backend:
     def __init__(self, fd, base, nbytes, a):
         from ppimpl.kvpool.backends import SSD_BACKENDS
+        kw = {"submitters": a.aio_submitters} if a.mode == "aio" and a.aio_submitters else {}
         self.u = SSD_BACKENDS[a.mode](fd, [(base, nbytes)], int(a.piece_mib * (1 << 20)), a.read_depth,
-                                      a.write_depth)
+                                      a.write_depth, **kw)
 
     def submit(self, kind, slot, ptr):
         return self.u.submit(kind, slot * SLOT, ptr, SLOT)
@@ -219,6 +220,7 @@ def main():
     p.add_argument("--mode", choices=["threads", "uring", "aio"], default="uring")
     p.add_argument("--threads", type=int, default=8)
     p.add_argument("--piece-mib", type=float, default=13.0)     # >= a slot: one request per slot
+    p.add_argument("--aio-submitters", type=int)                # aio: io_submit threads (default aio.SUBMITTERS)
     p.add_argument("--read-depth", type=int, default=8)
     p.add_argument("--write-depth", type=int, default=4)
     p.add_argument("--read-gbs", type=float, default=0.0)
