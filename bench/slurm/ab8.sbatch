@@ -1,7 +1,8 @@
 #!/bin/bash
 # Two 4-GPU runs at once in one 8-GPU job (an A/B pair on one node): run A on GPUs 0-3 with the CPUs of their NUMA
 # node, run B on GPUs 4-7 with the other node's, each through bench/slurm/m6.sbatch from its own run tree (code
-# under test), with its own port, TMPDIR and SSD dir. memguard prechecks/watches each run. Usage:
+# under test), with its own port, TMPDIR and SSD dir (AB_SSD_DIR: one dir for both, whose shard sets the two runs
+# take one each). memguard prechecks/watches each run. Usage:
 #   sbatch -p main -J ppab --gres=gpu:8 --mem=500G --time=00:35:00 -o <dir>/%j.out bench/slurm/ab8.sbatch \
 #     TREE_A TREE_B -- <m6.sbatch args for A> -- <m6.sbatch args for B>
 set -uo pipefail
@@ -31,7 +32,7 @@ echo "== ab8 job ${SLURM_JOB_ID:-local}: B $TB gpus $GB cpus $CB port $((BASEP +
 run() {   # tree gpus cpus port tag args...
   local tree=$1 g=$2 c=$3 p=$4 tag=$5; shift 5
   (cd "$tree" && SLURM_SUBMIT_DIR=$tree CUDA_VISIBLE_DEVICES=$g PPIMPL_PORT=$p \
-     PPIMPL_TMP=${TMPDIR:-/tmp}/ab$tag PPIMPL_SSD_DIR=$tree/../../tmp/ssd_tier_ab$tag \
+     PPIMPL_TMP=${TMPDIR:-/tmp}/ab$tag PPIMPL_SSD_DIR=${AB_SSD_DIR:-$tree/../../tmp/ssd_tier_ab$tag} \
      taskset -c "$c" bash "$M6" "$@") > "${AB_LOG:-$SLURM_SUBMIT_DIR/measured/logs}/ab_${SLURM_JOB_ID:-local}_$tag.out" 2>&1
 }
 run "$TA" "$GA" "$CA" "$BASEP" A "${A[@]}" & PA=$!

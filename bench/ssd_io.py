@@ -3,11 +3,12 @@
 Each of `--procs` processes (one per GPU) has its own preallocated file of whole slots (12,857,344 B, GLM-5.3 PP4
 balanced) and a host arena, and runs two loops at once:
 - reads: whole sessions, a random set of 3-60 file slots each, one read at a time (the member's SSD read thread),
-  arriving at `--read-gbs` per process (Poisson; 0: back to back, the maximum);
+  arriving at `--read-gbs` per process (Poisson; 0: back to back, the maximum; negative: no reads);
 - write-back: demotes of 3-60 slots, one at a time, paced to `--write-gbs` per process.
 Mechanisms: `threads` (the old SsdTier: one pool of `--threads` threads, os.preadv / os.pwritev of whole slots, reads
-and writes in one pool) or `uring` (`ppimpl.kvpool.uring.UringFile`: fixed file and buffers, pieces of `--piece-mib`,
-`--read-depth` / `--write-depth` pieces in flight, reads first).
+and writes in one pool), `uring` (`ppimpl.kvpool.uring.UringFile`: fixed file and buffers, pieces of `--piece-mib`,
+`--read-depth` / `--write-depth` pieces in flight, reads first) or `aio` (`ppimpl.kvpool.aio.AioFile`: the same
+pieces, depths and queues on a Linux AIO context).
 
     python -m bench.ssd_io fill  --dir D --procs 4 --file-gb 16
     python -m bench.ssd_io run   --dir D --procs 4 --mode uring --piece-mib 13 --read-depth 8 --write-depth 4 \\
@@ -15,7 +16,8 @@ and writes in one pool) or `uring` (`ppimpl.kvpool.uring.UringFile`: fixed file 
     python -m bench.ssd_io clean --dir D
 
 Per process it reports read and write GB/s over the timed window, read latency p50 / p99 (service: from the read's
-start; and with its queueing behind earlier reads) by session size, and the process's CPU (cores = CPU s / wall s).
+start; and with its queueing behind earlier reads) by session size, write-back latency p50 / p99 per slot (a demote's
+time / its slots), and the process's CPU (cores = CPU s / wall s).
 Processes are bound to `--node` (CPUs and memory) with numactl.
 """
 
@@ -89,10 +91,12 @@ class Threads:
         self.pool.shutdown()
 
 
-class Uring:
+class Backend:
     def __init__(self, fd, base, nbytes, a):
-        from ppimpl.kvpool.uring import UringFile
-        self.u = UringFile(fd, [(base, nbytes)], int(a.piece_mib * (1 << 20)), a.read_depth, a.write_depth)
+        from ppimpl.kvpool.backends import SSD_BACKENDS
+        kw = {"submitters": a.aio_submitters} if a.mode == "aio" and a.aio_submitters else {}
+        self.u = SSD_BACKENDS[a.mode](fd, [(base, nbytes)], int(a.piece_mib * (1 << 20)), a.read_depth,
+                                      a.write_depth, **kw)
 
     def submit(self, kind, slot, ptr):
         return self.u.submit(kind, slot * SLOT, ptr, SLOT)
@@ -107,7 +111,7 @@ def child(a):
     arena = mmap.mmap(-1, ARENA_SLOTS * SLOT)
     base = ctypes.addressof(ctypes.c_char.from_buffer(arena))
     ctypes.memset(base, 1, ARENA_SLOTS * SLOT)              # touch (numactl --membind places it)
-    io = Threads(fd, a.threads) if a.mode == "threads" else Uring(fd, base, ARENA_SLOTS * SLOT, a)
+    io = Threads(fd, a.threads) if a.mode == "threads" else Backend(fd, base, ARENA_SLOTS * SLOT, a)
     rng = random.Random(1000 + a.rank)
     t_start = time.monotonic() + 1.0                          # warm-up second, not counted
     t_end = t_start + a.secs
@@ -115,6 +119,8 @@ def child(a):
     stop = threading.Event()
 
     def reader():
+        if a.read_gbs < 0:
+            return
         t_arr = time.monotonic()
         mean = 31.5 * SLOT
         while not stop.is_set():
@@ -176,6 +182,9 @@ def child(a):
         if sv:
             out["lat"][name] = dict(n=len(sv), p50=float(np.percentile(sv, 50)), p99=float(np.percentile(sv, 99)),
                                     q_p50=float(np.percentile(qd, 50)), q_p99=float(np.percentile(qd, 99)))
+    ws = [1e3 * (t1 - t0) / k for t0, t1, k in writes if t_start <= t0 and t1 <= t_end]
+    if ws:
+        out["write_ms_per_slot"] = dict(n=len(ws), p50=float(np.percentile(ws, 50)), p99=float(np.percentile(ws, 99)))
     print(json.dumps(out), flush=True)
 
 
@@ -191,7 +200,9 @@ def run(a):
     rec = dict(tag=a.tag, cfg=cfg, procs=rows)
     agg = lambda key: [round(r[key], 2) for r in rows]
     lat = lambda b, f: [round(r["lat"].get(b, {}).get(f, float("nan")), 1) for r in rows]
-    print(f"{a.tag}: read GB/s {agg('read_gbs')} write {agg('write_gbs')} cores {agg('cpu_cores')}")
+    wl = [tuple(round(r.get("write_ms_per_slot", {}).get(f, float("nan")), 2) for f in ("p50", "p99")) for r in rows]
+    print(f"{a.tag}: read GB/s {agg('read_gbs')} write {agg('write_gbs')} cores {agg('cpu_cores')}; write ms per "
+          f"slot p50/p99 {wl}")
     for b in ("3-10", "11-30", "31-60"):
         print(f"  {b:>5} slots: p50 {lat(b, 'p50')} p99 {lat(b, 'p99')} ms; with queueing p50 {lat(b, 'q_p50')} "
               f"p99 {lat(b, 'q_p99')}")
@@ -206,9 +217,10 @@ def main():
     p.add_argument("--dir", required=True)
     p.add_argument("--procs", type=int, default=4)
     p.add_argument("--file-gb", type=float, default=16.0)
-    p.add_argument("--mode", choices=["threads", "uring"], default="uring")
+    p.add_argument("--mode", choices=["threads", "uring", "aio"], default="uring")
     p.add_argument("--threads", type=int, default=8)
     p.add_argument("--piece-mib", type=float, default=13.0)     # >= a slot: one request per slot
+    p.add_argument("--aio-submitters", type=int)                # aio: io_submit threads (default aio.SUBMITTERS)
     p.add_argument("--read-depth", type=int, default=8)
     p.add_argument("--write-depth", type=int, default=4)
     p.add_argument("--read-gbs", type=float, default=0.0)

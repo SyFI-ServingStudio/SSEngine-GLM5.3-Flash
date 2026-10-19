@@ -14,12 +14,12 @@ eviction waits for it) yields at each ring chunk to the reads queued or in fligh
 does not run ahead of its previous chunk. No wait on the compute stream: a write's blocks are final and pinned until it
 is done, a read's blocks are held by a request that computes only after all n `TierDone`s.
 
-SSD ops run on two threads, their file I/O on `SsdTier`'s io_uring (reads first in the kernel), into and out of host
+SSD ops run on two threads, their file I/O on `SsdTier`'s AIO context or io_uring (reads first in the kernel), into and out of host
 slots: DRAM's (a demote) or a staging arena's (every SSD read; a write-back to SSD without
 DRAM, or of a context larger than DRAM). The file is shard q (this member's quarter of every
 slot) of the set the leader took (`shards.py`), kept for the next run; its contents are never trusted. A read's
 file reads are queued as it arrives, behind the earlier reads' (as many reads in flight as the leader gave staging
-slots; the ring keeps `SSD_READ_DEPTH` in the kernel), and a copy thread moves each read to HBM once all its slots
+slots; the backend keeps `SSD_READ_DEPTH` in the kernel), and a copy thread moves each read to HBM once all its slots
 landed, in landing order: a read never waits behind an earlier one still on the SSD. A fetch (staged loading: SSD -> DRAM's loading area, no HBM copy) is reported when its last slot is in DRAM; the
 leader then moves it on with a DRAM read. Writes and demotes do not wait for their file writes: many are in flight at once (the leader orders
 ops that share slots, `TierOp.deps`), and each is reported when its last slot is on the SSD.
@@ -206,7 +206,8 @@ class PoolMember:
                 raise ValueError("SSD tier: tiers.ssd_dir is the shard set the leader took (shards.ShardSet)")
             assert num_slots(self.tc.ssd_gb, sb) * sb <= shard_bytes(self.tc.ssd_gb)
             self.ssd = SsdTier(shard_path(self.tc.ssd_dir, self.stage), shard_bytes(self.tc.ssd_gb), sb,
-                               [(a.base, a.nbytes) for a in (self.dram, self.staging) if a is not None])
+                               [(a.base, a.nbytes) for a in (self.dram, self.staging) if a is not None],
+                               self.tc.ssd_backend)
         self.mover = Mover(self.device, sb, self.tc.hops, self.tc.ring_depth, self.tc.ring_chunk_slots)
         print(f"stage {self.stage} tiers: slot {self.slot_bytes} B, state {P.state_slots} slots, "
               f"{len(P.kv_len)} kv + {len(P.st_len)} state pieces per block/context, "

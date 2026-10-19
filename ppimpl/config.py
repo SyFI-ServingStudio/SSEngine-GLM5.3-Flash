@@ -3,6 +3,7 @@
 
 import os
 from pathlib import Path
+from typing import Literal
 
 import msgspec
 import yaml
@@ -95,6 +96,10 @@ class TierConfig(msgspec.Struct, forbid_unknown_fields=True):
     ssd_dir: str | None = None            # the SSD shard sets (kvpool/shards.py: set<k>/shard<q>.bin, kept across runs,
                                           # created once, contents never trusted); default $PPIMPL_SSD_DIR. The
                                           # workers get the set the leader took.
+    ssd_backend: Literal["uring", "aio"] = "aio"   # the SSD tier's file I/O (kvpool/backends.py SSD_BACKENDS):
+                                          # Linux AIO (aio.py; Docker's default seccomp allows it, not io_uring) or
+                                          # io_uring (uring.py); equal in the A/B (TIERS.md §2.5). The one named is set
+                                          # up or the start-up fails.
 
 
 class FakeConfig(msgspec.Struct, forbid_unknown_fields=True):

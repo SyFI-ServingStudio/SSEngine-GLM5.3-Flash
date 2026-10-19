@@ -19,7 +19,8 @@ def test_arena_is_plain_memory_on_cpu():
     assert a.ptr(3) == a.base + (3 << 20)
 
 
-def test_ssd_slots_round_trip_and_file_is_kept(tmp_path):
+@pytest.mark.parametrize("backend", ["uring", "aio"])
+def test_ssd_slots_round_trip_and_file_is_kept(tmp_path, backend):
     sb = 8192
     src = np.random.default_rng(1).integers(0, 255, 3 * sb + 4096, dtype=np.uint8)
     dst = np.zeros_like(src)
@@ -30,7 +31,10 @@ def test_ssd_slots_round_trip_and_file_is_kept(tmp_path):
     shards.create_shard(path, 6 * sb)
     with pytest.raises(RuntimeError, match="the run needs"):                  # never resized by a run
         bk.SsdTier(path, 8 * sb, sb, [(p0, 3 * sb)])
-    f = bk.SsdTier(path, 6 * sb, sb, [(p0, 3 * sb), (p1, 3 * sb)])
+    with pytest.raises(ValueError, match="SSD backend"):
+        bk.SsdTier(path, 6 * sb, sb, [(p0, 3 * sb)], "threads")
+    f = bk.SsdTier(path, 6 * sb, sb, [(p0, 3 * sb), (p1, 3 * sb)], backend)
+    assert type(f.io) is bk.SSD_BACKENDS[backend] and backend in f.info
     for fut in f.write([5, 0, 2], [p0 + k * sb for k in range(3)]):
         fut.result()
     for fut in f.read([2, 5, 0], [p1 + k * sb for k in (2, 0, 1)]):

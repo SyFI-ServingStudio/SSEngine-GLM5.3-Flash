@@ -81,8 +81,8 @@ def test_build_config_is_the_design_setting(tmp_path):
     cfg = launch.build_config(args(str(d), dram_gb=50.0, ssd_gb=128.0, ssd_dir="/ssd", port=9000,
                                    served_model_name="glm", max_model_len=65536))
     t = cfg.tiers
-    assert (t.dram_gb, t.ssd_gb, t.ssd_dir, t.dram_writes, t.loading_area) == \
-        (50.0, 128.0, "/ssd", "hbm-evictions-exclusive", 0.1)
+    assert (t.dram_gb, t.ssd_gb, t.ssd_dir, t.dram_writes, t.loading_area, t.ssd_backend) == \
+        (50.0, 128.0, "/ssd", "hbm-evictions-exclusive", 0.1, "aio")
     assert (cfg.port, cfg.served_model_name, cfg.max_model_len) == (9000, "glm", 65536)
     assert launch.build_config(args(str(d), dram_gb=20.0)).tiers.ssd_gb is None
     # a YAML on top of the design setting, the options on top of both
@@ -90,6 +90,10 @@ def test_build_config_is_the_design_setting(tmp_path):
                                                      "port": 1234}))
     cfg = launch.build_config(args(str(d), config=str(tmp_path / "o.yaml"), port=4321))
     assert (cfg.pool_tokens, cfg.scheduler.mb_tokens, cfg.scheduler.order, cfg.port) == (1000, 8192, "srpt", 4321)
+    cfg = launch.build_config(args(str(d), dram_gb=50.0, ssd_gb=128.0, ssd_dir="/ssd", ssd_backend="uring"))
+    assert cfg.tiers.ssd_backend == "uring"
+    with pytest.raises(SystemExit, match="--ssd-backend without an SSD tier"):
+        launch.build_config(args(str(d), dram_gb=20.0, ssd_backend="uring"))
     with pytest.raises(SystemExit, match="SSD tier needs --ssd-dir"):
         launch.build_config(args(str(d), ssd_gb=128.0))
     with pytest.raises(SystemExit, match="at most 1048576"):
