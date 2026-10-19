@@ -127,6 +127,7 @@ if [ "${TIERS:-0}" = 1 ] && [ $rc = 0 ]; then
   export PPIMPL_IMAGE=$IMAGE PPIMPL_PORT=$P HF_CACHE=$HF_HOME PPIMPL_SSD_DIR=$SSD_DIR \
          PPIMPL_ARGS="--served-model-name glm53-flash $TIER_ARGS --ssd-dir /ssd"
   echo "== compose: $PPIMPL_ARGS (ssd dir $SSD_DIR)"
+  URL=http://127.0.0.1:$P      # compose publishes the port (its container has the network)
   "${COMPOSE[@]}" up -d || rc=1
   C=$("${COMPOSE[@]}" ps -q ppimpl)
   "${COMPOSE[@]}" logs -f > "$OUT/compose.log" 2>&1 &
@@ -142,7 +143,8 @@ if [ "${TIERS:-0}" = 1 ] && [ $rc = 0 ]; then
   docker cp "$C:/workspace/run" "$OUT/tiers_run" 2> /dev/null
   "${COMPOSE[@]}" stop -t 120 > /dev/null
   echo "== compose exit code $(docker inspect -f '{{.State.ExitCode}}' "$C")"
-  grep -h -iE 'tier|uring|dram|ssd' "$OUT"/tiers_run/worker0.log 2> /dev/null | grep -v Warning | head -8
+  jit_report "$OUT/tiers_run"
+  grep -h -E '^stage [0-9] (tiers|start-up):' "$OUT"/tiers_run/worker*.log
   "${COMPOSE[@]}" down -v > /dev/null 2>&1
 fi
 
