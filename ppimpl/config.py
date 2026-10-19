@@ -112,7 +112,7 @@ class RunConfig(msgspec.Struct, forbid_unknown_fields=True):
     form_lead_ms: float = 3.0         # a plan forms this long before its predicted host time ahead of its projected
                                       # stage-0 start (ppimpl/runtime/dispatch.py)
     pool_tokens: int | None = None    # cap on the KV pool, in tokens (1_contract.md §2.3)
-    cuda_graphs: bool = True          # glm53: microbatches up to 32768 tokens replay a CUDA graph per power-of-2 bucket
+    cuda_graphs: bool = True          # glm53: microbatches up to 8192 tokens replay a CUDA graph per power-of-2 bucket
                                       # (padded to it); larger ones run eagerly (ppimpl/model/stage.py)
     intake_procs: int = 16            # HTTP in N intake processes on the port (SO_REUSEPORT) that parse requests and
                                       # pass them on over zmq (ppimpl/serve/intake.py); 0: HTTP in the controller.
