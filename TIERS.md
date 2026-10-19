@@ -219,6 +219,60 @@ per process (= per GPU):
 - Need (simulator, victim chain, N = 400-500): SSD reads 0.7-1.8 GB/s per GPU on average (10 s peaks 2.3-4.1), SSD
   writes ~1.1 GB/s: a fifth of what one GPU's share delivers with 5 GB/s of writes beside it.
 
+**Linux AIO backend (`tiers.ssd_backend: aio`, `kvpool/aio.py`; lane-ssd-aio, 2026-10-19).** Docker's default seccomp
+profile (Docker >= 25) denies io_uring_* but allows io_setup / io_submit / io_getevents / io_destroy, so the SSD tier
+also runs on one AIO context per worker: the same pieces (one slot per request), the same two queues, read-first order
+and 8 / 4 depths, the same O_DIRECT shard files and host arenas, called as raw syscalls through ctypes (no libaio).
+The backend is a config choice (`--ssd-backend` in `ppimpl serve`); a backend that cannot be set up fails the
+start-up, and nothing falls back to the other. AIO has no fixed buffers: io_submit pins each piece's pages and builds
+its bios before it returns, ~0.4 ms of CPU per slot, about twice the ring's, so one thread submitting serially made a
+light-load read twice as slow (4 GB/s reads + 1 GB/s writes per process, 31-60 slots p50 21.5-23.7 ms vs 12.2-12.7);
+the owner thread keeps the queues and reaps completions (one eventfd that completions, IOCB_FLAG_RESFD, and callers
+write), and 4 submit threads each io_submit one iocb at a time (8 or 12 change nothing). Checked in the image with
+Docker's default profile: io_uring_setup EPERM, an AIO O_DIRECT read of a mounted host directory byte-equal.
+
+A/B, `bench/ssd_io.py` as above (4 processes on node 0, 20 s, mean of the 4 processes, two runs per arm in alternating
+order): read GB/s per process, CPU cores, read ms by session size p50 / p99, write ms per slot p50 / p99.
+
+| Load per process | Backend | Read GB/s | Cores | 3-10 slots | 31-60 slots | Write ms / slot |
+|---|---|---|---|---|---|---|
+| reads max + 3 GB/s writes | io_uring | 16.58 | 0.43 | 6.5 / 16.2 | 32.1 / 63.8 | 0.79 / 2.26 |
+| | aio | 16.27 | 0.76 | 6.4 / 15.3 | 33.8 / 63.3 | 0.89 / 2.41 |
+| reads max + 5 GB/s writes | io_uring | 11.89 | 0.41 | 9.0 / 18.8 | 47.5 / 73.4 | 1.21 / 2.76 |
+| | aio | 11.30 | 0.70 | 9.2 / 17.7 | 49.6 / 75.8 | 1.58 / 3.09 |
+| 10 GB/s reads + 3 GB/s writes | io_uring | 10.16 | 0.29 | 3.1 / 10.3 | 16.6 / 48.4 | 0.60 / 1.76 |
+| | aio | 10.23 | 0.55 | 3.4 / 11.9 | 16.6 / 52.5 | 0.64 / 2.62 |
+| 4 GB/s reads + 1 GB/s writes | io_uring | 4.03 | 0.11 | 2.5 / 4.8 | 12.7 / 24.7 | 0.39 / 1.14 |
+| | aio | 4.03 | 0.21 | 2.4 / 4.6 | 9.7 / 28.8 | 0.40 / 0.87 |
+| reads max, no writes | io_uring | 24.05 | 0.52 | 5.0 / 8.5 | 23.3 / 32.0 | |
+| | aio | 24.09 | 0.97 | 4.6 / 8.6 | 23.3 / 32.6 | |
+| writes max, no reads | io_uring | (12.61 written) | 0.30 | | | 1.01 / 1.75 |
+| | aio | (12.49 written) | 0.42 | | | 1.03 / 1.66 |
+
+- Same throughput and read latency at the loads the engine runs (its need is 0.7-4 GB/s of reads per GPU, above), and
+  the same write-back rate. At the array's limit with writes beside the reads AIO reads 2-5% less in these two runs;
+  over all five runs of that load the arms overlap (io_uring 16.14-16.58 and 10.85-11.89 GB/s, AIO 15.72-16.27 and
+  11.04-11.37). AIO takes ~1.8x the CPU (0.1-1.0 core per GPU).
+- SSD bring-up (job 8529, GPUs 0-3 = set A, arms one after the other; `bench.tiers --target ssd`, mean of 5 sessions):
+  SSD read 8.41 / 26.27 / 93.6 ms (io_uring) vs 8.43 / 26.18 / 95.3 ms (AIO) at 32k / 128k / 512k, round-1 TTFT
+  62.6 / 84.5 / 206.4 vs 62.8 / 84.4 / 207.5 ms.
+- Sessions, st10 tiers N = 300 (`measured/eval_m6`, minutes 10-20, `eval_table.py`; `bench/slurm/ab8.sbatch`, both
+  arms at once on set A = GPUs 0-3, bus 1B/43/52/61, and set B = 4-7, 9D/C3/D1/DF, then swapped; SSD read / write =
+  the tier op's sent -> landed, all sizes, from `tier_ops.jsonl`):
+
+  | Job | Set | Backend | SM MHz (s0-s3) | r/s | TTFT p50/p90/p99 (s) | > 60 s | Hit H/D/S % | s0 busy | SSD read ms p50/p99 | SSD write ms p50/p99 |
+  |---|---|---|---|---|---|---|---|---|---|---|
+  | 8530 | A | io_uring | 1796/1896/1886/1884 | 34.07 | 0.19/0.44/3.92 | 21 | 45.0/33.1/21.8 | 0.873 | 15.2 / 52.9 | 17.3 / 58.1 |
+  | 8530 | B | aio | 1640/1653/1626/1597 | 32.85 | 0.23/0.72/5.72 | 52 | 42.3/35.3/22.3 | 0.873 | 15.2 / 54.9 | 18.9 / 66.3 |
+  | 8532 | A | aio | 1664/1641/1562/1580 | 32.91 | 0.23/0.66/4.93 | 43 | 43.0/34.5/22.5 | 0.865 | 14.9 / 61.0 | 18.0 / 59.9 |
+  | 8532 | B | io_uring | 1638/1649/1629/1597 | 32.83 | 0.23/0.70/6.35 | 51 | 42.4/35.0/22.5 | 0.873 | 15.3 / 62.3 | 18.5 / 72.1 |
+  | 8534 | A | aio | 1662/1637/1560/1580 | 32.83 | 0.23/0.71/5.43 | 46 | 42.3/35.2/22.4 | 0.863 | 15.0 / 54.4 | 18.5 / 61.7 |
+  | 8534 | B | io_uring | 1635/1653/1894/1890 | 33.12 | 0.21/0.63/5.36 | 40 | 43.0/34.8/22.1 | 0.885 | 15.1 / 55.1 | 18.5 / 62.9 |
+
+  The runs differ by their GPUs' clocks, not by the backend: at the 1000 W cap (SW power cap, ~950 W, ~1600 MHz) all
+  four runs give 32.83-32.91 r/s, whichever backend; the GPUs that ran uncapped (~800 W, ~1890 MHz: all of set A in
+  8530, s2/s3 in 8534) give 34.07 and 33.12. SSD reads and writes take the same time on both.
+
 Note: own-stage storage (each GPU stores and moves its own stage's bytes) is not balanced. At PP4, stages 0, 2 and 3
 hold 3 DSA layers each (14.02 MB per block, 1,635 B/token: 9% above the mean of 1,499) and stage 1 holds 2 (9.35 MB,
 27% below); the KDA states are 39.1 / 39.1 / 34.7 / 34.7 MB. So three links carry 9% more than the mean and one 27%
