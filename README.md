@@ -129,24 +129,28 @@ later starts reuse them.
 
 ## Docker
 
-`docker/Dockerfile` builds the serving environment of `ENV.md` (`env/make_env.sh` with `STEPS="venv vllm conv1d"`:
-CUDA 13.0 devel on Ubuntu 24.04, uv's Python 3.12, `env/requirements.lock`, the vLLM fork, causal-conv1d built from
-source) with this repo installed; the bench-only parts (ServingStudioSim, req-frontend, enwik9) are not in it. Build
-from the repo root (CPU only, ~10 min, 8 of them the causal-conv1d build; the image is 16.6 GB; `--build-arg MAX_JOBS=N` sets the causal-conv1d build's parallel nvcc jobs,
-default 16):
+`docker/Dockerfile` builds the serving environment of `ENV.md` (`env/make_env.sh` with `STEPS="venv vllm conv1d
+install jit"`: CUDA 13.0 devel on Ubuntu 24.04, uv's Python 3.12, `env/requirements.lock`, the vLLM fork, causal-conv1d
+built from source, this repo, FlashInfer's JIT modules and cubins) and the GPU seed; the bench-only parts
+(ServingStudioSim, req-frontend, enwik9) are not in it. The image carries every JIT kernel a start needs, so a pulled
+image starts without compiling or downloading (below). Build from the repo root (CPU only, ~15 min; the image is
+17.0 GB; `--build-arg MAX_JOBS=N` sets the parallel nvcc jobs, default 16):
 
 ```bash
-docker build -f docker/Dockerfile -t ppimpl .
+docker build -f docker/Dockerfile -t ppimpl .     # needs docker/jit-seed/gpu.tar (the GPU seed, below)
 docker run --rm ppimpl check-env                  # env/check_env.py, no GPU needed
 ```
 
-Run it as `vllm/vllm-openai` is run, with the subcommand first:
+Run it with compose (`docker/compose.yaml`: all GPUs, `--ipc=host`, port 8000, the HF cache, the cache volume,
+`memlock` unlimited and `docker/seccomp.json`, so the DRAM and SSD tiers work too), or as `vllm/vllm-openai` is run:
 
 ```bash
+docker compose -f docker/compose.yaml up          # options of `ppimpl serve` in PPIMPL_ARGS (docker/compose.yaml)
+# or, HBM only:
 docker run --gpus all --ipc=host -p 8000:8000 \
   -v ~/.cache/huggingface:/root/.cache/huggingface \
   -v ppimpl-cache:/root/.cache \
-  ppimpl serve --served-model-name glm53-flash
+  ppimpl --served-model-name glm53-flash
 
 curl localhost:8000/health
 curl localhost:8000/v1/completions -H 'Content-Type: application/json' \
@@ -155,15 +159,30 @@ curl localhost:8000/v1/completions -H 'Content-Type: application/json' \
 
 - `--gpus`: 4 B200 in one NVLink domain; with more on the host, name four: `--gpus '"device=0,1,2,3"'`.
 - `--ipc=host`: the stages pass activations over CUDA IPC and the intake processes share prompts through `/dev/shm`.
-- `ppimpl-cache` keeps the JIT and autotune caches (FlashInfer, Triton, TileLang, DeepGEMM) across containers: the
-  first start compiles FlashInfer's JIT kernels and is ready after 11-16 min, later ones after ~50 s (jobs 8495, 8512,
-  8517; natively 65 s). Without the volume every start compiles again. The weights' cache is the host's, mounted over `/root/.cache/huggingface`.
-- Tiers: `--dram-gb 50` pins that much host memory per GPU. The SSD tier reads and writes through io_uring, which
-  Docker's default seccomp profile denies: run with `--security-opt seccomp=docker/seccomp.json` (the default profile
-  plus the three io_uring syscalls; `docker/make_seccomp.py` writes it). Mount a directory for the shards and make its
-  shard set once: `docker run --rm -v /nvme/ppimpl:/ssd ppimpl python -m ppimpl.kvpool.shards create --dir /ssd --gb
-  128`, then serve with `-v /nvme/ppimpl:/ssd ... --ssd-gb 128 --ssd-dir /ssd`. (The tiers in a container are not
-  measured yet; the GPU smoke test, `bench/slurm/docker_smoke.sbatch`, runs HBM only.)
+- JIT kernels: `/opt/ppimpl/jit-seed` holds FlashInfer's JIT modules and the trtllm-gen cubins of the kernel families
+  serving uses (`env/bake_jit.py`, built without a GPU), and the GPU seed: the Triton, TileLang, DeepGEMM, CuTe-DSL and
+  inductor kernels one B200 start compiles. The entry point copies what `/root/.cache` lacks at each start, so an
+  empty or mounted volume is seeded. A fresh container is ready after ~60 s with no network (jobs 8527, 8528,
+  8535: `--network none`, no compile or download); before the image carried them, a first start took 932 s (8495),
+  and 287 s with FlashInfer's part alone (8526). `ppimpl-cache` keeps what later starts add. The weights' cache is the host's, mounted over
+  `/root/.cache/huggingface`.
+- The GPU seed, `docker/jit-seed/gpu.tar` (not in git), is made from an image of the `base` target on 4 B200:
+  `docker build -f docker/Dockerfile --target base -t ppimpl:base .`, then
+  `IMAGE=ppimpl:base CACHE=fresh OFFLINE=1 SEED_OUT=$PWD/docker/jit-seed/gpu.tar sbatch ... bench/slurm/docker_smoke.sbatch`.
+  Make it again when the environment or a kernel changes; a stale one only costs compile time at the first start.
+- Tiers: `--dram-gb 50` pins that much host memory per GPU. Docker's default seccomp profile denies what the tiers
+  call: `mbind` (the DRAM tier and the staging area place their pages on the GPU's NUMA node; allowed there only with
+  `CAP_SYS_NICE`) and io_uring (the SSD tier's reads and writes). The SSD tier also registers the host memory with
+  io_uring, which counts against `memlock`. Run with `--security-opt seccomp=ppimpl-seccomp.json --ulimit memlock=-1`
+  (compose sets both). The profile is Docker's default plus the io_uring and NUMA policy syscalls
+  (`docker/make_seccomp.py`), also in the image:
+  `docker run --rm ppimpl cat /opt/ppimpl/docker/seccomp.json > ppimpl-seccomp.json`. `ppimpl serve` stops at once,
+  with these fixes, when a tier is asked for without them. Mount a directory for the shards and make its shard set
+  once: `docker run --rm -v /nvme/ppimpl:/ssd ppimpl python -m ppimpl.kvpool.shards create --dir /ssd --gb 128`, then
+  serve with `-v /nvme/ppimpl:/ssd ... --ssd-gb 128 --ssd-dir /ssd` (compose: `PPIMPL_SSD_DIR=/nvme/ppimpl
+  PPIMPL_ARGS="--dram-gb 50 --ssd-gb 128 --ssd-dir /ssd"`). The GPU smoke test (`bench/slurm/docker_smoke.sbatch`
+  `TIERS=1`) starts compose with a 20 GB DRAM and an 8 GB SSD tier and checks the answers (job 8535); the tiers in a
+  container are not measured under load yet.
 - Logs go to `/workspace/run` in the container (`-v $PWD/run:/workspace/run` keeps them). `TMPDIR` is `/tmp`: vLLM's zmq
   ipc path is `TMPDIR` + a uuid and must fit in 107 characters, so the entry point refuses a `TMPDIR` over 64.
 - `<image> <command>` runs any other command (`bash`, `python -m ...`).
