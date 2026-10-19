@@ -5,7 +5,7 @@ GET  /v1/models             the one model, under RunConfig.served_model_name
 POST /v1/completions        `prompt`: a string or a list of token ids
 POST /v1/chat/completions   `messages` through the checkpoint's chat template (`tools`, `chat_template_kwargs` too)
 
-The engine computes prefill and one output token (greedy, PLAN.md §1: no decode path), so `max_tokens` (or
+The engine computes prefill and one output token (greedy, dev:research/PLAN.md §1: no decode path), so `max_tokens` (or
 `max_completion_tokens`) must be 1 and defaults to 1; `temperature`, `top_p` and the other sampling fields are taken
 and ignored. `n` > 1, `echo` and `logprobs` are refused. With `"stream": true` the answer is one chunk, then the usage
 chunk if `stream_options.include_usage`, then `[DONE]`.

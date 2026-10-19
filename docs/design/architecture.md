@@ -84,5 +84,6 @@ The design was chosen and sized with the ServingStudio simulator, from its sim-t
 `glm53_flash_pp4_b200_v2` (ServingStudioSim `doc/handoff/`), whose milestone files are the specification.
 [../sim_to_real/index.html](../sim_to_real/index.html) tells that story (Chinese, with an
 [English version](../sim_to_real/en.html)). The original plan and the full design log of the tiers are kept on the
-`dev` branch under `research/` (`research/PLAN.md`, `research/TIERS.md`); section numbers such as "TIERS.md §5" in
-code comments refer to that log.
+`dev` branch under `research/`: [research/PLAN.md](https://github.com/SyFI-ServingStudio/SSEngine-GLM5.3-Flash/blob/dev/research/PLAN.md)
+and [research/TIERS.md](https://github.com/SyFI-ServingStudio/SSEngine-GLM5.3-Flash/blob/dev/research/TIERS.md).
+Code comments cite them as `dev:research/TIERS.md §5`.

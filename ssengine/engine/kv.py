@@ -14,7 +14,7 @@ not start with the whole kept context gets no hit (`resumable_tokens`). Kept ses
 requests and yield to them: when a request needs room, kept sessions are evicted least recently used first, a whole
 session at a time.
 
-Tiers (`lower`, set by the scheduler: the KV pool's `HbmLevel`, lanes/m6 TIERS.md §5). The pool is the level below
+Tiers (`lower`, set by the scheduler: the KV pool's `HbmLevel`, dev:research/TIERS.md §5). The pool is the level below
 HBM: it hears of every kept context (`kept`, `unkept`, `evicted`) and admission (`admitted`), writes kept contexts
 back ahead of eviction, and says which may be evicted now (`evictable`: written whole below) and how much charge is
 not yet (`held_back`, `make_room`). A request that fits only once writes land waits (`blocked_by_write`).

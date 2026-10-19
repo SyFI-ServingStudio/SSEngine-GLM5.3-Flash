@@ -64,7 +64,7 @@ class TierConfig(msgspec.Struct, forbid_unknown_fields=True):
     dram_read_gb_s: float = 50.0
     ssd_gb: float | None = 128.0          # None: no SSD tier. 128 GB per GPU (user, 2026-10-16); the handoff has 256
     ssd_read_gb_s: float = 10.0
-    # Writes: the victim chain HBM -> DRAM -> SSD (user, 2026-10-17; TIERS.md §5): a tier takes only what the level
+    # Writes: the victim chain HBM -> DRAM -> SSD (user, 2026-10-17; dev:research/TIERS.md §5): a tier takes only what the level
     # above evicts. Each level writes its least recently used entries ahead of their eviction once its occupancy
     # (HBM: running requests plus kept contexts not yet written; DRAM: entries not yet in SSD) passes its watermark
     # (kvpool/writeback.py); None: write only when evicting.
@@ -83,13 +83,13 @@ class TierConfig(msgspec.Struct, forbid_unknown_fields=True):
     bytes_per_token: int = 1635           # own stage (stage 0); balanced storage: 1,499
     state_bytes: int = 39_100_000         # one KDA state per context, own stage (stage 0); balanced: 36.9 MB
     max_read_wait_ms: float | None = 1000.0   # a read that would wait longer for its tier is passed over
-    # Slot accounting (the server, lanes/m6 TIERS.md §3): None = bytes as above (replay). A slot is one GPU's share of
+    # Slot accounting (the server, dev:research/TIERS.md §3): None = bytes as above (replay). A slot is one GPU's share of
     # one KV block on all stages (balanced: 8,576 x 1,499 B, 4 KiB-aligned); a context's state takes state_slots.
     slot_bytes: int | None = None
     state_slots: int = 3
     staging_gb: float = 8.0               # host slots for every SSD read, and SSD writes without DRAM (never a hit)
     hops: str = "two"                     # "two": host <-> own HBM ring <-> the stages over NVLink; "direct": host <->
-                                          # the stages' KV (peer writes from host: 31.7 vs 47.6 GB/s, TIERS.md §2.3)
+                                          # the stages' KV (peer writes from host: 31.7 vs 47.6 GB/s, dev:research/TIERS.md §2.3)
     ring_depth: int = 2                   # two hops: chunks per direction's device ring (2: double buffering)
     ring_chunk_slots: int = 4             # slots per ring chunk (job 7961 sweep: 4 best or tied at 32k-512k). The ring
                                           # is 2 directions x depth x chunk x slot bytes, from the HBM left after the KV
@@ -98,7 +98,7 @@ class TierConfig(msgspec.Struct, forbid_unknown_fields=True):
                                           # workers get the set the leader took.
     ssd_backend: Literal["uring", "aio"] = "aio"   # the SSD tier's file I/O (kvpool/backends.py SSD_BACKENDS):
                                           # Linux AIO (aio.py; Docker's default seccomp allows it, not io_uring) or
-                                          # io_uring (uring.py); equal in the A/B (TIERS.md §2.5). The one named is set
+                                          # io_uring (uring.py); equal in the A/B (dev:research/TIERS.md §2.5). The one named is set
                                           # up or the start-up fails.
 
 

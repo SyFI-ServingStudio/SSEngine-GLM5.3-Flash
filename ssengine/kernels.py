@@ -1,4 +1,4 @@
-"""Kernel manifest: the 35 configurations of handoff `2_kernels.md` §2 (PLAN.md §1).
+"""Kernel manifest: the 35 configurations of handoff `2_kernels.md` §2 (dev:research/PLAN.md §1).
 
 Per configuration: the DB kind/backend and fixed configuration of the profiler rows, the callable our stage runs
 (import path) and how the profiler row calls it, the library version the rows were taken with and ours, the M1
@@ -242,7 +242,7 @@ def stage_layer_types(stage: int, split=SPLIT) -> set[str]:
     if stage == 0:
         types.add("input_head")
     else:
-        types.add("stage_edge_recv")   # standalone hc_pre on the received 4-stream residual (PLAN.md §1)
+        types.add("stage_edge_recv")   # standalone hc_pre on the received 4-stream residual (dev:research/PLAN.md §1)
     if stage == len(split) - 1:
         types.add("output_head")
     else:

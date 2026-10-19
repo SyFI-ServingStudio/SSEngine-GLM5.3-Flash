@@ -28,7 +28,7 @@ usage:
                                  [--t-mode measured|physical|p99] [--dup-first drop|demote] [--ssd-backs]
                                  the victim chain's write-back (slot mode, the real KvManager + BalancedKVPool) on a
                                  server run's logged admissions, each op timed as the reference run measured it
-                                 (`OpLatency`, stalls included): HBM waits, write volume, hit split (TIERS.md §5)
+                                 (`OpLatency`, stalls included): HBM waits, write volume, hit split (dev:research/TIERS.md §5)
 """
 
 import argparse
@@ -508,7 +508,7 @@ def run_bringup(kind: str, variant: str = "dram", handoff: Path = HANDOFF) -> li
     return rows
 
 
-# --- write-back model on a server run's admissions (TIERS.md §5) ----------------------------------------------------
+# --- write-back model on a server run's admissions (dev:research/TIERS.md §5) ----------------------------------------------------
 
 OP_KINDS = {("write", "dram"): "write", ("write", "ssd"): "demote", ("demote", "ssd"): "demote",
             ("read", "dram"): "read_dram", ("read", "ssd"): "read_ssd"}

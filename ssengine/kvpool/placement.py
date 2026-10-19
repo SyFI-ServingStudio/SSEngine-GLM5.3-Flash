@@ -1,4 +1,4 @@
-"""Layer 2 of the KV pool (lanes/m6 TIERS.md §3, §13.2): balanced storage, 1/n of every range per GPU. Pure numpy.
+"""Layer 2 of the KV pool (dev:research/TIERS.md §3, §13.2): balanced storage, 1/n of every range per GPU. Pure numpy.
 
 n is the PP degree (`RunConfig.num_stages`), never fixed: PP4 has n = 4 (quarters), PP8 n = 8.
 
@@ -10,7 +10,7 @@ logical block's KV ranges of all stages into one slot (page_first), and of the c
 `BalancedPlacement` is built once per member from all stages' ranges (device addresses valid in that process: its
 own and the other stages' KV, opened by CUDA IPC); `pieces` turns one op into (device address, host offset, length,
 stage) arrays for `mover.Mover`, the HBM side of a block from its pages. Own-stage placement (every GPU stores only
-its own stage, TIERS.md §2.4) is not built: it would need per-GPU slot sizes in the index.
+its own stage, dev:research/TIERS.md §2.4) is not built: it would need per-GPU slot sizes in the index.
 """
 
 from __future__ import annotations

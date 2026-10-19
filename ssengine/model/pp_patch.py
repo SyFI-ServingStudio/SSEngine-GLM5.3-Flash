@@ -1,4 +1,4 @@
-"""Every runtime override of a library that ssengine makes (PLAN.md §1: the vLLM fork is used as a library, not vendored).
+"""Every runtime override of a library that ssengine makes (dev:research/PLAN.md §1: the vLLM fork is used as a library, not vendored).
 
 Nothing here edits `third_party/vllm` or any installed package. Each override is a per-instance attribute, a module
 attribute swapped for the duration of a `with` block, or (marked "process-wide") a module attribute replaced once in a

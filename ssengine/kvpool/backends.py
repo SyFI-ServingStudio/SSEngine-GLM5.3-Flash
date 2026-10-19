@@ -1,4 +1,4 @@
-"""Layer 3 of the KV pool (lanes/m6 TIERS.md §4, §13.2, §14.1): the host media one member stores its slots in. No torch.
+"""Layer 3 of the KV pool (dev:research/TIERS.md §4, §13.2, §14.1): the host media one member stores its slots in. No torch.
 
 Slot ids are not allocated here: the leader's index (`manager.py`) does, so they are the same on all n GPUs. A
 backend only maps a slot to a host address (`HostTier.ptr`) or a file offset (`SsdTier`, slot i at i x slot_bytes).
@@ -45,7 +45,7 @@ REGISTER_CHUNK = 1 << 30      # cudaHostRegister per ~1 GiB of whole slots, from
 TOUCH_THREADS = 16           # first-touch threads per arena, on the job's CPUs of the arena's node (page-cache reclaim
                              # runs in the touching threads: 4 threads on the worker's 2 cores were the limit)
 HUGEPAGE = os.environ.get("SSENGINE_TIER_HUGEPAGE", "0") == "1"
-SSD_READ_DEPTH = 8            # SSD I/O, one request per slot (TIERS.md §2.5): reads in the kernel at once
+SSD_READ_DEPTH = 8            # SSD I/O, one request per slot (dev:research/TIERS.md §2.5): reads in the kernel at once
 SSD_WRITE_DEPTH = 4           # writes: fewer, so a write-back never fills the device's queues in front of a read
 SSD_BACKENDS = {"uring": UringFile, "aio": AioFile}   # tiers.ssd_backend: the one used, never a fallback
 
@@ -340,7 +340,7 @@ class SsdTier:
         if not os.path.exists(path) or os.path.getsize(path) != nbytes:
             raise RuntimeError(f"SSD shard {path}: " + (f"{os.path.getsize(path)} B" if os.path.exists(path) else
                                "missing") + f", the run needs {nbytes} B; create the set with "
-                               "`python -m ssengine.kvpool.shards create` (TIERS.md §5)")
+                               "`python -m ssengine.kvpool.shards create` (dev:research/TIERS.md §5)")
         self.fd, self.direct = open_direct(path)
         try:
             piece = -(-slot_bytes // 4096) * 4096              # a whole slot (cut only at a fixed buffer's end)

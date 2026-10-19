@@ -700,7 +700,7 @@ nav.lang a[aria-current="page"] { background: var(--accent); color: var(--surfac
 <li>4 张 GPU 共享一个 socket 的主机侧带宽，读的目标（48.4）在 3% 以内。</li>
 <li>SSD：数据盘是 8 块 KIOXIA CM7 Gen5 的 md RAID0。fio O_DIRECT，io_uring qd 16、4 个 job：顺序读 96.9–99.6 GB/s，顺序写 53.8 GB/s，4 读 4 写同时 45.4 + 25.8 GB/s。节点上没有加载 nvidia-fs，没有 GDS。</li>
 </ul>
-<p class="src">TIERS.md §2.2–§2.3 · job 7916</p>
+<p class="src">dev:research/TIERS.md §2.2–§2.3 · job 7916</p>
 
 <h3 id="s6-3">6.3 主机内存安全</h3>
 <p>full 档原来每张 GPU 固定 150 GB DRAM，4 张共 600 GB，必须落在 GPU 所在的 NUMA node 上。这台机器每个 node 约 1,057 GB，和别人共用，node 0 上还有一台最多 512 GiB 的虚拟机。最终的做法：</p>
@@ -763,7 +763,7 @@ nav.lang a[aria-current="page"] { background: var(--accent); color: var(--surfac
 <li>SSD 文件按组保留（<code>set&lt;k&gt;/shard&lt;q&gt;.bin</code>），shard q 存的是成员 q 那 1/4，跨运行复用，每次运行整组加锁。</li>
 <li>文件内容从不被信任：每次启动索引都是空的。</li>
 </ul>
-<p class="src">lane-m6-ssd TIERS.md §2.5 · db48f02 · ceff3dc</p>
+<p class="src">dev:research/TIERS.md §2.5 · db48f02 · ceff3dc</p>
 
 <h3 id="s6-7">6.7 三档内存配置</h3>
 <p>full 档的 HBM 放得下大部分最新上下文，命中几乎全在 HBM。为了让 DRAM 和 SSD 真正被用到，另设两档缩小的配置。sim 里扫描 HBM × DRAM（SSD 固定 128 GB），选出：</p>
@@ -808,7 +808,7 @@ nav.lang a[aria-current="page"] { background: var(--accent); color: var(--surfac
   <div class="fighead"><span class="q">第 1 轮 TTFT：从哪一层读，真机 vs 目标</span>
     <div class="seg" data-for="f6e" data-key="t"><button data-v="hbm">HBM 命中</button><button data-v="dram">DRAM</button><button data-v="ssd">SSD</button></div></div>
   <div id="f6e" class="chart short" role="img" aria-label="32k、128k、512k 的第 1 轮 TTFT，真机和目标两组柱"></div>
-  <figcaption>ms。HBM 命中 7960；DRAM 8042（kvpool 重构后）；SSD 8073（DRAM 关闭，SSD 128 GB，GPU 4–7）。目标为 v2-realistic 的分层 bring-up（TIERS.md §10）。</figcaption>
+  <figcaption>ms。HBM 命中 7960；DRAM 8042（kvpool 重构后）；SSD 8073（DRAM 关闭，SSD 128 GB，GPU 4–7）。目标为 v2-realistic 的分层 bring-up（dev:research/TIERS.md §10）。</figcaption>
 </figure>
 <div class="tbl"><table>
 <thead><tr><th>上下文</th><th>DRAM 目标 TTFT (ms)</th><th>7966（重构前）</th><th>8042（重构后）</th><th>8042 读 (ms)</th><th>目标读</th></tr></thead>
@@ -856,7 +856,7 @@ nav.lang a[aria-current="page"] { background: var(--accent); color: var(--surfac
 <figure>
   <div class="fighead"><span class="q">h25d37：每 2 分钟完成的轮数</span></div>
   <div id="f6f" class="chart short" role="img" aria-label="塌缩前两条线逐窗口重合，第 12 到 14 分钟真机少一些"></div>
-  <figcaption>旧 trace，只有 DRAM，N = 400。真机 7969，sim 为 v2-realistic 的分层目标。<span class="src">TIERS.md §9 step 1b</span></figcaption>
+  <figcaption>旧 trace，只有 DRAM，N = 400。真机 7969，sim 为 v2-realistic 的分层目标。<span class="src">dev:research/TIERS.md §9 step 1b</span></figcaption>
 </figure>
 <ul class="find">
 <li><b>h25d37：</b>塌缩前逐窗口吻合（命中份额 0.83–0.91 对 0.83–0.90；DRAM 读每 2 分钟 9–852 对 10–847）。塌缩窗口 sim 第 14–16 分钟、真机第 12–16 分钟（真机在第 12–14 分钟少一些轮）：r/s −5%，TTFT p90 +44%。</li>

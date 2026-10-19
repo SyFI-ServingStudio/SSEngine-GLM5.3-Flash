@@ -1,8 +1,8 @@
-"""The KV pool: prefix KV and KDA states of n pipeline stages in DRAM and SSD behind HBM (lanes/m6 TIERS.md §13).
+"""The KV pool: prefix KV and KDA states of n pipeline stages in DRAM and SSD behind HBM (dev:research/TIERS.md §13).
 
 `BalancedKVPool` is the leader's object (here the controller's, where the scheduler runs). The scheduler sees only
 `lookup` (a `Hit` with `wait_ns`), `load` -> `Handle` (with `eta_ns`) and a load's completion. Writes are the victim
-chain HBM -> DRAM -> SSD (TIERS.md §5): the HBM KV manager reaches the pool through `hbm_level(kv)`, an `HbmLevel`
+chain HBM -> DRAM -> SSD (dev:research/TIERS.md §5): the HBM KV manager reaches the pool through `hbm_level(kv)`, an `HbmLevel`
 it asks whether a kept context may be evicted and tells about kept, taken-over and evicted contexts; the same
 `writeback.WriteBack` policy writes HBM's LRU tail to the fastest tier and DRAM's to SSD. Shares, slots, tiers' LRU
 and the ring stay inside. The controller posts every op to all n members (`ready_ops`, which also writes ahead,
@@ -194,7 +194,7 @@ class BalancedKVPool:
         return self.manager.summary()
 
     def write_back_stats(self) -> dict:
-        """Per level: writes ahead of need, writes at eviction, evictions that waited for a write (TIERS.md §5)."""
+        """Per level: writes ahead of need, writes at eviction, evictions that waited for a write (dev:research/TIERS.md §5)."""
         out = {} if self.hbm is None or self.hbm.wb is None else {"hbm": dict(self.hbm.wb.stats)}
         return out | {self.manager.tiers[i].name: dict(wb.stats) for i, wb in self.manager.wb.items()}
 

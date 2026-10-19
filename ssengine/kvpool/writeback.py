@@ -1,4 +1,4 @@
-"""Write-back of one cache level to the level below it (lanes/m6 TIERS.md §5): the victim chain HBM -> DRAM -> SSD.
+"""Write-back of one cache level to the level below it (dev:research/TIERS.md §5): the victim chain HBM -> DRAM -> SSD.
 
 The same class serves both levels: HBM's kept contexts written to the fastest tier (`BalancedKVPool.HbmLevel`, over
 the KV manager's LRU of kept sessions) and DRAM's entries demoted to SSD (`manager.TierManager`, over DRAM's LRU).
