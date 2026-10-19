@@ -1,5 +1,5 @@
 """Linux native AIO for the SSD tier (layer 3, `backends.SsdTier`, `tiers.ssd_backend: aio`; TIERS.md §2.5): one
-context per member, the same requests, pieces, queues and thread as `uring.UringFile`.
+context per member, the same requests, pieces and queues as `uring.UringFile`.
 
 The kernel's io_setup / io_submit / io_getevents / io_destroy, called as raw syscalls through ctypes (libc's
 `syscall`; no libaio): Docker's default seccomp profile allows them, while it denies io_uring_* (Docker >= 25). No
@@ -7,16 +7,21 @@ fallback: a context that cannot be set up fails the member at start-up, and the 
 config names.
 
 - **No registration.** AIO has no fixed files or buffers: each piece is an IOCB_CMD_PREAD / PWRITE of the fd at a host
-  address, and the kernel pins its pages per request (the arenas are `cudaHostRegister`ed, so they are resident).
-  `buffers` only bound the addresses a request may use and where pieces are cut, as the ring's fixed buffers do.
+  address. `buffers` only bound the addresses a request may use and where pieces are cut, as the ring's fixed buffers
+  do.
 - **Pieces.** A request (one slot) is cut into pieces of at most `piece_bytes`, and at a buffer span's end (spans of
   at most 1 GiB, as the ring's): the same pieces as io_uring.
 - **Reads first.** Pieces wait in two queues; at most `read_depth` read pieces and `write_depth` write pieces are in
   the kernel at once, and free read room is filled before write room.
-- **One thread** owns the context. Every iocb carries IOCB_FLAG_RESFD, so its completion adds to an eventfd that
-  callers also write to when they queue: the thread blocks only in that eventfd's read (GIL released), then reaps
-  every completed event without waiting (io_getevents, zero timeout) and submits what the free room allows. One
-  wait covers both new work and completions, as the ring's armed eventfd read does.
+- **One thread** owns the context and its bookkeeping. Every iocb carries IOCB_FLAG_RESFD, so its completion adds to
+  an eventfd that callers also write to when they queue: the thread blocks only in that eventfd's read (GIL released),
+  then reaps every completed event without waiting (io_getevents, zero timeout) and hands what the free room allows to
+  the submit threads. One wait covers both new work and completions, as the ring's armed eventfd read does.
+- **Submit threads.** io_submit pins a piece's user pages and builds its bios before it returns (fixed buffers spare
+  io_uring the pinning): ~0.4 ms of CPU per 12.9 MB slot, about twice the ring's. One thread doing it serially set
+  the latency of a light-load read (bench/ssd_io.py, 4 GB/s reads + 1 GB/s writes per process: 31-60 slots p50
+  21.5 ms vs 12.3 ms on the ring); `SUBMITTERS` threads, each submitting one iocb at a time, bring it to the ring's
+  (9.5 ms). A refused iocb goes back to the owner, which fails its request.
 """
 
 from __future__ import annotations
@@ -26,6 +31,7 @@ import ctypes
 import errno
 import os
 import platform
+import queue
 import threading
 from collections import deque
 from concurrent.futures import Future
@@ -37,6 +43,7 @@ _NR = {"x86_64": {"io_setup": 206, "io_destroy": 207, "io_getevents": 208, "io_s
        "aarch64": {"io_setup": 0, "io_destroy": 1, "io_submit": 2, "io_getevents": 4}}
 IOCB_CMD_PREAD, IOCB_CMD_PWRITE = 0, 1
 IOCB_FLAG_RESFD = 1
+SUBMITTERS = 4                # io_submit threads per context (see above)
 
 _libc = None
 
@@ -91,13 +98,15 @@ def probe() -> int:
 
 
 class AioFile:
-    """Reads and writes of byte ranges of one file into and out of host memory, on one AIO context and one thread
-    (the interface of `uring.UringFile`). `buffers`: (address, bytes) of the host memory every request lies in."""
+    """Reads and writes of byte ranges of one file into and out of host memory, on one AIO context, its owner thread
+    and `submitters` submit threads (the interface of `uring.UringFile`). `buffers`: (address, bytes) of the host
+    memory every request lies in."""
 
     def __init__(self, fd: int, buffers: list[tuple[int, int]], piece_bytes: int, read_depth: int,
-                 write_depth: int, name: str = "tier-aio"):
-        if piece_bytes <= 0 or piece_bytes % 4096 or read_depth < 1 or write_depth < 1:
-            raise ValueError(f"aio piece {piece_bytes} B (a multiple of 4 KiB), depths {read_depth}/{write_depth}")
+                 write_depth: int, name: str = "tier-aio", submitters: int = SUBMITTERS):
+        if piece_bytes <= 0 or piece_bytes % 4096 or read_depth < 1 or write_depth < 1 or submitters < 1:
+            raise ValueError(f"aio piece {piece_bytes} B (a multiple of 4 KiB), depths {read_depth}/{write_depth}, "
+                             f"{submitters} submit threads")
         self.fd, self.piece_bytes, self.depth = fd, piece_bytes, {"r": read_depth, "w": write_depth}
         self.entries = read_depth + write_depth
         self._ctx = ctypes.c_ulong(0)
@@ -118,6 +127,12 @@ class AioFile:
         self._zero = _Timespec(0, 0)
         self.error: BaseException | None = None
         self.stats = {"r": 0, "w": 0}                 # bytes completed
+        self._subq: queue.SimpleQueue = queue.SimpleQueue()   # aio_data of iocbs to submit
+        self._failed: deque = deque()               # (aio_data, -errno) of iocbs io_submit refused
+        self._subs = [threading.Thread(target=self._submitter, name=f"{name}-sub{i}", daemon=True)
+                      for i in range(submitters)]
+        for t in self._subs:
+            t.start()
         self._t = threading.Thread(target=self._loop, name=name, daemon=True)
         self._t.start()
 
@@ -149,6 +164,10 @@ class AioFile:
         self._stop = True
         os.eventfd_write(self._efd, 1)
         self._t.join()
+        for _ in self._subs:
+            self._subq.put(None)
+        for t in self._subs:
+            t.join()
         _sys("io_destroy", self._ctx)
         os.close(self._efd)
         self._open = False
@@ -158,13 +177,12 @@ class AioFile:
     def _loop(self):
         try:
             while True:
-                batch = []
+                while self._failed:
+                    self._done(*self._failed.popleft())
                 for k in ("r", "w"):              # reads take free room first
                     q = self._q[k]
                     while q and self._in[k] < self.depth[k]:
-                        batch.append(self._prep(k, q.popleft()))
-                if batch:
-                    self._submit(batch)
+                        self._subq.put(self._prep(k, q.popleft()))
                 if self._stop and not self._live:
                     break
                 os.eventfd_read(self._efd)        # blocks (GIL released) until a completion or a caller's wake-up
@@ -195,20 +213,15 @@ class AioFile:
         self._in[kind] += 1
         return ud
 
-    def _submit(self, uds: list[int]):
-        """io_submit the iocbs of `uds`, in order; one the kernel refuses (its errno for the first iocb of a call)
-        completes its piece with that error, and the rest go in the next call."""
-        while uds:
-            ptrs = (ctypes.c_void_p * len(uds))(*[ctypes.addressof(self._live[u][2]) for u in uds])
-            ret = _sys("io_submit", self._ctx, ctypes.c_long(len(uds)), ptrs)
-            if ret == -errno.EINTR:
-                continue
+    def _submitter(self):
+        """io_submit one iocb at a time (`_subq`; None stops); a refused one goes to `_failed` and wakes the owner."""
+        while (ud := self._subq.get()) is not None:
+            ptrs = (ctypes.c_void_p * 1)(ctypes.addressof(self._live[ud][2]))
+            while (ret := _sys("io_submit", self._ctx, ctypes.c_long(1), ptrs)) == -errno.EINTR:
+                pass
             if ret < 0:
-                if ret == -errno.EAGAIN:     # cannot happen: the context holds both depths
-                    _check(ret, "io_submit")
-                self._done(uds[0], ret)
-                ret = 1
-            uds = uds[ret:]
+                self._failed.append((ud, ret))
+                os.eventfd_write(self._efd, 1)
 
     def _done(self, ud: int, res: int):
         kind, (req, off, _a, n, _b), _cb = self._live.pop(ud)
