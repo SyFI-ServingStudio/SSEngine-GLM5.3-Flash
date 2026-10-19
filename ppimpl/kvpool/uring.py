@@ -67,6 +67,18 @@ def _check(ret: int, what: str):
         raise OSError(-ret, f"{what}: {os.strerror(-ret)}")
 
 
+def probe() -> int:
+    """0 if this process may set up an io_uring ring, else the errno of io_uring_setup (EPERM: a seccomp profile or
+    kernel.io_uring_disabled denies it, as Docker's default profile does since 25; ENOSYS: the kernel has none)."""
+    L = lib()
+    ring = ctypes.create_string_buffer(512)
+    ret = L.io_uring_queue_init(1, ring, 0)
+    if ret < 0:
+        return -ret
+    L.io_uring_queue_exit(ring)
+    return 0
+
+
 class UringFile:
     """Reads and writes of byte ranges of one file into and out of registered host memory, on one ring and one
     thread. `buffers`: (address, bytes) of the host memory every request lies in."""
@@ -87,7 +99,8 @@ class UringFile:
             iov = (ctypes.c_uint64 * (2 * len(spans)))(*[x for s in spans for x in s])   # struct iovec[]
             t0 = time.perf_counter()
             _check(L.io_uring_register_buffers(self._ring, iov, len(spans)), "io_uring_register_buffers "
-                   f"({len(spans)} buffers, {sum(n for _, n in spans) / 1e9:.1f} GB)")
+                   f"({len(spans)} buffers, {sum(n for _, n in spans) / 1e9:.1f} GB; ENOMEM: the locked-memory "
+                   "limit, `ulimit -l`, is below it: in Docker run with --ulimit memlock=-1)")
         except BaseException:
             L.io_uring_queue_exit(self._ring)
             raise

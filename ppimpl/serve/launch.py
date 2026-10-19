@@ -10,6 +10,7 @@ that, the command-line options last.
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 from pathlib import Path
@@ -89,6 +90,37 @@ def merge(base: dict, over: dict) -> dict:
     return out
 
 
+SECCOMP_FIX = """In Docker, run with the image's seccomp profile (Docker's default plus the three io_uring syscalls):
+  docker compose -f docker/compose.yaml up            (from a checkout: it sets the profile), or
+  docker run --rm <image> cat /opt/ppimpl/docker/seccomp.json > ppimpl-seccomp.json
+  docker run --security-opt seccomp=ppimpl-seccomp.json ...
+On a host: sysctl kernel.io_uring_disabled must be 0 (or 1 with this user in kernel.io_uring_group)."""
+
+
+MEMLOCK_FIX = """In Docker: --ulimit memlock=-1 (docker/compose.yaml sets it). On a host: memlock unlimited in
+/etc/security/limits.conf (`ulimit -l` shows the limit)."""
+
+
+def check_io_uring(dram_gb: float | None) -> None:
+    """The SSD tier reads and writes through io_uring only: stop before loading anything when it is denied, or when
+    the locked-memory limit is below the DRAM tier the ring registers (io_uring counts registered buffers against
+    RLIMIT_MEMLOCK, per user: all stages together)."""
+    import resource
+
+    from ppimpl.kvpool.uring import probe
+
+    err = probe()
+    if err:
+        raise SystemExit(f"the SSD tier needs io_uring, and io_uring_setup failed here: "
+                         f"{errno.errorcode.get(err, err)} ({os.strerror(err)}).\n{SECCOMP_FIX}")
+    soft = resource.getrlimit(resource.RLIMIT_MEMLOCK)[0]
+    need = len(LAYER_SPLIT) * (dram_gb or 0) * 1e9
+    if soft != resource.RLIM_INFINITY and soft < need:
+        raise SystemExit(f"the SSD tier registers the DRAM tier ({need / 1e9:.0f} GB on {len(LAYER_SPLIT)} stages) "
+                         f"with io_uring, which counts it as locked memory; the limit here is {soft / 2**20:.0f} MiB."
+                         f"\n{MEMLOCK_FIX}")
+
+
 def build_config(a) -> RunConfig:
     """The run config of `ppimpl serve <model>` (argparse namespace of ppimpl/__main__.py)."""
     checkpoint = resolve_model(a.model, a.revision)
@@ -106,6 +138,8 @@ def build_config(a) -> RunConfig:
                                                                 or os.environ.get("PPIMPL_SSD_DIR")):
         raise SystemExit("the SSD tier needs --ssd-dir (or PPIMPL_SSD_DIR): a directory with a shard set, made once by "
                          "`python -m ppimpl.kvpool.shards create --dir DIR --gb <ssd-gb>` (TIERS.md §5)")
+    if raw.get("tiers") and raw["tiers"].get("ssd_gb"):
+        check_io_uring(raw["tiers"].get("dram_gb"))
     if a.max_model_len is not None and not 1 < a.max_model_len <= MAX_MODEL_LEN:
         raise SystemExit(f"--max-model-len {a.max_model_len}: at most {MAX_MODEL_LEN} (the model's)")
     raw.update({k: v for k, v in (("host", a.host), ("port", a.port), ("run_dir", a.run_dir),
