@@ -15,7 +15,7 @@ HBM. Two optional tiers sit behind HBM: pinned host DRAM and NVMe SSD. The serve
 
 **Contents:** [Results](#results) · [Features](#features) · [Quick start](#quick-start) ·
 [Configuration](#configuration) · [API](#api) · [Docker](#docker) · [Performance](#performance) ·
-[Architecture](#architecture) · [Development](#development) · [Reproduce](#reproduce) ·
+[Architecture](#architecture) · [Development](#development) · [Branches](#branches) · [Reproduce](#reproduce) ·
 [Troubleshooting](#troubleshooting) · [License](#license)
 
 ## Results
@@ -388,7 +388,7 @@ First start of a fresh container (empty cache volume), until `/health` returns 2
 
 The bring-up measurements (single-request iteration times, prefix cache, scheduler, kernel timings and identity
 against the profiler rows, correctness against vLLM TP4, known gaps from the design targets) are on the `dev`
-branch under `research/measured/`.
+branch under `research/measured/` (see [Branches](#branches)).
 
 ## Architecture
 
@@ -437,6 +437,7 @@ Design documents:
 | `docker/` | Dockerfile, compose files, entry point, the io_uring seccomp profile |
 | `tests/` | CPU tests, plus GPU tests (`-m gpu`) |
 | `docs/` | design ([docs/design/](docs/design/)), results ([docs/results/](docs/results/)), the sim-to-real story |
+| `scripts/` | `release.sh`: cut `main` from `dev` (see [Branches](#branches)) |
 
 ## Development
 
@@ -450,6 +451,17 @@ CUDA_VISIBLE_DEVICES="" .venv/bin/python -m pytest -q          # CPU tests: sche
   needs the bench environment (`STEPS="client" env/make_env.sh`) and `cargo`.
 - The GPU tests need 4 GPUs: `.venv/bin/python -m pytest -q -m gpu`, through Slurm where there is one
   (`benchmarks/jobs/gtest.sbatch`, usage at its top).
+
+## Branches
+
+- **`main`** is the product: the engine, its tests, the Docker image, the benchmark runners that reproduce the
+  results, and the documentation. Releases are cut from it.
+- **`dev`** is the full history and the place where work happens. It is `main` plus `research/`: the bring-up
+  harnesses, one-off probes, raw measurements and the original design logs
+  (`research/README.md` on `dev` lists them).
+
+Contributions go to `dev`. `scripts/release.sh` (run on a clean `main`) merges `dev` into `main`, drops `research/`
+from the merge, runs the CPU tests and commits `Release from dev <sha>`; it never pushes.
 
 ## Reproduce
 
