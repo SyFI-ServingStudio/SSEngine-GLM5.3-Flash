@@ -21,6 +21,8 @@ import collections
 import json
 import random
 import statistics
+
+from ppimpl.engine.kv import block_pages
 from pathlib import Path
 from types import SimpleNamespace as NS
 
@@ -37,7 +39,7 @@ def build_plan(spec: str, block_tokens: int, first: bool, checkpoint: str):
     chunks, nb, at = [], 1, 0
     for i, (p, a) in enumerate(pairs):
         n_kv = -(-(p + a) // block_tokens)
-        chunks.append(NS(req_id=f"r{i}", start=p, num_tokens=a, kv_blocks=list(range(nb, nb + n_kv)),
+        chunks.append(NS(req_id=f"r{i}", start=p, num_tokens=a, kv_pages=block_pages(list(range(nb, nb + n_kv))),
                          state_blocks=list(range(nb + n_kv, nb + n_kv + 6)), is_last=True,
                          token_ids=ids[at:at + a] if ids else None))
         nb += n_kv + 6

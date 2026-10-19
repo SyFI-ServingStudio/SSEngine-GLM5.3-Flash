@@ -23,7 +23,7 @@ usage:
   python -m bench.replay check-sched [--steps plain,srpt8k,...]      scheduling check vs sched_check_targets.json
   python -m bench.replay check-force [--steps ...]                    force check vs force_check_targets.json
   python -m bench.replay sessions --step good --n 500 [--minutes 20] [--pool-tokens T] [--tiers full|tiers|ssd_heavy]
-                                 [--accounting blocks|tokens] [--partial-hits] --out <run dir>
+                                 [--accounting pages|tokens] [--partial-hits] --out <run dir>
   python -m bench.replay writeback --run <server run dir> [--latency-from <run>] [--cap-ms 50] [--measured]
                                  [--t-mode measured|physical|p99] [--dup-first drop|demote] [--ssd-backs]
                                  the victim chain's write-back (slot mode, the real KvManager + BalancedKVPool) on a
@@ -380,7 +380,7 @@ class Replay:
 # --- builders -----------------------------------------------------------------------------------------------------
 
 def make_scheduler(step: str | SchedulerConfig, pool_tokens: int = POOL_TOKENS, keep_sessions: bool = True,
-                   tiers: TierConfig | None = None, accounting: str = "blocks", partial_hits: bool = False,
+                   tiers: TierConfig | None = None, accounting: str = "pages", partial_hits: bool = False,
                    dispatch_ahead: int = 0, max_in_flight: int = NUM_STAGES) -> Scheduler:
     cfg = SCHEDULER_STEPS[step] if isinstance(step, str) else step
     kv = KvManager(pool_tokens // BLOCK_TOKENS, keep_sessions=keep_sessions, accounting=accounting,
@@ -450,7 +450,7 @@ def check_force(step: str, handoff: Path = HANDOFF) -> tuple[list[str], dict]:
 
 
 def run_sessions(step: str, n: int | None, out: Path, minutes: float = 20.0, memory: str = "full",
-                 tiers: bool = False, accounting: str = "blocks", partial_hits: bool = False,
+                 tiers: bool = False, accounting: str = "pages", partial_hits: bool = False,
                  trace: Path | None = None, pool_tokens: int | None = None, tier_cfg: TierConfig | None = None,
                  dispatch_ahead: int = 0, form_lead_ms: float | None = None, handoff: Path = HANDOFF,
                  max_in_flight: int = NUM_STAGES,
@@ -715,7 +715,7 @@ def run_writeback(run: Path, lat: OpLatency | None = None, t_mode: str = "measur
             row = dict(arrival_ms=arrival, cached=hbm)
             if hit is not None and hit.tokens > hbm:
                 a = kv.held[req.req_id]
-                pool.load(req.session, hit, KVViews(a.kv_blocks, a.state_blocks, hit.tokens, hbm), now[0], req.req_id)
+                pool.load(req.session, hit, KVViews(a.kv_pages, a.state_blocks, hit.tokens, hbm), now[0], req.req_id)
                 row |= dict(cached=hit.tokens, tier=hit.tier, tier_tokens=hit.tokens - hbm)
             got.append(row)
             waits.append((now[0] - at) / MS)
@@ -772,7 +772,7 @@ def main():
     p.add_argument("--memory", choices=list(MEMORY), default="full")
     p.add_argument("--tiers", action="store_true")
     p.add_argument("--no-ssd", action="store_true")
-    p.add_argument("--accounting", choices=["blocks", "tokens"], default="blocks")
+    p.add_argument("--accounting", choices=["pages", "tokens"], default="pages")
     p.add_argument("--partial-hits", action="store_true", help="the simulator's hit rule (not realizable)")
     p.add_argument("--trace", type=Path)
     p.add_argument("--pool-tokens", type=int)

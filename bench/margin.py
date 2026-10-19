@@ -22,6 +22,7 @@ from pathlib import Path
 from types import SimpleNamespace as NS
 
 from bench.common import MEASURED, ROOT
+from ppimpl.engine.kv import block_pages
 
 JOB = os.environ.get("SLURM_JOB_ID", "local")
 MB = 8192
@@ -178,7 +179,7 @@ def _worker(rank: int, cases: list[dict], repeats: int, port: int, out: str, tra
             for rep in range(repeats):
                 t0 = time.time()
                 for i, (s, n, last) in enumerate(c["schedule"]):
-                    plan = NS(mb_id=i, chunks=[NS(req_id="p", start=s, num_tokens=n, kv_blocks=kv,
+                    plan = NS(mb_id=i, chunks=[NS(req_id="p", start=s, num_tokens=n, kv_pages=block_pages(kv),
                                                   state_blocks=st, is_last=last, token_ids=t[s:s + n])])
                     hidden = pipe.recv(n, HIDDEN_WIDTH) if rank > 0 else None
                     if nvtx:     # bench/nsys_trace.py attributes kernels by this range, as in the server's workers

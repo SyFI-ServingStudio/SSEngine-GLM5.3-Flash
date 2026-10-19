@@ -16,6 +16,7 @@ from types import SimpleNamespace as NS
 
 from bench import common as lb
 from bench.overlap import make_plans
+from ppimpl.engine.kv import block_pages
 
 
 def main() -> None:
@@ -36,7 +37,8 @@ def main() -> None:
     B = 8576
     kv = list(range(used, used + 4))
     st = list(range(used + 4, used + 10))
-    plans.append(NS(mb_id=9, chunks=[NS(req_id="ctx", start=3 * B, num_tokens=4096, kv_blocks=kv, state_blocks=st,
+    plans.append(NS(mb_id=9, chunks=[NS(req_id="ctx", start=3 * B, num_tokens=4096, kv_pages=block_pages(kv),
+                                     state_blocks=st,
                                         is_last=True, token_ids=tokens[3 * B:3 * B + 4096])]))
     used += 10
     budget = max(sum(c.num_tokens for c in p.chunks) for p in plans)

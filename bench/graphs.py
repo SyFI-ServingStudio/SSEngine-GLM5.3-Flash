@@ -28,13 +28,14 @@ from pathlib import Path
 from types import SimpleNamespace as NS
 
 from bench import common as lb
+from ppimpl.engine.kv import block_pages
 
 
 def plans_for(Tb: int, tokens: list[int], prev: int | None = None):
     """The bucket exactly, and a padded plan of two requests between the next smaller bucket `prev` and Tb (not
     divisible by 16)."""
     def chunk(rid, n, kv, base_tok):
-        return NS(req_id=rid, start=0, num_tokens=n, kv_blocks=[kv], is_last=True,
+        return NS(req_id=rid, start=0, num_tokens=n, kv_pages=block_pages([kv]), is_last=True,
                   state_blocks=list(range(kv + 1, kv + 7)), token_ids=tokens[base_tok:base_tok + n])
     exact = NS(mb_id=0, chunks=[chunk("a", Tb, 1, 0)])
     T = Tb - (Tb - prev) // 8 - 3 if prev else Tb - 21
@@ -155,7 +156,8 @@ def memory_check(a, dev, free0) -> None:
     with torch.inference_mode():
         for T in (a.mb_tokens, big, a.mb_tokens, big):
             nb = -(-T // model.kv.block_tokens)
-            plan = NS(mb_id=0, chunks=[NS(req_id="m", start=0, num_tokens=T, kv_blocks=list(range(1, 1 + nb)),
+            plan = NS(mb_id=0, chunks=[NS(req_id="m", start=0, num_tokens=T, 
+                                          kv_pages=block_pages(list(range(1, 1 + nb))),
                                           is_last=True, state_blocks=list(range(1 + nb, 7 + nb)),
                                           token_ids=tokens[:T])])
             h = None if model.first else torch.zeros(T, model.hidden_width, dtype=torch.bfloat16, device=dev)

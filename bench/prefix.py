@@ -469,7 +469,7 @@ def sessions(run_dir: Path) -> dict:
             "server_ttft_s": {f"p{q}": float(np.percentile(sv, q)) for q in (50, 90, 99)} if len(sv) else None,
             "pool_tokens": cache.get("pool_tokens"), "evicted_sessions": cache.get("evicted_sessions"),
             "evicted_tokens": cache.get("evicted_tokens"), "preemptions": cache.get("preemptions"),
-            "hits": cache.get("hits"), "hit_tokens": cache.get("hit_tokens"), "peak_hard_blocks": cache.get("peak_hard"),
+            "hits": cache.get("hits"), "hit_tokens": cache.get("hit_tokens"), "peak_hard_pages": cache.get("peak_hard"),
             "dropped_stale": cache.get("dropped_stale"), "kept_sessions_at_end": cache.get("kept_sessions"),
             "prefix_shortfall_tokens": sum(c["shortfall"] for c in client.values()),
             "rounds_sent": len(client), "rounds_failed": sum(not c["ok"] for c in client.values()),

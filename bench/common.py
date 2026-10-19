@@ -7,6 +7,8 @@ normally.
 from __future__ import annotations
 
 import os
+
+from ppimpl.engine.kv import block_pages
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -55,7 +57,7 @@ def one_request_plan(tokens: list[int]):
     """One request, the whole prompt in one microbatch, on KV blocks 1.. and the 6 state blocks after them."""
     L = len(tokens)
     n = -(-L // 8576)
-    chunk = SimpleNamespace(req_id="r0", start=0, num_tokens=L, kv_blocks=list(range(1, 1 + n)),
+    chunk = SimpleNamespace(req_id="r0", start=0, num_tokens=L, kv_pages=block_pages(list(range(1, 1 + n))),
                             state_blocks=list(range(1 + KV_BLOCKS, 1 + KV_BLOCKS + 6)), is_last=True,
                             token_ids=tokens)
     return SimpleNamespace(mb_id=0, chunks=[chunk])

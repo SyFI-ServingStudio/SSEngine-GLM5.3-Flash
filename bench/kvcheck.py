@@ -33,6 +33,7 @@ import time
 from types import SimpleNamespace as NS
 
 from bench.common import MEASURED, enwik9_tokens
+from ppimpl.engine.kv import block_pages
 
 OUT = MEASURED / "kvcheck"
 JOB = os.environ.get("SLURM_JOB_ID", "local")
@@ -41,7 +42,7 @@ NUM_BLOCKS = 96          # blocks 1.. ; a 32k prompt needs 4 KV + 6 state, a fil
 
 
 def _chunk(rid, start, n, kv, state, last, toks):
-    return NS(req_id=rid, start=start, num_tokens=n, kv_blocks=kv, state_blocks=state, is_last=last,
+    return NS(req_id=rid, start=start, num_tokens=n, kv_pages=block_pages(kv), state_blocks=state, is_last=last,
               token_ids=toks[start:start + n])
 
 

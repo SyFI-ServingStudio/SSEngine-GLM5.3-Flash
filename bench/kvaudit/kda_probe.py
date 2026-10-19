@@ -36,6 +36,7 @@ from types import SimpleNamespace as NS
 import torch
 
 from bench.kvaudit import common as C
+from ppimpl.engine.kv import block_pages
 
 JOB = os.environ.get("SLURM_JOB_ID", "local")
 KDA_PROBE_LAYERS = (0, 1, 2)
@@ -104,7 +105,7 @@ def capture_inputs(m, L: int, chunk: int) -> list[dict]:
         with torch.inference_mode():
             for s in range(0, L, chunk):
                 n = min(chunk, L - s)
-                plan = NS(mb_id=s // chunk, chunks=[NS(req_id="p", start=s, num_tokens=n, kv_blocks=kv,
+                plan = NS(mb_id=s // chunk, chunks=[NS(req_id="p", start=s, num_tokens=n, kv_pages=block_pages(kv),
                                                        state_blocks=st, is_last=s + n == L, token_ids=toks[s:s + n])])
                 seen[0] = 0
                 b = m.prepare(plan)

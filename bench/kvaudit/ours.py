@@ -22,6 +22,7 @@ from pathlib import Path
 from types import SimpleNamespace as NS
 
 from bench.kvaudit import common as C
+from ppimpl.engine.kv import block_pages
 
 JOB = os.environ.get("SLURM_JOB_ID", "local")
 B = 8576
@@ -32,7 +33,8 @@ def _plans(case: C.OursCase, toks: list[int], kv: list[int], st: list[int]) -> l
     for rnd in case.rounds:
         for j, n in enumerate(rnd):
             last = j == len(rnd) - 1
-            plans.append(NS(mb_id=len(plans), chunks=[NS(req_id=case.name, start=s, num_tokens=n, kv_blocks=kv,
+            plans.append(NS(mb_id=len(plans), chunks=[NS(req_id=case.name, start=s, num_tokens=n,
+                                                         kv_pages=block_pages(kv),
                                                          state_blocks=st, is_last=last, token_ids=toks[s:s + n])]))
             s += n
     return plans
@@ -43,7 +45,8 @@ def _check_indexer_table(m, kv: list[int], T: int, toks: list[int]) -> dict:
     import torch
 
     n = min(1000, T - 1)
-    plan = NS(mb_id=-1, chunks=[NS(req_id="chk", start=T - n, num_tokens=n, kv_blocks=kv, state_blocks=[0] * 6,
+    plan = NS(mb_id=-1, chunks=[NS(req_id="chk", start=T - n, num_tokens=n, kv_pages=block_pages(kv),
+                                   state_blocks=[0] * 6,
                                    is_last=True, token_ids=toks[T - n:T])])
     b = m.meta.build(plan, with_tokens=m.first)
     i = next(i for i in C.DSA_LAYERS if i in m.layer_range)

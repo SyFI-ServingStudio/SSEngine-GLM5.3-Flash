@@ -24,6 +24,8 @@ import pstats
 import random
 import statistics
 import time
+
+from ppimpl.engine.kv import block_pages
 from pathlib import Path
 from types import SimpleNamespace as NS
 
@@ -48,7 +50,8 @@ def main():
     B = model.kv.block_tokens
     n_kv = -(-(a.prefix + a.append) // B)
     assert n_kv + 7 <= model.num_blocks, (n_kv, model.num_blocks, B)
-    plan = NS(mb_id=0, chunks=[NS(req_id="r", start=a.prefix, num_tokens=a.append, kv_blocks=list(range(1, 1 + n_kv)),
+    plan = NS(mb_id=0, chunks=[NS(req_id="r", start=a.prefix, num_tokens=a.append,
+                                  kv_pages=block_pages(list(range(1, 1 + n_kv))),
                                   is_last=True, state_blocks=list(range(1 + n_kv, 7 + n_kv)),
                                   token_ids=[random.Random(a.append).randrange(1, 150_000) for _ in range(a.append)])])
     # (varied ids: one repeated id routes every token to the same experts, and the MoE then costs far less than served)

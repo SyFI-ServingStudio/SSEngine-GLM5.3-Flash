@@ -22,6 +22,7 @@ from pathlib import Path
 from types import SimpleNamespace as NS
 
 from bench import common as lb
+from ppimpl.engine.kv import block_pages
 
 
 def make_plans(n_plans: int, reqs: int, L: int, tokens: list[int]):
@@ -37,14 +38,15 @@ def make_plans(n_plans: int, reqs: int, L: int, tokens: list[int]):
         chunks = []
         for r in range(reqs):
             kv, st = blocks(1), blocks(6)
-            chunks.append(NS(req_id=f"p{p}r{r}", start=0, num_tokens=L, kv_blocks=kv, state_blocks=st,
+            chunks.append(NS(req_id=f"p{p}r{r}", start=0, num_tokens=L, kv_pages=block_pages(kv), state_blocks=st,
                              is_last=True, token_ids=tokens[(p * reqs + r) * 7 % 4000:][:L]))
         if carry is not None:     # second chunk of the previous plan's long request
             kv, st, start = carry
-            chunks.append(NS(req_id=f"c{p}", start=start, num_tokens=L, kv_blocks=kv, state_blocks=st,
+            chunks.append(NS(req_id=f"c{p}", start=start, num_tokens=L, kv_pages=block_pages(kv), state_blocks=st,
                              is_last=True, token_ids=tokens[start:start + L]))
         kv, st = blocks(1), blocks(6)
-        chunks.append(NS(req_id=f"long{p}", start=0, num_tokens=L, kv_blocks=kv, state_blocks=st, is_last=False,
+        chunks.append(NS(req_id=f"long{p}", start=0, num_tokens=L, kv_pages=block_pages(kv), state_blocks=st,
+                         is_last=False,
                          token_ids=tokens[:L]))
         carry = (kv, st, L)
         plans.append(NS(mb_id=p, chunks=chunks))

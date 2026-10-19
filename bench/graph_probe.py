@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import argparse
 import time
+
+from ppimpl.engine.kv import block_pages
 from types import SimpleNamespace as NS
 
 
@@ -49,7 +51,7 @@ def main():
     print(f"[graph_probe] stage {a.stage}: built and warmed up in {time.perf_counter() - t0:.0f} s", flush=True)
     if a.eager:
         T = a.eager
-        plan = NS(mb_id=0, chunks=[NS(req_id="e", start=0, num_tokens=T, kv_blocks=[1], is_last=True,
+        plan = NS(mb_id=0, chunks=[NS(req_id="e", start=0, num_tokens=T, kv_pages=block_pages([1]), is_last=True,
                                       state_blocks=list(range(2, 8)), token_ids=[1] * T)])
         hidden = None if model.first else torch.zeros(T, model.hidden_width, dtype=torch.bfloat16, device=dev)
         with torch.inference_mode():
@@ -163,7 +165,7 @@ def capture_loop(model, buckets, a):
         for Tb in buckets:
             if a.pool_per_bucket:
                 pool = torch.cuda.graph_pool_handle()
-            plan = NS(mb_id=-10, chunks=[NS(req_id="g", start=0, num_tokens=Tb, kv_blocks=[1], is_last=True,
+            plan = NS(mb_id=-10, chunks=[NS(req_id="g", start=0, num_tokens=Tb, kv_pages=block_pages([1]), is_last=True,
                                             state_blocks=list(range(2, 8)), token_ids=[1] * Tb)])
             b = model.meta.build(plan, with_tokens=model.first, bucket=Tb)
             e = GraphEntry(Tb, torch.empty_like(b.graph_rows), None if hidden is None else hidden[:Tb])
