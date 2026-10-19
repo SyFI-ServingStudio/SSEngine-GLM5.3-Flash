@@ -875,7 +875,11 @@
    "names": [
     "io_uring_setup",
     "io_uring_enter",
-    "io_uring_register"
+    "io_uring_register",
+    "get_mempolicy",
+    "mbind",
+    "set_mempolicy",
+    "set_mempolicy_home_node"
    ],
    "action": "SCMP_ACT_ALLOW"
   }
