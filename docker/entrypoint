@@ -9,10 +9,17 @@ set -euo pipefail
 export TMPDIR=${TMPDIR:-/tmp}
 if (( ${#TMPDIR} > 64 )); then echo "TMPDIR $TMPDIR is over 64 characters (vLLM's zmq ipc path)" >&2; exit 1; fi
 mkdir -p "$TMPDIR"
+# The image's JIT kernels (docker/Dockerfile): copy what /root/.cache lacks, so a fresh or mounted cache volume starts
+# without compiling; files already there (a volume's own, maybe newer) are kept.
+seed() {
+  [ -d /opt/ppimpl/jit-seed ] || return 0
+  mkdir -p /root/.cache && cp -a --update=none /opt/ppimpl/jit-seed/. /root/.cache/ \
+    || echo "ppimpl: could not seed /root/.cache from /opt/ppimpl/jit-seed: the first start compiles the kernels" >&2
+}
 case "${1:-}" in
-  "") exec ppimpl serve ;;
-  -h|--help|serve|worker|intake) exec ppimpl "$@" ;;
-  -*) exec ppimpl serve "$@" ;;
+  "") seed; exec ppimpl serve ;;
+  -h|--help|serve|worker|intake) seed; exec ppimpl "$@" ;;
+  -*) seed; exec ppimpl serve "$@" ;;
   check-env)   # without --gpus there is no libcuda.so.1: the toolkit's stub lets the extensions load (no kernel runs)
     shift
     ldconfig -p | grep -q 'libcuda\.so\.1 ' || export LD_LIBRARY_PATH=/opt/cuda-stub${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}

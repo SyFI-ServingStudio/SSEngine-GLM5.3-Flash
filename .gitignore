@@ -18,3 +18,4 @@ measured/kernels_runs/
 measured/nodecheck_runs/
 tmp/
 measured/kvaudit/
+docker/jit-seed/
