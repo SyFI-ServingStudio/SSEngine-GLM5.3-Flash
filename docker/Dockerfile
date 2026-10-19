@@ -48,7 +48,7 @@ COPY env/bake_jit.py env/
 RUN STEPS=jit MAX_JOBS=$MAX_JOBS env/make_env.sh \
  && mkdir -p /opt/ppimpl/jit-seed && mv /root/.cache/flashinfer /opt/ppimpl/jit-seed/ && rm -rf /root/.cache
 
-COPY pyproject.toml README.md ENV.md ./
+COPY pyproject.toml README.md ENV.md LICENSE NOTICE ./
 COPY env/check_env.py env/
 COPY ppimpl ppimpl
 COPY docker/entrypoint docker/seccomp.json docker/
