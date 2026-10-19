@@ -12,7 +12,11 @@
 #   MAX_JOBS    parallel nvcc jobs for that build             default 16
 #   TMPDIR      keep it short: vLLM's zmq ipc path is TMPDIR + "/" + a uuid and must fit in 107 characters
 #   STEPS       the steps to run, in this order                default all of them:
-#                 venv vllm conv1d   the serving environment (the Docker image runs only these, docker/Dockerfile)
+#                 venv vllm conv1d   the serving environment (the Docker image runs these, install and jit:
+#                                    docker/Dockerfile)
+#                 install            this repo into the venv (editable, `ppimpl` on the venv's PATH)
+#                 jit                FlashInfer's JIT modules for sm_100a and the trtllm-gen cubins serving uses
+#                                    (env/bake_jit.py; no GPU, ~5 min): no compile or download at the first start
 #                 sim client corpus  the bench's handoff checkout, req-frontend and enwik9
 #                 check              env/check_env.py
 #   PPIMPL_ALLOW_ROOT=1   build as root: only inside a container build (docker/Dockerfile)
@@ -24,11 +28,11 @@ DIR=$(realpath "${1:-$HERE/..}")
 TP=$DIR/third_party
 PY=$DIR/.venv/bin/python
 export CUDA_HOME=${CUDA_HOME:-/usr/local/cuda} MAX_JOBS=${MAX_JOBS:-16}
-STEPS=${STEPS:-venv vllm conv1d sim client corpus check}
+STEPS=${STEPS:-venv vllm conv1d install jit sim client corpus check}
 mkdir -p "$TP/downloads"
 want() { [[ " $STEPS " == *" $1 "* ]]; }
 for s in $STEPS; do
-  case $s in venv|vllm|conv1d|sim|client|corpus|check) ;; *) echo "unknown step $s (STEPS)"; exit 1 ;; esac
+  case $s in venv|vllm|conv1d|install|jit|sim|client|corpus|check) ;; *) echo "unknown step $s (STEPS)"; exit 1 ;; esac
 done
 
 fetch() {  # url sha256 file: download once, then always check the hash
@@ -73,6 +77,18 @@ if want conv1d; then
       -o "$TP/wheels" "$TP/downloads/causal-conv1d-1.7.0"
   fi
   uv pip install --python "$PY" --no-deps "$TP"/wheels/causal_conv1d-1.7.0-*.whl
+fi
+
+# 3b. This repo, editable: the `ppimpl` command (.venv/bin/ppimpl) and `python -m ppimpl` from any directory.
+if want install; then
+  uv pip install --python "$PY" --no-deps -e "$HERE/.."
+fi
+
+# 3c. FlashInfer's JIT modules (fp4 quantization, trtllm-gen FMHA, trtllm-gen fused MoE) built for sm_100a and the
+#     trtllm-gen cubins they load, into FlashInfer's cache (~/.cache/flashinfer): what the first serving start would
+#     otherwise compile (~10 min) and download. Built with /usr/bin/ninja, as the server's JIT checks (ENV.md).
+if want jit; then
+  PATH=/usr/bin:$PATH MAX_JOBS=$MAX_JOBS "$PY" "$HERE/bake_jit.py"
 fi
 
 # 4. The handoff and the client: ServingStudioSim at 820adda0 (branch pp-main: the handoff on top of its frozen commit

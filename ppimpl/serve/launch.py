@@ -10,6 +10,7 @@ that, the command-line options last.
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 from pathlib import Path
@@ -18,7 +19,7 @@ import msgspec
 import yaml
 
 from ppimpl.config import (CHECKPOINT_REPO, CHECKPOINT_REVISION, HIDDEN_WIDTH, LAYER_SPLIT, SCHEDULER_STEPS,
-                           RunConfig)
+                           RunConfig, TierConfig)
 
 # The engine's model length: the stage models' vLLM config (ppimpl/model/stage.py MAX_MODEL_LEN), = the checkpoint's
 # max_position_embeddings. A prompt must also fit the KV pool (controller).
@@ -89,6 +90,50 @@ def merge(base: dict, over: dict) -> dict:
     return out
 
 
+NICE_FIX = """In Docker, add --cap-add SYS_NICE (docker/compose.yaml sets it): Docker's default seccomp profile allows
+mbind only to a container with CAP_SYS_NICE."""
+URING_FIX = """The default SSD backend, Linux AIO (--ssd-backend aio), needs neither. For io_uring in Docker, run with the
+image's seccomp profile (Docker's default plus io_uring) and no memlock limit:
+  docker compose -f docker/compose.yaml -f docker/compose.uring.yaml up      (from a checkout), or
+  docker run --rm <image> cat /opt/ppimpl/docker/seccomp.json > ppimpl-seccomp.json
+  docker run --security-opt seccomp=ppimpl-seccomp.json --ulimit memlock=-1 --cap-add SYS_NICE ...
+On a host: sysctl kernel.io_uring_disabled must be 0 (or 1 with this user in kernel.io_uring_group), and memlock
+unlimited in /etc/security/limits.conf (`ulimit -l` shows the limit)."""
+
+
+def check_tiers(tc: TierConfig) -> None:
+    """Stop before loading anything when the host denies what the tiers call: mbind (any tier: the DRAM tier's and the
+    staging area's NUMA placement) and the SSD backend's set-up (Linux AIO's io_setup, or io_uring's). Only io_uring
+    needs a locked-memory limit: it counts the buffers it registers (the DRAM tier and the staging area, per user: all
+    stages together) against RLIMIT_MEMLOCK. AIO's O_DIRECT requests and cudaHostRegister's pinning do not count
+    against it."""
+    import resource
+
+    from ppimpl.kvpool import aio, uring
+    from ppimpl.kvpool.backends import mbind_probe
+
+    if err := mbind_probe():
+        raise SystemExit(f"the KV tiers place host memory with mbind, which failed here: "
+                         f"{errno.errorcode.get(err, err)} ({os.strerror(err)}).\n{NICE_FIX}")
+    if not tc.ssd_gb:
+        return
+    if tc.ssd_backend == "aio":
+        if err := aio.probe():
+            raise SystemExit(f"the SSD tier's Linux AIO backend could not set up a context (io_setup): "
+                             f"{errno.errorcode.get(err, err)} ({os.strerror(err)}). EAGAIN: raise sysctl "
+                             "fs.aio-max-nr; EPERM: a seccomp profile denies it.")
+        return
+    if err := uring.probe():
+        raise SystemExit(f"--ssd-backend uring: io_uring_setup failed here: "
+                         f"{errno.errorcode.get(err, err)} ({os.strerror(err)}).\n{URING_FIX}")
+    soft = resource.getrlimit(resource.RLIMIT_MEMLOCK)[0]
+    need = len(LAYER_SPLIT) * (tc.dram_gb or 0) * 1e9
+    if soft != resource.RLIM_INFINITY and soft < need:
+        raise SystemExit(f"--ssd-backend uring registers the DRAM tier ({need / 1e9:.0f} GB on {len(LAYER_SPLIT)} "
+                         f"stages) with io_uring, which counts it as locked memory; the limit here is "
+                         f"{soft / 2**20:.0f} MiB.\n{URING_FIX}")
+
+
 def build_config(a) -> RunConfig:
     """The run config of `ppimpl serve <model>` (argparse namespace of ppimpl/__main__.py)."""
     checkpoint = resolve_model(a.model, a.revision)
@@ -110,6 +155,8 @@ def build_config(a) -> RunConfig:
                                                                 or os.environ.get("PPIMPL_SSD_DIR")):
         raise SystemExit("the SSD tier needs --ssd-dir (or PPIMPL_SSD_DIR): a directory with a shard set, made once by "
                          "`python -m ppimpl.kvpool.shards create --dir DIR --gb <ssd-gb>` (TIERS.md §5)")
+    if raw.get("tiers"):
+        check_tiers(msgspec.convert(raw["tiers"], TierConfig))
     if a.max_model_len is not None and not 1 < a.max_model_len <= MAX_MODEL_LEN:
         raise SystemExit(f"--max-model-len {a.max_model_len}: at most {MAX_MODEL_LEN} (the model's)")
     raw.update({k: v for k, v in (("host", a.host), ("port", a.port), ("run_dir", a.run_dir),

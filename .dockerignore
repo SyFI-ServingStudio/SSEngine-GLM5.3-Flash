@@ -3,8 +3,11 @@
 !env/make_env.sh
 !env/requirements.lock
 !env/check_env.py
+!env/bake_jit.py
 !ppimpl/
 !docker/entrypoint
+!docker/seccomp.json
+!docker/jit-seed/gpu.tar
 !pyproject.toml
 !README.md
 !ENV.md

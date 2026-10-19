@@ -124,6 +124,20 @@ def bind_node(numa, ptr: int, nbytes: int, node: int):
     _mbind(numa, ptr, nbytes, node, MPOL_BIND)
 
 
+def mbind_probe() -> int:
+    """0 if this process may set a page's NUMA policy (`prefer_node`), else the errno of mbind (EPERM: a seccomp
+    profile allows it only with CAP_SYS_NICE, as Docker's default does)."""
+    numa = ctypes.CDLL("libnuma.so.1", use_errno=True)
+    ptr = anon_map(4096)
+    try:
+        prefer_node(numa, ptr, 4096, 0)
+        return 0
+    except OSError as e:
+        return e.errno
+    finally:
+        anon_unmap(ptr, 4096)
+
+
 class NodeShort(MemoryError):
     pass
 

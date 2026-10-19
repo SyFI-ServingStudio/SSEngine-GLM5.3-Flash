@@ -1,0 +1,45 @@
+# One command for the server with every setting it needs (README "Quick start"):
+#
+#   docker compose -f docker/compose.yaml up
+#
+# serves nvidia/GLM-5.3-Flash-NVFP4 on port 8000 with HBM only. Options of `ppimpl serve` go in PPIMPL_ARGS, e.g. the
+# DRAM and SSD tiers (the SSD shard set made once, README "Memory tiers"):
+#
+#   PPIMPL_ARGS="--dram-gb 50 --ssd-gb 128 --ssd-dir /ssd" PPIMPL_SSD_DIR=/nvme/ppimpl \
+#     docker compose -f docker/compose.yaml up
+#
+# Environment (all optional):
+#   PPIMPL_IMAGE   the image                                     default ppimpl
+#   PPIMPL_ARGS    `ppimpl serve` options (`docker run --rm ppimpl serve --help`)   default none
+#   PPIMPL_PORT    host port                                     default 8000
+#   HF_CACHE       the host's Hugging Face cache (weights)       default ~/.cache/huggingface
+#   PPIMPL_SSD_DIR host directory of the SSD tier's shard sets (fast NVMe), mounted at /ssd   default a volume
+# The optional io_uring SSD backend (`--ssd-backend uring` in PPIMPL_ARGS) needs docker/compose.uring.yaml on top:
+#   docker compose -f docker/compose.yaml -f docker/compose.uring.yaml up
+# Logs: /workspace/run in the container (`docker compose -f docker/compose.yaml cp ppimpl:/workspace/run .`).
+name: ppimpl
+services:
+  ppimpl:
+    image: ${PPIMPL_IMAGE:-ppimpl}
+    command: serve ${PPIMPL_ARGS:-}     # compose splits this string into words
+    ports: ["${PPIMPL_PORT:-8000}:8000"]
+    network_mode: bridge          # Docker's default bridge, as `docker run`: no network of its own to create
+    ipc: host                     # the stages pass activations over CUDA IPC; the intakes share prompts in /dev/shm
+    cap_add: [SYS_NICE]           # mbind (the tiers' NUMA placement): Docker's default seccomp profile allows it
+                                  # only with CAP_SYS_NICE; the default SSD backend (Linux AIO) needs nothing more
+    volumes:
+      - ${HF_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface
+      - ppimpl-cache:/root/.cache # JIT and autotune caches, seeded from the image at each start
+      - ${PPIMPL_SSD_DIR:-ppimpl-ssd}:/ssd
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all          # 4 B200 in one NVLink domain; on a larger host name four instead:
+                                  # device_ids: ["0", "1", "2", "3"]
+              capabilities: [gpu]
+    stop_grace_period: 2m
+volumes:
+  ppimpl-cache:
+  ppimpl-ssd:

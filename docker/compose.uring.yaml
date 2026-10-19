@@ -1,0 +1,12 @@
+# On top of docker/compose.yaml, for the optional io_uring SSD backend (`--ssd-backend uring`; the default, Linux AIO,
+# needs none of this):
+#
+#   PPIMPL_ARGS="--dram-gb 50 --ssd-gb 128 --ssd-dir /ssd --ssd-backend uring" PPIMPL_SSD_DIR=/nvme/ppimpl \
+#     docker compose -f docker/compose.yaml -f docker/compose.uring.yaml up
+services:
+  ppimpl:
+    security_opt:
+      - seccomp=./seccomp.json    # Docker's default profile plus io_uring (denied there since Docker 25);
+                                  # docker/make_seccomp.py writes it
+    ulimits:
+      memlock: -1                 # io_uring counts the host memory it registers (DRAM tier, staging) as locked
