@@ -6,12 +6,19 @@
 #       bench/slurm/vllm_dpep.sbatch                       # A: HBM only
 #   N=400 OFFLOAD_GB=50 sbatch ... --mem=450G ...         # B: native CPU offload, 50 GB (1e9 B) per GPU
 #   SMOKE=1 N=8 sbatch -p priority --time=00:30:00 ...    # smoke: 3 min of client
+#   TP=4 N=400 sbatch ...                                 # pure tensor parallel: one TP4 engine, no EP, no router
 # Variables: N (client --max-concurrency), TRACE (default the v3 trace data/tracelab-v3/m6/sessions_2ps_v3.csv), OFFLOAD_GB (per GPU; --kv-offloading-size is per DP engine in GiB, since
 # CPUOffloadingSpec divides by the engine's world size = TP x PP = 1), CLIENT_TIMEOUT (default 22m; SMOKE 3m),
 # OUT (default <main tree>/measured/vllm_dpep), RUN (run name), VLLM_EXTRA (extra server args),
 # POLICY (vllm-router policy in front of the server, default cache_aware = prefix-aware; none = no router, the client
 # talks to vLLM's own load-only DP balancer as in job 8199), MNBT (--max-num-batched-tokens, default 32768 = our
-# engine's mb_tokens).
+# engine's mb_tokens). TP (default 1 = the DP4 x EP4 layout above): TP=4 runs one --tensor-parallel-size 4
+# --data-parallel-size 1 engine without --enable-expert-parallel (MoE experts TP-sharded) and without a router (one
+# engine; the client talks to vLLM directly, POLICY is ignored); TAG starts with tp4. Same --max-num-seqs (1016; the
+# KDA grid limit below does not bind at 16 heads per rank, kept for parity), MNBT, memguard, watchdog, prom collection.
+# Offload at TP4: --kv-offloading-size is the engine's total over its TP workers (CPUOffloadingSpec: one chunk = all
+# world_size workers' copies; the single-copy replicated_layout applies only to pure-MLA models, not this hybrid), so
+# the script passes TP x OFFLOAD_GB and OFFLOAD_GB stays per GPU (e.g. 50 -> 200 GB = 186.26 GiB, 50 GB a GPU).
 # Router: vllm-router 0.1.15 (PyPI, github.com/vllm-project/router) in <main tree>/tmp/vllm-router-venv
 # (uv venv --python 3.12 && uv pip install vllm-router==0.1.15). --intra-node-data-parallel-size 4 expands the one vLLM
 # URL into 4 DP-aware workers and sends X-data-parallel-rank, which vLLM's DPLBAsyncMPClient honors (the request's
@@ -43,7 +50,10 @@ N=${N:?N (client max concurrency)}
 OFF=${OFFLOAD_GB:-}
 POLICY=${POLICY:-cache_aware}
 MNBT=${MNBT:-32768}
+TP=${TP:-1}
+case $TP in 1) ;; 4) POLICY=none ;; *) echo "TP must be 1 (DP4 x EP4) or 4 (one TP4 engine)"; exit 1 ;; esac
 TAG=$([ -n "$OFF" ] && echo "off${OFF}" || echo hbm)
+[ "$TP" != 1 ] && TAG=tp${TP}_$TAG
 [ "$POLICY" != none ] && TAG=${TAG}_${POLICY}
 [ "$MNBT" != 32768 ] && TAG=${TAG}_mnbt${MNBT}
 [ -n "${SMOKE:-}" ] && TAG=smoke_$TAG
@@ -64,14 +74,18 @@ echo "== PSI $(head -2 /proc/pressure/memory | tr '\n' ' '); /dev/shm $(df -h /d
 
 # --- server
 ARGS=(serve "$CKPT" --served-model-name glm53-flash-pp4 --host 127.0.0.1 --port $P
-      --data-parallel-size 4 --tensor-parallel-size 1 --enable-expert-parallel --data-parallel-rpc-port $((P + 10))
       --kv-cache-dtype fp8_e4m3 --enable-prefix-caching --mamba-cache-mode align
       --max-model-len 1048576 --language-model-only --tokens-only --enable-prompt-tokens-details
       --max-num-seqs 1016 --max-num-batched-tokens $MNBT)
+if [ "$TP" = 1 ]; then
+  ARGS+=(--data-parallel-size 4 --tensor-parallel-size 1 --enable-expert-parallel --data-parallel-rpc-port $((P + 10)))
+else
+  ARGS+=(--data-parallel-size 1 --tensor-parallel-size "$TP")
+fi
 # --max-num-seqs 1016, not the default 1024: the fork's KDA decode kernel (fused_recurrent_kda) launches grid
 # z = seqs x 64 KDA heads (TP1), and 1024 x 64 = 65536 exceeds CUDA's 65535 limit (job 8189: Triton "invalid argument"
 # during the CUDA-graph memory profile at capture size 1024). 1016 is the largest multiple of 8 below 1024.
-[ -n "$OFF" ] && ARGS+=(--kv-offloading-size "$(python3 -c "print(round($OFF * 1e9 / 2**30, 4))")"
+[ -n "$OFF" ] && ARGS+=(--kv-offloading-size "$(python3 -c "print(round($TP * $OFF * 1e9 / 2**30, 4))")"
                         --kv-offloading-backend native)
 ARGS+=(${VLLM_EXTRA:-})
 echo "$PY -m vllm.entrypoints.cli.main ${ARGS[*]}" | tee "$RD/server_command.txt"
