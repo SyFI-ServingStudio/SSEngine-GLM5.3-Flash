@@ -3,7 +3,9 @@ name = "ppimpl"
 version = "0.1.0"
 description = "GLM-5.3-Flash NVFP4 as a 4-stage pipeline on 4xB200 (handoff glm53_flash_pp4_b200_v2)"
 requires-python = ">=3.12"
-# torch and the vLLM fork come from the shared env (.venv); see README.md, Provenance.
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+# torch and the vLLM fork come from the shared env (.venv); see README.md, Architecture.
 dependencies = ["uvicorn", "uvloop", "httptools", "msgspec", "pyzmq", "pyyaml", "numpy"]
 
 [project.scripts]
@@ -13,7 +15,7 @@ ppimpl = "ppimpl.__main__:main"     # `ppimpl serve <model>` (README "Serve"), t
 test = ["pytest", "httpx"]
 
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]          # PEP 639 `license` / `license-files`
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
