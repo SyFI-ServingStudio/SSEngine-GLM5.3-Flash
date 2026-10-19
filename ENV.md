@@ -38,6 +38,7 @@ From `env/check_env.py`, which fails on any other version:
 | DeepSelect | the fork's `vllm._deepselect_C` (`torch.ops.deep_select.topk`) | the fork's native build |
 | FlashKDA | the fork's `vllm._flashkda_C` (`torch.ops._flashkda_C.fwd`) | the fork's native build |
 | liburing | 2.5, `liburing-ffi.so.2` (the SSD tier's io_uring, through ctypes) | Ubuntu package `liburing2` |
+| libnuma | `libnuma.so.1` (the DRAM tier's NUMA placement, through ctypes) | Ubuntu package `libnuma1` |
 | causal-conv1d (Dao) | 1.7.0, built from the source tag against torch 2.13. The released cu13 wheel is built for torch 2.10 and fails to load with 2.13 (`undefined symbol c10::impl::cow::materialize_cow_storage`). | https://github.com/Dao-AILab/causal-conv1d, tag `v1.7.0` |
 
 Two kernels follow the design rather than the fork (`measured/kernels_identity.md`, Decisions):
@@ -61,17 +62,23 @@ Two kernels follow the design rather than the fork (`measured/kernels_identity.m
    repo's measurements ran on. To compile instead, see the fork's `docs/contributing/incremental_build.md`.
 3. Builds causal-conv1d 1.7.0 from the source tag into `third_party/wheels/` (`uv build --no-build-isolation`, CUDA
    13 toolkit at `CUDA_HOME`, `MAX_JOBS` default 16: about 10 minutes) and installs it.
+3b. `install`: installs this repo editable (`uv pip install --no-deps -e .`): the `ppimpl` command in `.venv/bin`.
+3c. `jit`: `env/bake_jit.py` builds FlashInfer's JIT modules for sm_100a (`fp4_quantization_100`, `fmha_gen`,
+   `fused_moe_trtllm_sm100`) with FlashInfer's own JIT specs and `/usr/bin/ninja`, and downloads every trtllm-gen cubin
+   of the kernel families serving dispatches to (MoE NVFP4 batched GEMMs, FP8 token-sparse MLA decode) into
+   `~/.cache/flashinfer`. No GPU needed, ~10 minutes; a server then neither compiles them (~10 min at a first start)
+   nor downloads cubins from NVIDIA's artifactory.
 4. Clones ServingStudioSim at `820adda0` with the req-frontend submodule
    (https://github.com/uw-syfi/request-factory at `7f6aa9d8`), and `git archive 7bb224a6 profiling` into
    `third_party/sim_7bb224a6`.
 5. Downloads enwik9 (http://mattmahoney.net/dc/enwik9.zip) and checks the zip's and the file's sha256.
 6. Runs `env/check_env.py`.
 
-`STEPS` names the steps to run (default all): `venv vllm conv1d` (1-3) is the serving environment, `sim client corpus`
-(4, 4b, 5) the bench's, `check` step 6. The Docker image (`docker/Dockerfile`, README "Docker") runs the serving steps
-one per layer on `nvidia/cuda:13.0.2-devel-ubuntu24.04` (with `apt` `git curl liburing2 ninja-build g++` and uv 0.8.19),
-drops the downloads, installs this repo (`pip install -e .`, the `ppimpl` command) and ends with `env/check_env.py`;
-the versions above hold there too, at `/opt/ppimpl`.
+`STEPS` names the steps to run (default all): `venv vllm conv1d install jit` (1-3c) is the serving environment,
+`sim client corpus` (4, 4b, 5) the bench's, `check` step 6. The Docker image (`docker/Dockerfile`, README "Docker")
+runs the serving steps one per layer on `nvidia/cuda:13.0.2-devel-ubuntu24.04` (with `apt` `git curl liburing2
+libnuma1 ninja-build g++` and uv 0.8.19), drops the downloads and ends with `env/check_env.py`; the versions above hold there
+too, at `/opt/ppimpl`. The `jit` step's cache and the GPU seed (README "Docker") are in `/opt/ppimpl/jit-seed`.
 
 Run it as the normal user, never as root (`PPIMPL_ALLOW_ROOT=1` is for the container build only), with a short `TMPDIR`: vLLM's zmq ipc path is `TMPDIR` + a uuid and must fit
 in 107 characters (`bench/slurm/env.sh` makes one short TMPDIR per job under `PPIMPL_TMP`).

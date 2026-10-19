@@ -99,11 +99,20 @@ def rows() -> list[tuple[str, str, bool]]:
         check("FlashInfer KDA cute-dsl-persistent", kda_persistent),
         check("ninja (FlashInfer JIT)", ninja),
         check("liburing (SSD tier io_uring)", liburing, "liburing-ffi.so.2"),
+        check("libnuma (DRAM tier placement)", libnuma, "libnuma.so.1"),
     ]
     return out
 
 
 NINJA = "/usr/bin/ninja"
+
+
+def libnuma() -> str:
+    """The DRAM tier (ppimpl/kvpool/backends.py HostTier) places pages with libnuma.so.1 (Ubuntu package libnuma1)."""
+    import ctypes
+
+    ctypes.CDLL("libnuma.so.1")
+    return "libnuma.so.1"
 
 
 def liburing() -> str:
