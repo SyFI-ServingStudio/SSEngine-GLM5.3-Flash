@@ -545,8 +545,6 @@ class StageModel:
         import gc
         from types import SimpleNamespace as NS
 
-        from vllm.utils.torch_utils import weak_ref_tensors
-
         B = self.kv.block_tokens
         buckets = sorted((b for b in buckets if b <= self.max_tokens), reverse=True)
         t0 = time.perf_counter()
@@ -571,11 +569,7 @@ class StageModel:
                 torch.cuda.synchronize(self.device)
                 e.capture = graph_capture(pool)
                 with self._graph_context(b, e), e.capture:
-                    # weak refs, taken inside the capture (as vLLM's BreakableCUDAGraphWrapper): the pool reuses the
-                    # outputs' memory for the next bucket's capture, so buckets share it instead of each pinning its
-                    # own (81 buckets to 32,768 pinned 65-69 GiB). Safe: replays run one at a time on one stream,
-                    # and `_run_graph` consumes the outputs on that stream before the next replay.
-                    e.out = weak_ref_tensors(self._graph_body(e))
+                    e.out = self._graph_body(e)
                 torch.cuda.synchronize(self.device)
                 self.graphs[Tb] = e
         free1 = torch.cuda.mem_get_info(self.device)[0]
@@ -608,7 +602,7 @@ class StageModel:
         """Pad to the bucket, replay (or, `replay=False`, run the same body eagerly on the same static buffers: the
         exactness reference), then the output rows. A non-last stage runs the stage edge's `hc_post` on the bucket's
         rows eagerly into a new tensor (same kernel, same inputs as in the graph, without a copy out of the graph's
-        output buffer, which the next replay of any bucket overwrites while this send may still be queued). `raw`:
+        output buffer, which the next replay of this bucket overwrites while this send may still be queued). `raw`:
         copies of the first T rows (tests)."""
         e = self.graphs[b.bucket]
         T = b.num_tokens
