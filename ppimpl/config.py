@@ -1,5 +1,5 @@
 """Design constants of handoff glm53_flash_pp4_b200_v2 (the same as v1's) and the run config
-(`python -m ppimpl serve --config`)."""
+(`python -m ppimpl serve --config`, or built from a model by `ppimpl serve <model>`: ppimpl/serve/launch.py)."""
 
 import os
 from pathlib import Path
@@ -130,6 +130,10 @@ class RunConfig(msgspec.Struct, forbid_unknown_fields=True):
     # mb_tokens: one-request runs set it >= the prompt
     scheduler: SchedulerConfig = msgspec.field(default_factory=SchedulerConfig)
     tiers: TierConfig | None = None   # phase D: DRAM / SSD behind HBM
+    # The OpenAI API (ppimpl/serve/openai.py; `ppimpl serve <model>` sets them, ppimpl/serve/launch.py): the model
+    # name it answers to (None: "glm53"), and the longest prompt + output it takes (None: the model's, 1,048,576)
+    served_model_name: str | None = None
+    max_model_len: int | None = None
     fake: FakeConfig = msgspec.field(default_factory=FakeConfig)
 
     @property

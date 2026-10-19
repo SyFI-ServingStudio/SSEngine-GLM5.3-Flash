@@ -7,6 +7,7 @@ POST /inference/v1/generate  {"token_ids": [...], "sampling_params": {"max_token
   The request id is the `x-request-id` header (req-frontend sends the trace id), else the body's `rid`.
 GET /health  200 once all stages are ready.
 POST /shutdown  graceful stop (bench/run.py).
+GET /v1/models, POST /v1/completions, POST /v1/chat/completions  the OpenAI-compatible API (ppimpl/serve/openai.py).
 """
 
 import asyncio
@@ -23,6 +24,7 @@ import uvicorn
 
 from ppimpl.config import RunConfig
 from ppimpl.serve.http import SamplingParams, error, json_body, read_body, reply, sse_body
+from ppimpl.serve.openai import PATHS as OPENAI_PATHS, OpenAI
 from ppimpl.runtime.controller import Controller, RequestError
 
 
@@ -44,6 +46,7 @@ class App:
         # Bodies are decoded off the event loop: a burst arrives within one loop iteration, and decoding 2048 bodies
         # of 8k tokens there (~0.2 ms each) holds back every answer that becomes ready meanwhile.
         self.decoder = concurrent.futures.ThreadPoolExecutor(1, thread_name_prefix="decode")
+        self.openai = OpenAI(cfg)
 
     async def __call__(self, scope, receive, send):
         if scope["type"] == "lifespan":
@@ -51,6 +54,8 @@ class App:
         method, path = scope["method"], scope["path"]
         if path == "/inference/v1/generate" and method == "POST":
             return await self._generate(scope, receive, send)
+        if path in OPENAI_PATHS:
+            return await self.openai.handle(scope, receive, send, self._submit, self._sent)
         if path == "/health" and method == "GET":
             ok = self.ctl.ready and not self.ctl.failed
             return await reply(send, 200 if ok else 503, b"")
@@ -73,6 +78,17 @@ class App:
             await send({"type": f"lifespan.{kind}.complete"})
             if kind == "shutdown":
                 return
+
+    async def _submit(self, ids, req_id: str, arrival_ns: int, body_ns: int):
+        """openai.Submit through the controller in this process."""
+        try:
+            tok, info = await self.ctl.submit(req_id, ids.tolist(), arrival_ns)
+        except RequestError as e:
+            raise RuntimeError(str(e))
+        return tok, info.get("cached", 0), info
+
+    async def _sent(self, info):
+        self.ctl.log_response(info)
 
     async def _generate(self, scope, receive, send):
         arrival_ns = time.time_ns()

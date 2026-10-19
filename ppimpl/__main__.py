@@ -1,4 +1,5 @@
-"""python -m ppimpl serve --config <yaml> [--port P] [--run-dir D]   controller + HTTP server (spawns the workers)
+"""ppimpl serve <model> [options]                                       the server, vLLM style (ppimpl/serve/launch.py)
+python -m ppimpl serve --config <yaml> [--port P] [--run-dir D]   controller + HTTP server (spawns the workers)
 python -m ppimpl worker --config <yaml> --stage S                    one stage worker (spawned by serve)
 python -m ppimpl intake --config <yaml> --index I                    one HTTP intake process (spawned by serve)"""
 
@@ -14,12 +15,11 @@ from ppimpl.config import load_config
 
 
 def main():
-    ap = argparse.ArgumentParser(prog="python -m ppimpl")
+    ap = argparse.ArgumentParser(prog="ppimpl", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
-    s = sub.add_parser("serve")
-    s.add_argument("--config", required=True)
-    s.add_argument("--port", type=int)
-    s.add_argument("--run-dir")
+    s = sub.add_parser("serve", help="the OpenAI-compatible server (GLM-5.3-Flash NVFP4 on 4 GPUs)")
+    from ppimpl.serve.launch import add_arguments
+    add_arguments(s)
     w = sub.add_parser("worker")
     w.add_argument("--config", required=True)
     w.add_argument("--stage", type=int, required=True)
@@ -28,8 +28,18 @@ def main():
     i.add_argument("--index", type=int, required=True)
     a = ap.parse_args()
     if a.cmd == "serve":
+        if a.model:
+            from ppimpl.serve.launch import build_config
+            cfg = build_config(a)
+        elif a.config:
+            if any(v is not None for v in (a.revision, a.dram_gb, a.ssd_gb, a.ssd_dir)):
+                s.error("--revision and the tier options need a model; with --config alone, set them in the YAML")
+            cfg = load_config(a.config, port=a.port, run_dir=a.run_dir, host=a.host,
+                              served_model_name=a.served_model_name, max_model_len=a.max_model_len)
+        else:
+            s.error("give a model (`ppimpl serve nvidia/GLM-5.3-Flash-NVFP4`) or --config")
         from ppimpl.serve.server import serve
-        serve(load_config(a.config, port=a.port, run_dir=a.run_dir))
+        serve(cfg)
     elif a.cmd == "intake":
         from ppimpl.serve.intake import run_intake
         run_intake(load_config(a.config), a.index)
