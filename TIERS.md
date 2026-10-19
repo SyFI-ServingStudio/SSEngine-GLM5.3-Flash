@@ -909,9 +909,9 @@ No `numa_alloc_onnode`, `MPOL_BIND` or `membind` is left in the lane.
   - a preferred 10 GB arena on a node whose MemFree we filled with our own preferred filler, landing on the other
     node without an OOM, then `cudaHostRegister` on it.
 
-  The script is ready in the scratchpad (`oomcheck.py` and `oomcheck.sbatch`, 1 GPU, priority, 10 min, 300G). It
+  The script was written outside the repo and is gone (`oomcheck.py` and `oomcheck.sbatch`, 1 GPU, priority, 10 min, 300G). It
   fills the node with less MemFree, refuses to run unless the other node has > filler + 200 GB, and aborts on
-  PSI > 5% or the other node under 150 GB. Copy it into the lane before use. Caveat: with
+  PSI > 5% or the other node under 150 GB. It has to be rewritten before use. Caveat: with
   `zone_reclaim_mode` 0 the spill happens at the node's low watermark, but kswapd also reclaims that node's page
   cache, so part of the arena may still land locally; record the split.
 - The spill path at full scale (150 GB arenas on a short node) and the per-node watchdog in a real job.

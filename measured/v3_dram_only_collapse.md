@@ -169,19 +169,19 @@ because it starts overdue rounds' DRAM reads at the force bound. In the stable n
 
 ## Reproduction
 
-Sim (wt-pp-staged, CPU only; the presets, scripts and outputs are in `logs/20261018_15_v3_dramonly/`):
+Sim (a ServingStudioSim checkout of branch pp-staged, CPU only; the presets, scripts and outputs are the sim run
+`20261018_15_v3_dramonly` in its `logs/`), from that checkout:
 
 ```bash
-cd /raid/kanzhu/ServingStudio/wt-pp-staged && set -a && source /raid/kanzhu/ServingStudio/.env && set +a
 uv run python -m launcher logs/20261018_15_v3_dramonly/preset.yaml --no-gpu --no-plot --parallelism 15   # 15 runs
 uv run python -m launcher logs/20261018_15_v3_dramonly/refine.yaml --no-gpu --no-plot --parallelism 7    # 7 runs
 ```
 
-Real (eval tree at c5d4e09; h25d75 needs `--mem=500G` for 300 GB of pinned DRAM):
+Real (this repo at c5d4e09, from its root; T is the TraceLab v3 trace `m6/sessions_2ps_v3.csv`, not in this repo;
+h25d75 needs `--mem=500G` for 300 GB of pinned DRAM):
 
 ```bash
-cd /raid/kanzhu/ServingStudio/pp-impl/lanes/m6-eval-run
-T=/raid/kanzhu/ServingStudio/data/tracelab-v3/m6/sessions_2ps_v3.csv
+T=<path to sessions_2ps_v3.csv>
 sbatch -p priority -J ppdo50 --time=00:30:00 --mem=400G -o measured/runs_m6/slurm/%j.out bench/slurm/m6.sbatch \
   sched_good_n400 --trace $T --pool-tokens 15273856 --dram-gb 50 --ssd-gb none \
   --tier dram_writes=hbm-evictions-exclusive --tier loading_area=0.10 --run-name do_h25d50_n400    # job 8491
@@ -190,13 +190,12 @@ sbatch -p priority -J ppdo75 --time=00:30:00 --mem=500G -o measured/runs_m6/slur
   --tier dram_writes=hbm-evictions-exclusive --tier loading_area=0.10 --run-name do_h25d75_n400    # job 8492
 ```
 
-Comparison:
+Comparison, from this repo's root (a Python with numpy and pyarrow):
 
 ```bash
-PY=/raid/kanzhu/ServingStudio/wt-pp-staged/.venv/bin/python
-S=/raid/kanzhu/ServingStudio/wt-pp-staged/logs/20261018_15_v3_dramonly
-R=/raid/kanzhu/ServingStudio/pp-impl/lanes/m6-eval-run/measured/runs_m6
-cd /raid/kanzhu/ServingStudio/pp-impl
+PY=python
+S=<ServingStudioSim checkout>/logs/20261018_15_v3_dramonly
+R=measured/runs_m6
 $PY measured/eval_m6/eval_table.py real:h25d50=$R/do_h25d50_n400 sim:h25d50=$S/h25d50/c400 \
   real:h25d75=$R/do_h25d75_n400 sim:h25d75=$S/h25d75/c400
 $PY $S/windows.py real:h25d50=$R/do_h25d50_n400 sim:h25d50=$S/h25d50/c400 \

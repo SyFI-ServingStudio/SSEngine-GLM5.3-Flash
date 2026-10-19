@@ -138,7 +138,7 @@ trace level, with no cache pressure:
 
 ## Sources and reproduction
 
-All paths are under `/raid/kanzhu/ServingStudio/wt-pp-staged/` (branch pp-staged), CPU only.
+All `logs/` paths are simulator runs in a ServingStudioSim checkout of branch pp-staged, CPU only.
 
 - **base runs:** `logs/20261018_1_v3_katomic/{k1,k2,k4}/base/hb_c{1563,2000,2500}`.
   - Code: c7dc261f.
@@ -155,7 +155,7 @@ All paths are under `/raid/kanzhu/ServingStudio/wt-pp-staged/` (branch pp-staged
     new tok/s exactly (checked 2026-10-18).
 - **Per-class split and trace-level split:** the two DuckDB queries described above, over `request_slo.parquet`
   joined to the trace by row id, and over `data/tracelab-v3/traces/v3new_preserving.csv`.
-  - Copies: `/raid/tmp/kanzhu/claude-1003/-raid-kanzhu-ServingStudio/11236ddb-1871-4140-9ac9-09a4d30fbd66/scratchpad/extra_by_class.py`
-    and `/raid/tmp/kanzhu/claude-1003/-raid-kanzhu-ServingStudio/11236ddb-1871-4140-9ac9-09a4d30fbd66/scratchpad/trace_k1_split.py`.
+  - Scripts: `measured/kda_ckpt/extra_by_class.py` (per-class split, `<run dir>=<trace>` arguments) and
+    `measured/kda_ckpt/trace_k1_split.py` (trace-level split); they need `duckdb`.
 - **M6 v3 trace-level numbers:** `logs/20261018_10_kda_anchors/step0_sessions_2ps_v3.json` (`step0.py`).
   Extra/new = comp / sum(input_len) - 1, where sum(input_len) = 711,802,609.

@@ -185,17 +185,17 @@ The hg rule exists only on branch `pp-stable` (063c85ae). These runs use that co
   (logs/20261018_1_v3_katomic, logs/20261018_6_v3_stB). The k1/k2 rows here reproduce it at the newer code:
   - k1 base and k1/k2 st10 are md5-identical to those runs.
   - k2 base differs because of 0d19fb23 (reads move only surviving states): 58.50 / 58.43 / 54.90 r/s here.
-- **Main runs.** `/raid/kanzhu/ServingStudio/wt-pp-staged/logs/20261018_15_v3_8h_steady/`
+- **Main runs.** the sim run `20261018_15_v3_8h_steady` in the logs/ of a ServingStudioSim checkout of branch pp-staged
   - Layout: `{hb,nohb}/{k1,k2}/{st10,base}/{s8t,d150}/c*`.
   - Branch pp-staged at e4de4292, repo `profiling/profile.db` (md5 12529b8e, the database the k study used).
-  - Commands, from `wt-pp-staged`:
+  - Commands, from that checkout:
     - `bash logs/20261018_15_v3_8h_steady/make_traces.sh` (nohb traces into `traces/`).
     - `uv run python -m launcher logs/20261018_15_v3_8h_steady/hb_s8t.yaml logs/20261018_15_v3_8h_steady/hb_d150.yaml --no-gpu --no-plot --parallelism 12`
     - `uv run python -m launcher logs/20261018_15_v3_8h_steady/nohb.yaml --no-gpu --no-plot --parallelism 8`
-- **hg runs.** `/raid/kanzhu/ServingStudio/wt-pp-stable/logs/20261018_0_v3_hg/`
+- **hg runs.** the sim run `20261018_0_v3_hg` in the logs/ of a ServingStudioSim checkout of branch pp-stable
   - Layout: `{hb,nohb}/{s8t,d150}/{base,hg}/c*`.
   - Branch pp-stable at 063c85ae, same profile.db md5.
-  - Command, from `wt-pp-stable`:
+  - Command, from that checkout:
     `uv run python -m launcher logs/20261018_0_v3_hg/hb_s8t.yaml logs/20261018_0_v3_hg/hb_d150.yaml logs/20261018_0_v3_hg/nohb_s8t.yaml logs/20261018_0_v3_hg/nohb_d150.yaml --no-gpu --no-plot --parallelism 6`
 - **Tables.**
   - `bash logs/20261018_15_v3_8h_steady/rows.sh` runs `steady_table.py` on every completed run of both directories
