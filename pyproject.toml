@@ -6,6 +6,9 @@ requires-python = ">=3.12"
 # torch and the vLLM fork come from the shared env (.venv); see README.md, Provenance.
 dependencies = ["uvicorn", "uvloop", "httptools", "msgspec", "pyzmq", "pyyaml", "numpy"]
 
+[project.scripts]
+ppimpl = "ppimpl.__main__:main"     # `ppimpl serve <model>` (README "Serve"), the same as `python -m ppimpl`
+
 [project.optional-dependencies]
 test = ["pytest", "httpx"]
 
@@ -15,6 +18,9 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 include = ["ppimpl*"]
+
+[tool.setuptools.package-data]
+ppimpl = ["data/*.json", "native/*.cpp"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

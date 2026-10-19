@@ -1,0 +1,12 @@
+# docker/Dockerfile's build context is the repo root: send only what the image uses (an allowlist).
+*
+!env/make_env.sh
+!env/requirements.lock
+!env/check_env.py
+!ppimpl/
+!docker/entrypoint
+!pyproject.toml
+!README.md
+!ENV.md
+**/__pycache__
+**/*.pyc

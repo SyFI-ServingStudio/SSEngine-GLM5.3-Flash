@@ -92,7 +92,9 @@ def rows() -> list[tuple[str, str, bool]]:
         check("DeepGEMM (vendored)", deep_gemm, "2.8.0"),
         check("DeepSelect", lambda: ext("vllm._deepselect_C", "deep_select", "topk")),
         check("FlashKDA", lambda: ext("vllm._flashkda_C", "_flashkda_C", "fwd")),
-        check("vLLM _C", lambda: ext("vllm._custom_ops", "_C", "top_k_per_row_prefill")),
+        # the extension itself: vllm._custom_ops loads it only once vLLM has found a GPU (its CUDA platform), and this
+        # check also runs without one (the Docker build)
+        check("vLLM _C", lambda: ext("vllm._C_stable_libtorch", "_C", "top_k_per_row_prefill")),
         check("causal-conv1d (Dao; KDA short conv)", causal_conv1d, "1.7.0"),
         check("FlashInfer KDA cute-dsl-persistent", kda_persistent),
         check("ninja (FlashInfer JIT)", ninja),
