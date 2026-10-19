@@ -1,4 +1,5 @@
-"""ppimpl serve <model> [options]                                       the server, vLLM style (ppimpl/serve/launch.py)
+"""ppimpl serve [<model>] [options]                                     the server, vLLM style (ppimpl/serve/launch.py);
+                                                                     <model> defaults to nvidia/GLM-5.3-Flash-NVFP4
 python -m ppimpl serve --config <yaml> [--port P] [--run-dir D]   controller + HTTP server (spawns the workers)
 python -m ppimpl worker --config <yaml> --stage S                    one stage worker (spawned by serve)
 python -m ppimpl intake --config <yaml> --index I                    one HTTP intake process (spawned by serve)"""
@@ -11,7 +12,7 @@ import os
 for _v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "TORCHINDUCTOR_COMPILE_THREADS"):
     os.environ.setdefault(_v, "1")
 
-from ppimpl.config import load_config
+from ppimpl.config import CHECKPOINT_REPO, load_config
 
 
 def main():
@@ -28,16 +29,15 @@ def main():
     i.add_argument("--index", type=int, required=True)
     a = ap.parse_args()
     if a.cmd == "serve":
-        if a.model:
-            from ppimpl.serve.launch import build_config
-            cfg = build_config(a)
-        elif a.config:
+        if a.config and not a.model:
             if any(v is not None for v in (a.revision, a.dram_gb, a.ssd_gb, a.ssd_dir)):
                 s.error("--revision and the tier options need a model; with --config alone, set them in the YAML")
             cfg = load_config(a.config, port=a.port, run_dir=a.run_dir, host=a.host,
                               served_model_name=a.served_model_name, max_model_len=a.max_model_len)
         else:
-            s.error("give a model (`ppimpl serve nvidia/GLM-5.3-Flash-NVFP4`) or --config")
+            from ppimpl.serve.launch import build_config
+            a.model = a.model or CHECKPOINT_REPO   # the one model served
+            cfg = build_config(a)
         from ppimpl.serve.server import serve
         serve(cfg)
     elif a.cmd == "intake":

@@ -118,7 +118,7 @@ def build_config(a) -> RunConfig:
 def add_arguments(s) -> None:
     """The `serve` options (ppimpl/__main__.py)."""
     s.add_argument("model", nargs="?", help="Hugging Face repo id or local checkpoint directory (only "
-                   f"{CHECKPOINT_REPO}); without it, --config is the whole run config")
+                   f"{CHECKPOINT_REPO}, the default); with --config and no model, the YAML is the whole run config")
     s.add_argument("--config", help="run config YAML (ppimpl/config.py RunConfig); with a model, applied on top of the "
                    "design setting")
     s.add_argument("--host", help="HTTP address (with a model: default 0.0.0.0)")

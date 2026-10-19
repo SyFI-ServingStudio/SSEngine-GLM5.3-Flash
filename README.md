@@ -88,7 +88,8 @@ measured/logs/%j.out bench/slurm/chain.sbatch "chain vllm"`. The other milestone
 
 ## Serve
 
-`ppimpl serve <model>` starts the server the way `vllm serve <model>` does (`ppimpl/serve/launch.py`). `<model>` is
+`ppimpl serve [<model>]` starts the server the way `vllm serve <model>` does (`ppimpl/serve/launch.py`). `<model>`
+defaults to `nvidia/GLM-5.3-Flash-NVFP4`, so `ppimpl serve` alone serves it; it can also be
 a Hugging Face repo id or a local checkpoint directory, and only one model is served: `nvidia/GLM-5.3-Flash-NVFP4`
 (`Glm5NextForConditionalGeneration`, NVFP4) as 4 pipeline stages on 4 GPUs. Any other model is refused from its
 `config.json` before anything else is downloaded. A repo id is fetched into the Hugging Face cache (`HF_HOME`) on
@@ -96,8 +97,9 @@ first use (~191 GB), at the revision above unless `--revision` says otherwise.
 
 ```bash
 uv pip install --python .venv/bin/python --no-deps -e .   # once: the `ppimpl` command (or .venv/bin/python -m ppimpl)
-ppimpl serve nvidia/GLM-5.3-Flash-NVFP4                                      # HBM only
-ppimpl serve nvidia/GLM-5.3-Flash-NVFP4 --dram-gb 50 --ssd-gb 128 --ssd-dir /nvme/ppimpl   # with DRAM and SSD tiers
+ppimpl serve                                                                 # nvidia/GLM-5.3-Flash-NVFP4, HBM only
+ppimpl serve /path/to/checkpoint                                             # the same model from a local directory
+ppimpl serve --dram-gb 50 --ssd-gb 128 --ssd-dir /nvme/ppimpl   # with DRAM and SSD tiers
 ```
 
 The run config is the design setting of the M6 evaluation (`measured/eval_m6/summary.md`, "st10"): scheduler step
@@ -144,7 +146,7 @@ Run it as `vllm/vllm-openai` is run, with the subcommand first:
 docker run --gpus all --ipc=host -p 8000:8000 \
   -v ~/.cache/huggingface:/root/.cache/huggingface \
   -v ppimpl-cache:/root/.cache \
-  ppimpl serve nvidia/GLM-5.3-Flash-NVFP4 --served-model-name glm53-flash
+  ppimpl serve --served-model-name glm53-flash
 
 curl localhost:8000/health
 curl localhost:8000/v1/completions -H 'Content-Type: application/json' \

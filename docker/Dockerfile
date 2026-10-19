@@ -4,7 +4,7 @@
 #
 #   docker build -f docker/Dockerfile -t ppimpl .
 #   docker run --gpus all --ipc=host -v ~/.cache/huggingface:/root/.cache/huggingface -v ppimpl-cache:/root/.cache \
-#     -p 8000:8000 ppimpl serve nvidia/GLM-5.3-Flash-NVFP4
+#     -p 8000:8000 ppimpl            # = serve nvidia/GLM-5.3-Flash-NVFP4; `ppimpl serve [<model>] [options]`
 #
 # The environment is env/make_env.sh's serving steps (STEPS="venv vllm conv1d"), so ENV.md's versions hold here as on
 # a host; the bench-only steps (ServingStudioSim, req-frontend, enwik9) are left out: serving imports none of them.
@@ -54,4 +54,4 @@ ENV PATH=$PATH:/opt/ppimpl/.venv/bin \
 WORKDIR /workspace
 EXPOSE 8000
 ENTRYPOINT ["/opt/ppimpl/docker/entrypoint"]
-CMD ["--help"]
+CMD ["serve"]
