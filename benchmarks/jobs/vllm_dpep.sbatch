@@ -36,8 +36,8 @@ set -uo pipefail
 source "${SLURM_SUBMIT_DIR:-$(dirname "$0")/../..}/benchmarks/jobs/env.sh"
 echo 1000 > /proc/self/oom_score_adj
 export CUDA_DEVICE_ORDER=PCI_BUS_ID PATH=/usr/bin:$PATH   # /usr/bin/ninja first (FlashInfer JIT, notes.md)
-CKPT=$($PY -c 'from ppimpl.config import CHECKPOINT; print(CHECKPOINT)')   # PPIMPL_CHECKPOINT, else the HF_HOME snapshot
-H=${PPIMPL_HANDOFF:-$MAIN/third_party/handoff}/data
+CKPT=$($PY -c 'from ssengine.config import CHECKPOINT; print(CHECKPOINT)')   # SSENGINE_CHECKPOINT, else the HF_HOME snapshot
+H=${SSENGINE_HANDOFF:-$MAIN/third_party/handoff}/data
 # The M6 runs' req-frontend (8723d90) with one change, benchmarks/vllm_dpep_client_preflight.patch: the prefix-cache
 # preflight probe is 32768 tokens, not 8192. vLLM's hybrid KV for this model at TP1 has an 8576-token block (attention
 # page padded to the KDA state page), so an 8192-token probe can never hit and the unpatched client refuses to start
@@ -136,7 +136,7 @@ fi
 # --- client: exactly the M6 command (client_command.txt of runs_m6/st_tiers_n400) but base URL and paths
 CT=${CLIENT_TIMEOUT:-$([ -n "${SMOKE:-}" ] && echo 3m || echo 22m)}
 CMD=(timeout "$CT" "$CLIENT" --trace "$TRACE" --input-file-format text-generation-session-execution-v2
-     --text-file "${PPIMPL_ENWIK9:-$MAIN/third_party/enwik9}" --tokenizer "$CKPT/tokenizer.json"
+     --text-file "${SSENGINE_ENWIK9:-$MAIN/third_party/enwik9}" --tokenizer "$CKPT/tokenizer.json"
      --model glm53-flash-pp4 --backend vllm-tokens --base-url "$URL" --temperature 0
      --arrival-mode trace-timed --stream-idle-timeout-secs 600 --stop-session-on-error true --timeline true
      --log-path "$RD/requests.jsonl" --summary-path "$RD/summary.json" --timeline-path "$RD/timeline.parquet"

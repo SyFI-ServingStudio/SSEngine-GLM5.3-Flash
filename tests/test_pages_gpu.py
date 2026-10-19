@@ -12,8 +12,8 @@ import random
 
 import pytest
 
-from ppimpl.config import BLOCK_PAGES
-from ppimpl.engine.kv import block_pages, kv_pages_for
+from ssengine.config import BLOCK_PAGES
+from ssengine.engine.kv import block_pages, kv_pages_for
 
 pytestmark = pytest.mark.gpu
 
@@ -24,7 +24,7 @@ def test_scattered_pages_match_whole_blocks(stage):
 
     import torch
 
-    from ppimpl.model.stage import StageModel, bench_config
+    from ssengine.model.stage import StageModel, bench_config
 
     dev = torch.device("cuda", 0)
     B = 8576

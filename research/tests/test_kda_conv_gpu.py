@@ -15,7 +15,7 @@ pytestmark = pytest.mark.gpu
 def test_conv_qkv_bitwise(name):
     import torch
 
-    from ppimpl.model import kda_conv
+    from ssengine.model import kda_conv
 
     dev = torch.device("cuda")
     g = torch.Generator(device=dev).manual_seed(1)
@@ -45,7 +45,7 @@ def test_kda_state_gather_scatter_bitwise(name):
     paged as vLLM binds it."""
     import torch
 
-    from ppimpl.model import kda_state
+    from ssengine.model import kda_state
 
     dev = torch.device("cuda")
     g = torch.Generator(device=dev).manual_seed(2)

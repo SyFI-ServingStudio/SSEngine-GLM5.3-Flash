@@ -3,18 +3,18 @@
 #SBATCH --time=00:25:00
 #SBATCH -J pp-remeasure
 # Re-measure kernel rows (2_kernels.md §4/§8) through the ServingStudioSim profiler runners
-# executing in pp-impl/.venv (research/bench/kernels/ppimpl_profile.py), cold L2, --fresh (no DB writes).
+# executing in pp-impl/.venv (research/bench/kernels/ssengine_profile.py), cold L2, --fresh (no DB writes).
 # One lane per GPU claims chunks from the shared queue until the job's time runs short;
 # several such jobs drain one queue. The deadline comes from the job's own time limit. Usage, from the repo root:
 #   sbatch -p main -o research/measured/logs/%x-%j.out research/bench/slurm/kernels_queue.sbatch
 # The queue is research/measured/kernels_runs/queue (research/bench/kernels/make_queue.py).
-# PPIMPL_SIM: a ServingStudioSim checkout of pp-main with its profiler venv (`uv sync` there); default
+# SSENGINE_SIM: a ServingStudioSim checkout of pp-main with its profiler venv (`uv sync` there); default
 # <main tree>/third_party/ServingStudioSim (benchmarks/jobs/env.sh).
 set -u
 source "${SLURM_SUBMIT_DIR:-$(dirname "$0")/../../..}/benchmarks/jobs/env.sh"
 TL=$(squeue -h -j "$SLURM_JOB_ID" -o %l)   # [[D-]HH:]MM:SS
 LIMIT_S=$(echo "$TL" | awk -F'[-:]' '{n=NF; s=$n+60*$(n-1); if(n>2)s+=3600*$(n-2); if(n>3)s+=86400*$(n-3); print s}')
-SIM=${PPIMPL_SIM:-$MAIN/third_party/ServingStudioSim}
+SIM=${SSENGINE_SIM:-$MAIN/third_party/ServingStudioSim}
 Q=$ROOT/measured/kernels_runs/queue
 LOG=$ROOT/measured/kernels_runs/logs/$SLURM_JOB_ID
 mkdir -p "$LOG" "$Q/out" "$Q/knames" "$Q/timeouts"
@@ -26,7 +26,7 @@ NEED_S=${NEED_S:-240}; NEED_MOE_S=${NEED_MOE_S:-360}
 {
   echo "job=$SLURM_JOB_ID cvd=$CUDA_VISIBLE_DEVICES start=$(date -Is) limit_s=$LIMIT_S"
   echo "uptime: $(uptime)"
-  echo "sim_head=$(git -C $SIM rev-parse HEAD) ppimpl_head=$(git -C $ROOT rev-parse HEAD)"
+  echo "sim_head=$(git -C $SIM rev-parse HEAD) ssengine_head=$(git -C $ROOT rev-parse HEAD)"
   nvidia-smi --query-gpu=index,name,uuid,memory.used,utilization.gpu --format=csv
   ls $MOESIM_CUPTI_BUILD_DIR/*.so
 } > "$LOG/env.txt" 2>&1
@@ -62,7 +62,7 @@ lane() {
     # run_call.sh: own session; on timeout it kills that session only (never by GPU or user).
     ( cd "$SIM" && CUDA_VISIBLE_DEVICES=$dev PPM_KNAMES_DIR="$Q/knames/$stem" \
         "$ROOT/research/bench/kernels/run_call.sh" $(( left - 100 )) "$Q/out/$stem.json" "$Q/out/$stem.err" \
-        uv run --no-sync python "$ROOT/research/bench/kernels/ppimpl_profile.py" run "$kind" \
+        uv run --no-sync python "$ROOT/research/bench/kernels/ssengine_profile.py" run "$kind" \
         --backend "$backend" --specs "$Q/claimed/$f" --fresh --gpu-name "NVIDIA B200" --json )
     local rc=$?
     if [ $rc -eq 0 ] || grep -q '"results"' "$Q/out/$stem.json"; then

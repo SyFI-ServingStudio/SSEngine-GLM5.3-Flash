@@ -6,7 +6,7 @@
 #   sbatch -p main -J ppab --gres=gpu:8 --mem=500G --time=00:35:00 -o <dir>/%j.out research/bench/slurm/ab8.sbatch \
 #     TREE_A TREE_B -- <m6.sbatch args for A> -- <m6.sbatch args for B>
 set -uo pipefail
-M6=${SLURM_SUBMIT_DIR:?}/benchmarks/jobs/m6.sbatch   # submit from the lane: its m6.sbatch (PPIMPL_PORT) runs both
+M6=${SLURM_SUBMIT_DIR:?}/benchmarks/jobs/m6.sbatch   # submit from the lane: its m6.sbatch (SSENGINE_PORT) runs both
 TA=$1 TB=$2; shift 2; [ "$1" = -- ] && shift
 A=(); while [ $# -gt 0 ] && [ "$1" != -- ]; do A+=("$1"); shift; done; shift; B=("$@")
 G=${CUDA_VISIBLE_DEVICES:?}; IFS=, read -ra GS <<< "$G"; [ ${#GS[@]} = 8 ] || { echo "need 8 GPUs, got $G"; exit 1; }
@@ -31,8 +31,8 @@ echo "== ab8 job ${SLURM_JOB_ID:-local}: A $TA gpus $GA cpus $CA port $BASEP: ${
 echo "== ab8 job ${SLURM_JOB_ID:-local}: B $TB gpus $GB cpus $CB port $((BASEP + 100)): ${B[*]}"
 run() {   # tree gpus cpus port tag args...
   local tree=$1 g=$2 c=$3 p=$4 tag=$5; shift 5
-  (cd "$tree" && SLURM_SUBMIT_DIR=$tree CUDA_VISIBLE_DEVICES=$g PPIMPL_PORT=$p \
-     PPIMPL_TMP=${TMPDIR:-/tmp}/ab$tag PPIMPL_SSD_DIR=${AB_SSD_DIR:-$tree/../../tmp/ssd_tier_ab$tag} \
+  (cd "$tree" && SLURM_SUBMIT_DIR=$tree CUDA_VISIBLE_DEVICES=$g SSENGINE_PORT=$p \
+     SSENGINE_TMP=${TMPDIR:-/tmp}/ab$tag SSENGINE_SSD_DIR=${AB_SSD_DIR:-$tree/../../tmp/ssd_tier_ab$tag} \
      taskset -c "$c" bash "$M6" "$@") > "${AB_LOG:-$SLURM_SUBMIT_DIR/measured/logs}/ab_${SLURM_JOB_ID:-local}_$tag.out" 2>&1
 }
 run "$TA" "$GA" "$CA" "$BASEP" A "${A[@]}" & PA=$!

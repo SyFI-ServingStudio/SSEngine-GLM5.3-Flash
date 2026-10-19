@@ -7,7 +7,7 @@
 #   RUNS="one_1k one_2k" sbatch -p priority --time=00:20:00 -o research/measured/runs_m3/slurm/%j.out research/bench/slurm/runs.sbatch
 # DRY=1 bash research/bench/slurm/runs.sbatch prints the plan only. HTTP ports come from the job id; the first run failing
 # stops the job (the defaults are broken: server start, graphs) instead of holding the GPUs.
-#SBATCH -J ppimpl-runs
+#SBATCH -J ssengine-runs
 #SBATCH --gres=gpu:4
 set -uo pipefail
 source "${SLURM_SUBMIT_DIR:-$(dirname "$0")/../../..}/benchmarks/jobs/env.sh"
@@ -16,7 +16,7 @@ mkdir -p "$R/slurm"
 G=${CUDA_VISIBLE_DEVICES:-0,1,2,3}
 P=$((20000 + ${SLURM_JOB_ID:-0} % 120 * 100))
 echo "== $(date -Is) gpus $G port $P runs: $RUNS"
-$PY -c "from ppimpl.config import RunConfig as C; c=C(); print('   defaults:', {k: getattr(c, k) for k in ('intake_procs', 'cuda_graphs', 'max_in_flight')})"
+$PY -c "from ssengine.config import RunConfig as C; c=C(); print('   defaults:', {k: getattr(c, k) for k in ('intake_procs', 'cuda_graphs', 'max_in_flight')})"
 [ -n "${DRY:-}" ] || nvidia-smi --query-gpu=index,pci.bus_id,memory.used --format=csv,noheader
 rc=0; first=1
 for n in $RUNS; do

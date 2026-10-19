@@ -1,10 +1,10 @@
 #!/bin/bash
 # M4 (5_prefix_cache.md) runs on one 4-GPU server, into OUT (default research/measured/runs_m4). Usage, from the repo root:
 #   mkdir -p research/measured/runs_m4/slurm
-#   sbatch -p priority -J ppimpl --time=00:12:00 -o research/measured/runs_m4/slurm/%j.out research/bench/slurm/m4.sbatch check
-#   sbatch -p priority -J ppimpl --time=00:30:00 -o research/measured/runs_m4/slurm/%j.out research/bench/slurm/m4.sbatch bringup
-#   sbatch -p priority -J ppimpl --time=00:20:00 -o research/measured/runs_m4/slurm/%j.out research/bench/slurm/m4.sbatch preflight
-#   sbatch -p priority -J ppimpl --time=00:28:00 -o research/measured/runs_m4/slurm/%j.out research/bench/slurm/m4.sbatch prefix_n400
+#   sbatch -p priority -J ssengine --time=00:12:00 -o research/measured/runs_m4/slurm/%j.out research/bench/slurm/m4.sbatch check
+#   sbatch -p priority -J ssengine --time=00:30:00 -o research/measured/runs_m4/slurm/%j.out research/bench/slurm/m4.sbatch bringup
+#   sbatch -p priority -J ssengine --time=00:20:00 -o research/measured/runs_m4/slurm/%j.out research/bench/slurm/m4.sbatch preflight
+#   sbatch -p priority -J ssengine --time=00:28:00 -o research/measured/runs_m4/slurm/%j.out research/bench/slurm/m4.sbatch prefix_n400
 # preflight (before any long run), stopping at the first failure: kvcheck at 32,768 tokens (8,192-token chunks must be
 # bitwise; 8,000-token chunks leave a 768-token chunk of another mHC split-K count: the batch-numerics baseline), then
 # at 40,000 tokens with chunk starts inside 4-token indexer pools and off KDA's 32-token grid (8,001 and 8,190: within
@@ -26,10 +26,10 @@
 # 34, P 512k A 1k, and all of session 35, P 512k A 8k; microbatch 0 is req-frontend's preflight). prefix_n<N>: the
 # 20-minute session run at N. M5 (6_scheduler.md, OUT=research/measured/runs_m5): sched_check_<step>, force_check_<step> and
 # sched_<step>_n<N> (step plain, srpt8k, budget, even or good; benchmarks/run.py), then `python -m benchmarks.sched summarize`;
-# one job per run (or several: m4.sbatch a b runs them one after another), e.g. OUT=research/measured/runs_m5 BY_JOB=1 SAMPLE=1 sbatch -p priority -J ppimpl-m5 --dependency=singleton
+# one job per run (or several: m4.sbatch a b runs them one after another), e.g. OUT=research/measured/runs_m5 BY_JOB=1 SAMPLE=1 sbatch -p priority -J ssengine-m5 --dependency=singleton
 # --time=00:07:00 -o research/measured/runs_m5/slurm/%j_force_check_even.out research/bench/slurm/m4.sbatch force_check_even. BRINGUP_ARGS adds benchmarks/run.py options to bringup, e.g. "--gap-s 17 --sessions 30,31
 # --run-name prefix_bringup_rest" (sessions 17 s apart: the cluster stops GPU jobs idle for 10 min). Then `python -m benchmarks.prefix summarize research/measured/runs_m4 --out measured`.
-#SBATCH -J ppimpl
+#SBATCH -J ssengine
 #SBATCH --gres=gpu:4
 set -uo pipefail
 source "${SLURM_SUBMIT_DIR:-$(dirname "$0")/../../..}/benchmarks/jobs/env.sh"
@@ -37,7 +37,7 @@ R=$ROOT/${OUT:-measured/runs_m4}
 mkdir -p "$R/slurm"
 export CUDA_DEVICE_ORDER=PCI_BUS_ID   # CUDA device i = the i-th GPU listed, as nvidia-smi numbers them
 G=${CUDA_VISIBLE_DEVICES:-0,1,2,3}
-# GPU_ORDER (stage -> GPU placement; workers take CUDA device = stage, CPUs on that GPU's NUMA node: ppimpl/runtime/
+# GPU_ORDER (stage -> GPU placement; workers take CUDA device = stage, CPUs on that GPU's NUMA node: ssengine/runtime/
 # cpus.py). Unset: stage s on the job's GPU s. "2,3,0,1": stage s on the job's GPU G[s] (run name _gpu2301).
 # "reverse": 3,2,1,0 (_gpurev). "cool_late": stages 2-3 (the busiest) on the job's two coolest GPUs, 0-1 on the rest
 # (_gpucool); a GPU is hot when it is the 3rd or 4th of its group of 4 in the node's PCI bus order (/proc/driver/
@@ -101,13 +101,13 @@ case $WHAT in
     ;;
   margin) rc=0; [ -n "${GTEST:-}" ] && { $PY -m pytest tests -m gpu -k "$GTEST" -v; rc=$?; }   # GPU tests first
     (( rc == 0 )) && $PY -m research.bench.margin "${CASES:-measured/margins/cases_unaligned.json}" --repeats "${REPEATS:-3}" ${MARGIN_ARGS:-}; rc=$? ;;
-  resume_nsys)   # per-kernel cost of the last chunks of CASES, at each of REVS (a commit: its ppimpl/ and research/bench/ from
+  resume_nsys)   # per-kernel cost of the last chunks of CASES, at each of REVS (a commit: its ssengine/ and research/bench/ from
                  # git archive; "worktree": this tree), under Nsight Systems; research/bench/mb_kernels.py per stage and kernel
     rc=0; [ -n "${GTEST:-}" ] && { $PY -m pytest tests -m gpu -k "$GTEST" -v; rc=$?; }   # GPU tests first
     (( rc == 0 )) && for rev in ${REVS:-worktree}; do
       D=$R/resume_nsys_${SLURM_JOB_ID:-local}/$rev; mkdir -p "$D"; src=$ROOT
       if [ "$rev" != worktree ]; then
-        src=$TMPDIR/rev_$rev; mkdir -p "$src"; git -C "$ROOT" archive "$rev" ppimpl bench | tar -x -C "$src" || { rc=1; break; }
+        src=$TMPDIR/rev_$rev; mkdir -p "$src"; git -C "$ROOT" archive "$rev" ssengine bench | tar -x -C "$src" || { rc=1; break; }
       fi
       echo "== resume_nsys $rev ($(git -C "$ROOT" log --oneline -1 "${rev/worktree/HEAD}")) from $src"
       for cases in ${CASES:-$ROOT/measured/margins/cases_resume_cost.json}; do

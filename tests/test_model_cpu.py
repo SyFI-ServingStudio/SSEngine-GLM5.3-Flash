@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from ppimpl import kernels as K
-from ppimpl.config import CHECKPOINT
+from ssengine import kernels as K
+from ssengine.config import CHECKPOINT
 
 CKPT = Path(CHECKPOINT)
 
@@ -79,7 +79,7 @@ def test_check_trace_assigns_each_kernel_to_its_own_config():
 
 @pytest.mark.skipif(not CKPT.exists(), reason="checkpoint not on this host")
 def test_stage_weights_partition_the_text_model():
-    from ppimpl.model.pp_patch import stage_weight_names
+    from ssengine.model.pp_patch import stage_weight_names
 
     index = json.loads((CKPT / "model.safetensors.index.json").read_text())["weight_map"]
     seen: dict[str, int] = {}
@@ -104,7 +104,7 @@ def _specs_for_stage(stage: int):
     from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
     from vllm.v1.kv_cache_interface import KpoolTailSpec, MambaSpec, MLAAttentionSpec, SparseCacheRole, get_kv_quant_mode
 
-    from ppimpl.model import kv_tensors
+    from ssengine.model import kv_tensors
 
     B, kv = 8576, "fp8_e4m3"
     mla = MLAAttentionSpec(block_size=B, num_kv_heads=1, head_size=512, dtype=torch.float8_e4m3fn,
@@ -127,7 +127,7 @@ def _specs_for_stage(stage: int):
 
 @pytest.mark.parametrize("stage", range(4))
 def test_kv_layout_matches_the_contract(stage):
-    from ppimpl.model import kv_tensors
+    from ssengine.model import kv_tensors
 
     spec = _specs_for_stage(stage)
     per_block = kv_tensors.bytes_per_block(None, spec)
@@ -149,7 +149,7 @@ def test_kda_state_block_index_is_global():
     """A KDA layer's state block (state_blocks[g]) is the same group g whichever stage holds it."""
     from vllm.v1.kv_cache_interface import MambaSpec
 
-    from ppimpl.model import kv_tensors
+    from ssengine.model import kv_tensors
 
     index = {}
     for stage in range(4):
@@ -165,8 +165,8 @@ def test_kda_state_block_index_is_global():
 def test_stage_reads_only_run_config_fields():
     """Every run-config field StageModel reads exists on RunConfig(model="glm53") (a misspelled field fails here
     instead of falling back), and the bench stand-in has the same fields."""
-    from ppimpl.config import RunConfig
-    from ppimpl.model.stage import bench_config, stage_settings
+    from ssengine.config import RunConfig
+    from ssengine.model.stage import bench_config, stage_settings
 
     cfg = RunConfig(model="glm53")
     st = stage_settings(cfg)
@@ -180,7 +180,7 @@ def test_stage_reads_only_run_config_fields():
 def test_ninja_check_warns_not_fails(monkeypatch):
     import shutil
 
-    from ppimpl.model import stage
+    from ssengine.model import stage
 
     monkeypatch.setattr(shutil, "which", lambda name: "/opt/venv/bin/ninja")
     import pytest
@@ -191,7 +191,7 @@ def test_ninja_check_warns_not_fails(monkeypatch):
 
 
 def test_load_tactics_missing_file_is_reported(tmp_path):
-    from ppimpl.model.stage import load_tactics
+    from ssengine.model.stage import load_tactics
 
     r = load_tactics(tmp_path / "none.json")
     assert r["source"] == "missing" and "does not exist" in r["reason"]
@@ -203,7 +203,7 @@ def test_kv_groups_place_layers_by_the_design_split(monkeypatch, caplog):
     from vllm.v1.core import kv_cache_utils as kcu
     from vllm.distributed import utils as dist_utils
 
-    from ppimpl.model import kv_tensors as kt
+    from ssengine.model import kv_tensors as kt
 
     seen, design = [], kt.design_pp_indices
 

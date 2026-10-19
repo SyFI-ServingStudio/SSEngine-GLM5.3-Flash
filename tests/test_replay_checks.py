@@ -3,7 +3,7 @@
 import pytest
 from benchmarks.replay import check_force, check_sched
 
-from ppimpl.config import SCHEDULER_STEPS
+from ssengine.config import SCHEDULER_STEPS
 
 
 @pytest.mark.parametrize("step", list(SCHEDULER_STEPS))

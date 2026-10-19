@@ -22,7 +22,7 @@ from research.bench.graphs import plans_for
 def main() -> None:
     import torch
 
-    from ppimpl.model.stage import CHECKPOINT, StageModel, bench_config
+    from ssengine.model.stage import CHECKPOINT, StageModel, bench_config
 
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--stage", type=int, required=True)

@@ -1,5 +1,5 @@
 """M2 per-layer alignment (handoff `3_layers.md`): one layer of each type, plus the input and output heads, at
-L = 1k ... 128k on one GPU, through the serving code path (`ppimpl.model.stage.StageModel`).
+L = 1k ... 128k on one GPU, through the serving code path (`ssengine.model.stage.StageModel`).
 
 The bench model is stage 0 (layers 0-11: `first_kda_dense`, 2 x `kda_dense`, 3 x `dsa_moe`, 6 x `kda_moe`, the
 `input_head`) built with the final norm and `lm_head` (`output_head`), so one forward runs every layer type at once
@@ -323,7 +323,7 @@ def _union_us(kernels) -> float:
 
 
 def unit_type(unit: str) -> str:
-    from ppimpl import kernels as km
+    from ssengine import kernels as km
 
     if unit in ("embed", "hc_expand"):
         return "input_head"
@@ -566,7 +566,7 @@ def raw_dump(L: int, routing: str, parsed: dict) -> None:
 
 
 def trace_check(parsed: dict) -> dict:
-    from ppimpl import kernels as km
+    from ssengine import kernels as km
 
     run = parsed[min(parsed)]
     names = [k["name"] for k in run if k["unit"] not in (None, "output_head")]
@@ -576,7 +576,7 @@ def trace_check(parsed: dict) -> dict:
 
 def bench(args) -> None:
     import torch
-    from ppimpl.model.stage import CHECKPOINT, StageModel, bench_config
+    from ssengine.model.stage import CHECKPOINT, StageModel, bench_config
 
     targets = load_targets()
     lengths = [int(x) for x in args.lengths.split(",")]

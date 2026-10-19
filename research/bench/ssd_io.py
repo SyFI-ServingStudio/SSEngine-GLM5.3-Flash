@@ -6,8 +6,8 @@ balanced) and a host arena, and runs two loops at once:
   arriving at `--read-gbs` per process (Poisson; 0: back to back, the maximum; negative: no reads);
 - write-back: demotes of 3-60 slots, one at a time, paced to `--write-gbs` per process.
 Mechanisms: `threads` (the old SsdTier: one pool of `--threads` threads, os.preadv / os.pwritev of whole slots, reads
-and writes in one pool), `uring` (`ppimpl.kvpool.uring.UringFile`: fixed file and buffers, pieces of `--piece-mib`,
-`--read-depth` / `--write-depth` pieces in flight, reads first) or `aio` (`ppimpl.kvpool.aio.AioFile`: the same
+and writes in one pool), `uring` (`ssengine.kvpool.uring.UringFile`: fixed file and buffers, pieces of `--piece-mib`,
+`--read-depth` / `--write-depth` pieces in flight, reads first) or `aio` (`ssengine.kvpool.aio.AioFile`: the same
 pieces, depths and queues on a Linux AIO context).
 
     python -m research.bench.ssd_io fill  --dir D --procs 4 --file-gb 16
@@ -93,7 +93,7 @@ class Threads:
 
 class Backend:
     def __init__(self, fd, base, nbytes, a):
-        from ppimpl.kvpool.backends import SSD_BACKENDS
+        from ssengine.kvpool.backends import SSD_BACKENDS
         kw = {"submitters": a.aio_submitters} if a.mode == "aio" and a.aio_submitters else {}
         self.u = SSD_BACKENDS[a.mode](fd, [(base, nbytes)], int(a.piece_mib * (1 << 20)), a.read_depth,
                                       a.write_depth, **kw)

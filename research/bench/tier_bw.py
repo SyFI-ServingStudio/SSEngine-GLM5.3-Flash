@@ -45,7 +45,7 @@ NUMA = ctypes.CDLL("libnuma.so.1")
 
 def alloc_on(nbytes: int, node: int) -> int:
     """nbytes preferred (not bound) on `node`: a strict bind OOM-kills other processes on a full node."""
-    from ppimpl.kvpool.backends import anon_map, oom_first, prefer_node
+    from ssengine.kvpool.backends import anon_map, oom_first, prefer_node
     oom_first()
     ptr = anon_map(nbytes)
     prefer_node(NUMA, ptr, nbytes, node)

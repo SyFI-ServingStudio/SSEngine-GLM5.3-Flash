@@ -1,6 +1,6 @@
 """CPU check of the re-measure worker environment (no GPU): for each (kind, backend) of a queue,
 start the worker interpreter exactly as the profiler would (its own host-worker command
-builder, with ppimpl_profile.py's env overrides), and in it import the runner, load the list
+builder, with ssengine_profile.py's env overrides), and in it import the runner, load the list
 runner and coerce the first spec. CUDA is hidden, so only import/env errors show.
 
 usage (from the ServingStudioSim checkout):
@@ -14,7 +14,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import ppimpl_profile  # noqa: E402
+import ssengine_profile  # noqa: E402
 
 SNIPPET = r"""
 import json, sys
@@ -31,15 +31,15 @@ print("OK", kind, backend, getattr(mod, "__module__", mod), "torch", torch.__ver
 
 
 def main(todo):
-    sys.path.insert(0, str(ppimpl_profile.SIM))
+    sys.path.insert(0, str(ssengine_profile.SIM))
     from profiling.db.registry import find_kernel_profiler_spec
     from profiling.exec.env import register_profile_env, resolve_profile_env
     from profiling.exec.local import _host_worker_command
 
-    for name in ppimpl_profile.ENV_NAMES:
-        register_profile_env(name, ppimpl_profile.VENV_PY,
-                             additional_python_paths=[ppimpl_profile.HOOK] + ppimpl_profile.PATHS,
-                             additional_library_paths=(ppimpl_profile.TORCH_LIB,),
+    for name in ssengine_profile.ENV_NAMES:
+        register_profile_env(name, ssengine_profile.VENV_PY,
+                             additional_python_paths=[ssengine_profile.HOOK] + ssengine_profile.PATHS,
+                             additional_library_paths=(ssengine_profile.TORCH_LIB,),
                              isolated_site_packages=True)
     seen = set()
     for f in sorted(Path(todo).glob("*.jsonl")):

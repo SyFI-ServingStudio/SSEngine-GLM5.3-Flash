@@ -1,4 +1,4 @@
-"""Slot-mode index of the pool's leader (ppimpl/kvpool/manager.py; the server, lanes/m6 TIERS.md §3, §5-§7): slots per
+"""Slot-mode index of the pool's leader (ssengine/kvpool/manager.py; the server, lanes/m6 TIERS.md §3, §5-§7): slots per
 block, op order by dependencies, write before evict in HBM, SSD eviction at a small SSD, SSD reads through DRAM or
 staging. A byte model executes the ops in any order `ready_ops` allows and checks that every op reads what the
 context holds."""
@@ -7,11 +7,11 @@ import random
 
 import pytest
 
-from ppimpl.config import BLOCK_PAGES, BLOCK_TOKENS as B, SchedulerConfig, TierConfig
-from ppimpl.engine.kv import KvManager, pages_for
-from ppimpl.engine.scheduler import Request, Scheduler
-from ppimpl.kvpool import BalancedKVPool, Hit, KVViews
-from ppimpl.kvpool.manager import TierManager
+from ssengine.config import BLOCK_PAGES, BLOCK_TOKENS as B, SchedulerConfig, TierConfig
+from ssengine.engine.kv import KvManager, pages_for
+from ssengine.engine.scheduler import Request, Scheduler
+from ssengine.kvpool import BalancedKVPool, Hit, KVViews
+from ssengine.kvpool.manager import TierManager
 
 SLOT = 1_000_000          # 1 MB slots: dram_gb=0.01 is 10 slots
 
@@ -466,7 +466,7 @@ def test_exclusive_writes_at_eviction_and_the_blocks_wait_for_it():
 
 
 def test_a_read_moves_only_the_states_that_survive():
-    from ppimpl.kvpool.manager import states_to_move
+    from ssengine.kvpool.manager import states_to_move
     assert states_to_move([100], 100, 1, 2) == [100]                       # the engine: k = 1
     s = [10, 20, 30, 40]
     assert states_to_move(s, 30, 1, 2) == [30]

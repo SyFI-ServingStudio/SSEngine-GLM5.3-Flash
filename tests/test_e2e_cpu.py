@@ -1,4 +1,4 @@
-"""End to end on CPU: `python -m ppimpl serve` with FakeStageModel over gloo, driven over HTTP and by req-frontend."""
+"""End to end on CPU: `python -m ssengine serve` with FakeStageModel over gloo, driven over HTTP and by req-frontend."""
 
 import asyncio
 import json
@@ -138,7 +138,7 @@ def test_worker_failure_stops_server(tmp_path, request):
     srv = Server(tmp_path / "run", port, **CPU)
     request.addfinalizer(srv.kill_group)                     # also when an assert or the wait below fails
     srv.wait_ready()
-    workers = subprocess.run(["pgrep", "-P", str(srv.proc.pid), "-f", "ppimpl worker"], capture_output=True,
+    workers = subprocess.run(["pgrep", "-P", str(srv.proc.pid), "-f", "ssengine worker"], capture_output=True,
                              text=True).stdout.split()
     assert len(workers) == 4
     subprocess.run(["kill", "-9", workers[2]])

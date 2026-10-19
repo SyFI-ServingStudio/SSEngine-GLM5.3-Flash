@@ -108,7 +108,7 @@ def case(P: int, A: int, buf, db, dev) -> dict:
     from vllm.utils.deep_gemm import fp8_fp4_mqa_logits
     from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerMetadataBuilder as B
 
-    from ppimpl.model import pp_patch, topk_canon
+    from ssengine.model import pp_patch, topk_canon
 
     N = (P + A) // 4
     g = torch.Generator(device=dev).manual_seed(P + A)
@@ -158,7 +158,7 @@ def case(P: int, A: int, buf, db, dev) -> dict:
 
 def check_canon(dev) -> dict:
     """canon_new == canon_old == torch reference on the top-k of random and of tie-heavy logits."""
-    from ppimpl.model import topk_canon
+    from ssengine.model import topk_canon
 
     out = {}
     for name, rnd in (("random", False), ("ties_0.1", True)):

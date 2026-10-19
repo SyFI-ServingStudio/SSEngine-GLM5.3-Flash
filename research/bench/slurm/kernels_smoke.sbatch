@@ -6,11 +6,11 @@
 # so an env or import failure shows in minutes. Exits nonzero if any call returned no ok result. Usage, from the
 # repo root:
 #   sbatch -p main -o research/measured/logs/%x-%j.out research/bench/slurm/kernels_smoke.sbatch
-# PPIMPL_SIM: a ServingStudioSim checkout of pp-main with its profiler venv (`uv sync` there); default
+# SSENGINE_SIM: a ServingStudioSim checkout of pp-main with its profiler venv (`uv sync` there); default
 # <main tree>/third_party/ServingStudioSim (benchmarks/jobs/env.sh).
 set -u
 source "${SLURM_SUBMIT_DIR:-$(dirname "$0")/../../..}/benchmarks/jobs/env.sh"
-SIM=${PPIMPL_SIM:-$MAIN/third_party/ServingStudioSim}
+SIM=${SSENGINE_SIM:-$MAIN/third_party/ServingStudioSim}
 Q=$ROOT/measured/kernels_runs/queue
 OUT=$ROOT/measured/kernels_runs/smoke/$SLURM_JOB_ID
 mkdir -p "$OUT"
@@ -27,7 +27,7 @@ for f in $(ls "$Q/todo" | grep -v rows | awk -F'__' '!seen[$2"__"$3]++' | grep -
   to=240; case "$kind" in nvfp4_fused_moe) to=420;; esac
   ( cd "$SIM" && PPM_KNAMES_DIR="$OUT/knames_$kind.$backend" "$ROOT/research/bench/kernels/run_call.sh" $to \
       "$OUT/$kind.$backend.json" "$OUT/$kind.$backend.err" \
-      uv run --no-sync python "$ROOT/research/bench/kernels/ppimpl_profile.py" run "$kind" \
+      uv run --no-sync python "$ROOT/research/bench/kernels/ssengine_profile.py" run "$kind" \
       --backend "$backend" --specs "$OUT/$kind.$backend.spec.jsonl" --fresh --gpu-name "NVIDIA B200" --json )
   rc=$?
   st=$(python3 -c "import json; d=json.load(open('$OUT/$kind.$backend.json')); r=d['results'][0]; print(r.get('status'), r.get('metrics',{}).get('time_ms'), (r.get('error') or '')[:200])" 2>/dev/null || echo "no-json")

@@ -1,4 +1,4 @@
-"""The indexer's prefill pool-to-token expansion: the fork's launches vs `ppimpl.model.kpool_fast.expand_into` (1 GPU).
+"""The indexer's prefill pool-to-token expansion: the fork's launches vs `ssengine.model.kpool_fast.expand_into` (1 GPU).
 
   python -m research.bench.kpool_expand_bench [--rows 4096] [--pools 512] [--pool 4] [--reps 200]
 
@@ -16,7 +16,7 @@ def main():
     import torch
     from vllm.models.glm5next.nvidia.ops import kpool_compress as kops
 
-    from ppimpl.model import kpool_fast
+    from ssengine.model import kpool_fast
 
     ap = argparse.ArgumentParser()
     ap.add_argument("--rows", type=int, default=4096)

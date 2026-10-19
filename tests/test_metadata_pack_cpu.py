@@ -1,10 +1,10 @@
-"""CPU test of StageMetadata's packed staging (ppimpl/model/metadata.py `Pack`): every view equals the array it was
+"""CPU test of StageMetadata's packed staging (ssengine/model/metadata.py `Pack`): every view equals the array it was
 built from (dtype, shape, values), segments are aligned and disjoint, empty arrays work."""
 
 import numpy as np
 import torch
 
-from ppimpl.model.metadata import PACK_ALIGN, Pack
+from ssengine.model.metadata import PACK_ALIGN, Pack
 
 
 def test_pack_views_round_trip():

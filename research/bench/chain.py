@@ -35,15 +35,15 @@ def _write(name: str, data: dict) -> None:
 
 
 def _prompt(L: int) -> list[int]:
-    from ppimpl.model.stage import CHECKPOINT
+    from ssengine.model.stage import CHECKPOINT
 
     return enwik9_tokens(CHECKPOINT, L)
 
 
 def split(L: int) -> None:
     import torch
-    from ppimpl.model import pp_patch
-    from ppimpl.model.stage import StageModel, bench_config
+    from ssengine.model import pp_patch
+    from ssengine.model.stage import StageModel, bench_config
     from vllm.forward_context import set_forward_context
 
     dev = torch.device("cuda", 0)
@@ -99,8 +99,8 @@ def edge(L: int) -> None:
     (B) by the fork's fused TileLang post+pre, (C) by hc_post then a standalone hc_pre (the stage edge); and the
     unsplit 0-22 run repeated (noise), and with the fork's fused op at every boundary."""
     import torch
-    from ppimpl.model import pp_patch
-    from ppimpl.model.stage import StageModel, bench_config
+    from ssengine.model import pp_patch
+    from ssengine.model.stage import StageModel, bench_config
     from vllm.forward_context import set_forward_context
     from vllm.model_executor.layers.mhc import MHCFusedPostPreOp
 
@@ -168,10 +168,10 @@ def edge(L: int) -> None:
 
 def _chain_worker(rank: int, L: int, port: int, profile: bool) -> None:
     import torch
-    from ppimpl import kernels as km
-    from ppimpl.config import HIDDEN_WIDTH, RunConfig, SchedulerConfig
-    from ppimpl.model.stage import StageModel, bench_config
-    from ppimpl.runtime.transport import open_pipe
+    from ssengine import kernels as km
+    from ssengine.config import HIDDEN_WIDTH, RunConfig, SchedulerConfig
+    from ssengine.model.stage import StageModel, bench_config
+    from ssengine.runtime.transport import open_pipe
 
     dev = torch.device("cuda", rank)
     torch.cuda.set_device(dev)
@@ -241,7 +241,7 @@ def chain(L: int, profile: bool) -> None:
 
 
 def vllm_reference(L: int) -> None:
-    from ppimpl.model.stage import CHECKPOINT
+    from ssengine.model.stage import CHECKPOINT
     from vllm import LLM, SamplingParams
 
     ids = _prompt(L)

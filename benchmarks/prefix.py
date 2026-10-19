@@ -114,7 +114,7 @@ def replay_window(run_dir: Path, n: int, window_ms: float) -> dict | None:
     import yaml
 
     from benchmarks.replay import run_sessions
-    from ppimpl.config import SCHEDULER_STEPS
+    from ssengine.config import SCHEDULER_STEPS
 
     cfg = yaml.safe_load((run_dir / "server_config.yaml").read_text())
     step = next((k for k, v in SCHEDULER_STEPS.items() if msgspec.structs.asdict(v) == cfg["scheduler"]), None)

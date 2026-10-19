@@ -12,9 +12,9 @@ One node, recorded 2026-10-15. Measured values only; anything not yet measured s
 
 ## Serving code and kernel libraries
 
-The engine (`pp-impl`, provenance in its `README.md`) and the correctness reference run in `pp-impl/.venv`,
+The engine (`SSEngine`, provenance in its `README.md`) and the correctness reference run in `.venv`,
 declared final by the model lane at `lane-model` 8ec9465. It holds the vLLM fork checkout
-`pp-impl/third_party/vllm`, commit `892da0822f` (`servingstudio-alignment` line, the same commit as
+`third_party/vllm`, commit `892da0822f` (`servingstudio-alignment` line, the same commit as
 `wt-flash-dflash2/alignment/profiler/vllm`):
 
 | Library | Version / commit |
@@ -29,7 +29,7 @@ declared final by the model lane at `lane-model` 8ec9465. It holds the vLLM fork
 | Triton | 3.7.1 |
 | CuTe DSL | `nvidia-cutlass-dsl` 4.8.0 (fork venv: 4.7.1) |
 | cuBLAS / cuDNN / NCCL | 13.1.1.3 / 9.20.0.48 / 2.29.7 (cu13) |
-| causal-conv1d (Dao-AILab) | 1.7.0, on `PYTHONPATH` from `pp-impl/third_party/causal_conv1d_try/pkg` (not in the fork venv, whose `glm5next` KDA layer calls vLLM's Triton `causal_conv1d_fn`) |
+| causal-conv1d (Dao-AILab) | 1.7.0, on `PYTHONPATH` from `third_party/causal_conv1d_try/pkg` (not in the fork venv, whose `glm5next` KDA layer calls vLLM's Triton `causal_conv1d_fn`) |
 | transformers / safetensors | 5.19.0 / 0.8.0 |
 
 The kernel rows (`data/kernel_specs.jsonl`) were measured by the ServingStudioSim profiler in other environments:

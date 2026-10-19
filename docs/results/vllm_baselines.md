@@ -1,13 +1,13 @@
 # vLLM DP4/EP4 baseline: GLM-5.3-Flash NVFP4, 4×B200, M6 v3 sessions
 
-Setup: vLLM fork 0.1.dev21920+g892da0822 (pp-impl/third_party/vllm, unpatched).
+Setup: vLLM fork 0.1.dev21920+g892da0822 (third_party/vllm, unpatched).
 - Topology: DP4 × TP1 + expert parallel; FP4 checkpoint; fp8_e4m3 KV.
 - Prefix caching on, chunked prefill, `--mamba-cache-mode align`.
 - Trace: data/tracelab-v3/m6/sessions_2ps_v3.csv, trace-timed, 22 min client; metrics at 20 min.
 - Routing: vllm-router 0.1.15 `cache_aware` (radix tree on token ids; `--intra-node-data-parallel-size 4` → X-data-parallel-rank). 8199 instead uses vLLM's built-in DP balancer, which is load-only, not cache-aware.
 - B runs: native OffloadingConnector, `--kv-offloading-size 46.5661` GiB = 50 GB per engine. The size is per engine, because world_size = TP×PP = 1. One /dev/shm region per engine.
 
-Scripts are on lane `lane-vllm-dpep` (pp-impl/lanes/vllm-dpep):
+Scripts:
 - [benchmarks/jobs/vllm_dpep.sbatch](../../benchmarks/jobs/vllm_dpep.sbatch)
 - [benchmarks/vllm_dpep_summary.py](../../benchmarks/vllm_dpep_summary.py)
 - [benchmarks/vllm_dpep_table.py](../../benchmarks/vllm_dpep_table.py)

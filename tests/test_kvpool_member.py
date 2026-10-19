@@ -1,4 +1,4 @@
-"""The pool's members on CPU (ppimpl/kvpool/member.py): the leader (slot mode) decides the ops and `tier_move` turns
+"""The pool's members on CPU (ssengine/kvpool/member.py): the leader (slot mode) decides the ops and `tier_move` turns
 them into what the members get, four members (one per quarter, all four fake stages' views in this process) run them
 into their own DRAM arenas. A context written at the end of round 0, evicted from HBM and read back into other blocks
 is byte-equal; growth rewrites only the new blocks; the fake member reports ops after their bandwidth time."""
@@ -11,13 +11,13 @@ import msgspec
 import pytest
 import torch
 
-from ppimpl.config import BLOCK_PAGES as P, BLOCK_TOKENS as B, TierConfig
-from ppimpl.engine.kv import block_pages, kv_pages_for
-from ppimpl.engine.scheduler import Request
-from ppimpl.kvpool import BalancedKVPool, KVViews, shards
-from ppimpl.kvpool.member import PoolMember, tier_move
-from ppimpl.kvpool.placement import BalancedPlacement
-from ppimpl.runtime.transport import TierBatch, decode_tier, encode
+from ssengine.config import BLOCK_PAGES as P, BLOCK_TOKENS as B, TierConfig
+from ssengine.engine.kv import block_pages, kv_pages_for
+from ssengine.engine.scheduler import Request
+from ssengine.kvpool import BalancedKVPool, KVViews, shards
+from ssengine.kvpool.member import PoolMember, tier_move
+from ssengine.kvpool.placement import BalancedPlacement
+from ssengine.runtime.transport import TierBatch, decode_tier, encode
 from test_kvpool_placement import block_bytes, scattered, stages
 
 
@@ -206,7 +206,7 @@ def test_member_threads_route_dram_ops_by_direction(tmp_path):
     byte-equal, and Shutdown ends every thread."""
     import zmq
 
-    from ppimpl.runtime.transport import Shutdown, TierDone, decode_to_controller
+    from ssengine.runtime.transport import Shutdown, TierDone, decode_to_controller
 
     views, ranges, mems, tc = members()
     ctx = zmq.Context()
@@ -262,7 +262,7 @@ def test_fake_member_reports_after_bandwidth_time():
     direction; TierDone goes out over the report socket."""
     import zmq
 
-    from ppimpl.runtime.transport import TierDone, TierMove, decode_to_controller
+    from ssengine.runtime.transport import TierDone, TierMove, decode_to_controller
 
     ctx = zmq.Context()
     pull = ctx.socket(zmq.PULL)
@@ -300,7 +300,7 @@ def test_ssd_writes_are_reported_when_their_last_file_write_is_done():
     import threading
     from concurrent.futures import Future
 
-    from ppimpl.runtime.transport import WorkerError
+    from ssengine.runtime.transport import WorkerError
 
     e = PoolMember.__new__(PoolMember)
     e.stage, e.q, e._ssd_writes, e._ssd_cv = 0, {"write": queue.Queue()}, 0, threading.Condition()
@@ -367,7 +367,7 @@ def test_write_chunks_yield_to_reads_queued_then_not_later_ones():
 
 def test_eviction_waiting_for_writes_makes_them_urgent():
     """make_room urges the writes in flight and the evict writes it starts; ahead writes stay yielding."""
-    from ppimpl.kvpool.writeback import WriteBack
+    from ssengine.kvpool.writeback import WriteBack
 
     class Lvl:
         capacity = 10.0

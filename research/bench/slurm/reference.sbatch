@@ -8,10 +8,10 @@
 #   sbatch -p main -o research/measured/logs/%x-%j.out research/bench/slurm/reference.sbatch
 set -u
 source "${SLURM_SUBMIT_DIR:-$(dirname "$0")/../../..}/benchmarks/jobs/env.sh"
-# the same paths the Python side uses (benchmarks/common.py, ppimpl/config.py)
+# the same paths the Python side uses (benchmarks/common.py, ssengine/config.py)
 eval "$($PY -c "
 from benchmarks.common import ENWIK9, HANDOFF, REQ_FRONTEND
-from ppimpl.config import CHECKPOINT
+from ssengine.config import CHECKPOINT
 print(f'RF={REQ_FRONTEND} HANDOFF={HANDOFF} SNAP={CHECKPOINT} ENWIK9={ENWIK9}')")"
 RUNS=$ROOT/measured/runs
 LOGS=$RUNS/reference_logs/$SLURM_JOB_ID

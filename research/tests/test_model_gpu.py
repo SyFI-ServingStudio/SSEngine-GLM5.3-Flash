@@ -7,7 +7,7 @@ check on every traced stage. Each test runs `research/bench/chain.py` and reads 
 to back without a sync (the host several forwards ahead of the GPU, as in the pipeline) are bitwise equal to the same
 microbatches run one at a time, at 1k-token requests (`research/bench/overlap.py`). (f) CUDA graph replay vs eager per bucket
 (`research/bench/graphs.py`), eager repeated bitwise. (g) the Triton top-k canonicalization equals its torch reference and
-does not depend on the kernel's set or order (`ppimpl/model/topk_canon.py`).
+does not depend on the kernel's set or order (`ssengine/model/topk_canon.py`).
 """
 
 import json
@@ -75,7 +75,7 @@ def test_topk_canonical_matches_reference(rows, width, two_requests):
     mid-row."""
     import torch
 
-    from ppimpl.model.topk_canon import canonical_topk_torch, canonicalize, canonicalize_split
+    from ssengine.model.topk_canon import canonical_topk_torch, canonicalize, canonicalize_split
 
     dev, k = torch.device("cuda", 0), 512
     g = torch.Generator(device=dev).manual_seed(0)
@@ -101,7 +101,7 @@ def test_topk_canonical_ignores_out_of_row_indices(rows, width):
     uninitialized KV, job 7670): canonicalization never reads past the row and returns indices within it."""
     import torch
 
-    from ppimpl.model.topk_canon import canonicalize, canonicalize_split
+    from ssengine.model.topk_canon import canonicalize, canonicalize_split
 
     dev, k = torch.device("cuda", 0), 512
     g = torch.Generator(device=dev).manual_seed(1)
@@ -127,8 +127,8 @@ def test_decode_topk_canonical(rows, width, path):
     (research/bench/topk_check.py: per backend and shape, whether the kernel's set itself is valid)."""
     import torch
 
-    from ppimpl.model import pp_patch
-    from ppimpl.model.topk_canon import canonical_topk_torch
+    from ssengine.model import pp_patch
+    from ssengine.model.topk_canon import canonical_topk_torch
     from vllm.model_executor.layers import indexer_topk
     from vllm.v1.worker.workspace import init_workspace_manager
 

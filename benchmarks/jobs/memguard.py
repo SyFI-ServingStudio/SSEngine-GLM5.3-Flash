@@ -30,7 +30,7 @@ GPUS = 4
 STAGING_GB = 8.0          # TierConfig.staging_gb's default
 HEADROOM_GB = 100.0
 NODE_HEADROOM_GB = 50.0   # per NUMA node while running
-NODE_START_GB = 115.0     # per NUMA node at start: the arenas' touch keeps ppimpl.kvpool.backends.TOUCH_RESERVE_GB
+NODE_START_GB = 115.0     # per NUMA node at start: the arenas' touch keeps ssengine.kvpool.backends.TOUCH_RESERVE_GB
                           # (114) free after its last 1 GiB piece, so a node that passes here is not short there
 PSI_START = 5.0           # % full avg10 to start
 PSI_STOP, PSI_STOP_S = 20.0, 30
@@ -54,7 +54,7 @@ def mem_available_gb() -> float:
 
 def node_avail_gb(node: int, root: str = "/sys/devices/system/node") -> float:
     """MemFree plus the clean file LRU pages of NUMA node `node` (what the kernel can hand out there without touching
-    anyone's anonymous, shmem or mlocked memory or waiting for writeback), GB; as ppimpl.kvpool.backends'
+    anyone's anonymous, shmem or mlocked memory or waiting for writeback), GB; as ssengine.kvpool.backends'
     node_reclaimable_gb."""
     kb = {}
     for line in open(f"{root}/node{node}/meminfo"):
@@ -65,9 +65,9 @@ def node_avail_gb(node: int, root: str = "/sys/devices/system/node") -> float:
 
 
 def gpu_nodes() -> list[int]:
-    """The NUMA node of each GPU the job sees (nvidia-smi bus ids; PPIMPL_GPU_NODES="0,0,1,1" overrides)."""
-    if os.environ.get("PPIMPL_GPU_NODES"):
-        return [int(x) for x in os.environ["PPIMPL_GPU_NODES"].split(",")]
+    """The NUMA node of each GPU the job sees (nvidia-smi bus ids; SSENGINE_GPU_NODES="0,0,1,1" overrides)."""
+    if os.environ.get("SSENGINE_GPU_NODES"):
+        return [int(x) for x in os.environ["SSENGINE_GPU_NODES"].split(",")]
     import subprocess
     out = subprocess.run(["nvidia-smi", "--query-gpu=pci.bus_id", "--format=csv,noheader"], capture_output=True,
                          text=True, check=True).stdout.split()

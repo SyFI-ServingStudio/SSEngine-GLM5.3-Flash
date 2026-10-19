@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build pp-impl's environment from public sources (ENV.md has the versions and why each one).
+# Build SSEngine's environment from public sources (ENV.md has the versions and why each one).
 #
 #   env/make_env.sh [DIR]
 #
@@ -14,15 +14,15 @@
 #   STEPS       the steps to run, in this order                default all of them:
 #                 venv vllm conv1d   the serving environment (the Docker image runs these, install and jit:
 #                                    docker/Dockerfile)
-#                 install            this repo into the venv (editable, `ppimpl` on the venv's PATH)
+#                 install            this repo into the venv (editable, `ssengine` on the venv's PATH)
 #                 jit                FlashInfer's JIT modules for sm_100a and the trtllm-gen cubins serving uses
 #                                    (env/bake_jit.py; no GPU, ~5 min): no compile or download at the first start
 #                 sim client corpus  the bench's handoff checkout, req-frontend and enwik9
 #                 check              env/check_env.py
-#   PPIMPL_ALLOW_ROOT=1   build as root: only inside a container build (docker/Dockerfile)
+#   SSENGINE_ALLOW_ROOT=1   build as root: only inside a container build (docker/Dockerfile)
 # Each step skips what is already in place, so a failed run can be repeated.
 set -euo pipefail
-[ "$(id -u)" != 0 ] || [ "${PPIMPL_ALLOW_ROOT:-}" = 1 ] || { echo "do not run as root"; exit 1; }
+[ "$(id -u)" != 0 ] || [ "${SSENGINE_ALLOW_ROOT:-}" = 1 ] || { echo "do not run as root"; exit 1; }
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 DIR=$(realpath "${1:-$HERE/..}")
 TP=$DIR/third_party
@@ -79,7 +79,7 @@ if want conv1d; then
   uv pip install --python "$PY" --no-deps "$TP"/wheels/causal_conv1d-1.7.0-*.whl
 fi
 
-# 3b. This repo, editable: the `ppimpl` command (.venv/bin/ppimpl) and `python -m ppimpl` from any directory.
+# 3b. This repo, editable: the `ssengine` command (.venv/bin/ssengine) and `python -m ssengine` from any directory.
 if want install; then
   uv pip install --python "$PY" --no-deps -e "$HERE/.."
 fi

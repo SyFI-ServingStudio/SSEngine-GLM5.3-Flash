@@ -1,4 +1,4 @@
-"""Tune FlashInfer's tactics once and persist them (`ppimpl.model.stage.TACTICS`), or verify a persisted file.
+"""Tune FlashInfer's tactics once and persist them (`ssengine.model.stage.TACTICS`), or verify a persisted file.
 
     python -m benchmarks.tune_tactics tune   [--out PATH] --routing RUN_DIR [--routing ...] | --routing-json PATH  # 1 GPU
     python -m benchmarks.tune_tactics verify [--lengths 1024,8192,131072]  # fresh process: load, Ready time, cache misses
@@ -7,8 +7,8 @@
 `tune` builds stage 0 with the output head (every FlashInfer op the four stages use: KDA-dense and MoE layers'
 NVFP4 GEMMs, the trtllm NVFP4 MoE, the TRTLLM sparse MLA), budget 131,072 tokens (the largest microbatch any run
 config uses, so every token bucket is profiled), runs the warm-up with tuning forced and saves the autotuner's
-configs. The fused MoE is tuned at the serving buckets (`ppimpl.model.moe_tuning`, installed by every stage) on
-served routing: `--routing` reads the experts_stage<S>.jsonl of runs made with PPIMPL_LOG_EXPERTS=1 and folds each
+configs. The fused MoE is tuned at the serving buckets (`ssengine.model.moe_tuning`, installed by every stage) on
+served routing: `--routing` reads the experts_stage<S>.jsonl of runs made with SSENGINE_LOG_EXPERTS=1 and folds each
 routed-row count's histograms; `--routing-json` takes {rows: histogram} or a single histogram list (then every
 bucket scales it). The histograms each bucket was tuned on go to <out>.routing.json. The file carries FlashInfer's metadata (FlashInfer/CUDA/cuBLAS/cuDNN versions, GPU); a stage loads it only
 where they match, otherwise it tunes in-process and warns.
@@ -33,7 +33,7 @@ BUDGET = 131072
 
 def build(warmup: str):
     import torch
-    from ppimpl.model.stage import StageModel, bench_config
+    from ssengine.model.stage import StageModel, bench_config
 
     t0 = time.time()
     model = StageModel(bench_config(BUDGET), 0, torch.device("cuda", 0), warmup=False, last=True,
@@ -45,7 +45,7 @@ def build(warmup: str):
 
 
 def load_profile(runs: list[Path], json_path: Path | None) -> dict[int, list[int]]:
-    from ppimpl.model import moe_tuning
+    from ssengine.model import moe_tuning
 
     if runs:
         return moe_tuning.routing_profile(runs)
@@ -57,7 +57,7 @@ def load_profile(runs: list[Path], json_path: Path | None) -> dict[int, list[int
 
 def tune(out: Path, profile: dict[int, list[int]], sources: list[str]) -> None:
     from flashinfer.autotuner import AutoTuner
-    from ppimpl.model import moe_tuning
+    from ssengine.model import moe_tuning
 
     if not profile:
         raise SystemExit("tune: no routing histograms (--routing / --routing-json)")
@@ -95,7 +95,7 @@ def merge(base: Path, abs_: list[Path], routing: str, out: Path) -> dict:
     research.bench.moe_tactics reports `abs_` at routing `routing` takes the sustained-best tactic where it is faster than that
     one. Every other key is kept as is. Returns what changed."""
     from flashinfer.fused_moe.utils import map_to_hybrid_bucket
-    from ppimpl.model import moe_tuning
+    from ssengine.model import moe_tuning
 
     data = json.loads(base.read_text())
     moe = {_moe_key_tokens(k): k for k in data if OP_MOE in k}
@@ -129,7 +129,7 @@ def merge(base: Path, abs_: list[Path], routing: str, out: Path) -> dict:
 def verify(lengths: list[int]) -> None:
     import torch
     from flashinfer.autotuner import AutoTuner
-    from ppimpl.model.stage import CHECKPOINT
+    from ssengine.model.stage import CHECKPOINT
 
     misses: collections.Counter = collections.Counter()
     orig = AutoTuner.search_cache
@@ -163,7 +163,7 @@ def verify(lengths: list[int]) -> None:
 
 
 def main() -> None:
-    from ppimpl.model.stage import TACTICS
+    from ssengine.model.stage import TACTICS
 
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("mode", choices=["tune", "verify", "merge"])

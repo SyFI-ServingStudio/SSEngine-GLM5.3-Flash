@@ -9,7 +9,7 @@ import torch
 
 fw = pytest.importorskip("flashinfer.kda_kernels.persistent.forward")
 
-from ppimpl.model import kda_schedule  # noqa: E402
+from ssengine.model import kda_schedule  # noqa: E402
 
 H, SMS = 64, 148    # GLM-5.3-Flash KDA heads; B200 SMs (the plan's slots)
 PY_SPLIT = fw._split_heads if kda_schedule._ORIG is None else kda_schedule._ORIG
@@ -73,7 +73,7 @@ def test_installed_plan_equals_python_plan(monkeypatch):
 def test_host_plan_equals_flashinfer_make_plan(monkeypatch):
     """pp_patch `make_kda_plan_host` (the schedule StageMetadata stages in its Pack) equals FlashInfer's `make_plan`
     (device tensors) array for array, with the same G, scratch sizes, has_split and full_chunks."""
-    from ppimpl.model.pp_patch import make_kda_plan_host
+    from ssengine.model.pp_patch import make_kda_plan_host
 
     monkeypatch.setattr(fw, "_sm_count", lambda dev: SMS)
     rng = random.Random(1)

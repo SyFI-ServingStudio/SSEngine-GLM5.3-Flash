@@ -1,8 +1,8 @@
-"""Per-microbatch, per-stage GPU numbers from an Nsight Systems capture of `python -m ppimpl serve`.
+"""Per-microbatch, per-stage GPU numbers from an Nsight Systems capture of `python -m ssengine serve`.
 
   python -m benchmarks.nsys_trace <run dir>       reads <run dir>/trace.sqlite (`nsys export --type sqlite`), writes trace.json
 
-Attribution: each worker wraps a plan in the NVTX range `stage <s> mb <id>` (ppimpl/runtime/worker.py). A CUDA API
+Attribution: each worker wraps a plan in the NVTX range `stage <s> mb <id>` (ssengine/runtime/worker.py). A CUDA API
 call made inside that range on the worker's thread (kernel launch, graph launch) carries a correlation
 id; the kernels with that id (graph-node kernels share their graph launch's id) belong to that (stage, microbatch).
 
@@ -13,7 +13,7 @@ Per (microbatch, stage), times in ms, by the 4_iteration.md §6 GPU-trace defini
   `launch_ms`: host time from the first to the last compute launch (the host cost of launching the stage);
 - per microbatch: `sends` (stage s last kernel end -> stage s+1 first kernel start) and `gpu_span_ms`.
 Per stage and kernel name: count and time over the microbatches complete on every stage, with the manifest's
-configuration and layer positions (`ppimpl.kernels.check_trace`) when the manifest is importable.
+configuration and layer positions (`ssengine.kernels.check_trace`) when the manifest is importable.
 """
 
 import bisect
@@ -105,7 +105,7 @@ def stage_numbers(kernels: list) -> dict:
 
 def manifest_class(stage: int, demangled: str) -> dict:
     try:
-        from ppimpl import kernels as manifest
+        from ssengine import kernels as manifest
     except ImportError:
         return {}
     tc = manifest.check_trace([demangled], stage)

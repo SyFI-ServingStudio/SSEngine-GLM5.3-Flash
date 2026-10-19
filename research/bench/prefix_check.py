@@ -89,7 +89,7 @@ def run_mode(run_dir: Path, keep: bool, sess: list[dict], pool: np.ndarray, port
     uptime = subprocess.run(["uptime"], capture_output=True, text=True).stdout.strip()
     meta = {"name": run_dir.name, "keep_sessions": keep, "uptime": uptime, "job_id": os.environ.get("SLURM_JOB_ID")}
     print(f"[{run_dir.name}] uptime: {uptime}", flush=True)
-    serve = [PYTHON, "-m", "ppimpl", "serve", "--config", str(run_dir / "server.yaml")]
+    serve = [PYTHON, "-m", "ssengine", "serve", "--config", str(run_dir / "server.yaml")]
     rows = []
     with open(run_dir / "server.log", "w") as slog:
         server = subprocess.Popen(step(serve, None if cpu else 4), cwd=ROOT, stdout=slog, stderr=subprocess.STDOUT)

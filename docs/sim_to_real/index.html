@@ -119,13 +119,13 @@ nav.lang a[aria-current="page"] { background: var(--accent); color: var(--surfac
 })();</script>
 <p class="kicker">ServingStudio · research notes · draft</p>
 <h1>从模拟到真机：GLM-5.3-Flash NVFP4 PP4 on B200 的实现与对齐</h1>
-<p class="byline">GLM-5.3-Flash NVFP4 · 4 × B200 PP4 · TraceLab coding-agent sessions · 目标来自 ServingStudio 模拟，实测来自 pp-impl</p>
+<p class="byline">GLM-5.3-Flash NVFP4 · 4 × B200 PP4 · TraceLab coding-agent sessions · 目标来自 ServingStudio 模拟，实测来自 SSEngine</p>
 
 <div class="alpha"><b>草稿 v3。</b>写于 M6 eval 完成之后。
 <ul class="find">
 <li>最终对照（§5.6、§6.9–§6.10、§7）用 TraceLab v3（新模型）trace：20 分钟闭环用于真机对照，8 小时闭环只在 sim 里跑。</li>
 <li>引擎逐步搭建的 bring-up（§4–§6 中标“合成负载”或“旧 trace”的小节）用当时的合成负载和旧 trace，记录的是每一步的最终结果。</li>
-<li>真机数字来自 <code>pp-impl</code>（各节注明 Slurm 作业号）；sim 数字来自 ServingStudioSim 的 handoff <code>glm53_flash_pp4_b200_v2</code> 和之后的实验目录（v3 部分在 wt-pp-staged）。</li>
+<li>真机数字来自 <code>SSEngine</code>（各节注明 Slurm 作业号）；sim 数字来自 ServingStudioSim 的 handoff <code>glm53_flash_pp4_b200_v2</code> 和之后的实验目录（v3 部分在 wt-pp-staged）。</li>
 <li>还没做完的工作集中在 <a href="#s9">§9</a>。</li>
 </ul></div>
 
@@ -144,7 +144,7 @@ nav.lang a[aria-current="page"] { background: var(--accent); color: var(--surfac
 
 <h3 id="s0-2">Method</h3>
 <ul class="find">
-<li>真机系统叫 pp-impl：自己写的小引擎（scheduler、KV/prefix cache、DRAM/SSD 分层、pipeline runtime、server）。</li>
+<li>真机系统叫 SSEngine：自己写的小引擎（scheduler、KV/prefix cache、DRAM/SSD 分层、pipeline runtime、server）。</li>
 <li>kernel 和模型层代码复用 vLLM 的 fork。</li>
 <li>sim 给出每个阶段的目标（handoff），真机逐阶段追目标，一个阶段过关才进入下一个。</li>
 </ul>
@@ -179,7 +179,7 @@ nav.lang a[aria-current="page"] { background: var(--accent); color: var(--surfac
 <ol start="1">
 <li><a href="#s1">背景与目标</a></li>
 <li><a href="#s2">sim 如何指导实现</a></li>
-<li><a href="#s3">实现：pp-impl</a></li>
+<li><a href="#s3">实现：SSEngine</a></li>
 <li><a href="#s4">Kernel 与单步迭代</a></li>
 <li><a href="#s5">Prefix cache 与 scheduler</a></li>
 <li><a href="#s6">DRAM 与 SSD 分层</a></li>
@@ -293,7 +293,7 @@ nav.lang a[aria-current="page"] { background: var(--accent); color: var(--surfac
 </ul>
 
 <!-- ============================== 3 ============================== -->
-<h2 id="s3"><span class="no">3</span>实现：pp-impl</h2>
+<h2 id="s3"><span class="no">3</span>实现：SSEngine</h2>
 <div class="tk"><b>要点</b><ul>
 <li>引擎自己写，kernel 和模型层从 vLLM fork 当库导入，不复制任何 kernel。</li>
 <li>一个 controller 加 4 个 stage worker；级间激活走 copy engine，不占 SM。</li>
@@ -302,10 +302,10 @@ nav.lang a[aria-current="page"] { background: var(--accent); color: var(--surfac
 
 <h3 id="s3-1">3.1 复用边界</h3>
 <ul class="find">
-<li>kernel 和模型层复用 vLLM fork（<code>892da0822f</code>，<code>vllm/models/glm5next</code>），当作库导入。没有任何 kernel 被复制进 pp-impl。</li>
+<li>kernel 和模型层复用 vLLM fork（<code>892da0822f</code>，<code>vllm/models/glm5next</code>），当作库导入。没有任何 kernel 被复制进 SSEngine。</li>
 <li>不运行 vLLM 的 engine、scheduler、model runner 或 KV manager。vLLM 只作为独立的正确性参照（<a href="#s3-4">§3.4</a>）。</li>
 </ul>
-<p>fork 有两处和 PP 不兼容，在 <code>ppimpl/model/pp_patch.py</code> 里用小补丁覆盖：</p>
+<p>fork 有两处和 PP 不兼容，在 <code>ssengine/model/pp_patch.py</code> 里用小补丁覆盖：</p>
 <ul class="find">
 <li><b>mHC 的 stage 边界：</b>fork 关掉了 glm5next 的 PP，stage 边界会丢掉 mHC 的延迟状态。发送方先做完最后一层的 <code>hc_post</code>，发完整的 4 路 residual；接收方第一层单独做 <code>hc_pre</code>。比目标里融合的 post+pre 每个边界慢 0.03 ms（8k）到 0.32 ms（128k），不到一个 stage 的 0.06%。</li>
 <li><b>只做 prefill，只出一个 token：</b>没有 decode 路径，没有 MTP，stage 3 做 greedy 采样。</li>
@@ -348,9 +348,9 @@ nav.lang a[aria-current="page"] { background: var(--accent); color: var(--surfac
 <!-- ============================== 4 ============================== -->
 <h2 id="s4"><span class="no">4</span>Kernel 与单步迭代</h2>
 <div class="tk"><b>要点</b><ul>
-<li>kernel 在 pp-impl 环境里重测，15 个配置的中位比值 0.95–1.08；单层、单请求的每个 stage 都在目标的 ±10% 内。</li>
+<li>kernel 在 SSEngine 环境里重测，15 个配置的中位比值 0.95–1.08；单层、单请求的每个 stage 都在目标的 ±10% 内。</li>
 <li>所有请求在 t = 0 同时到达时，满载吞吐是目标的 0.93–1.00 倍，TTFT 分布和目标一致。</li>
-<li>KV cache 和 vLLM 在噪声范围内一致；长上下文的差异来自 vLLM 的 KDA kernel，不是 pp-impl。</li>
+<li>KV cache 和 vLLM 在噪声范围内一致；长上下文的差异来自 vLLM 的 KDA kernel，不是 SSEngine。</li>
 </ul></div>
 
 <h3 id="s4-1">4.1 调用路径对照</h3>
@@ -363,7 +363,7 @@ nav.lang a[aria-current="page"] { background: var(--accent); color: var(--surfac
 <tr><td>DIFF</td><td>fork 调用的是另一个函数</td><td>5</td></tr>
 </tbody></table></div>
 <ul class="find">
-<li><b>14 个配置直接覆盖</b>（同一函数且库版本等价），21 个需要在 pp-impl 环境里重测。</li>
+<li><b>14 个配置直接覆盖</b>（同一函数且库版本等价），21 个需要在 SSEngine 环境里重测。</li>
 <li><b>DIFF 的配置跟设计走，不跟 fork：</b>KDA prefill 用 FlashInfer 的 persistent <code>recurrent_kda</code>，KDA short conv 用 Dao 的 channel-last 实现，每个 mHC 边界用 DeepGEMM 的 <code>mega_mhc</code>，indexer top-k 按形状选 DeepSelect 或 <code>top_k_per_row_prefill</code>。</li>
 <li><b>目标多算的地方：</b>目标每个 MoE 层算两次 router GEMM，fork 只算一次，所以目标偏慢一点（记入 <code>issues.md</code>）。</li>
 </ul>
@@ -371,7 +371,7 @@ nav.lang a[aria-current="page"] { background: var(--accent); color: var(--surfac
 
 <h3 id="s4-2">4.2 Kernel 重测</h3>
 <ul class="find">
-<li><b>方法：</b>用 ServingStudioSim profiler 自己的 runner，在 pp-impl 的环境里重测 profile DB 的行（cold L2，不写库）。</li>
+<li><b>方法：</b>用 ServingStudioSim profiler 自己的 runner，在 SSEngine 的环境里重测 profile DB 的行（cold L2，不写库）。</li>
 <li><b>全量重测：</b>需要重测的 15 个配置共 3,084 行全部重测。各配置的中位比值在 0.95–1.08 之间，大部分在 0.96–1.01，例如 KDA chunk prefill 1.001，mHC 融合 post+pre 1.000，NVFP4 MoE 1.003。</li>
 <li><b>超出 ±10% 的 154 行</b>里，149 行不到 20 µs，绝对差最多 2.3 µs；另有 5 个 21–101 µs 的 GEMM 快了 10–16%。把这些行换进目标，stage 时间最多变 0.35%，所以目标不变。</li>
 <li><b>本机抽查：</b>35 个配置各取最小、中位、最大一行，共 105 行，中位比值 0.999；超出 ±10% 的 27 行大多是 launch 限制的极小形状。按调用次数加权，对一个 stage 的影响是 −0.2% 到 −0.6%。</li>
@@ -712,7 +712,7 @@ nav.lang a[aria-current="page"] { background: var(--accent); color: var(--surfac
 </ul>
 
 <h3 id="s6-4">6.4 KV pool 的五层结构</h3>
-<p>分层存储重构成 <code>ppimpl/kvpool</code> 下的五层：</p>
+<p>分层存储重构成 <code>ssengine/kvpool</code> 下的五层：</p>
 <ul class="find">
 <li><b>layout：</b>字节范围。</li>
 <li><b>placement：</b>balanced 的 1/4 规则。</li>
@@ -1235,7 +1235,7 @@ nav.lang a[aria-current="page"] { background: var(--accent); color: var(--surfac
 <h3 id="s9-2">9.2 分层里的 KDA state 压缩</h3>
 <p>KDA state 每层是 fp32 的 [H, 128, 128]。写进 DRAM 和 SSD 时按一条阈值规则压缩：|x| &lt; 0.3 的值存成 fp16(x · 2<sup>16</sup>)（2 的幂缩放，缩放本身无误差），其余保留 fp32。</p>
 <ul class="find">
-<li><b>压缩比和误差。</b>在从 pp-impl SSD shard 里取出的 19 个真实 state 上：压缩比约 1.86×，相对 RMS 误差 1.8e-7，最大的 1% 的值无损。大部分 head 的 max|x| &lt; 0.3，整个 head 可以存成定长的 fp16。</li>
+<li><b>压缩比和误差。</b>在从 SSEngine SSD shard 里取出的 19 个真实 state 上：压缩比约 1.86×，相对 RMS 误差 1.8e-7，最大的 1% 的值无损。大部分 head 的 max|x| &lt; 0.3，整个 head 可以存成定长的 fp16。</li>
 <li><b>对照：</b>无损压缩（zstd 加 byte shuffle）只有约 1.15×；同样大小的 bf16 误差大 8 倍；不缩放的 fp16 会把约 22% 的值变成零或非规格化数。</li>
 <li><b>误差不会累积。</b>KDA 的更新对 state 误差是非扩张的（k 是单位向量，β、α ∈ (0, 1)），压缩误差在接着算时不会放大。CPU 上接着算的检查显示，误差比 bf16 输入本身的噪声小 10 倍以上。</li>
 <li><b>编解码只在主机 CPU 上做。</b>满载时 stage 的 SM 全忙，分层路径只用 copy engine（<a href="#s6-1">§6.1</a>），所以不用 GPU 编解码。HBM 里的 state 不压缩。</li>
@@ -1331,15 +1331,15 @@ nav.lang a[aria-current="page"] { background: var(--accent); color: var(--surfac
 </ul>
 <h3 id="s11-3">11.3 代码提交</h3>
 <ul class="find">
-<li>pp-impl：<code>m4-done</code> db6895d，<code>m5-done</code> a167593，lane-m6 afda6f3（kvpool 重构），lane-m6-ssd db48f02 · 016976e · 913eadf · ceff3dc，eval 代码 lanes/m6-eval-run a78dc6f · 9496233（含 9780a2f、14bf48b、ab0099a），lane-m6-pack 8d50066，lane-m6-hostgate 7e391df，lane-m6-next c5d4e09</li>
+<li>SSEngine：<code>m4-done</code> db6895d，<code>m5-done</code> a167593，lane-m6 afda6f3（kvpool 重构），lane-m6-ssd db48f02 · 016976e · 913eadf · ceff3dc，eval 代码 lanes/m6-eval-run a78dc6f · 9496233（含 9780a2f、14bf48b、ab0099a），lane-m6-pack 8d50066，lane-m6-hostgate 7e391df，lane-m6-next c5d4e09</li>
 <li>ServingStudioSim：handoff v2 5153041a（<code>1de110c0</code>），pp-dram-victim 4b93b396 · 08c0e231 · eaab79cd · ef23e439（handoff 文档），pp-staged c7dc261f · 0d19fb23 · b0455c55 · d376d8ff · e4de4292，pp-stable 063c85ae</li>
 </ul>
 <h3 id="s11-4">11.4 复现</h3>
 <p>sim（只用 CPU）：</p>
 <pre class="src">cd wt-pp-staged
 uv run python -m launcher logs/20261018_9_v3_m6/preset.yaml --no-gpu --no-plot --parallelism 14</pre>
-<p>真机 session（pp-impl eval 树，Slurm）：</p>
-<pre class="src">cd pp-impl/lanes/m6-eval-run
+<p>真机 session（SSEngine eval 树，Slurm）：</p>
+<pre class="src">cd lanes/m6-eval-run
 T=data/tracelab-v3/m6/sessions_2ps_v3.csv
 sbatch -p priority --time=00:30:00 --mem=400G bench/slurm/m6.sbatch sched_good_n400 --trace $T \
   --pool-tokens 15273856 --dram-gb 50 --ssd-gb none \

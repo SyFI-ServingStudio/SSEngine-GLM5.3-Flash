@@ -1,4 +1,4 @@
-"""ppimpl/model/moe_tuning.py: the MoE's serving tactic buckets and the served routing it is tuned on (CPU)."""
+"""ssengine/model/moe_tuning.py: the MoE's serving tactic buckets and the served routing it is tuned on (CPU)."""
 
 import json
 import random
@@ -6,8 +6,8 @@ import random
 import pytest
 import torch
 
-from ppimpl.model import moe_tuning as mt
-from ppimpl.model.stage import GRAPH_BUCKETS
+from ssengine.model import moe_tuning as mt
+from ssengine.model.stage import GRAPH_BUCKETS
 
 
 def test_buckets_are_the_graph_buckets_then_powers_of_two():

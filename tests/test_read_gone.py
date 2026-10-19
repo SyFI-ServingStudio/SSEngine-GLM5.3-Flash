@@ -2,10 +2,10 @@
 hit up, then HBM makes room for the round, and those evictions can push the round's own DRAM entry out; `pool.load`
 then returns None and the round computes from what HBM held."""
 
-from ppimpl.config import SchedulerConfig, TierConfig
-from ppimpl.engine.kv import KvManager
-from ppimpl.engine.scheduler import Scheduler
-from ppimpl.kvpool import BalancedKVPool
+from ssengine.config import SchedulerConfig, TierConfig
+from ssengine.engine.kv import KvManager
+from ssengine.engine.scheduler import Scheduler
+from ssengine.kvpool import BalancedKVPool
 
 from tests.test_staged_loading import EXCL, MB, SLOT, put, rnd
 

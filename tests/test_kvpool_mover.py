@@ -1,4 +1,4 @@
-"""One GPU's mover (ppimpl/kvpool/mover.py) on CPU (memmove): pieces of two segments (KV slots, state slots) written to
+"""One GPU's mover (ssengine/kvpool/mover.py) on CPU (memmove): pieces of two segments (KV slots, state slots) written to
 host slots and read back are byte-equal through direct and two hops at several ring shapes; the segments' slots are
 cut into ring chunks together, and `ready` is called before each chunk's host slots are read."""
 
@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 import torch
 
-from ppimpl.kvpool.mover import Mover, Segment
+from ssengine.kvpool.mover import Mover, Segment
 
 SB = 4096
 
@@ -99,7 +99,7 @@ def test_a_transfer_holds_its_direction_unless_it_yields(gated):
 def test_runs_merge_contiguous_pieces_within_a_slot_only():
     """`_runs`: pieces contiguous on both sides merge, but never across slots (adjacent host slots may sit in two
     registered allocations: one copy must not span them)."""
-    from ppimpl.kvpool.mover import _runs
+    from ssengine.kvpool.mover import _runs
     src = np.array([0, 100, 300, 400, 500], dtype=np.int64)
     dst = np.array([1000, 1100, 1300, 1400, 1500], dtype=np.int64)
     lens = np.array([100, 100, 100, 100, 100], dtype=np.int64)

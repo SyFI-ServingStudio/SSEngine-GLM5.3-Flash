@@ -1,6 +1,6 @@
 """Every FlashInfer tactic of the trtllm NVFP4 fused MoE, timed under sustained load at given routings (1 GPU).
 
-The serving tactic file (ppimpl/data/flashinfer_tactics_b200.json, benchmarks/tune_tactics.py) was tuned on the
+The serving tactic file (ssengine/data/flashinfer_tactics_b200.json, benchmarks/tune_tactics.py) was tuned on the
 autotuner's own inputs: FlashInfer regenerates every dynamic-dim input of the profile, so the router logits were
 `torch.rand` (U[0,1)) and the routing came from those plus the layer's correction bias, not from served tokens. This
 times all valid tactics of the GLM-5.3 MoE (288 experts, top 8, hidden 4096, intermediate 2048) at each token count
@@ -17,7 +17,7 @@ the GPU stays loaded as in serving and slow clock drift spreads over all tactics
 Routings (`--routing`, repeatable `name=source`):
   - `json:<path>[:<key>]`  a JSON list of 288 counts, or an object of named lists (key picks one, else all);
   - `experts:<run dir>:<stage>[:<n>]`  the first n (default 4) microbatches of exactly T routed rows in
-    `<run dir>/experts_stage<S>.jsonl` (PPIMPL_LOG_EXPERTS), every MoE layer of each as its own histogram, timed and
+    `<run dir>/experts_stage<S>.jsonl` (SSENGINE_LOG_EXPERTS), every MoE layer of each as its own histogram, timed and
     reported as the mean over histograms; for T without such microbatches, T/4096-scaled sums of 4096-row ones;
   - `synth:<layer>`  what the autotuner tuned on: sigmoid(U[0,1)) + layer <layer>'s correction bias, top 8;
   - `uniform`  sigmoid(U[0,1)) top 8, zero bias (the profiler's own tuning input).
@@ -37,7 +37,7 @@ import time
 from pathlib import Path
 
 from benchmarks.common import PROFILER
-from ppimpl.model.moe_tuning import scale_hist
+from ssengine.model.moe_tuning import scale_hist
 
 OP = "flashinfer::trtllm_fp4_block_scale_moe"
 E, TOP_K, HIDDEN, INTER = 288, 8, 4096, 2048
@@ -57,7 +57,7 @@ def synth_hist(tokens: int, bias, seed: int = 0) -> list[int]:
 
 def layer_bias(layer: int):
     from safetensors import safe_open
-    from ppimpl.config import CHECKPOINT
+    from ssengine.config import CHECKPOINT
     idx = json.loads((Path(CHECKPOINT) / "model.safetensors.index.json").read_text())["weight_map"]
     key = next(k for k in idx if k.endswith(f"layers.{layer}.mlp.gate.e_score_correction_bias"))
     with safe_open(str(Path(CHECKPOINT) / idx[key]), "pt") as f:
@@ -213,7 +213,7 @@ def main():
     import torch
     Forced.install()
     files = {}
-    for f in a.file or ["ppimpl/data/flashinfer_tactics_b200.json"]:
+    for f in a.file or ["ssengine/data/flashinfer_tactics_b200.json"]:
         files[f] = {int(k.split("((")[1].split(",")[0]): tuple(v[1])
                     for k, v in json.loads(Path(f).read_text()).items() if OP in k}
     report = {"job": os.environ.get("SLURM_JOB_ID"), "cases": []}

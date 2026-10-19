@@ -1,6 +1,6 @@
 # M6 retention eval: real engine (PP4 GLM-5.3-Flash NVFP4, 4x B200) vs sim vs vLLM, v3 20-min trace
 
-Real code: pp-impl eval tree lanes/m6-eval-run (a78dc6f = e283243 minus the 32k CUDA graphs; 9496233 adds the excl
+Real code: commit a78dc6f (= e283243 minus the 32k CUDA graphs; 9496233 adds the excl
 read-gone fix, used by 8453, 8462, 8466). Sim: wt-pp-staged logs 20261018_11_v3_m6_c300 (N300), 20261018_9_v3_m6 (N400),
 20261018_13_v3_m6_c100 (N100). Trace data/tracelab-v3/m6/sessions_2ps_v3.csv, closed loop of N sessions.
 Metrics: eval_table.py (windows by first token; TTFT = client first token - submit, server-side differs by 1-5 ms;

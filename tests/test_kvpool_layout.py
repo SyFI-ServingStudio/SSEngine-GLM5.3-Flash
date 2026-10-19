@@ -1,4 +1,4 @@
-"""Which bytes a block or a state owns (ppimpl/kvpool/layout.py) on CPU: fake layer objects shaped like one stage's
+"""Which bytes a block or a state owns (ssengine/kvpool/layout.py) on CPU: fake layer objects shaped like one stage's
 (MLA pages of 2 kernel blocks per logical block, indexer pages of 1, a tail row and KDA (conv, recurrent) rows per
 state block). The real StageKV's ranges are checked by tests/test_kvpool_bytes_gpu.py."""
 
@@ -7,7 +7,7 @@ from types import SimpleNamespace as NS
 import pytest
 import torch
 
-from ppimpl.kvpool.layout import from_stage_kv
+from ssengine.kvpool.layout import from_stage_kv
 
 NB = 5
 

@@ -12,7 +12,7 @@ ServingStudioSim profiler runner's (`dsa_sparse_mla_attention`, PROFILER), case 
     requests' prefix and append give every query row's valid count min(2,176, prefix + i + 1)):
       `mb<i>.ctx`: indices spread over each request's own context, laid out contiguously from slot 0 (a small cache);
       `mb<i>.pool`: the same context positions, each request's KV in blocks of 8,576 tokens placed at random block
-        ids of the stage's pool (`--pool-blocks` x 8,576 slots: the served layout, ppimpl/model/kv*.py);
+        ids of the stage's pool (`--pool-blocks` x 8,576 slots: the served layout, ssengine/model/kv*.py);
   - `u2176.pool`: every row 2,176 indices over the pool (the fully past-prefix case).
 Indices within a context are stratified uniform (one per equal slice of the row's context), unique and ascending.
 

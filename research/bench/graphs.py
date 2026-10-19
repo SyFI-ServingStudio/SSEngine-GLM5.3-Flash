@@ -28,7 +28,7 @@ from pathlib import Path
 from types import SimpleNamespace as NS
 
 from benchmarks import common as lb
-from ppimpl.engine.kv import block_pages
+from ssengine.engine.kv import block_pages
 
 
 def plans_for(Tb: int, tokens: list[int], prev: int | None = None):
@@ -48,8 +48,8 @@ def main() -> None:
     import torch
     from vllm.forward_context import set_forward_context
 
-    from ppimpl.model import pp_patch
-    from ppimpl.model.stage import CHECKPOINT, StageModel, bench_config
+    from ssengine.model import pp_patch
+    from ssengine.model.stage import CHECKPOINT, StageModel, bench_config
 
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--stage", type=int, required=True)
@@ -145,7 +145,7 @@ def main() -> None:
 def memory_check(a, dev, free0) -> None:
     import torch
 
-    from ppimpl.model.stage import CHECKPOINT, StageModel, bench_config
+    from ssengine.model.stage import CHECKPOINT, StageModel, bench_config
 
     gib = lambda v: round(v / 2**30, 2)  # noqa: E731
     model = StageModel(bench_config(a.mb_tokens, cuda_graphs=True), a.stage, dev)

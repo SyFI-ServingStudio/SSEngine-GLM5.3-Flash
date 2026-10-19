@@ -138,8 +138,8 @@ def check(run_dir: Path) -> dict:
 
 
 def _commit(meta: dict) -> str | None:
-    """The ppimpl commit a run recorded at its start (benchmarks/run.py), short."""
-    c = meta.get("ppimpl_commit")
+    """The ssengine commit a run recorded at its start (benchmarks/run.py), short."""
+    c = meta.get("ssengine_commit")
     return None if not c else c[:7] + c[40:]
 
 

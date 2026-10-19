@@ -3,7 +3,7 @@
 # Usage, from the repo root (OUT default research/measured/tier_bw):
 #   mkdir -p research/measured/tier_bw/slurm
 #   sbatch -p main --nice=0 --gres=gpu:4 --mem=64G --time=00:15:00 -o research/measured/tier_bw/slurm/%j.out research/bench/slurm/tier_bw.sbatch
-#SBATCH -J ppimpl-tierbw
+#SBATCH -J ssengine-tierbw
 set -uo pipefail
 source "${SLURM_SUBMIT_DIR:-$(dirname "$0")/../../..}/benchmarks/jobs/env.sh"
 R=$ROOT/${OUT:-measured/tier_bw}/$JOB

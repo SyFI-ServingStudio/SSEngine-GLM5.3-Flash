@@ -1,6 +1,6 @@
 # research/
 
-The bring-up and research history of ppimpl. This directory exists only on the `dev` branch; `main` is `dev` without
+The bring-up and research history of SSEngine (`ssengine`). This directory exists only on the `dev` branch; `main` is `dev` without
 it (`scripts/release.sh`). Nothing here is needed to serve, to run the tests in `tests/`, or to reproduce the results
 in `docs/results/`.
 
@@ -17,4 +17,4 @@ Run the harnesses from the repository root as modules, e.g. `python -m research.
 the product package and `benchmarks/` and share `benchmarks/jobs/env.sh` for paths.
 
 The documents here are historical: they keep the names and paths of the time they were written (the package was
-`ppimpl`, the harnesses lived in `bench/`, the measurements in `measured/`).
+`ppimpl` and the repository pp-impl, the harnesses lived in `bench/`, the measurements in `measured/`).

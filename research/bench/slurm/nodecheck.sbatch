@@ -8,13 +8,13 @@
 # NC_ONLY: optional regex over "<kind>\t<backend>" to re-run a subset of calls;
 # NC_SKIP_H2D=1 skips the H2D bandwidth measurement. Usage, from the repo root:
 #   sbatch -p main -o research/measured/logs/%x-%j.out research/bench/slurm/nodecheck.sbatch
-# PPIMPL_SIM: a ServingStudioSim checkout of pp-main with its profiler venv (`uv sync` there); default
+# SSENGINE_SIM: a ServingStudioSim checkout of pp-main with its profiler venv (`uv sync` there); default
 # <main tree>/third_party/ServingStudioSim (benchmarks/jobs/env.sh).
 # VIBESIM_VLLM_FORK_ROOT (required): a built checkout of the vLLM fork at 892da0822f with its own .venv, the
 # profiler's vllm env.
 set -u
 source "${SLURM_SUBMIT_DIR:-$(dirname "$0")/../../..}/benchmarks/jobs/env.sh"
-SIM=${PPIMPL_SIM:-$MAIN/third_party/ServingStudioSim}
+SIM=${SSENGINE_SIM:-$MAIN/third_party/ServingStudioSim}
 SPECS=$ROOT/measured/nodecheck_specs
 OUT=$ROOT/measured/nodecheck_runs/$SLURM_JOB_ID
 mkdir -p "$OUT"

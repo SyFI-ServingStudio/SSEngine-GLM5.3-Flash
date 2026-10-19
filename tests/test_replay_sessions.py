@@ -5,7 +5,7 @@ import json
 import pytest
 from benchmarks.replay import HANDOFF, MEMORY, Replay, StageModel, load_trace, make_scheduler
 
-from ppimpl.config import BLOCK_PAGES, TierConfig
+from ssengine.config import BLOCK_PAGES, TierConfig
 
 
 class Watched:

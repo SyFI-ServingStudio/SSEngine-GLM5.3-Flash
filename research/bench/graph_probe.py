@@ -13,14 +13,14 @@ from __future__ import annotations
 import argparse
 import time
 
-from ppimpl.engine.kv import block_pages
+from ssengine.engine.kv import block_pages
 from types import SimpleNamespace as NS
 
 
 def main():
     import torch
 
-    from ppimpl.model.stage import StageModel, bench_config
+    from ssengine.model.stage import StageModel, bench_config
 
     ap = argparse.ArgumentParser()
     ap.add_argument("--stage", type=int, default=0)
@@ -159,7 +159,7 @@ def capture_loop(model, buckets, a):
     pool = torch.cuda.graph_pool_handle()
     hidden = None if model.first else torch.zeros(buckets[0], model.hidden_width, dtype=torch.bfloat16,
                                                   device=model.device)
-    from ppimpl.model.stage import GraphEntry, graph_capture
+    from ssengine.model.stage import GraphEntry, graph_capture
 
     with torch.inference_mode():
         for Tb in buckets:

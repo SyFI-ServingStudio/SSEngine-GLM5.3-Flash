@@ -147,7 +147,7 @@ def cases(L: int) -> Cases:
 def prompt(n: int) -> list[int]:
     """The first n tokens of enwik9 (benchmarks/common.py), as every pp-impl check uses."""
     from benchmarks.common import enwik9_tokens
-    from ppimpl.config import CHECKPOINT
+    from ssengine.config import CHECKPOINT
 
     return enwik9_tokens(CHECKPOINT, n)
 

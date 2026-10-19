@@ -1,9 +1,9 @@
-"""CPU tests of the host trims (ppimpl/model/pp_patch.py): plain parameters keep storage and attributes; the
+"""CPU tests of the host trims (ssengine/model/pp_patch.py): plain parameters keep storage and attributes; the
 FlashInfer tactic memo returns what the autotuner returns, with the caller's runner object."""
 
 import torch
 
-from ppimpl.model import pp_patch
+from ssengine.model import pp_patch
 
 
 def test_plain_parameters_same_storage_and_attrs(monkeypatch):
@@ -44,12 +44,12 @@ def test_autotune_memo_matches_and_returns_callers_runner():
     cfg = TuningConfig()
     x = torch.zeros(16, 8)
     r1 = [R(1), R(2)]
-    a = tuner.choose_one("ppimpl_test_op", r1, cfg, [x])
+    a = tuner.choose_one("ssengine_test_op", r1, cfg, [x])
     r2 = [R(1), R(2)]
-    b = tuner.choose_one("ppimpl_test_op", r2, cfg, [x])
+    b = tuner.choose_one("ssengine_test_op", r2, cfg, [x])
     assert a[1] == b[1] and b[0] is r2[r1.index(a[0])]
     assert pp_patch.AUTOTUNE_MEMO_STATS["hit"] >= 1
     # a different shape is a different key
     n = len(pp_patch.AUTOTUNE_MEMO)
-    tuner.choose_one("ppimpl_test_op", r2, cfg, [torch.zeros(32, 8)])
+    tuner.choose_one("ssengine_test_op", r2, cfg, [torch.zeros(32, 8)])
     assert len(pp_patch.AUTOTUNE_MEMO) == n + 1

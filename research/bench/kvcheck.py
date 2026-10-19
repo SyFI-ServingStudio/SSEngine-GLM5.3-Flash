@@ -33,7 +33,7 @@ import time
 from types import SimpleNamespace as NS
 
 from benchmarks.common import MEASURED, enwik9_tokens
-from ppimpl.engine.kv import block_pages
+from ssengine.engine.kv import block_pages
 
 OUT = MEASURED / "kvcheck"
 JOB = os.environ.get("SLURM_JOB_ID", "local")
@@ -91,9 +91,9 @@ def _rel(x, a) -> float:
 
 def _worker(rank: int, L: int, chunk: int, port: int, chunk_b: int | None = None) -> None:
     import torch
-    from ppimpl.config import HIDDEN_WIDTH, RunConfig, SchedulerConfig
-    from ppimpl.model.stage import CHECKPOINT, StageModel, bench_config
-    from ppimpl.runtime.transport import open_pipe
+    from ssengine.config import HIDDEN_WIDTH, RunConfig, SchedulerConfig
+    from ssengine.model.stage import CHECKPOINT, StageModel, bench_config
+    from ssengine.runtime.transport import open_pipe
     from vllm.forward_context import set_forward_context
 
     dev = torch.device("cuda", rank)

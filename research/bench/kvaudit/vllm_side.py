@@ -129,7 +129,7 @@ def main() -> None:
     import torch
     from vllm import LLM, SamplingParams
 
-    from ppimpl.config import CHECKPOINT
+    from ssengine.config import CHECKPOINT
 
     cs = C.cases(a.length)
     todo = [c for c in cs.vllm if not a.only or c.name in a.only]

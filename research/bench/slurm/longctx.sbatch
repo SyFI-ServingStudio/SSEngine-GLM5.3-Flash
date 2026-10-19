@@ -9,7 +9,7 @@
 # runs: the benchmarks.run commands in RUNS (";"-separated argument lists, e.g. "prefix_bringup --trace X --run-name a;
 #   prefix_bringup --trace Y --run-name b"), each on a fresh server, one after another, into OUT (default
 #   research/measured/runs_lc); stops at the first failure. Uptime before and after each.
-#SBATCH -J ppimpl-lc
+#SBATCH -J ssengine-lc
 #SBATCH --gres=gpu:4
 set -uo pipefail
 source "${SLURM_SUBMIT_DIR:-$(dirname "$0")/../../..}/benchmarks/jobs/env.sh"

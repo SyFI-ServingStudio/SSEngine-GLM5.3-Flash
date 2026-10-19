@@ -4,9 +4,9 @@
 # /v1/completions (text), one with token ids and one /v1/chat/completions answer, then a graceful stop. From the repo
 # root:
 #   mkdir -p runs/logs
-#   IMAGE=ppimpl sbatch -p <partition> --time=00:30:00 -o runs/logs/%j.out benchmarks/jobs/docker_smoke.sbatch
+#   IMAGE=ssengine sbatch -p <partition> --time=00:30:00 -o runs/logs/%j.out benchmarks/jobs/docker_smoke.sbatch
 # The container gets the job's GPUs by UUID (docker's devices are not Slurm's cgroup), the HF cache read-only
-# (HF_HUB_OFFLINE) and the JIT caches in the volume CACHE (default ppimpl-cache-$USER). Options:
+# (HF_HUB_OFFLINE) and the JIT caches in the volume CACHE (default ssengine-cache-$USER). Options:
 #   CACHE=fresh  a new empty cache volume, removed at the end: the first start of a pulled image
 #   OFFLINE=1    no network in the container (--network none, FLASHINFER_NO_DOWNLOAD): requests through `docker exec`
 #   SEED_OUT=F   after the run, write to F the cache files the run made that the image's seed lacks (the GPU seed,
@@ -19,12 +19,12 @@
 set -uo pipefail
 {
 source "${SLURM_SUBMIT_DIR:-$(dirname "$0")/../..}/benchmarks/jobs/env.sh"
-IMAGE=${IMAGE:-ppimpl}
+IMAGE=${IMAGE:-ssengine}
 MODEL=${MODEL:-}
-CACHE=${CACHE:-ppimpl-cache-$USER}
-[ "$CACHE" = fresh ] && { CACHE=ppimpl-smoke-$JOB; FRESH=1; } || FRESH=0
-P=${PPIMPL_PORT:-$((20000 + ${SLURM_JOB_ID:-0} % 120 * 100))}
-NAME=ppimpl-smoke-$JOB
+CACHE=${CACHE:-ssengine-cache-$USER}
+[ "$CACHE" = fresh ] && { CACHE=ssengine-smoke-$JOB; FRESH=1; } || FRESH=0
+P=${SSENGINE_PORT:-$((20000 + ${SLURM_JOB_ID:-0} % 120 * 100))}
+NAME=ssengine-smoke-$JOB
 OUT=$ROOT/runs/logs/docker_smoke_$JOB
 mkdir -p "$OUT"
 # the job's GPUs: all nvidia-smi sees when Slurm's cgroup hides the others, else CUDA_VISIBLE_DEVICES of them
@@ -35,7 +35,7 @@ UUIDS=$(nvidia-smi "${SEL[@]}" --query-gpu=uuid --format=csv,noheader | paste -s
 echo "== $(date -Is) image $IMAGE ($(docker image inspect -f '{{.Id}}' "$IMAGE" | cut -c1-19)) gpus $UUIDS port $P" \
      "cache $CACHE fresh=$FRESH offline=${OFFLINE:-0}"
 [ $FRESH = 1 ] && { docker volume rm "$CACHE" > /dev/null 2>&1; docker volume create "$CACHE" > /dev/null; }
-COMPOSE=(docker compose -p "ppimpl-smoke-$JOB" -f "$ROOT/docker/compose.yaml" -f "$OUT/compose.gpus.yaml")
+COMPOSE=(docker compose -p "ssengine-smoke-$JOB" -f "$ROOT/docker/compose.yaml" -f "$OUT/compose.gpus.yaml")
 cleanup() {
   docker rm -f "$NAME" > /dev/null 2>&1
   [ -f "$OUT/compose.gpus.yaml" ] && "${COMPOSE[@]}" down -v > /dev/null 2>&1
@@ -110,7 +110,7 @@ if [ -n "${SEED_OUT:-}" ] && [ $rc = 0 ]; then
   docker run --rm --entrypoint bash -v "$CACHE:/c:ro" -v "$(realpath "$(dirname "$SEED_OUT")"):/out" "$IMAGE" -c '
     cd /c && find . -path ./huggingface -prune -o -type f -print | sed "s|^\./||" \
       | grep -Ev "(\.lock$|/tmp/|/\.staging/|^vllm/modelinfos/)" \
-      | while read -r f; do [ -e "/opt/ppimpl/jit-seed/$f" ] || echo "$f"; done | sort > /out/.seed.list
+      | while read -r f; do [ -e "/opt/ssengine/jit-seed/$f" ] || echo "$f"; done | sort > /out/.seed.list
     tar -cf "/out/'"$(basename "$SEED_OUT")"'" -T /out/.seed.list && rm /out/.seed.list' \
     && echo "== GPU seed $SEED_OUT: $(tar -tf "$SEED_OUT" | wc -l) files, $(du -h "$SEED_OUT" | cut -f1);" \
             "$(tar -tf "$SEED_OUT" | cut -d/ -f1 | sort | uniq -c | tr '\n' ' ')" \
@@ -122,14 +122,14 @@ if [ "${TIERS:-0}" = 1 ] && [ $rc = 0 ]; then
   SSD_DIR=${SSD_DIR:-$MAIN/tmp/ssd_docker}
   TIER_ARGS=${TIER_ARGS:---dram-gb 20 --ssd-gb 8}
   ids=$(tr , '\n' <<< "$UUIDS" | sed 's/.*/"&"/' | paste -sd, -)
-  printf 'services:\n  ppimpl:\n    deploy:\n      resources:\n        reservations:\n          devices: !override\n            - {driver: nvidia, device_ids: [%s], capabilities: [gpu]}\n    environment: {HF_HUB_OFFLINE: "1"}\n' \
+  printf 'services:\n  ssengine:\n    deploy:\n      resources:\n        reservations:\n          devices: !override\n            - {driver: nvidia, device_ids: [%s], capabilities: [gpu]}\n    environment: {HF_HUB_OFFLINE: "1"}\n' \
     "$ids" > "$OUT/compose.gpus.yaml"
-  export PPIMPL_IMAGE=$IMAGE PPIMPL_PORT=$P HF_CACHE=$HF_HOME PPIMPL_SSD_DIR=$SSD_DIR \
-         PPIMPL_ARGS="--served-model-name glm53-flash $TIER_ARGS --ssd-dir /ssd"
-  echo "== compose: $PPIMPL_ARGS (ssd dir $SSD_DIR)"
+  export SSENGINE_IMAGE=$IMAGE SSENGINE_PORT=$P HF_CACHE=$HF_HOME SSENGINE_SSD_DIR=$SSD_DIR \
+         SSENGINE_ARGS="--served-model-name glm53-flash $TIER_ARGS --ssd-dir /ssd"
+  echo "== compose: $SSENGINE_ARGS (ssd dir $SSD_DIR)"
   URL=http://127.0.0.1:$P      # compose publishes the port (its container has the network)
   "${COMPOSE[@]}" up -d || rc=1
-  C=$("${COMPOSE[@]}" ps -q ppimpl)
+  C=$("${COMPOSE[@]}" ps -q ssengine)
   "${COMPOSE[@]}" logs -f > "$OUT/compose.log" 2>&1 &
   if [ $rc = 0 ] && wait_health "$URL" "[ \"\$(docker inspect -f '{{.State.Running}}' $C)\" = true ]"; then
     ask "$URL" tiers || rc=1
@@ -149,7 +149,7 @@ if [ "${TIERS:-0}" = 1 ] && [ $rc = 0 ]; then
 fi
 
 if [ "${NATIVE:-0}" = 1 ] && [ $rc = 0 ]; then
-  HF_HUB_OFFLINE=1 $PY -m ppimpl serve ${MODEL:+"$MODEL"} --served-model-name glm53-flash --host 127.0.0.1 --port "$P" \
+  HF_HUB_OFFLINE=1 $PY -m ssengine serve ${MODEL:+"$MODEL"} --served-model-name glm53-flash --host 127.0.0.1 --port "$P" \
     --run-dir "$OUT/native_run" > "$OUT/native.log" 2>&1 &
   SRV=$!
   if wait_health "http://127.0.0.1:$P" "kill -0 $SRV 2> /dev/null"; then

@@ -1,6 +1,6 @@
 """Two-hop tier copies on the GPUs, the pool's own code path (lanes/m6 TIERS.md §2.3 "Second hop").
 
-One process drives the job's 4 GPUs with four `PoolMember`s (`ppimpl/kvpool/member.py`, `hops = "two"`), each on its
+One process drives the job's 4 GPUs with four `PoolMember`s (`ssengine/kvpool/member.py`, `hops = "two"`), each on its
 own GPU, over fake per-stage KV laid out like GLM-5.3 PP4 (DSA layers 3/2/3/3 at 545 B/token each, split 4:1
 between an MLA-like and an indexer-like view; KDA states 9/9/8/8 of 4 MiB + 144 KiB; a 2 KiB tail per DSA layer).
 Measured, every result one JSON line in OUT/tier_hop2.jsonl:
@@ -24,10 +24,10 @@ from types import SimpleNamespace as NS
 
 import torch
 
-from ppimpl.config import HIDDEN_WIDTH, TierConfig
-from ppimpl.kvpool import member
-from ppimpl.kvpool.layout import ViewRange
-from ppimpl.runtime.transport import TierMove
+from ssengine.config import HIDDEN_WIDTH, TierConfig
+from ssengine.kvpool import member
+from ssengine.kvpool.layout import ViewRange
+from ssengine.runtime.transport import TierMove
 
 B = 8576
 DSA = [3, 2, 3, 3]

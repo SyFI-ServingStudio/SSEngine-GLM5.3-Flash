@@ -1,4 +1,4 @@
-"""CPU timing-model executor: the real `ppimpl.engine` (scheduler, KV, tiers) driven by a discrete-event pipeline.
+"""CPU timing-model executor: the real `ssengine.engine` (scheduler, KV, tiers) driven by a discrete-event pipeline.
 
 Not the product: the product drives the same engine from the controller with real GPU times. This replays a handoff
 trace with stage times from a model, to check the engine's decisions on CPU:
@@ -45,10 +45,10 @@ import numpy as np
 import yaml
 
 from benchmarks.common import HANDOFF
-from ppimpl.config import BLOCK_TOKENS, SCHEDULER_STEPS, SchedulerConfig, TierConfig
-from ppimpl.engine.kv import KvManager
-from ppimpl.engine.scheduler import Request, Scheduler
-from ppimpl.kvpool import BalancedKVPool, KVViews
+from ssengine.config import BLOCK_TOKENS, SCHEDULER_STEPS, SchedulerConfig, TierConfig
+from ssengine.engine.kv import KvManager
+from ssengine.engine.scheduler import Request, Scheduler
+from ssengine.kvpool import BalancedKVPool, KVViews
 
 NUM_STAGES = 4
 POOL_TOKENS = 61_258_368

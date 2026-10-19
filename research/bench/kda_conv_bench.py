@@ -1,4 +1,4 @@
-"""KDA short conv of one layer: the per-sequence Dao calls the design prices (the reference) vs `ppimpl.model.kda_conv`
+"""KDA short conv of one layer: the per-sequence Dao calls the design prices (the reference) vs `ssengine.model.kda_conv`
 (two launches), bitwise and timed, on 1 GPU.
 
   python -m research.bench.kda_conv_bench [--reps 100] [--out x.json]
@@ -6,7 +6,7 @@
 Cases: one 4,096-row sequence (fresh, and continuing a conv state), served-like multi-sequence microbatches with
 initial states, sequences shorter than the conv width, 8,192 rows. q, k, v and the whole conv-state pool (paged as vLLM
 binds it: blocks a page apart) must be bitwise equal to the Dao calls'. Then the KDA recurrent state gather / scatter
-(ppimpl.model.kda_state) vs torch index_select / index_copy_. Times: CUDA events over `reps` back-to-back calls,
+(ssengine.model.kda_state) vs torch index_select / index_copy_. Times: CUDA events over `reps` back-to-back calls,
 interleaved by variant, median of 5 rounds; the bound is reading and writing the bytes once at 8 TB/s.
 """
 
@@ -16,7 +16,7 @@ import statistics
 
 import torch
 
-from ppimpl.model import kda_conv
+from ssengine.model import kda_conv
 
 P = 8192                 # 64 heads x 128
 C = 3 * P
@@ -81,7 +81,7 @@ def timed(fs: dict, reps: int) -> dict:
 
 def state_cases(dev, g, reps: int) -> dict:
     """KDA recurrent state gather (zeros for fresh requests) and scatter: the torch ops of pp_patch vs kda_state."""
-    from ppimpl.model import kda_state
+    from ssengine.model import kda_state
     pool0 = paged(torch.randn(40, 64 * 128 * 128 + 1024, generator=g, device=dev), (40, 64, 128, 128))
     out = {}
     for name, inits in STATE_CASES.items():

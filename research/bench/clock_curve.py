@@ -8,7 +8,7 @@ ms = a + b / MHz (least squares), and the fit's ms at `--at` MHz (the serving cl
 
 Kernels (`--kernels`, in order):
   - `moe`: the trtllm NVFP4 fused MoE (FC1 + FC2 + routing + finalize as served), 4,096 tokens, tactic [128,41], the
-    first 4,096-row stage-2 microbatch's MoE layer 0 of `--experts` (PPIMPL_LOG_EXPERTS run) as routing;
+    first 4,096-row stage-2 microbatch's MoE layer 0 of `--experts` (SSENGINE_LOG_EXPERTS run) as routing;
   - `mla`: TRTLLM sparse MLA, 4,096 queries of one request at prefix 30,104 (2,176 indices each), as
     research.bench.sparse_mla_shapes builds it.
 

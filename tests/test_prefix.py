@@ -2,9 +2,9 @@
 
 import pytest
 
-from ppimpl.config import BLOCK_PAGES, BLOCK_TOKENS, PAGE_TOKENS, SchedulerConfig
-from ppimpl.engine.kv import STATE_TOKENS, KvManager, kv_pages_for, pages_for
-from ppimpl.engine.scheduler import Request, Scheduler
+from ssengine.config import BLOCK_PAGES, BLOCK_TOKENS, PAGE_TOKENS, SchedulerConfig
+from ssengine.engine.kv import STATE_TOKENS, KvManager, kv_pages_for, pages_for
+from ssengine.engine.scheduler import Request, Scheduler
 
 
 def rnd(name, session, prefix, new, token_ids=None):

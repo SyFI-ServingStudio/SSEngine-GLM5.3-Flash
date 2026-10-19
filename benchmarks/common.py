@@ -1,6 +1,6 @@
 """Shared by the bench harnesses: repo paths, the handoff inputs, and one request on enwik9 as a stage plan.
 
-Every harness runs from the repo root as a module (`python -m benchmarks.<name>`), so `ppimpl` and `benchmarks` import
+Every harness runs from the repo root as a module (`python -m benchmarks.<name>`), so `ssengine` and `benchmarks` import
 normally.
 """
 
@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import os
 
-from ppimpl.engine.kv import block_pages
+from ssengine.engine.kv import block_pages
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -18,19 +18,19 @@ ROOT = Path(__file__).resolve().parents[1]
 MAIN = ROOT.parents[1] if ROOT.parent.name == "lanes" else ROOT
 MEASURED = ROOT / "research" / "measured"     # bring-up data (dev branch only); runs go to ROOT / "runs"
 # A ServingStudioSim checkout of branch pp-main (env/make_env.sh clones it): req-frontend, the client.
-SIM = Path(os.environ.get("PPIMPL_SIM") or MAIN / "third_party" / "ServingStudioSim")
+SIM = Path(os.environ.get("SSENGINE_SIM") or MAIN / "third_party" / "ServingStudioSim")
 # The frozen handoff in use (read-only: data/ traces, targets and the microbatch fit): glm53_flash_pp4_b200_v2 at
-# ServingStudioSim 5153041a, linked at third_party/handoff (PPIMPL_HANDOFF overrides it).
-HANDOFF = Path(os.environ.get("PPIMPL_HANDOFF") or MAIN / "third_party" / "handoff")
+# ServingStudioSim 5153041a, linked at third_party/handoff (SSENGINE_HANDOFF overrides it).
+HANDOFF = Path(os.environ.get("SSENGINE_HANDOFF") or MAIN / "third_party" / "handoff")
 # The client, req-frontend (request-factory), its own checkout at REQ_FRONTEND_COMMIT or later (env/make_env.sh): the
 # session slot is freed when a session's last round completes, as the sim's CapacityLimit::on_completion does
 # (REQ_FRONTEND_SLOT_RELEASE; before it the client slept the last round's tool wait holding the slot: N=400 offered
 # ~2.5% fewer rounds, 7733 / 7895).
-REQ_FRONTEND = Path(os.environ.get("PPIMPL_REQ_FRONTEND") or MAIN / "third_party" / "req-frontend")
+REQ_FRONTEND = Path(os.environ.get("SSENGINE_REQ_FRONTEND") or MAIN / "third_party" / "req-frontend")
 REQ_FRONTEND_COMMIT = "8723d90d4dcfcc526f49cce9fa7b50925f8635e0"
 REQ_FRONTEND_SLOT_RELEASE = "8723d90d4dcfcc526f49cce9fa7b50925f8635e0"
 # The prompt corpus (http://mattmahoney.net/dc/enwik9.zip, unzipped; env/make_env.sh fetches it).
-ENWIK9 = Path(os.environ.get("PPIMPL_ENWIK9") or MAIN / "third_party" / "enwik9")
+ENWIK9 = Path(os.environ.get("SSENGINE_ENWIK9") or MAIN / "third_party" / "enwik9")
 # The ServingStudioSim profiler package (`profiling`) at the handoff's frozen commit 7bb224a6 (env/make_env.sh).
 PROFILER = MAIN / "third_party" / "sim_7bb224a6"
 

@@ -11,9 +11,9 @@
 #     n16_1k:saturated_1k --intake-procs 16"                                                    # first TTFT (7390)
 #   OUT=research/measured/runs_perf STUDY="early:saturated_8k --nsys --nsys-mbs 0:10;\
 #     steady:saturated_8k --nsys --nsys-mbs 1000:1010;one:one_8k --nsys;\
-#     sync:PPIMPL_SYNC_EACH_MB=1 saturated_8k"                                                  # kernel classes (7392)
+#     sync:SSENGINE_SYNC_EACH_MB=1 saturated_8k"                                                  # kernel classes (7392)
 #   OUT=research/measured/runs_perf SAMPLE=1 REVERSE=1 STUDY="perm:saturated_8k"                          # GPU placement (7396)
-#SBATCH -J ppimpl-study
+#SBATCH -J ssengine-study
 #SBATCH --gres=gpu:4
 set -uo pipefail
 source "${SLURM_SUBMIT_DIR:-$(dirname "$0")/../../..}/benchmarks/jobs/env.sh"

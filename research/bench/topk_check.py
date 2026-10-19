@@ -52,8 +52,8 @@ def main() -> None:
     ap.add_argument("--calls", type=int, default=5)
     a = ap.parse_args()
 
-    from ppimpl.model import pp_patch
-    from ppimpl.model.topk_canon import canonical_topk_torch
+    from ssengine.model import pp_patch
+    from ssengine.model.topk_canon import canonical_topk_torch
     from vllm.model_executor.layers import indexer_topk
     from vllm.v1.worker.workspace import init_workspace_manager
 

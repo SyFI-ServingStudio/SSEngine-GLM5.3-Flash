@@ -4,7 +4,7 @@ once, never cross a sequence, and carry its (start, end, state block, has initia
 
 import numpy as np
 
-from ppimpl.model import kda_conv
+from ssengine.model import kda_conv
 
 
 def test_tables_cover_rows_once():

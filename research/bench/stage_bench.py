@@ -11,7 +11,7 @@ seeded random hidden rows on later stages. Modes:
 - kernels: the same under torch.profiler: per forward, each kernel's and memcpy's time and count, and the gaps (span
   minus the union of the GPU activities), by name.
 - stacks: eager (no graphs) under torch.profiler with Python stacks: each kernel name's launch sites (the innermost
-  frames in ppimpl / vllm / flashinfer), to find the code behind glue kernels.
+  frames in ssengine / vllm / flashinfer), to find the code behind glue kernels.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ import json
 import random
 import statistics
 
-from ppimpl.engine.kv import block_pages
+from ssengine.engine.kv import block_pages
 from pathlib import Path
 from types import SimpleNamespace as NS
 
@@ -60,8 +60,8 @@ def sm_clock(dev_index: int) -> int | None:
 def main():
     import torch
 
-    from ppimpl.config import CHECKPOINT
-    from ppimpl.model.stage import StageModel, bench_config
+    from ssengine.config import CHECKPOINT
+    from ssengine.model.stage import StageModel, bench_config
 
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--stage", type=int, default=0)
@@ -163,7 +163,7 @@ def kernels(prof, reps: int) -> dict:
 
 def stacks(prof, reps: int) -> dict:
     """Kernel name -> launch sites: the CPU op that launched each kernel, its innermost frames in our code."""
-    keep = ("ppimpl/", "vllm/", "flashinfer/", "fla/")
+    keep = ("ssengine/", "vllm/", "flashinfer/", "fla/")
     sites = collections.defaultdict(lambda: collections.Counter())
     tot = collections.defaultdict(lambda: [0, 0.0])
     for e in prof.events():

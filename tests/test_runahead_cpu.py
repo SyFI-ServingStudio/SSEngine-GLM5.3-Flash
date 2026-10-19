@@ -1,6 +1,6 @@
-"""RunAhead (ppimpl/runtime/worker.py): which earlier microbatches the main thread waits for before a launch."""
+"""RunAhead (ssengine/runtime/worker.py): which earlier microbatches the main thread waits for before a launch."""
 
-from ppimpl.runtime.worker import RunAhead
+from ssengine.runtime.worker import RunAhead
 
 
 class Ev:

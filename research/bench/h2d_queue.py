@@ -6,7 +6,7 @@ of `--piece-mb` from pinned host memory into HBM on their own stream, topped up 
 stream, one of:
   ce        a `--small-mb` pinned tensor .to(device, non_blocking=True) (the Pack.copy of a microbatch's metadata)
   ce_hi     the same on a highest-priority stream
-  sm        the same bytes by `ppimpl.model.sm_h2d.SmH2D` (a kernel reading mapped pinned memory)
+  sm        the same bytes by `ssengine.model.sm_h2d.SmH2D` (a kernel reading mapped pinned memory)
   pageable  7 x torch.tensor(<64 ints>, device=...) + synchronize (FlashInfer KDA make_plan, `_kda_plan`)
 Per foreground op: host time from before its launch to its completion (spinning on an event after it; includes
 ~10 us of launch), and GPU time between events before and after it on its idle stream (an event ahead of a copy
@@ -22,8 +22,8 @@ import time
 import numpy as np
 import torch
 
-from ppimpl.kvpool.mover import Driver
-from ppimpl.model.sm_h2d import SmH2D
+from ssengine.kvpool.mover import Driver
+from ssengine.model.sm_h2d import SmH2D
 
 
 def run_case(bg: str, op: str, depth: int, a, drv: Driver, st_bg, iters: int, flags: int = 0):

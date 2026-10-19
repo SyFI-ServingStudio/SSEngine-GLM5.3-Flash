@@ -11,7 +11,7 @@ direct - ahead is what the host costs the stage on the GPU timeline. With --idle
 thread sleeps X ms before each forward, as a worker blocks on its plan socket between microbatches) and
 `direct_spin` (it busy-waits X ms instead): what an idle, cold host thread adds. Also the host time of `forward` (perf
 counter), and with --profile one cProfile of a direct forward (top functions by own and by cumulative time).
-With --stamps, low-overhead host timings of direct forwards (ppimpl/runtime/host_stamps.py): when each graph
+With --stamps, low-overhead host timings of direct forwards (ssengine/runtime/host_stamps.py): when each graph
 segment and eager break starts after the forward's start, each chosen function's inclusive time, GC time.
 """
 
@@ -25,14 +25,14 @@ import random
 import statistics
 import time
 
-from ppimpl.engine.kv import block_pages
+from ssengine.engine.kv import block_pages
 from pathlib import Path
 from types import SimpleNamespace as NS
 
 def main():
     import torch
 
-    from ppimpl.model.stage import StageModel, bench_config
+    from ssengine.model.stage import StageModel, bench_config
 
     ap = argparse.ArgumentParser()
     ap.add_argument("--stage", type=int, default=0)
@@ -116,11 +116,11 @@ def main():
 
 
 def stamps(model, plan, hidden, dev, reps: int) -> dict:
-    """--stamps: segment start times and function times (ppimpl.runtime.host_stamps) over `reps` direct forwards,
+    """--stamps: segment start times and function times (ssengine.runtime.host_stamps) over `reps` direct forwards,
     medians per forward."""
     import torch
 
-    from ppimpl.runtime.host_stamps import HostStamps
+    from ssengine.runtime.host_stamps import HostStamps
 
     st = HostStamps(model)
     if st.missing:

@@ -16,7 +16,7 @@ set -u
 source "${SLURM_SUBMIT_DIR:-$(dirname "$0")/../../..}/benchmarks/jobs/env.sh"
 eval "$($PY -c "
 from benchmarks.common import ENWIK9, HANDOFF, REQ_FRONTEND
-from ppimpl.config import CHECKPOINT
+from ssengine.config import CHECKPOINT
 print(f'RF={REQ_FRONTEND} HANDOFF={HANDOFF} SNAP={CHECKPOINT} ENWIK9={ENWIK9}')")"
 OUT=$ROOT/${OUT:-measured/runs_lc/reference_long}
 SESSIONS=${SESSIONS:-30,35}

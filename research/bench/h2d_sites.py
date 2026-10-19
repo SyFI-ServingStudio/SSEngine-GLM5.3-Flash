@@ -16,14 +16,14 @@ from types import SimpleNamespace as NS
 
 from benchmarks import common as lb
 from research.bench.overlap import make_plans
-from ppimpl.engine.kv import block_pages
+from ssengine.engine.kv import block_pages
 
 
 def main() -> None:
     import torch
     from torch.overrides import TorchFunctionMode
 
-    from ppimpl.model.stage import CHECKPOINT, StageModel, bench_config
+    from ssengine.model.stage import CHECKPOINT, StageModel, bench_config
 
     ap = argparse.ArgumentParser()
     ap.add_argument("--stage", type=int, default=0)

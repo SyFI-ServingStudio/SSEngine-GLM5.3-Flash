@@ -27,11 +27,11 @@ VARIANTS = ("hbm_hit", "hbm", "dram", "ssd", "dram_unbal", "ssd_unbal")
 
 # Victim-chain settings (HBM -> DRAM -> SSD, TIERS.md §5): name -> (sim run, HBM GB, `--pool-tokens`, DRAM GB per
 # GPU); SSD 128 GB per GPU. Targets: the simulator's rows of these runs, copied from the sim run 20261017_7_victim_chain
-# (PPIMPL_VICTIM_TARGETS overrides the path).
+# (SSENGINE_VICTIM_TARGETS overrides the path).
 VICTIM_SETTINGS = {"full": ("full_d50", 100.18, None, 50.0),
                    "tiers": ("h20_d20", 20.0, 12_220_800, 20.0),
                    "ssd_heavy": ("h12p5_d12p5", 12.5, 7_632_640, 12.5)}
-VICTIM_TARGETS = Path(os.environ.get("PPIMPL_VICTIM_TARGETS") or ROOT / "measured" / "victim_chain_rows.jsonl")
+VICTIM_TARGETS = Path(os.environ.get("SSENGINE_VICTIM_TARGETS") or ROOT / "measured" / "victim_chain_rows.jsonl")
 
 
 def victim_target(setting: str, n: int, rows: Path = VICTIM_TARGETS) -> dict | None:
@@ -238,7 +238,7 @@ def trace_parts(op: dict) -> dict:
 
 def trace_summary(run_dir: Path) -> dict | None:
     """Per kind (read / write), p50 and mean of trace_parts over every traced op on every GPU. The trace holds 1 DRAM
-    op in `every` (PPIMPL_TIER_TRACE; older traces: every op): `ops` counts the ops it stands for, `traced` the lines;
+    op in `every` (SSENGINE_TIER_TRACE; older traces: every op): `ops` counts the ops it stands for, `traced` the lines;
     counts and totals of tier ops come from tier_ops.jsonl, not from here."""
     rows: dict[str, list] = {}
     every: dict[str, int] = {}

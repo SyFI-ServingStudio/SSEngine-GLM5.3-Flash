@@ -1,4 +1,4 @@
-"""Run handoff workloads against `python -m ppimpl serve` with req-frontend: one entry per run name.
+"""Run handoff workloads against `python -m ssengine serve` with req-frontend: one entry per run name.
 
   python -m benchmarks.run one_8k saturated_8k [--fake] --time 00:20:00 [--partition main]   submit one Slurm job
   python -m benchmarks.run one_8k --fake --inline                                                 run here (no Slurm)
@@ -7,7 +7,7 @@
 Names: one_<L>, saturated_<L> (4_iteration.md), L in 1k..128k; tier_bringup (7_offloading.md, pool 1,234,944 tokens;
 tiers from --dram-gb/--ssd-gb); prefix_bringup and prefix_n<N> (5_prefix_cache.md,
 prefix cache on: `keep_sessions`); sched_check_<step>, force_check_<step> and sched_<step>_n<N> (6_scheduler.md, step
-one of ppimpl.config.SCHEDULER_STEPS: plain, srpt8k, budget, even, good; prefix_n<N> is sched_plain_n<N>).
+one of ssengine.config.SCHEDULER_STEPS: plain, srpt8k, budget, even, good; prefix_n<N> is sched_plain_n<N>).
 Session runs (prefix_n<N>, sched_<step>_n<N>) run the client under `timeout 22m`: 1_contract.md §2.2
 says 20 min, but req-frontend first spends ~45 s tokenizing the corpus (measured, loaded host) and t = 0 is its first
 submit; rounds answered after 20 min are not counted (data/metrics.py), so the extra 2 min change no number.
@@ -37,8 +37,8 @@ import msgspec
 import yaml
 
 from benchmarks.common import ENWIK9, HANDOFF, REQ_FRONTEND, REQ_FRONTEND_SLOT_RELEASE, ROOT, free_port_block
-from ppimpl.config import CHECKPOINT, SCHEDULER_STEPS
-from ppimpl.runtime.cpus import cpu_list
+from ssengine.config import CHECKPOINT, SCHEDULER_STEPS
+from ssengine.runtime.cpus import cpu_list
 
 CLIENT_BIN = ROOT / "build/req-frontend/release/session_runner"   # built from REQ_FRONTEND (ensure_client_bin)
 CHECKPOINT = Path(CHECKPOINT)
@@ -86,7 +86,7 @@ def hold_for(trace: Path) -> int:
     return sum(float(r.split(",")[col]) == 0 for r in rows[1:] if r.strip())
 
 
-# A plan forms this long before its predicted host time ahead of its projected stage-0 start (ppimpl/runtime/
+# A plan forms this long before its predicted host time ahead of its projected stage-0 start (ssengine/runtime/
 # dispatch.py). Longer: arrivals in the window miss the microbatch the targets would put them in (they form at the
 # start); shorter: stage 0 idles where its time was over-predicted by more (up to the report path's ~1.4 ms). From
 # 7763/7764's stage-0 prediction errors: 3 ms costs 0.23 / 0.24 s/min of stage-0 idle at N=400 / 500 and moves 138 / 84
@@ -253,7 +253,7 @@ def nsys_prefix(run_dir: Path, window: int) -> list[str]:
     trace.nsys-rep, then nsys numbers the next ones)."""
     argv = [NSYS, "profile", "-o", str(run_dir / "trace"), "--force-overwrite", "true", "-t", "cuda,nvtx,osrt",
             "--cuda-graph-trace=node"]
-    if os.environ.get("PPIMPL_NSYS_HOST"):   # where host time goes: CPU + Python samples, context switches
+    if os.environ.get("SSENGINE_NSYS_HOST"):   # where host time goes: CPU + Python samples, context switches
         argv += ["--sample=process-tree", "--cpuctxsw=process-tree", "--python-sampling=true",
                  "--python-sampling-frequency=1000", "--python-backtrace=cuda"]
     else:
@@ -307,14 +307,14 @@ def execute(run_dir: Path, server_cfg: dict, client_cfg: dict, *, port: int, met
     meta = {**meta, "port": port, "job_id": os.environ.get("SLURM_JOB_ID"), "host": os.uname().nodename,
             "gpus": os.environ.get("CUDA_VISIBLE_DEVICES"), "gpu_bus": gpu_bus(os.environ.get("CUDA_VISIBLE_DEVICES")),
             "run_cpus": cpu_list(os.sched_getaffinity(0)),
-            "ppimpl_commit": git_rev(ROOT), "req_frontend_commit": git_rev(REQ_FRONTEND),
+            "ssengine_commit": git_rev(ROOT), "req_frontend_commit": git_rev(REQ_FRONTEND),
             "client": client_info()}   # fails before the server starts if the binary is not REQ_FRONTEND's build
     uptime = subprocess.run(["uptime"], capture_output=True, text=True).stdout.strip()
     (run_dir / "uptime.txt").write_text(uptime + "\n")
     meta["uptime"] = uptime
     print(f"[{run_dir.name}] uptime: {uptime}", flush=True)
 
-    serve = [PYTHON, "-m", "ppimpl", "serve", "--config", str(run_dir / "server.yaml")]
+    serve = [PYTHON, "-m", "ssengine", "serve", "--config", str(run_dir / "server.yaml")]
     if nsys:
         serve = nsys_prefix(run_dir, len(server_cfg.get("profile_mbs") or []) // 2) + serve
         meta["nsys"] = {"command": shlex.join(serve), "profile_mbs": server_cfg.get("profile_mbs")}
@@ -511,7 +511,7 @@ def run_named(name: str, fake: bool, port: int, out_root: Path, args) -> dict:
         extra["profile_mbs"] = [int(x) for w in args.nsys_mbs.split(",") for x in w.split(":")]   # a:b[,c:d...]
     if args.pool_tokens or (kind == "tier_bringup" and args.pool_tokens is None):   # 0: the full pool
         extra["pool_tokens"] = args.pool_tokens or TIER_BRINGUP_POOL
-    if args.dram_gb is not None or args.ssd_gb is not None:   # lanes/m6 TIERS.md; SSD files in $PPIMPL_SSD_DIR
+    if args.dram_gb is not None or args.ssd_gb is not None:   # lanes/m6 TIERS.md; SSD files in $SSENGINE_SSD_DIR
         gb = {k: None if v in (None, "none") else float(v) for k, v in (("dram_gb", args.dram_gb),
                                                                          ("ssd_gb", args.ssd_gb))}
         extra["tiers"] = gb | ({"staging_gb": args.staging_gb} if args.staging_gb else {})
@@ -576,7 +576,7 @@ def submit(args) -> None:
     if args.out_root:
         inner += ["--out-root", str(Path(args.out_root).resolve())]
     script = f"""#!/bin/bash
-#SBATCH -J ppimpl-bench
+#SBATCH -J ssengine-bench
 #SBATCH --gres=gpu:4
 #SBATCH --time={args.time}
 #SBATCH -p {args.partition}
@@ -662,7 +662,7 @@ def main():
 
 
 def in_run_jit(run_dir: Path) -> dict:
-    """Kernels compiled after warm-up (ppimpl/runtime/worker.py FirstUse: jit_stage<S>.jsonl): count, by stage, and
+    """Kernels compiled after warm-up (ssengine/runtime/worker.py FirstUse: jit_stage<S>.jsonl): count, by stage, and
     the distinct (microbatch, kernel) pairs of the first stage that compiled any."""
     rows = [json.loads(line) for f in sorted(run_dir.glob("jit_stage[0-9].jsonl")) for line in f.read_text().splitlines()
             if line.strip()]

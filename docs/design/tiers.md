@@ -2,7 +2,7 @@
 
 The prefix cache keeps whole sessions in HBM. With `--dram-gb` and `--ssd-gb`, contexts that HBM lets go of move to
 pinned host DRAM and then to NVMe SSD, and are read back when the session's next round arrives. The code is in
-[ppimpl/kvpool/](../../ppimpl/kvpool/). Measured results: [../results/eval_m6.md](../results/eval_m6.md) and
+[ssengine/kvpool/](../../ssengine/kvpool/). Measured results: [../results/eval_m6.md](../results/eval_m6.md) and
 [../results/ssd_backend_ab.md](../results/ssd_backend_ab.md).
 
 ## Bytes per context
@@ -27,19 +27,19 @@ quarter of every context, 12.86 MB per KV block and 36.9 MB of state, whatever t
   stages move between GPU q's staging ring and their own GPU over NVLink. A direct copy from host to another GPU's HBM
   measured a third slower.
 - **Copy engine only.** Each tier op is one batched copy (`cuMemcpyBatchAsync`) per GPU; no SMs are used.
-- **Placement** is in [placement.py](../../ppimpl/kvpool/placement.py) and [layout.py](../../ppimpl/kvpool/layout.py);
-  the byte path in [mover.py](../../ppimpl/kvpool/mover.py) and [member.py](../../ppimpl/kvpool/member.py).
+- **Placement** is in [placement.py](../../ssengine/kvpool/placement.py) and [layout.py](../../ssengine/kvpool/layout.py);
+  the byte path in [mover.py](../../ssengine/kvpool/mover.py) and [member.py](../../ssengine/kvpool/member.py).
 
 ## DRAM
 
-Per GPU, on that GPU's NUMA node ([backends.py](../../ppimpl/kvpool/backends.py) `HostTier`): an anonymous mapping,
+Per GPU, on that GPU's NUMA node ([backends.py](../../ssengine/kvpool/backends.py) `HostTier`): an anonymous mapping,
 `mbind(MPOL_PREFERRED)` to the GPU's node, first touch from 16 threads while the weights load (checking free memory
 per 1 GiB so the host does not run out), then `cudaHostRegister` in ~1 GiB chunks. torch's pinned allocator is not
 used: it rounds to a power of two.
 
 ## SSD
 
-One preallocated shard file per GPU, kept across runs ([shards.py](../../ppimpl/kvpool/shards.py)):
+One preallocated shard file per GPU, kept across runs ([shards.py](../../ssengine/kvpool/shards.py)):
 `<ssd-dir>/set<k>/shard<q>.bin` holds GPU q's quarter of every slot. A server locks the first free set for as long as
 it runs. Shard contents are never trusted: the slot index starts empty each run.
 
@@ -47,9 +47,9 @@ I/O is O_DIRECT, one request per slot, at most 8 reads and 4 writes in the kerne
 write-back never queues in front of a read. Two backends (`tiers.ssd_backend`), equal in an A/B
 ([../results/ssd_backend_ab.md](../results/ssd_backend_ab.md)):
 
-- `aio` (default, [aio.py](../../ppimpl/kvpool/aio.py)): Linux native AIO through raw syscalls, one context and four
+- `aio` (default, [aio.py](../../ssengine/kvpool/aio.py)): Linux native AIO through raw syscalls, one context and four
   submit threads per GPU. Runs under Docker's default seccomp profile.
-- `uring` ([uring.py](../../ppimpl/kvpool/uring.py)): one io_uring per GPU, with the file and the host arenas
+- `uring` ([uring.py](../../ssengine/kvpool/uring.py)): one io_uring per GPU, with the file and the host arenas
   registered as fixed buffers. Half the CPU of AIO; Docker's default profile denies it.
 
 The one named is set up or the start fails; nothing falls back to the other.
@@ -62,9 +62,9 @@ DRAM's evictions go to SSD, and SSD evicts into nothing. Only what the level bel
 - **Exclusive DRAM** (the served setting, `tiers.dram_writes: hbm-evictions-exclusive`): HBM writes a context to DRAM
   at its eviction and frees the blocks at once; the blocks' next users wait for the copy. A DRAM read releases the
   DRAM entry. SSD stays inclusive.
-- One write-back class ([writeback.py](../../ppimpl/kvpool/writeback.py)) serves both levels. An entry is dirty until
+- One write-back class ([writeback.py](../../ssengine/kvpool/writeback.py)) serves both levels. An entry is dirty until
   the level below holds it whole, and only clean entries are evicted without waiting.
-- The index is [manager.py](../../ppimpl/kvpool/manager.py) (`TierManager`); [../../ppimpl/kvpool/__init__.py](../../ppimpl/kvpool/__init__.py)
+- The index is [manager.py](../../ssengine/kvpool/manager.py) (`TierManager`); [../../ssengine/kvpool/__init__.py](../../ssengine/kvpool/__init__.py)
   is the facade the scheduler uses (`BalancedKVPool`).
 
 ## Reads and staged loading

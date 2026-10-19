@@ -1,10 +1,10 @@
-"""CPU tests of the CUDA-graph plumbing (ppimpl/model/stage.py, metadata.py, pp_patch.py): bucket choice, the padded
+"""CPU tests of the CUDA-graph plumbing (ssengine/model/stage.py, metadata.py, pp_patch.py): bucket choice, the padded
 static rows a captured graph reads, the run-config flag, and the deterministic top-k that makes repeated forwards bitwise equal."""
 
 import numpy as np
 
-from ppimpl.model.metadata import PAD_SLOT_ID, graph_rows
-from ppimpl.model.stage import GRAPH_BUCKETS, graph_bucket
+from ssengine.model.metadata import PAD_SLOT_ID, graph_rows
+from ssengine.model.stage import GRAPH_BUCKETS, graph_bucket
 
 
 def test_bucket_is_smallest_that_holds_the_microbatch():
@@ -36,8 +36,8 @@ def test_graph_rows_pad_positions_slots_and_tokens():
 
 
 def test_run_config_flag():
-    from ppimpl.config import RunConfig
-    from ppimpl.model.stage import bench_config, stage_settings
+    from ssengine.config import RunConfig
+    from ssengine.model.stage import bench_config, stage_settings
 
     assert stage_settings(RunConfig(model="glm53"))["cuda_graphs"] is True
     assert stage_settings(RunConfig(model="glm53", cuda_graphs=False))["cuda_graphs"] is False
@@ -48,7 +48,7 @@ def test_run_config_flag():
 def test_topk_canonical_set_and_order():
     import torch
 
-    from ppimpl.model.topk_canon import canonical_topk_torch, canonicalize
+    from ssengine.model.topk_canon import canonical_topk_torch, canonicalize
 
     # row 0: keys 0..5, k=3, a tie at the 3rd value (cols 1, 3, 5 all 2.0): the lowest index wins, whatever the
     # kernel picked. row 1: keys start at col 2 (indices relative to it), only 2 keys: all of them, then -1.

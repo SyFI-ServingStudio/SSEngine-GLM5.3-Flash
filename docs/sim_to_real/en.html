@@ -119,13 +119,13 @@ nav.lang a[aria-current="page"] { background: var(--accent); color: var(--surfac
 })();</script>
 <p class="kicker">ServingStudio · research notes · draft</p>
 <h1>From sim to real engine: implementing and aligning GLM-5.3-Flash NVFP4 PP4 on B200</h1>
-<p class="byline">GLM-5.3-Flash NVFP4 · 4 × B200 PP4 · TraceLab coding-agent sessions · targets from the ServingStudio sim, measurements from pp-impl</p>
+<p class="byline">GLM-5.3-Flash NVFP4 · 4 × B200 PP4 · TraceLab coding-agent sessions · targets from the ServingStudio sim, measurements from SSEngine</p>
 
 <div class="alpha"><b>Draft v3.</b> Written after the M6 eval completed.
 <ul class="find">
 <li>The final comparison (§5.6, §6.9–§6.10, §7) uses the TraceLab v3 (new model) trace: the 20-minute closed loop is used for the real-engine comparison, the 8-hour closed loop only runs in sim.</li>
 <li>The engine bring-up step by step (sections marked "synthetic load" or "old trace" in §4–§6) used the synthetic load and old trace of that time; what is recorded is the final result of each step.</li>
-<li>Real-engine numbers come from <code>pp-impl</code> (each section notes the Slurm job id); sim numbers come from the ServingStudioSim handoff <code>glm53_flash_pp4_b200_v2</code> and the experiment directories after it (the v3 part is in wt-pp-staged).</li>
+<li>Real-engine numbers come from <code>SSEngine</code> (each section notes the Slurm job id); sim numbers come from the ServingStudioSim handoff <code>glm53_flash_pp4_b200_v2</code> and the experiment directories after it (the v3 part is in wt-pp-staged).</li>
 <li>Unfinished work is collected in <a href="#s9">§9</a>.</li>
 </ul></div>
 
@@ -144,7 +144,7 @@ nav.lang a[aria-current="page"] { background: var(--accent); color: var(--surfac
 
 <h3 id="s0-2">Method</h3>
 <ul class="find">
-<li>The real engine is called pp-impl: a small engine we wrote ourselves (scheduler, KV/prefix cache, DRAM/SSD tiering, pipeline runtime, server).</li>
+<li>The real engine is called SSEngine: a small engine we wrote ourselves (scheduler, KV/prefix cache, DRAM/SSD tiering, pipeline runtime, server).</li>
 <li>Kernel and model layer code reuse a vLLM fork.</li>
 <li>The sim gives the target for each stage (handoff); the real engine chases the target stage by stage, and only moves to the next stage once one stage passes.</li>
 </ul>
@@ -179,7 +179,7 @@ nav.lang a[aria-current="page"] { background: var(--accent); color: var(--surfac
 <ol start="1">
 <li><a href="#s1">Background and targets</a></li>
 <li><a href="#s2">How the sim guided the implementation</a></li>
-<li><a href="#s3">Implementation: pp-impl</a></li>
+<li><a href="#s3">Implementation: SSEngine</a></li>
 <li><a href="#s4">Kernel and single-step iteration</a></li>
 <li><a href="#s5">Prefix cache and scheduler</a></li>
 <li><a href="#s6">DRAM and SSD tiering</a></li>
@@ -293,7 +293,7 @@ nav.lang a[aria-current="page"] { background: var(--accent); color: var(--surfac
 </ul>
 
 <!-- ============================== 3 ============================== -->
-<h2 id="s3"><span class="no">3</span>Implementation: pp-impl</h2>
+<h2 id="s3"><span class="no">3</span>Implementation: SSEngine</h2>
 <div class="tk"><b>Key points</b><ul>
 <li>The engine is written in-house; kernels and model layers are imported as a library from the vLLM fork, and no kernel is copied.</li>
 <li>One controller plus 4 stage workers; inter-stage activations go over the copy engine and do not use SMs.</li>
@@ -302,10 +302,10 @@ nav.lang a[aria-current="page"] { background: var(--accent); color: var(--surfac
 
 <h3 id="s3-1">3.1 Reuse boundary</h3>
 <ul class="find">
-<li>Kernels and model layers reuse the vLLM fork (<code>892da0822f</code>, <code>vllm/models/glm5next</code>), imported as a library. No kernel is copied into pp-impl.</li>
+<li>Kernels and model layers reuse the vLLM fork (<code>892da0822f</code>, <code>vllm/models/glm5next</code>), imported as a library. No kernel is copied into SSEngine.</li>
 <li>vLLM's engine, scheduler, model runner, or KV manager are not run. vLLM serves only as an independent correctness reference (<a href="#s3-4">§3.4</a>).</li>
 </ul>
-<p>The fork has two PP incompatibilities, overridden with small patches in <code>ppimpl/model/pp_patch.py</code>:</p>
+<p>The fork has two PP incompatibilities, overridden with small patches in <code>ssengine/model/pp_patch.py</code>:</p>
 <ul class="find">
 <li><b>mHC stage boundary:</b> the fork disables PP for glm5next, and the stage boundary would lose mHC's delay state. The sender first finishes the last layer's <code>hc_post</code> and sends the full 4-way residual; the receiver does <code>hc_pre</code> separately in its first layer. This is 0.03 ms (8k) to 0.32 ms (128k) slower per boundary than the fused post+pre in the target, under 0.06% of a stage.</li>
 <li><b>Prefill only, one token out:</b> no decode path, no MTP, stage 3 does greedy sampling.</li>
@@ -347,9 +347,9 @@ nav.lang a[aria-current="page"] { background: var(--accent); color: var(--surfac
 <!-- ============================== 4 ============================== -->
 <h2 id="s4"><span class="no">4</span>Kernels and single-step iteration</h2>
 <div class="tk"><b>Key points</b><ul>
-<li>Kernels were re-measured in the pp-impl environment; the median ratio for the 15 configs is 0.95–1.08; every stage of a single layer and single request is within ±10% of the target.</li>
+<li>Kernels were re-measured in the SSEngine environment; the median ratio for the 15 configs is 0.95–1.08; every stage of a single layer and single request is within ±10% of the target.</li>
 <li>When all requests arrive at t = 0 simultaneously, saturated throughput is 0.93–1.00x the target, and the TTFT distribution matches the target.</li>
-<li>KV cache matches vLLM within noise; the long-context difference comes from vLLM's KDA kernel, not from pp-impl.</li>
+<li>KV cache matches vLLM within noise; the long-context difference comes from vLLM's KDA kernel, not from SSEngine.</li>
 </ul></div>
 
 <h3 id="s4-1">4.1 Call-path comparison</h3>
@@ -362,7 +362,7 @@ nav.lang a[aria-current="page"] { background: var(--accent); color: var(--surfac
 <tr><td>DIFF</td><td>The fork calls a different function</td><td>5</td></tr>
 </tbody></table></div>
 <ul class="find">
-<li><b>14 configs are covered directly</b> (same function and equivalent library version); 21 need re-measurement in the pp-impl environment.</li>
+<li><b>14 configs are covered directly</b> (same function and equivalent library version); 21 need re-measurement in the SSEngine environment.</li>
 <li><b>DIFF configs follow the design, not the fork:</b> KDA prefill uses FlashInfer's persistent <code>recurrent_kda</code>, KDA short conv uses Dao's channel-last implementation, each mHC boundary uses DeepGEMM's <code>mega_mhc</code>, and indexer top-k picks DeepSelect or <code>top_k_per_row_prefill</code> by shape.</li>
 <li><b>Where the target over-computes:</b> the target computes the router GEMM twice per MoE layer, the fork only once, so the target is slightly slower (recorded in <code>issues.md</code>).</li>
 </ul>
@@ -370,7 +370,7 @@ nav.lang a[aria-current="page"] { background: var(--accent); color: var(--surfac
 
 <h3 id="s4-2">4.2 Kernel re-measurement</h3>
 <ul class="find">
-<li><b>Method:</b> re-measure the profile DB rows with ServingStudioSim profiler's own runner in the pp-impl environment (cold L2, no DB writes).</li>
+<li><b>Method:</b> re-measure the profile DB rows with ServingStudioSim profiler's own runner in the SSEngine environment (cold L2, no DB writes).</li>
 <li><b>Full re-measurement:</b> all 3,084 rows of the 15 configs needing re-measurement were re-measured. Per-config median ratios fall between 0.95 and 1.08, most between 0.96 and 1.01, e.g. KDA chunk prefill 1.001, mHC fused post+pre 1.000, NVFP4 MoE 1.003.</li>
 <li><b>Of the 154 rows beyond ±10%</b>, 149 are under 20 µs with an absolute difference of at most 2.3 µs; the other 5 GEMMs of 21–101 µs are 10–16% faster. Swapping these rows into the target changes stage time by at most 0.35%, so the target is unchanged.</li>
 <li><b>Local spot check:</b> the smallest, median and largest row for each of the 35 configs, 105 rows in total, median ratio 0.999; most of the 27 rows beyond ±10% are tiny launch-limited shapes. Weighted by call count, the effect on a stage is −0.2% to −0.6%.</li>
@@ -709,7 +709,7 @@ nav.lang a[aria-current="page"] { background: var(--accent); color: var(--surfac
 </ul>
 
 <h3 id="s6-4">6.4 The five-layer KV pool structure</h3>
-<p>Tiered storage was restructured into five layers under <code>ppimpl/kvpool</code>:</p>
+<p>Tiered storage was restructured into five layers under <code>ssengine/kvpool</code>:</p>
 <ul class="find">
 <li><b>layout:</b> byte ranges.</li>
 <li><b>placement:</b> the balanced 1/4 rule.</li>
@@ -1228,7 +1228,7 @@ nav.lang a[aria-current="page"] { background: var(--accent); color: var(--surfac
 <h3 id="s9-2">9.2 KDA state compression in tiering</h3>
 <p>Each layer's KDA state is fp32 [H, 128, 128]. When written to DRAM and SSD it is compressed by a threshold rule: values with |x| &lt; 0.3 are stored as fp16(x · 2<sup>16</sup>) (a power-of-2 scale, the scaling itself is lossless), the rest stay fp32.</p>
 <ul class="find">
-<li><b>Compression ratio and error.</b> On 19 real states taken from the pp-impl SSD shard: compression ratio about 1.86x, relative RMS error 1.8e-7, the largest 1% of values lossless. Most heads have max|x| &lt; 0.3, so the whole head can be stored as fixed-length fp16.</li>
+<li><b>Compression ratio and error.</b> On 19 real states taken from the SSEngine SSD shard: compression ratio about 1.86x, relative RMS error 1.8e-7, the largest 1% of values lossless. Most heads have max|x| &lt; 0.3, so the whole head can be stored as fixed-length fp16.</li>
 <li><b>Comparison:</b> lossless compression (zstd plus byte shuffle) only gives about 1.15x; bf16 of the same size has 8x the error; fp16 without scaling turns about 22% of values into zeros or subnormals.</li>
 <li><b>Error does not accumulate.</b> The KDA update is non-expansive with respect to state error (k is a unit vector, β, α ∈ (0, 1)), so compression error is not amplified during the subsequent compute. Checks of the subsequent CPU compute show the error is more than 10x smaller than the noise of the bf16 input itself.</li>
 <li><b>Encoding and decoding happen only on the host CPU.</b> At full load the stage's SMs are all busy, and the tiering path uses only the copy engine (<a href="#s6-1">§6.1</a>), so no GPU encode/decode is used. State in HBM is not compressed.</li>
@@ -1324,15 +1324,15 @@ nav.lang a[aria-current="page"] { background: var(--accent); color: var(--surfac
 </ul>
 <h3 id="s11-3">11.3 Commit</h3>
 <ul class="find">
-<li>pp-impl: <code>m4-done</code> db6895d, <code>m5-done</code> a167593, lane-m6 afda6f3 (kvpool refactor), lane-m6-ssd db48f02 · 016976e · 913eadf · ceff3dc, eval code lanes/m6-eval-run a78dc6f · 9496233 (including 9780a2f, 14bf48b, ab0099a), lane-m6-pack 8d50066, lane-m6-hostgate 7e391df, lane-m6-next c5d4e09</li>
+<li>SSEngine: <code>m4-done</code> db6895d, <code>m5-done</code> a167593, lane-m6 afda6f3 (kvpool refactor), lane-m6-ssd db48f02 · 016976e · 913eadf · ceff3dc, eval code lanes/m6-eval-run a78dc6f · 9496233 (including 9780a2f, 14bf48b, ab0099a), lane-m6-pack 8d50066, lane-m6-hostgate 7e391df, lane-m6-next c5d4e09</li>
 <li>ServingStudioSim: handoff v2 5153041a (<code>1de110c0</code>), pp-dram-victim 4b93b396 · 08c0e231 · eaab79cd · ef23e439 (handoff doc), pp-staged c7dc261f · 0d19fb23 · b0455c55 · d376d8ff · e4de4292, pp-stable 063c85ae</li>
 </ul>
 <h3 id="s11-4">11.4 Reproduction</h3>
 <p>sim (CPU only):</p>
 <pre class="src">cd wt-pp-staged
 uv run python -m launcher logs/20261018_9_v3_m6/preset.yaml --no-gpu --no-plot --parallelism 14</pre>
-<p>Real engine session (pp-impl eval tree, Slurm):</p>
-<pre class="src">cd pp-impl/lanes/m6-eval-run
+<p>Real engine session (SSEngine eval tree, Slurm):</p>
+<pre class="src">cd lanes/m6-eval-run
 T=data/tracelab-v3/m6/sessions_2ps_v3.csv
 sbatch -p priority --time=00:30:00 --mem=400G bench/slurm/m6.sbatch sched_good_n400 --trace $T \
   --pool-tokens 15273856 --dram-gb 50 --ssd-gb none \

@@ -1,6 +1,6 @@
 """M3 output check: the engine's first tokens against the correctness reference (research/measured/reference.md).
 
-Reads <run dir>/server_requests.jsonl, one line per request with at least `id` and `token` (ppimpl/runtime/controller.py),
+Reads <run dir>/server_requests.jsonl, one line per request with at least `id` and `token` (ssengine/runtime/controller.py),
 and benchmarks/data/reference.jsonl (research/bench/reference/summarize.py). Each request is matched to its reference prompt:
   - by `prompt_sha256` when the line has one (sha256 of the prompt's token ids as little-endian int32, as in reference.jsonl);
   - otherwise by request id: req-frontend's `independent_<row id>` with any `#k` dedup suffix dropped, and then the

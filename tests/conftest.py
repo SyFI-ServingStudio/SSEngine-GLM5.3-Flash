@@ -27,4 +27,4 @@ def pytest_configure(config):
     from benchmarks.common import HANDOFF
 
     if not HANDOFF.is_dir():   # most CPU tests read the handoff's traces and targets
-        raise pytest.UsageError(f"handoff not found at {HANDOFF}: set PPIMPL_SIM or run env/make_env.sh (README)")
+        raise pytest.UsageError(f"handoff not found at {HANDOFF}: set SSENGINE_SIM or run env/make_env.sh (README)")

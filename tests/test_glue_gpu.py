@@ -9,7 +9,7 @@ on the same buffers (`replay=False`, the exactness reference): every sent row bi
 
 import pytest
 
-from ppimpl.engine.kv import block_pages
+from ssengine.engine.kv import block_pages
 
 pytestmark = pytest.mark.gpu
 
@@ -20,7 +20,7 @@ def test_edge_send_after_replay_matches_eager(stage):
 
     import torch
 
-    from ppimpl.model.stage import StageModel, bench_config
+    from ssengine.model.stage import StageModel, bench_config
 
     dev = torch.device("cuda", 0)
     B = 8576
@@ -68,8 +68,8 @@ def test_indexer_float_matches_torch_cast():
     import torch
     from vllm.models.glm5next.common.attention import Indexer
 
-    from ppimpl.model import glue_fast
-    from ppimpl.model.stage import StageModel, bench_config
+    from ssengine.model import glue_fast
+    from ssengine.model.stage import StageModel, bench_config
 
     dev = torch.device("cuda", 0)
     B = 8576

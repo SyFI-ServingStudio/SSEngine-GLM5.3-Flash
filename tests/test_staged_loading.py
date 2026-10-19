@@ -1,4 +1,4 @@
-"""Staged loading (ppimpl/engine/scheduler.py "Staged loading"; ServingStudioSim pp-staged): pending -> loading ->
+"""Staged loading (ssengine/engine/scheduler.py "Staged loading"; ServingStudioSim pp-staged): pending -> loading ->
 ready -> batch, one test per invariant. HBM is a KvManager of a few dozen blocks; a context of one block (8,576
 tokens) costs 7 blocks' pages (67 KV pages + 6 state blocks, `P` pages each), in DRAM/SSD 2 slots (1 KV + 1 state).
 Ops are completed by hand (`op_done`)."""
@@ -7,10 +7,10 @@ import math
 
 import pytest
 
-from ppimpl.config import BLOCK_PAGES as P, BLOCK_TOKENS as B, SchedulerConfig, TierConfig
-from ppimpl.engine.kv import KvManager, pages_for
-from ppimpl.engine.scheduler import Request, Scheduler
-from ppimpl.kvpool import BalancedKVPool, KVViews
+from ssengine.config import BLOCK_PAGES as P, BLOCK_TOKENS as B, SchedulerConfig, TierConfig
+from ssengine.engine.kv import KvManager, pages_for
+from ssengine.engine.scheduler import Request, Scheduler
+from ssengine.kvpool import BalancedKVPool, KVViews
 
 SLOT = 1_000_000
 MB = 8192

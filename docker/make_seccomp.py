@@ -1,5 +1,5 @@
 """Write docker/seccomp.json: Docker's default seccomp profile plus the io_uring syscalls, which it denies since Docker 25.
-Only the optional io_uring SSD backend (`--ssd-backend uring`, ppimpl/kvpool/uring.py) needs it: the default backend,
+Only the optional io_uring SSD backend (`--ssd-backend uring`, ssengine/kvpool/uring.py) needs it: the default backend,
 Linux AIO, runs under Docker's default profile, and the tiers' mbind needs only `--cap-add SYS_NICE` (the default
 profile allows the NUMA memory-policy syscalls with CAP_SYS_NICE). Used as
 `docker run --security-opt seccomp=docker/seccomp.json ...` or docker/compose.uring.yaml (README "Docker").

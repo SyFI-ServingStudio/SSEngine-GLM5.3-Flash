@@ -22,7 +22,7 @@ from pathlib import Path
 from types import SimpleNamespace as NS
 
 from research.bench.kvaudit import common as C
-from ppimpl.engine.kv import block_pages
+from ssengine.engine.kv import block_pages
 
 JOB = os.environ.get("SLURM_JOB_ID", "local")
 B = 8576
@@ -67,9 +67,9 @@ def _worker(rank: int, L: int, port: int, out_root: str, only: list[str] | None)
     import torch
     from vllm.forward_context import set_forward_context
 
-    from ppimpl.config import HIDDEN_WIDTH, RunConfig, SchedulerConfig
-    from ppimpl.model.stage import StageModel, bench_config
-    from ppimpl.runtime.transport import open_pipe
+    from ssengine.config import HIDDEN_WIDTH, RunConfig, SchedulerConfig
+    from ssengine.model.stage import StageModel, bench_config
+    from ssengine.runtime.transport import open_pipe
 
     cs = C.cases(L)
     todo = [c for c in cs.ours if not only or c.name in only]

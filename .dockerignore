@@ -4,7 +4,7 @@
 !env/requirements.lock
 !env/check_env.py
 !env/bake_jit.py
-!ppimpl/
+!ssengine/
 !docker/entrypoint
 !docker/seccomp.json
 !docker/jit-seed/gpu.tar

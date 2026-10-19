@@ -69,7 +69,7 @@ def make(kind, rows, width, dev, g):
 def main():
     import vllm._deepselect_C  # noqa: F401
 
-    from ppimpl.model import topk_canon
+    from ssengine.model import topk_canon
 
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default=str(MEASURED / "topk_determinism.json"))

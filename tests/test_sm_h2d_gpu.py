@@ -1,4 +1,4 @@
-"""GPU test of `ppimpl.model.sm_h2d.SmH2D` (kernel copies from mapped pinned memory): bytes equal for every size,
+"""GPU test of `ssengine.model.sm_h2d.SmH2D` (kernel copies from mapped pinned memory): bytes equal for every size,
 word width and alignment; a source freed by its caller right after the copy is issued is not reused before the
 kernel has read it (the copy queued behind a GPU sleep while the host allocates and overwrites pinned buffers)."""
 
@@ -9,7 +9,7 @@ pytestmark = pytest.mark.gpu
 
 
 def test_sm_h2d_bytes_equal():
-    from ppimpl.model.sm_h2d import SmH2D
+    from ssengine.model.sm_h2d import SmH2D
 
     dev = torch.device("cuda", 0)
     h = SmH2D(dev)
@@ -29,7 +29,7 @@ def test_sm_h2d_bytes_equal():
 
 
 def test_sm_h2d_source_kept_until_read():
-    from ppimpl.model.sm_h2d import SmH2D
+    from ssengine.model.sm_h2d import SmH2D
 
     dev = torch.device("cuda", 0)
     h = SmH2D(dev)

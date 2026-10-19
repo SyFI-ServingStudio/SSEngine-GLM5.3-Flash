@@ -3,7 +3,7 @@
 #   sbatch -p priority --time=00:25:00 -o research/measured/runs_lc/slurm/%j.out research/bench/slurm/graph_probe.sbatch
 # Waves of 4 processes, one GPU each (research/bench/graph_probe.py), then research/bench/graphs.py on every stage (the GPU test
 # test_graph_replay_matches_eager, which builds each stage with warm-up and captures GRAPH_BUCKETS).
-#SBATCH -J ppimpl-lc-probe
+#SBATCH -J ssengine-lc-probe
 #SBATCH --gres=gpu:4
 set -uo pipefail
 source "${SLURM_SUBMIT_DIR:-$(dirname "$0")/../../..}/benchmarks/jobs/env.sh"

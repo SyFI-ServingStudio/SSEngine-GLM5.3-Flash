@@ -22,7 +22,7 @@ from pathlib import Path
 from types import SimpleNamespace as NS
 
 from benchmarks import common as lb
-from ppimpl.engine.kv import block_pages
+from ssengine.engine.kv import block_pages
 
 
 def make_plans(n_plans: int, reqs: int, L: int, tokens: list[int]):
@@ -112,7 +112,7 @@ def blocked_at(model, plans, hidden, sleep_cycles: int) -> dict:
 
 def main() -> None:
     import torch
-    from ppimpl.model.stage import CHECKPOINT, StageModel, bench_config
+    from ssengine.model.stage import CHECKPOINT, StageModel, bench_config
 
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--stage", type=int, default=1)
@@ -134,8 +134,8 @@ def main() -> None:
               torch.randn(sum(c.num_tokens for c in p.chunks), model.hidden_width, device=dev, generator=gen,
                           dtype=torch.float32).to(torch.bfloat16) for p in plans]
     cpm = lb.sleep_cycles_per_ms()
-    from ppimpl.model import metadata as md_mod
-    from ppimpl.model.pp_patch import TOPK_SEGMENTS
+    from ssengine.model import metadata as md_mod
+    from ssengine.model.pp_patch import TOPK_SEGMENTS
 
     packs: list = []          # (host snapshot right after the copy was issued, host buffer, device buffer)
     orig_copy = md_mod.Pack.copy

@@ -4,9 +4,9 @@
 #   mkdir -p runs/m6/slurm
 #   sbatch -p <partition> -J ppm6 --time=00:20:00 --mem=300G -o runs/m6/slurm/%j.out benchmarks/jobs/m6.sbatch \
 #     tier_bringup --dram-gb 48 --ssd-gb none --run-name tier_bringup_dram
-# SSD shard sets (ppimpl/kvpool/shards.py: set<k>/shard<q>.bin, 128 GB per shard) live in PPIMPL_SSD_DIR, default
+# SSD shard sets (ssengine/kvpool/shards.py: set<k>/shard<q>.bin, 128 GB per shard) live in SSENGINE_SSD_DIR, default
 # <main tree>/tmp/ssd_tier, kept across runs; the run takes the first free set. Create a set once, before the first
-# SSD run: $PY -m ppimpl.kvpool.shards create --sets 1 --shards 4 --gb 128. df of the repo's file system is printed
+# SSD run: $PY -m ssengine.kvpool.shards create --sets 1 --shards 4 --gb 128. df of the repo's file system is printed
 # before and after.
 # Memory guards: benchmarks/jobs/memguard.py (start only with MemAvailable > pinned + 100 GB and memory PSI < 5%; a timed
 # part that thrashes is stopped and marked INVALID.txt).
@@ -21,12 +21,12 @@ R=$ROOT/${OUT:-runs/m6}
 mkdir -p "$R/slurm"
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
 G=${CUDA_VISIBLE_DEVICES:-0,1,2,3}
-P=${PPIMPL_PORT:-$((20000 + ${SLURM_JOB_ID:-0} % 120 * 100))}   # PPIMPL_PORT: two runs in one job (ab8.sbatch)
-export PPIMPL_SSD_DIR=${PPIMPL_SSD_DIR:-$MAIN/tmp/ssd_tier}
-export PPIMPL_HANDOFF=${PPIMPL_HANDOFF:-$MAIN/third_party/handoff_v2_realistic}   # v2-realistic targets
+P=${SSENGINE_PORT:-$((20000 + ${SLURM_JOB_ID:-0} % 120 * 100))}   # SSENGINE_PORT: two runs in one job (ab8.sbatch)
+export SSENGINE_SSD_DIR=${SSENGINE_SSD_DIR:-$MAIN/tmp/ssd_tier}
+export SSENGINE_HANDOFF=${SSENGINE_HANDOFF:-$MAIN/third_party/handoff_v2_realistic}   # v2-realistic targets
 trap 'rm -rf "$TMPDIR"; echo "== df after: $(df -h "$ROOT" | tail -1)"' EXIT
 WHAT=${1:?run name (benchmarks/run.py)}; shift
-echo "== $(date -Is) gpus $G port $P: $WHAT $* (ssd dir $PPIMPL_SSD_DIR)"
+echo "== $(date -Is) gpus $G port $P: $WHAT $* (ssd dir $SSENGINE_SSD_DIR)"
 echo "== df before: $(df -h "$ROOT" | tail -1)"
 nvidia-smi --query-gpu=index,pci.bus_id,memory.used --format=csv,noheader
 if [ -n "${HOP2:-}" ]; then                # HOP2=1: the two-hop probe (research/bench/tier_hop2.py) first; stop if it fails

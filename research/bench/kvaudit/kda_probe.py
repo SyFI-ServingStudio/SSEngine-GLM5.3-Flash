@@ -36,7 +36,7 @@ from types import SimpleNamespace as NS
 import torch
 
 from research.bench.kvaudit import common as C
-from ppimpl.engine.kv import block_pages
+from ssengine.engine.kv import block_pages
 
 JOB = os.environ.get("SLURM_JOB_ID", "local")
 KDA_PROBE_LAYERS = (0, 1, 2)
@@ -360,7 +360,7 @@ def main() -> None:
     ap.add_argument("--heads", "--fp64-heads", dest="heads", default="0:10,1:45,1:7,2:56",
                     help="layer:head pairs reported per bin (the audit's worst heads + a median one)")
     a = ap.parse_args()
-    from ppimpl.model.stage import StageModel, bench_config
+    from ssengine.model.stage import StageModel, bench_config
 
     dev = torch.device("cuda", 0)
     C.OUT.mkdir(parents=True, exist_ok=True)

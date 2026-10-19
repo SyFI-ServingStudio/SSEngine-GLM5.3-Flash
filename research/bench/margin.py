@@ -22,7 +22,7 @@ from pathlib import Path
 from types import SimpleNamespace as NS
 
 from benchmarks.common import MEASURED, ROOT
-from ppimpl.engine.kv import block_pages
+from ssengine.engine.kv import block_pages
 
 JOB = os.environ.get("SLURM_JOB_ID", "local")
 MB = 8192
@@ -149,10 +149,10 @@ def _worker(rank: int, cases: list[dict], repeats: int, port: int, out: str, tra
 
     import numpy as np
     import torch
-    from ppimpl.config import HIDDEN_WIDTH, RunConfig, SchedulerConfig
-    from ppimpl.model import pp_patch
-    from ppimpl.model.stage import StageModel, bench_config
-    from ppimpl.runtime.transport import open_pipe
+    from ssengine.config import HIDDEN_WIDTH, RunConfig, SchedulerConfig
+    from ssengine.model import pp_patch
+    from ssengine.model.stage import StageModel, bench_config
+    from ssengine.runtime.transport import open_pipe
     from vllm.forward_context import set_forward_context
 
     dev = torch.device("cuda", rank)
