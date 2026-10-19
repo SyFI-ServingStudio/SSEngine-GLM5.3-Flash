@@ -2,7 +2,7 @@
 
 <model> is a Hugging Face repo id or a local checkpoint directory. Only the model this engine is built for is served:
 GLM-5.3-Flash NVFP4 as 4 pipeline stages (`check_model`); anything else is refused before a weight is read or
-downloaded. The config is the design setting of the M6 evaluation (measured/eval_m6/summary.md, "st10"): the
+downloaded. The config is the design setting of the M6 evaluation (docs/results/eval_m6.md, "st10"): the
 scheduler of 6_scheduler.md step "good", the exact prefix cache (kept sessions) and, when a DRAM or SSD tier is given,
 exclusive DRAM writes and a 10% loading area (TIERS.md); without one, HBM only. A `--config` YAML is applied on top of
 that, the command-line options last.

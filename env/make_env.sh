@@ -105,7 +105,7 @@ if want sim; then
   fi
 fi
 
-# 4b. The client: req-frontend (request-factory) at 8723d90d (bench.common REQ_FRONTEND_COMMIT: a session's slot is
+# 4b. The client: req-frontend (request-factory) at 8723d90d (benchmarks.common REQ_FRONTEND_COMMIT: a session's slot is
 #     freed when its last round completes, as in the sim). That commit is on a local branch (preserialize-body) until it
 #     is pushed: REQ_FRONTEND_FROM names a checkout that has it (default: the GitHub repository).
 if want client; then

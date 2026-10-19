@@ -1,10 +1,10 @@
 """CPU tests of what keeps Triton compiles out of a run: the g0 table width classes (ppimpl/model/metadata.py), the
-served shapes warm-up runs (ppimpl/model/stage.py), and in-run compiles failing the run (bench/run.py)."""
+served shapes warm-up runs (ppimpl/model/stage.py), and in-run compiles failing the run (benchmarks/run.py)."""
 
 import json
 from types import SimpleNamespace as NS
 
-from bench.run import in_run_jit, run_failure
+from benchmarks.run import in_run_jit, run_failure
 from ppimpl.config import BLOCK_PAGES as P
 from ppimpl.model.metadata import StageMetadata
 from ppimpl.model.stage import StageModel

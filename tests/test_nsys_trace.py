@@ -1,4 +1,4 @@
-"""bench/nsys_trace.py on a synthetic Nsight SQLite export (the tables and columns `nsys export --type sqlite` writes)."""
+"""benchmarks/nsys_trace.py on a synthetic Nsight SQLite export (the tables and columns `nsys export --type sqlite` writes)."""
 
 import json
 import sqlite3
@@ -7,8 +7,8 @@ import types
 
 import pytest
 
-from bench import nsys_trace as tr
-from bench import report
+from benchmarks import nsys_trace as tr
+from benchmarks import report
 from test_report import outcome, write_run
 
 MS = 1_000_000

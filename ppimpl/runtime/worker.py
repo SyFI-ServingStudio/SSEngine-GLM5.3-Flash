@@ -72,7 +72,7 @@ class Clock:
 class RunAhead:
     """Bounds how far the host launches ahead of the GPU, so the main thread never blocks inside a launch.
 
-    CUDA's launch queue holds ~1,024 kernels (measured/issues.md: the host got at most ~1.7 eager forwards ahead). A
+    CUDA's launch queue holds ~1,024 kernels (research/measured/issues.md: the host got at most ~1.7 eager forwards ahead). A
     launch into a full queue blocks the main thread inside model.run, and a tier thread's next CUDA call (event
     create / record, cuMemcpyBatchAsync) waits behind it: 100-370 ms late starts of tier ops on stages 2/3 (job 8095,
     minutes 2-5) with eager microbatches (> 8,192 tokens, no CUDA graph; ~400-600 kernels each) queued back to back,
@@ -160,7 +160,7 @@ class FirstUse:
     specialization) plus, per Triton compile or disk-cache load, the microbatch and the host time it took: "stage S
     mb M: first use after warm-up: triton <kernel> T ms", also appended to `jit_stage<S>.jsonl` in the run dir.
     Warm-up is meant to have run every variant (StageModel.warmup); each such line is one it missed, and fails the
-    run (bench/run.py). The hooks run only on a compile path, never on a cached
+    run (benchmarks/run.py). The hooks run only on a compile path, never on a cached
     launch."""
 
     def __init__(self, stage: int, run_dir: str | None = None):
@@ -187,7 +187,7 @@ class FirstUse:
         ms = -1.0 if t is None else 1e3 * (time.perf_counter() - t)
         name = getattr(kw.get("fn"), "name", "?")
         print(f"stage {self.stage} mb {self.mb}: first use after warm-up: triton {name} {ms:.1f} ms", flush=True)
-        if self.log is not None:          # read by bench/run.py: any line fails the run (run_failure)
+        if self.log is not None:          # read by benchmarks/run.py: any line fails the run (run_failure)
             with open(self.log, "a") as f:
                 f.write(json.dumps({"stage": self.stage, "mb": self.mb, "kernel": name, "ms": round(ms, 1)}) + "\n")
 
@@ -315,7 +315,7 @@ def run_worker(cfg: RunConfig, stage: int):   # makes inference tensors, which a
             mbs += 1
             window.before(plan.mb_id)
             if cuda:
-                torch.cuda.nvtx.range_push(f"stage {stage} mb {plan.mb_id}")   # bench/nsys_trace.py attributes kernels
+                torch.cuda.nvtx.range_push(f"stage {stage} mb {plan.mb_id}")   # benchmarks/nsys_trace.py attributes kernels
             clock.maybe_reanchor()
             first_use.mb = plan.mb_id
             hostprof.before(plan.mb_id)

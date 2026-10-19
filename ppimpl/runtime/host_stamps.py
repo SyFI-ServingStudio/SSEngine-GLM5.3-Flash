@@ -1,4 +1,4 @@
-"""Low-overhead host timings of a stage forward, for diagnosis (bench.host_front --stamps; the worker with
+"""Low-overhead host timings of a stage forward, for diagnosis (research.bench.host_front --stamps; the worker with
 PPIMPL_HOST_STAMPS="a:b[@stages]", default stage 0, writes <run dir>/host_stamps.jsonl for microbatches [a, b)).
 
 Per forward: the inclusive host time of chosen functions (`sys.monitoring` PY_START/PY_RETURN on their code objects

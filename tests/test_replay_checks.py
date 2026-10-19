@@ -1,7 +1,7 @@
 """Scheduling check chunk for chunk and force check (6_scheduler.md §7), on the CPU replay."""
 
 import pytest
-from bench.replay import check_force, check_sched
+from benchmarks.replay import check_force, check_sched
 
 from ppimpl.config import SCHEDULER_STEPS
 
@@ -38,7 +38,7 @@ def test_force_check(step):
 def test_bringups(kind, variant):
     """5_prefix_cache.md §6 / 7_offloading.md §6 on the fit: the hit is exactly P, from the tier the run allows; read
     time and both rounds' TTFT within 10%."""
-    from bench.replay import run_bringup
+    from benchmarks.replay import run_bringup
     for row in run_bringup(kind, variant):
         assert row["cached"] == [0 if variant == "hbm" else row["P"]]
         assert row["tier"] == [{"dram_unbal": "dram", "ssd_unbal": "ssd"}.get(variant, "None")]

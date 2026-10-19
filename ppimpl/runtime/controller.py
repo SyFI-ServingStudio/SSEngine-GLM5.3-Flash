@@ -61,7 +61,7 @@ from ppimpl.engine.scheduler import ChunkSpec, Request, Scheduler
 from ppimpl.kvpool import BalancedKVPool
 from ppimpl.kvpool.manager import TierOp
 from ppimpl.kvpool.member import tier_move
-from torch.cuda.nvtx import range as nvtx_range   # host ranges for Nsight Systems (bench/run.py --nsys)
+from torch.cuda.nvtx import range as nvtx_range   # host ranges for Nsight Systems (benchmarks/run.py --nsys)
 
 from ppimpl.runtime.cpus import CONTROLLER_CORES, cpu_list, pin_process, split_cores, threads
 from ppimpl.runtime.dispatch import NOW, WAIT, DispatchRule
@@ -82,7 +82,7 @@ class Remote(NamedTuple):
 
 
 def prompt_sha256(token_ids: list[int]) -> str:
-    """The prompt's id in measured/reference.jsonl: sha256 of its token ids as little-endian int32."""
+    """The prompt's id in benchmarks/data/reference.jsonl: sha256 of its token ids as little-endian int32."""
     return hashlib.sha256(np.asarray(token_ids, "<i4").tobytes()).hexdigest()
 
 

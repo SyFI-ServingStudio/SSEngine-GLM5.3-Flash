@@ -1,8 +1,8 @@
-"""`bench.sched summarize` against a handoff that covers only some steps (v2-realistic: good only): the runs of the
+"""`benchmarks.sched summarize` against a handoff that covers only some steps (v2-realistic: good only): the runs of the
 other steps are listed as not compared instead of failing on the missing target, and the Notes part is kept."""
 import json
 
-from bench import sched
+from benchmarks import sched
 
 
 def test_summarize_skips_steps_without_targets(tmp_path, monkeypatch):

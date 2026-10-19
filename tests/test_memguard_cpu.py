@@ -1,11 +1,11 @@
-"""bench/slurm/memguard.py: the start check's arithmetic and the watchdog stopping a thrashing run."""
+"""benchmarks/jobs/memguard.py: the start check's arithmetic and the watchdog stopping a thrashing run."""
 
 import importlib.util
 import json
 import subprocess
 from pathlib import Path
 
-spec = importlib.util.spec_from_file_location("memguard", Path(__file__).parents[1] / "bench/slurm/memguard.py")
+spec = importlib.util.spec_from_file_location("memguard", Path(__file__).parents[1] / "benchmarks/jobs/memguard.py")
 mg = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mg)
 

@@ -3,7 +3,7 @@
 - `to_float`: the indexer's `hidden_states.float()` (glm5next `Indexer.forward`, before the FP32 head-weights GEMM).
   torch runs that BF16 -> FP32 cast with its unrolled (non-vectorized) copy kernel: 41 us at 4,096 x 4,096 in the
   serving trace (7808, stage 2, 3 per microbatch, ~2.3 TB/s). Here one Triton kernel: 49.2 -> 20.5 us at 4,096 rows
-  alone at 1,965 MHz (job 7914, bench/glue_bench.py).
+  alone at 1,965 MHz (job 7914, research/bench/glue_bench.py).
   BF16 -> FP32 is exact, so the values are the same bits whatever the kernel.
 
 `install_indexer_float` rewrites `Indexer.forward`'s source at that line (checking it is there once: a fork change

@@ -1,11 +1,11 @@
-"""bench/report.py on synthetic run dirs."""
+"""benchmarks/report.py on synthetic run dirs."""
 
 import json
 
 import numpy as np
 import pytest
 
-from bench import report
+from benchmarks import report
 
 
 def write_run(d, kind, length, mbs, client, trace_ids, t0_unix_ns=1_000_000_000_000_000_000, sreq=None):

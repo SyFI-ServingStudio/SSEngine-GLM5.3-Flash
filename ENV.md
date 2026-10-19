@@ -42,7 +42,7 @@ From `env/check_env.py`, which fails on any other version:
 | libnuma | `libnuma.so.1` (the DRAM tier's NUMA placement, through ctypes) | Ubuntu package `libnuma1` |
 | causal-conv1d (Dao) | 1.7.0, built from the source tag against torch 2.13. The released cu13 wheel is built for torch 2.10 and fails to load with 2.13 (`undefined symbol c10::impl::cow::materialize_cow_storage`). | https://github.com/Dao-AILab/causal-conv1d, tag `v1.7.0` |
 
-Two kernels follow the design rather than the fork (`measured/kernels_identity.md`, Decisions):
+Two kernels follow the design rather than the fork (`research/measured/kernels_identity.md` on the `dev` branch, Decisions):
 - KDA chunked prefill uses FlashInfer `recurrent_kda(backend="cute-dsl-persistent")`. That backend exists only in the
   nightly the rows used, so the venv carries FlashInfer 0.7.2.dev20261008 with cutlass-dsl 4.8.0 instead of the
   fork's pins (0.7.0 / 4.7.1). `uv pip check` reports exactly these two pins as mismatched. The fork imports and
@@ -82,13 +82,13 @@ libnuma1 ninja-build g++` and uv 0.8.19), drops the downloads and ends with `env
 too, at `/opt/ppimpl`. The `jit` step's cache and the GPU seed (README "Docker") are in `/opt/ppimpl/jit-seed`.
 
 Run it as the normal user, never as root (`PPIMPL_ALLOW_ROOT=1` is for the container build only), with a short `TMPDIR`: vLLM's zmq ipc path is `TMPDIR` + a uuid and must fit
-in 107 characters (`bench/slurm/env.sh` makes one short TMPDIR per job under `PPIMPL_TMP`).
+in 107 characters (`benchmarks/jobs/env.sh` makes one short TMPDIR per job under `PPIMPL_TMP`).
 
 ## Other tools
 
-- `cargo` (Rust): `bench/run.py` builds req-frontend's `session_runner` on first use.
+- `cargo` (Rust): `benchmarks/run.py` builds req-frontend's `session_runner` on first use.
 - `/usr/bin/ninja` 1.11.1 for FlashInfer's JIT: processes that share `~/.cache/flashinfer` with another ninja version
   hash build commands differently and rebuild every object. `check_env.py` warns when another ninja is first on PATH.
-- The M1 kernel re-measure (`bench/slurm/kernels_*.sbatch`) runs the ServingStudioSim profiler from
+- The M1 kernel re-measure (`research/bench/slurm/kernels_*.sbatch`, `dev` branch) runs the ServingStudioSim profiler from
   `third_party/ServingStudioSim` with that checkout's own uv project env (`uv sync` there) and its CUPTI extension
   (`MOESIM_CUPTI_BUILD_DIR`); see the profiler's README.

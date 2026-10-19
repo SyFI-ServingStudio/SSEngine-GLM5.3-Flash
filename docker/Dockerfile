@@ -13,7 +13,7 @@
 # The JIT kernels are in the image, so a fresh container starts without compiling or downloading (README "Docker"):
 #   - FlashInfer's JIT modules and trtllm-gen cubins, built and fetched here without a GPU (make_env.sh step `jit`);
 #   - what only a run on a B200 produces (Triton, TileLang, DeepGEMM, CuTe-DSL, inductor kernels): the GPU seed
-#     docker/jit-seed/gpu.tar (not in git), made by bench/slurm/docker_smoke.sbatch with SEED_OUT from an image of the
+#     docker/jit-seed/gpu.tar (not in git), made by benchmarks/jobs/docker_smoke.sbatch with SEED_OUT from an image of the
 #     `base` target. Optional: without it the image builds the same, and a fresh container's first start compiles
 #     these (~5 min) into the cache volume.
 # Both sit in /opt/ppimpl/jit-seed, laid out as /root/.cache; docker/entrypoint copies what is missing into
@@ -74,7 +74,7 @@ EXPOSE 8000
 ENTRYPOINT ["/opt/ppimpl/docker/entrypoint"]
 CMD ["serve"]
 
-# the GPU seed, when the build context has it (bench/slurm/docker_smoke.sbatch SEED_OUT=docker/jit-seed/gpu.tar on an
+# the GPU seed, when the build context has it (benchmarks/jobs/docker_smoke.sbatch SEED_OUT=docker/jit-seed/gpu.tar on an
 # image of the `base` target); the bind mounts docker/, which always exists, so a checkout without the seed builds too
 FROM base
 RUN --mount=type=bind,source=docker,target=/tmp/ctx-docker \

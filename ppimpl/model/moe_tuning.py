@@ -11,7 +11,7 @@ persisted tactic file holds one entry per bucket, so a file and the process read
 Routing. FlashInfer's autotuner times every tactic on inputs it makes itself: router logits `torch.rand` (U[0,1)),
 the layer's real correction bias, so its routing is whatever sigmoid(U[0,1)) + bias picks (232 of 288 experts, at
 most 319 tokens per expert at 4,096 tokens on layer 3) rather than what served tokens route to. `real_routing`
-replaces that initializer while tuning (bench/tune_tactics.py) with logits whose top 8 gives a served histogram
+replaces that initializer while tuning (benchmarks/tune_tactics.py) with logits whose top 8 gives a served histogram
 scaled to the profiled token count: the histogram profile of `routing_profile`, measured from microbatches the
 engine routed (PPIMPL_LOG_EXPERTS, ppimpl/model/expert_log.py).
 """

@@ -19,7 +19,7 @@ config names.
   the submit threads. One wait covers both new work and completions, as the ring's armed eventfd read does.
 - **Submit threads.** io_submit pins a piece's user pages and builds its bios before it returns (fixed buffers spare
   io_uring the pinning): ~0.4 ms of CPU per 12.9 MB slot, about twice the ring's. One thread doing it serially set
-  the latency of a light-load read (bench/ssd_io.py, 4 GB/s reads + 1 GB/s writes per process: 31-60 slots p50
+  the latency of a light-load read (research/bench/ssd_io.py, 4 GB/s reads + 1 GB/s writes per process: 31-60 slots p50
   21.5 ms vs 12.3 ms on the ring); `SUBMITTERS` threads, each submitting one iocb at a time, bring it to the ring's
   (9.5 ms). A refused iocb goes back to the owner, which fails its request.
 """

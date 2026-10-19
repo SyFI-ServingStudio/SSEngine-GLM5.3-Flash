@@ -10,7 +10,7 @@ the file into other DRAM slots (a loading area) and moved on from there into K4 
 (an HBM hit) and on K1 (after the tier read): the logits are bitwise equal. The workers run with expandable segments,
 as the server's do (the KV is allocated IPC-shareable regardless). Run through Slurm:
 
-    sbatch -p main --gres=gpu:4 --time=00:20:00 -o measured/logs/%j.out bench/slurm/gtest.sbatch kvpool_bytes
+    sbatch -p <partition> --gres=gpu:4 --time=00:20:00 -o runs/logs/%j.out benchmarks/jobs/gtest.sbatch kvpool_bytes
 """
 
 import json
@@ -39,7 +39,7 @@ def _plans(name, toks, start, sizes, kv, st, mb0):
 
 
 def _run(m, pipe, rank, plans):
-    """The plans through the pipeline (as bench/kvaudit/ours.py); rank 3 returns the last chunk's logits."""
+    """The plans through the pipeline (as research/bench/kvaudit/ours.py); rank 3 returns the last chunk's logits."""
     import torch
     from vllm.forward_context import set_forward_context
 

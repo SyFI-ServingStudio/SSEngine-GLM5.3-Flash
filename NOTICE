@@ -11,11 +11,11 @@ glm53_flash_pp4_b200_v1/v2 (doc/handoff/) or from its simulator's outputs. The S
 copyright holders make these files available under the Apache License, Version 2.0, as part of
 this product:
 
-  - bench/prefix.py: the window-metric functions (real_arrays, sim_arrays, window_metrics), ported
+  - benchmarks/prefix.py: the window-metric functions (real_arrays, sim_arrays, window_metrics), ported
     from the handoff's data/metrics.py
-  - bench/sim_rounds.py: the run export, using the columns and filter of the handoff's
+  - research/bench/sim_rounds.py: the run export, using the columns and filter of the handoff's
     data/metrics.py
-  - bench/targets_ext/*: prefix_targets_ext.py is a parameterized copy of the handoff's
+  - research/bench/targets_ext/*: prefix_targets_ext.py is a parameterized copy of the handoff's
     data/prefix_targets.py, make_prefix_ext.py follows its data/bringup/make_bringup.py, and the
     .csv/.json files are traces and simulator targets made with them
   - ppimpl/data/topk_rows.json: rows of the handoff's data/kernel_specs.jsonl

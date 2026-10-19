@@ -1,4 +1,4 @@
-"""CPU test of bench/check_tokens.py on a stub run dir and a stub reference.
+"""CPU test of benchmarks/check_tokens.py on a stub run dir and a stub reference.
 
 run: python -m pytest tests/test_check_tokens.py
 """
@@ -13,9 +13,9 @@ from pathlib import Path
 import numpy as np
 
 HERE = Path(__file__).resolve().parent
-from bench import check_tokens  # noqa: E402
+from benchmarks import check_tokens  # noqa: E402
 
-REAL_REFERENCE = HERE.parent / "measured" / "reference.jsonl"
+REAL_REFERENCE = HERE.parent / "benchmarks" / "data" / "reference.jsonl"
 
 
 def sha(ids):
@@ -58,7 +58,7 @@ def test_stub_run():
         assert not res["summary"]["ok"]
         assert (t / "run" / "token_check.json").exists()
         # The CLI exits 1 on a failure and 0 once only passing requests remain.
-        cli = [sys.executable, "-m", "bench.check_tokens", str(t / "run"),
+        cli = [sys.executable, "-m", "benchmarks.check_tokens", str(t / "run"),
                "--reference", str(t / "ref.jsonl"), "--min-margin", "0"]
         assert subprocess.run(cli, capture_output=True, cwd=HERE.parent).returncode == 1
         write_ok = [r for r in reqs[:2]]

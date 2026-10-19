@@ -4,7 +4,7 @@ write-back to SSD, and the scheduler's read path through the pool (read-wait bou
 import json
 
 import pytest
-from bench.replay import HANDOFF
+from benchmarks.replay import HANDOFF
 
 from ppimpl.config import BLOCK_PAGES, BLOCK_TOKENS, SchedulerConfig, TierConfig
 from ppimpl.engine.kv import KvManager, kv_pages_for, pages_for

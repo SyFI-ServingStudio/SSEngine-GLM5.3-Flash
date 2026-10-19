@@ -2,10 +2,10 @@
 
 Per configuration: the DB kind/backend and fixed configuration of the profiler rows, the callable our stage runs
 (import path) and how the profiler row calls it, the library version the rows were taken with and ours, the M1
-call-path verdict (`measured/kernels_identity.md`), and the GPU kernel names it launches. Three uses:
+call-path verdict (`research/measured/kernels_identity.md`), and the GPU kernel names it launches. Three uses:
 
-- the M1 identity check against the profiler rows (`measured/kernels_identity.md` is the table form of this file);
-- one entry point for `bench/` and the tests (`CONFIGS`, `by_position`);
+- the M1 identity check against the profiler rows (`research/measured/kernels_identity.md` is the table form of this file);
+- one entry point for `research/bench/` and the tests (`CONFIGS`, `by_position`);
 - `check_trace`: a stage's traced GPU kernel names must be exactly the manifest's, with none of the fallbacks a
   silent backend switch would launch (FlashKDA, the fork's Triton conv, the TileLang fused mHC at a layer boundary,
   ...).
@@ -38,7 +38,7 @@ OURS = ("fork 892da0822f, torch 2.13.0+cu130, cuBLAS 13.1.1.3, FlashInfer 0.7.2.
 
 @dataclass(frozen=True)
 class KernelConfig:
-    config: int                      # row number in 2_kernels.md §2 (= measured/kernels_identity.md)
+    config: int                      # row number in 2_kernels.md §2 (= research/measured/kernels_identity.md)
     kind: str
     backend: str
     fixed: str                       # fixed configuration of the rows

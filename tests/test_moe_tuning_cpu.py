@@ -93,7 +93,7 @@ def test_real_routing_swaps_the_logit_initializer_while_tuning_only():
 
 
 def test_merge_fills_the_serving_buckets_from_the_base_and_takes_only_faster_ab_tactics(tmp_path):
-    from bench.tune_tactics import merge
+    from benchmarks.tune_tactics import merge
 
     op = "flashinfer::trtllm_fp4_block_scale_moe"
     key = lambda t: f"('{op}', 'MoERunner', (({t}, 4096), ({t}, 288)), ('Module', 8))"     # noqa: E731

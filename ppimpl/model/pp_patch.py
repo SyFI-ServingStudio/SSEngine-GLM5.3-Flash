@@ -6,7 +6,7 @@ stage process, which serves this one model and nothing else. Each one is deliber
 and in the function's docstring, and the last column names what fails if it stops taking effect (a fork or FlashInfer
 upgrade that renames the target, say). "Manifest check" is `ppimpl.kernels.check_trace` on a traced forward: every GPU
 kernel a stage launches must be the manifest's for its position, with no fallback (GPU test d,
-`tests/test_model_gpu.py::test_chain_token_matches_vllm_and_manifest`; M2 `bench/layers.py` per run).
+`tests/test_model_gpu.py::test_chain_token_matches_vllm_and_manifest`; M2 `research/bench/layers.py` per run).
 
 | Override | Replaces (library) | Why | Proved by |
 |---|---|---|---|
@@ -15,16 +15,16 @@ kernel a stage launches must be the manifest's for its position, with no fallbac
 | `edge_send` / `edge_recv` | the fork's PP hand-off, which drops the mHC deferred state | send the 4-stream residual after the last layer's `hc_post`; the receiver's first layer runs a standalone `hc_pre` (issues.md, "mHC boundary at the stage edge") | GPU test b (split vs unsplit) |
 | `route_mhc_boundaries` | each layer's `mhc_fused_post_pre_op` (vLLM TileLang) | DeepGEMM `mega_mhc`, non-shifted (config 7, `kernels_identity.md` Decisions) | manifest check (config 7) |
 | `route_hc_expand` | glm5next `model.hc_expand` (vLLM), process-wide | one vectorized concatenation; the fork's broadcast copy ran at ~1 TB/s (M2: input_head x3.3) | M2 `input_head` time (issues.md, "M2 results") |
-| `route_kda` | each KDA layer's `Glm5NextLinearAttention._forward` (vLLM) | the short conv by `kda_conv` (config 4: bitwise the Dao causal-conv1d call per sequence the design prices, in one launch per layer: ~78 us at 4,096 rows vs Dao 111-225 by sequence count, job 7927) + FlashInfer persistent `recurrent_kda` (config 5) on our state blocks, gathered and scattered by `kda_state` (5.1 + 4.4 us per layer vs torch's 12.7 + 9.4 at 2 sequences, job 7918) | manifest check (configs 4, 5); `bench/kvcheck.py`; `test_kda_conv_gpu.py` (q, k, v, conv states, state copies bitwise) |
+| `route_kda` | each KDA layer's `Glm5NextLinearAttention._forward` (vLLM) | the short conv by `kda_conv` (config 4: bitwise the Dao causal-conv1d call per sequence the design prices, in one launch per layer: ~78 us at 4,096 rows vs Dao 111-225 by sequence count, job 7927) + FlashInfer persistent `recurrent_kda` (config 5) on our state blocks, gathered and scattered by `kda_state` (5.1 + 4.4 us per layer vs torch's 12.7 + 9.4 at 2 sequences, job 7918) | manifest check (configs 4, 5); `research/bench/kvcheck.py`; `test_kda_conv_gpu.py` (q, k, v, conv states, state copies bitwise) |
 | `install_topk_router` | `torch.ops._C.top_k_per_row_prefill` and `indexer.build_prefill_chunk_metadata` (vLLM), process-wide | per shape, DeepSelect or vLLM's kernel, whichever row is faster (configs 20/21); `topk_canon` makes the answer deterministic | manifest check (configs 20/21) on traces past 2,048 tokens (the 1k chain test runs no indexer; issues.md, "Manifest trace check"); `test_model_cpu.py::test_topk_choice_matches_the_faster_row_at_every_profiled_shape`; GPU test g |
-| `install_decode_topk_canon` | glm5next `sparse_indexer.get_indexer_topk` (vLLM), process-wide | the indexer's decode top-k (1-token chunks) returns its set in a varying order: `topk_canon` fixes set and order, as on the prefill path | `test_model_gpu.py::test_decode_topk_canonical`; `bench/margin.py --trace-topk` (issues.md, job 7522) |
+| `install_decode_topk_canon` | glm5next `sparse_indexer.get_indexer_topk` (vLLM), process-wide | the indexer's decode top-k (1-token chunks) returns its set in a varying order: `topk_canon` fixes set and order, as on the prefill path | `test_model_gpu.py::test_decode_topk_canonical`; `research/bench/margin.py --trace-topk` (issues.md, job 7522) |
 | `install_kpool_unaligned` | glm5next `sparse_indexer._kpool_compress_insert` and `kpool_compress.kpool_seed_tail_cache` (vLLM), process-wide | a chunk may start inside a 4-token indexer pool (prefix hits resume at the kept prompt's length); the fork's insert assumes pool-aligned starts. The straddling pool is written from the tail ring + batch rows with the same kernel | `test_kpool_cpu.py` (reference ops); `test_kpool_gpu.py` (fork ops, cache bytes bitwise vs unsplit) |
 | `install_kda_split_heads` | `flashinfer.kda_kernels.persistent.forward._split_heads`, process-wide | host time: the KDA plan's head-split search (a Python LPT simulation over a 10 x 10 grid, 20-35 ms per multi-request microbatch, up to 110 ms; stage 0 waited for it, 1.1 s/min at good N=400, 7895) in C++ (`kda_schedule.py`); same schedule | `test_kda_schedule_cpu.py` (equal to the Python search on random microbatches, and the whole plan) |
 | `install_kpool_expand` | glm5next `sparse_indexer.sparse_attn_indexer_kpool` (vLLM), process-wide: its source with three edits (`kpool_fast._EDITS`) | host and GPU time: the prefill pool-to-token expansion in one kernel written into the top-k buffer, in place of two casts, a 128-column expand and a copy (stage 2 at 4,096 rows: 0.21 ms per microbatch, job 7787); same values (index arithmetic) | `test_kpool_gpu.py::test_expand_into_matches_the_fork_bitwise`; `test_kpool_cpu.py::test_kpool_expand_installs` (a fork change to the edited lines fails at start-up) |
 | `install_indexer_float` | glm5next `Indexer.forward` (vLLM), process-wide: its source with one edit (`glue_fast._INDEXER_EDITS`) | GPU time: the indexer's BF16 -> FP32 cast of the hidden rows by one Triton kernel, not torch's unrolled copy (49.2 -> 20.5 us at 4,096 rows, job 7914; 3 per stage-2 microbatch); exact | `test_glue_gpu.py::test_indexer_float_matches_torch_cast` |
 | `install_indexer_split` | `DeepseekV32IndexerMetadataBuilder._split_indexer_prefill_chunks` (vLLM), process-wide | the indexer logits of one prefill go out in calls of at most 2 GiB, query rows in multiples of 512: DeepGEMM's `fp8_mqa_logits` costs the same per 512 query rows at long context, so the fork's greedy split (1,022 + 2 rows at 512k + 1k) paid a whole second call for 2 rows (issues.md, "Long context") | `test_indexer_split_cpu.py`; nsys at 512k |
 | `install_sparse_mla_split` | `flashinfer.decode.trtllm_batch_decode_with_kv_cache_mla`, process-wide | a launch over 32,768 rows returns without doing the work on B200; split as the target does (issues.md, "M2 results") | M2 `dsa_moe` at 64k/128k |
-| `install_moe_buckets` | `flashinfer.fused_moe.shared.tuning` bucket functions, process-wide | the MoE's tactic buckets are the serving shapes (every CUDA-graph bucket), not FlashInfer's hybrid ones, which served 4,097-8,191 tokens with 8,192's tactic (`moe_tuning.py`) | `test_moe_tuning_cpu.py`; `bench.tune_tactics verify` (0 misses) |
+| `install_moe_buckets` | `flashinfer.fused_moe.shared.tuning` bucket functions, process-wide | the MoE's tactic buckets are the serving shapes (every CUDA-graph bucket), not FlashInfer's hybrid ones, which served 4,097-8,191 tokens with 8,192's tactic (`moe_tuning.py`) | `test_moe_tuning_cpu.py`; `benchmarks.tune_tactics verify` (0 misses) |
 | `install_sm_h2d` | `vllm.utils.torch_utils.async_tensor_h2d` and every module binding of it (vLLM), process-wide | GPU time: the builders' host -> device copies (MLA chunked-context tables, up to MBs per microbatch with long cached prefixes) by a kernel reading mapped pinned memory (`sm_h2d`), not the copy engine the KV tier reads keep busy: copies queued behind them started up to tens of ms late (job 8367); same bytes | `test_sm_h2d_gpu.py`; GPU tests b, c, e |
 | `install_autotune_memo` | FlashInfer `AutoTuner.choose_one`, process-wide | host time: memoize the tactic lookup outside tuning (same answer) | `test_host_trims_cpu.py::test_autotune_memo_matches_and_returns_callers_runner` |
 | `install_mm_fp4_skip_check` | `flashinfer.mm_fp4`, process-wide | host time: `skip_check=True` after the warm-up ran the checks | GPU tests c, d (same kernels, same token) |
@@ -274,7 +274,7 @@ _DS_INPUT_ALIGN = 16
 
 # DeepSelect with sorted_index returns the canonical top-k itself (topk_canon's rule: the keys above the k-th value,
 # the lowest-index ties, ascending), so its rows skip canonicalize's extra read of the logits. Only set from the
-# GPU proof in bench/topk_determinism.py (every shape and data kind there: canonical, repeatable, batch-independent).
+# GPU proof in research/bench/topk_determinism.py (every shape and data kind there: canonical, repeatable, batch-independent).
 DS_CANONICAL = False
 
 
@@ -367,7 +367,7 @@ def install_topk_router() -> None:
 
 
 _ORIG_DECODE_TOPK = None
-DECODE_TOPK_CANON = True      # bench/margin.py cases may turn it off (the before/after of the same process)
+DECODE_TOPK_CANON = True      # research/bench/margin.py cases may turn it off (the before/after of the same process)
 # Which top-k selects the decode rows: "prefill" (vLLM's top_k_per_row_prefill), "deep_select", or "kernel" (vLLM's
 # decode dispatcher: cooperative/persistent). The cooperative kernel returned a wrong set, run to run, on a real
 # 131,072-pool row (issues.md, job 7558); the prefill top-k gave a valid one every time.
@@ -682,7 +682,7 @@ def install_moe_buckets() -> None:
 # ---------------------------------------------------------------- host trims (M3: stage-0 host time, job 7091)
 #
 # Per-call Python that returns the same answer on every call of a serving process, hoisted or memoized. None of them
-# changes a launched kernel or its arguments (host time: measured/issues.md, "Host launch time", jobs 7091/7113; the
+# changes a launched kernel or its arguments (host time: research/measured/issues.md, "Host launch time", jobs 7091/7113; the
 # chain/edge checks stay exact).
 
 AUTOTUNE_MEMO: dict = {}

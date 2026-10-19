@@ -9,7 +9,7 @@ p50 12-15 / p90 47-58 ms after its stream was free, ~29 s of stage-0 idle per 10
 Here the copy is a kernel: pinned host memory is mapped into the device's address space (UVA), so a kernel on the
 compute stream reads it over PCIe and writes the device buffer. It is ordered on the compute stream like the copy
 it replaces, needs no copy engine, and shares only the PCIe link with the reads (a few MB per microbatch against
-their ~50 GB/s). `bench/h2d_queue.py` measures both against a tier-like read stream.
+their ~50 GB/s). `research/bench/h2d_queue.py` measures both against a tier-like read stream.
 
 The host buffer must outlive the kernel. Pinned blocks from torch's caching host allocator are reused as soon as
 their tensor is freed when no copy recorded a use of them (only torch's own copies record one), so `SmH2D` keeps a

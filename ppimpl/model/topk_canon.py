@@ -1,7 +1,7 @@
 """Deterministic indexer top-k: the same set and order for the same logits.
 
 vLLM's prefill top-k (`top_k_per_row_prefill`) returns a valid top-k, but in rows with more than k keys neither its
-order nor, when keys tie at the k-th value, its set is fixed run to run (measured/issues.md, job 7315: an 8k prompt,
+order nor, when keys tie at the k-th value, its set is fixed run to run (research/measured/issues.md, job 7315: an 8k prompt,
 ~5% of forwards). The sparse attention sums in that order, so the same input gave different bits. `canonicalize`
 rewrites the kernel's answer in place: every key above the k-th largest value plus, among the keys equal to it, the
 lowest indices, in ascending order, -1 fills last. Rows of at most k keys come back as the kernel gives them (all

@@ -43,7 +43,7 @@ from ppimpl.model import kv_tensors, pp_patch, sm_h2d  # noqa: E402
 from ppimpl.model.metadata import StageMetadata  # noqa: E402
 
 HIDDEN_WIDTH = 4 * 4096
-# FlashInfer tactics, tuned once (bench/tune_tactics.py) and loaded at warm-up with tuning off, as vLLM loads its
+# FlashInfer tactics, tuned once (benchmarks/tune_tactics.py) and loaded at warm-up with tuning off, as vLLM loads its
 # persisted configs: start-up skips ~150 s of MoE profiling and every stage, run and test uses the same tactics.
 # The file's own metadata (FlashInfer/CUDA/cuBLAS/cuDNN versions, GPU) decides whether it is valid here.
 TACTICS = Path(os.environ.get("PPIMPL_FI_TACTICS",
@@ -311,7 +311,7 @@ class StageModel:
     def warmup(self, tune: str = "auto") -> None:
         """Before `Ready`: run every kernel once (first launches load modules) with FlashInfer's tactics settled.
         `tune`: "auto" loads `TACTICS` (tuning off) and tunes in this process, loudly, only when the file is missing
-        or invalid here; "force" tunes in this process (bench/tune_tactics.py); "off" uses neither. Tuning is one
+        or invalid here; "force" tunes in this process (benchmarks/tune_tactics.py); "off" uses neither. Tuning is one
         autotuned pass at the microbatch budget, as vLLM's `kernel_warmup` does. Shapes: one request at the full
         budget (indexer and both top-k paths), then two requests, one continuing a cached prefix (conv and KDA initial
         state, chunk start > 0), then every power-of-2 length from 512 below the budget, a length not divisible by
@@ -341,7 +341,7 @@ class StageModel:
 
             if tune == "auto":
                 msg = (f"FlashInfer tactics not loaded ({self.tactics['reason']}): tuning in this process (~150 s, "
-                       f"tactics may differ per process). Run bench/tune_tactics.py to write {TACTICS}.")
+                       f"tactics may differ per process). Run benchmarks/tune_tactics.py to write {TACTICS}.")
                 warnings.warn(msg, stacklevel=2)
                 print(f"WARNING: {msg}", flush=True)
                 self.tactics["source"] = "tuned_in_process"

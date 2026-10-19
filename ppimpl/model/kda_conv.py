@@ -14,7 +14,7 @@ Here, per layer:
   its old state where the sequence is shorter) into its conv state.
 The arithmetic is the Dao kernel's SASS (sm_100, built with --use_fast_math): fma.rn.ftz from 0 over w = 0..3, then
 x * rcp.approx.ftz(1 + ex2.approx.ftz(x * -log2(e))), in inline PTX so the compiler cannot reorder or refuse FTZ.
-Measured (bench/kda_conv_bench.py, job 7927, B200, BLOCK_T 16 / BLOCK_C 512 / 4 warps, within 1% of the best of 36):
+Measured (research/bench/kda_conv_bench.py, job 7927, B200, BLOCK_T 16 / BLOCK_C 512 / 4 warps, within 1% of the best of 36):
 ~78 us per layer at 4,096 rows whatever the sequence count, vs Dao 111 (1 sequence), 137 (2), 166 (4), 225 (7 short);
 q, k, v and the conv states bitwise equal in every case. Earlier versions, also bitwise: 2D tiles, each output reading
 4 shifted rows, 171 us (job 7910); the row loop without the lookahead, 111 us (job 7917).

@@ -41,7 +41,7 @@ def _expand_rows_kernel(pool_ids_ptr, pos_ptr, out_ptr, topk, out_cols, pid_s0, 
         tl.store(out_ptr + row * out_s0 + cols, tl.where(is_history, hist_out, tail_out), mask=mask)
 
 
-BLOCK_COLS = 512   # bench/kpool_expand_bench.py, job 7881: 12.3 us vs the fork's 77.8 at 4,096 rows (1,024: 14.5)
+BLOCK_COLS = 512   # research/bench/kpool_expand_bench.py, job 7881: 12.3 us vs the fork's 77.8 at 4,096 rows (1,024: 14.5)
 NUM_WARPS = 4
 
 

@@ -6,7 +6,7 @@ POST /inference/v1/generate  {"token_ids": [...], "sampling_params": {"max_token
   prefix cache (0 without `keep_sessions`).
   The request id is the `x-request-id` header (req-frontend sends the trace id), else the body's `rid`.
 GET /health  200 once all stages are ready.
-POST /shutdown  graceful stop (bench/run.py).
+POST /shutdown  graceful stop (benchmarks/run.py).
 GET /v1/models, POST /v1/completions, POST /v1/chat/completions  the OpenAI-compatible API (ppimpl/serve/openai.py).
 """
 
@@ -131,7 +131,7 @@ def serve(cfg: RunConfig):
 
 
 async def _serve_controller(cfg: RunConfig):
-    """Until SIGTERM (bench/run.py, or /shutdown at an intake, or a failed pipeline): then a graceful stop."""
+    """Until SIGTERM (benchmarks/run.py, or /shutdown at an intake, or a failed pipeline): then a graceful stop."""
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
