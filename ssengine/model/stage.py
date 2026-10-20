@@ -217,7 +217,8 @@ class StageModel:
     def __init__(self, cfg, stage: int, device: torch.device, *, layers: range | None = None,
                  first: bool | None = None, last: bool | None = None, num_blocks: int | None = None,
                  max_model_len: int | None = None, warmup: bool = True,
-                 host_trims: bool = True, cuda_graphs: bool | None = None, ipc_kv: bool = False):
+                 host_trims: bool = True, cuda_graphs: bool | None = None, ipc_kv: bool = False,
+                 extra_blocks: int = 0):
         st = stage_settings(cfg)
         check_ninja()
         split = st["layer_split"]
@@ -306,7 +307,7 @@ class StageModel:
         graphs = st["cuda_graphs"] if cuda_graphs is None else cuda_graphs
         self.kv_profile = None
         if num_blocks is None:
-            num_blocks = self._profile_blocks(per_block, st["pool_tokens"], graphs)
+            num_blocks = self._profile_blocks(per_block, st["pool_tokens"], graphs, extra_blocks)
         self._build_kv(num_blocks)
         if warmup:
             self._warm(graphs)
@@ -330,13 +331,14 @@ class StageModel:
         self.graph_info["warmup_s"] = warmup_s
         self.graph_info["jit_warmup"] = self.jit_warmup
 
-    def _profile_blocks(self, per_block: int, pool_tokens: int | None, graphs: bool) -> int:
+    def _profile_blocks(self, per_block: int, pool_tokens: int | None, graphs: bool, extra_blocks: int = 0) -> int:
         """KV blocks this stage can back, measured as vLLM's profile run measures them: on a probe pool that holds
         every warm-up shape (the longest context at max_model_len, 16 fresh requests), run the warm-up and graph
         capture at this microbatch budget, take the allocator's peak beyond the probe pool (activations, MoE and
         attention workspaces, the graph pool), drop the probe pool and graphs, and fit the pool in the HBM left after
         that peak. The peak grows with the budget (one-request runs set it to the prompt) and with the quantization
-        (FP8's DeepGEMM MoE keeps its scratch in vLLM's workspace)."""
+        (FP8's DeepGEMM MoE keeps its scratch in vLLM's workspace). `extra_blocks`: device memory allocated after the
+        pool, in blocks of this stage (the tiers' two-hop ring)."""
         import gc
 
         from vllm.v1.worker.utils import clear_layer_kv_caches
@@ -365,7 +367,10 @@ class StageModel:
         released = live - torch.cuda.memory_allocated(self.device)
         assert released >= probe_bytes, f"probe pool not released: {released / 2**30:.2f} of {probe_bytes / 2**30:.2f} GiB"
         free = torch.cuda.mem_get_info(self.device)[0]
-        need = peak - probe_bytes - held + int(PROFILE_MARGIN_GB * 2**30)
+        # + one indexer prefill logits call at its cap: a served microbatch of long contexts makes it beside
+        # activations the profile shapes do not hold at the same time (FP8 prefix_n400 ran out of memory there)
+        need = (peak - probe_bytes - held + int(PROFILE_MARGIN_GB * 2**30) + pp_patch.INDEXER_MAX_LOGITS_BYTES
+                + extra_blocks * per_block)
         n = kv_tensors.blocks_that_fit(per_block, free, need, pool_tokens)
         self.kv_profile = {"probe_blocks": probe, "peak_beyond_kv_gib": round((peak - probe_bytes - held) / 2**30, 3),
                            "free_gib": round(free / 2**30, 2), "blocks": n}
@@ -461,7 +466,7 @@ class StageModel:
         allocate their eager-path buffers from the driver: 35 more device allocations per stage and +37 ms on the
         first 4x1k microbatch (sched_check_good 7738), +80 ms with expandable segments. Run the shapes that set the
         allocator's peak once more: several fresh prompts, the largest microbatch, and the largest one continuing
-        long contexts."""
+        long contexts (four requests, and one request of the whole budget)."""
         from types import SimpleNamespace as NS
 
         T = self.max_tokens
@@ -470,6 +475,9 @@ class StageModel:
         if (sum(-(-(st + n) // self.kv.block_tokens) + 6 for st, n in long) <= self.num_blocks - 1
                 and LONG_WARMUP + T <= self.vc.model_config.max_model_len):
             shapes.append(long)
+            # the whole budget continuing a long context: the indexer's prefill logits reach their per-call cap
+            # (pp_patch.INDEXER_MAX_LOGITS_BYTES; 8192 rows x 64k keys), which the profile pass must see
+            shapes.append([(LONG_WARMUP, T)])
         with torch.inference_mode():
             for i, specs in enumerate(shapes):
                 if sum(n for _, n in specs) > T:

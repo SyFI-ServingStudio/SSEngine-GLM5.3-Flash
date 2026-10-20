@@ -230,7 +230,9 @@ def build_model(cfg: RunConfig, stage: int, device: torch.device):
         from ssengine.model.fake import FakeStageModel
         return FakeStageModel(cfg, stage, device)
     from ssengine.model.stage import StageModel
-    return StageModel(cfg, stage, device, ipc_kv=cfg.tiers is not None)   # tiers: peers copy our KV (CUDA IPC)
+    t = cfg.tiers   # tiers: peers copy our KV (CUDA IPC); the two-hop ring is allocated after the pool
+    ring = 2 * t.ring_depth * t.ring_chunk_slots if t is not None and t.hops == "two" else 0
+    return StageModel(cfg, stage, device, ipc_kv=t is not None, extra_blocks=ring)
 
 # SSENGINE_TIER_SWITCH_S=S: the GIL switch interval with tiers on (default 0: Python's 5 ms). For the A/B under session
 # load (job 7966, idle: no effect; in session runs a tier op's submit waits for the GIL behind the launch thread).
