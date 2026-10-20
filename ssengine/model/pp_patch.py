@@ -27,7 +27,7 @@ kernel a stage launches must be the manifest's for its position, with no fallbac
 | `install_moe_buckets` | `flashinfer.fused_moe.shared.tuning` bucket functions, process-wide | the MoE's tactic buckets are the serving shapes (every CUDA-graph bucket), not FlashInfer's hybrid ones, which served 4,097-8,191 tokens with 8,192's tactic (`moe_tuning.py`) | `test_moe_tuning_cpu.py`; `benchmarks.tune_tactics verify` (0 misses) |
 | `install_sm_h2d` | `vllm.utils.torch_utils.async_tensor_h2d` and every module binding of it (vLLM), process-wide | GPU time: the builders' host -> device copies (MLA chunked-context tables, up to MBs per microbatch with long cached prefixes) by a kernel reading mapped pinned memory (`sm_h2d`), not the copy engine the KV tier reads keep busy: copies queued behind them started up to tens of ms late (job 8367); same bytes | `test_sm_h2d_gpu.py`; GPU tests b, c, e |
 | `install_autotune_memo` | FlashInfer `AutoTuner.choose_one`, process-wide | host time: memoize the tactic lookup outside tuning (same answer) | `test_host_trims_cpu.py::test_autotune_memo_matches_and_returns_callers_runner` |
-| `install_mm_fp4_skip_check` | `flashinfer.mm_fp4`, process-wide | host time: `skip_check=True` after the warm-up ran the checks | GPU tests c, d (same kernels, same token) |
+| `install_mm_fp4_skip_check` | `flashinfer.mm_fp4`, process-wide (NVFP4 checkpoint only) | host time: `skip_check=True` after the warm-up ran the checks | GPU tests c, d (same kernels, same token) |
 | `plain_parameters` | vLLM parameter subclasses on the loaded weights | host time: no `__torch_function__` round trip per op | `test_host_trims_cpu.py::test_plain_parameters_same_storage_and_attrs` |
 | `install_host_trims` | also `vllm.envs.enable_envs_cache()`, as vLLM's engine does after start-up | host time | as above |
 
@@ -784,12 +784,13 @@ def plain_parameters(modules) -> int:
     return n
 
 
-def install_host_trims(modules) -> dict:
+def install_host_trims(modules, quant: str) -> dict:
     """All of the above plus vLLM's env cache (the engine enables it after start-up: envs are read on every linear
-    call otherwise). Call after the weights are loaded."""
+    call otherwise). `mm_fp4` runs only with NVFP4 weights. Call after the weights are loaded."""
     import vllm.envs as envs
 
     envs.enable_envs_cache()
     install_autotune_memo()
-    install_mm_fp4_skip_check()
+    if quant == "nvfp4":
+        install_mm_fp4_skip_check()
     return {"plain_parameters": plain_parameters(modules)}

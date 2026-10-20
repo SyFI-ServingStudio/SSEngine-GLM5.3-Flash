@@ -1,0 +1,222 @@
+{
+  "_metadata": {
+    "flashinfer_version": "0.7.2.dev20261008",
+    "cuda_version": "13.0",
+    "cublas_version": "13.1.1",
+    "cudnn_version": "92000",
+    "cudnn_frontend_version": "1.31.0",
+    "cutlass_dsl_version": "nvidia-cutlass-dsl-libs-base==4.8.0;nvidia-cutlass-dsl-libs-core==4.8.0;nvidia-cutlass-dsl-libs-cu12==4.8.0;nvidia-cutlass-dsl-libs-cu13==4.8.0;nvidia-cutlass-dsl==4.8.0",
+    "gpu": "NVIDIA B200"
+  },
+  "('trtllm_batch_decode_mla', '_BatchMLAPagedAttentionTrtllmGenBackend', ((1, 1, 64, 512), (1, 1, 2176), (1,), (1, 1, 64, 512), (1,)), (torch.float8_e4m3fn, torch.float8_e4m3fn, torch.bfloat16, 256, 512, 0, 64, 4096, 2176, True, True, True, 'bmm1_float', 'bmm2_float', None, None, False, True))": [
+    "_BatchMLAPagedAttentionTrtllmGenBackend",
+    -1,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold"
+    ]
+  ],
+  "('trtllm_batch_decode_mla', '_BatchMLAPagedAttentionTrtllmGenBackend', ((1024, 1, 64, 512), (1024, 1, 2176), (1024,), (1024, 1, 64, 512), (1024,)), (torch.float8_e4m3fn, torch.float8_e4m3fn, torch.bfloat16, 256, 512, 0, 64, 4096, 2176, True, True, True, 'bmm1_float', 'bmm2_float', None, None, False, True))": [
+    "_BatchMLAPagedAttentionTrtllmGenBackend",
+    -1,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold"
+    ]
+  ],
+  "('trtllm_batch_decode_mla', '_BatchMLAPagedAttentionTrtllmGenBackend', ((128, 1, 64, 512), (128, 1, 2176), (128,), (128, 1, 64, 512), (128,)), (torch.float8_e4m3fn, torch.float8_e4m3fn, torch.bfloat16, 256, 512, 0, 64, 4096, 2176, True, True, True, 'bmm1_float', 'bmm2_float', None, None, False, True))": [
+    "_BatchMLAPagedAttentionTrtllmGenBackend",
+    -1,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold"
+    ]
+  ],
+  "('trtllm_batch_decode_mla', '_BatchMLAPagedAttentionTrtllmGenBackend', ((1280, 1, 64, 512), (1280, 1, 2176), (1280,), (1280, 1, 64, 512), (1280,)), (torch.float8_e4m3fn, torch.float8_e4m3fn, torch.bfloat16, 256, 512, 0, 64, 4096, 2176, True, True, True, 'bmm1_float', 'bmm2_float', None, None, False, True))": [
+    "_BatchMLAPagedAttentionTrtllmGenBackend",
+    -1,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold"
+    ]
+  ],
+  "('trtllm_batch_decode_mla', '_BatchMLAPagedAttentionTrtllmGenBackend', ((1536, 1, 64, 512), (1536, 1, 2176), (1536,), (1536, 1, 64, 512), (1536,)), (torch.float8_e4m3fn, torch.float8_e4m3fn, torch.bfloat16, 256, 512, 0, 64, 4096, 2176, True, True, True, 'bmm1_float', 'bmm2_float', None, None, False, True))": [
+    "_BatchMLAPagedAttentionTrtllmGenBackend",
+    -1,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold"
+    ]
+  ],
+  "('trtllm_batch_decode_mla', '_BatchMLAPagedAttentionTrtllmGenBackend', ((16, 1, 64, 512), (16, 1, 2176), (16,), (16, 1, 64, 512), (16,)), (torch.float8_e4m3fn, torch.float8_e4m3fn, torch.bfloat16, 256, 512, 0, 64, 4096, 2176, True, True, True, 'bmm1_float', 'bmm2_float', None, None, False, True))": [
+    "_BatchMLAPagedAttentionTrtllmGenBackend",
+    -1,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold"
+    ]
+  ],
+  "('trtllm_batch_decode_mla', '_BatchMLAPagedAttentionTrtllmGenBackend', ((1792, 1, 64, 512), (1792, 1, 2176), (1792,), (1792, 1, 64, 512), (1792,)), (torch.float8_e4m3fn, torch.float8_e4m3fn, torch.bfloat16, 256, 512, 0, 64, 4096, 2176, True, True, True, 'bmm1_float', 'bmm2_float', None, None, False, True))": [
+    "_BatchMLAPagedAttentionTrtllmGenBackend",
+    -1,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold"
+    ]
+  ],
+  "('trtllm_batch_decode_mla', '_BatchMLAPagedAttentionTrtllmGenBackend', ((2, 1, 64, 512), (2, 1, 2176), (2,), (2, 1, 64, 512), (2,)), (torch.float8_e4m3fn, torch.float8_e4m3fn, torch.bfloat16, 256, 512, 0, 64, 4096, 2176, True, True, True, 'bmm1_float', 'bmm2_float', None, None, False, True))": [
+    "_BatchMLAPagedAttentionTrtllmGenBackend",
+    -1,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold"
+    ]
+  ],
+  "('trtllm_batch_decode_mla', '_BatchMLAPagedAttentionTrtllmGenBackend', ((2048, 1, 64, 512), (2048, 1, 2176), (2048,), (2048, 1, 64, 512), (2048,)), (torch.float8_e4m3fn, torch.float8_e4m3fn, torch.bfloat16, 256, 512, 0, 64, 4096, 2176, True, True, True, 'bmm1_float', 'bmm2_float', None, None, False, True))": [
+    "_BatchMLAPagedAttentionTrtllmGenBackend",
+    -1,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold"
+    ]
+  ],
+  "('trtllm_batch_decode_mla', '_BatchMLAPagedAttentionTrtllmGenBackend', ((256, 1, 64, 512), (256, 1, 2176), (256,), (256, 1, 64, 512), (256,)), (torch.float8_e4m3fn, torch.float8_e4m3fn, torch.bfloat16, 256, 512, 0, 64, 4096, 2176, True, True, True, 'bmm1_float', 'bmm2_float', None, None, False, True))": [
+    "_BatchMLAPagedAttentionTrtllmGenBackend",
+    -1,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold"
+    ]
+  ],
+  "('trtllm_batch_decode_mla', '_BatchMLAPagedAttentionTrtllmGenBackend', ((2560, 1, 64, 512), (2560, 1, 2176), (2560,), (2560, 1, 64, 512), (2560,)), (torch.float8_e4m3fn, torch.float8_e4m3fn, torch.bfloat16, 256, 512, 0, 64, 4096, 2176, True, True, True, 'bmm1_float', 'bmm2_float', None, None, False, True))": [
+    "_BatchMLAPagedAttentionTrtllmGenBackend",
+    -1,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold"
+    ]
+  ],
+  "('trtllm_batch_decode_mla', '_BatchMLAPagedAttentionTrtllmGenBackend', ((3072, 1, 64, 512), (3072, 1, 2176), (3072,), (3072, 1, 64, 512), (3072,)), (torch.float8_e4m3fn, torch.float8_e4m3fn, torch.bfloat16, 256, 512, 0, 64, 4096, 2176, True, True, True, 'bmm1_float', 'bmm2_float', None, None, False, True))": [
+    "_BatchMLAPagedAttentionTrtllmGenBackend",
+    -1,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold"
+    ]
+  ],
+  "('trtllm_batch_decode_mla', '_BatchMLAPagedAttentionTrtllmGenBackend', ((32, 1, 64, 512), (32, 1, 2176), (32,), (32, 1, 64, 512), (32,)), (torch.float8_e4m3fn, torch.float8_e4m3fn, torch.bfloat16, 256, 512, 0, 64, 4096, 2176, True, True, True, 'bmm1_float', 'bmm2_float', None, None, False, True))": [
+    "_BatchMLAPagedAttentionTrtllmGenBackend",
+    -1,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold"
+    ]
+  ],
+  "('trtllm_batch_decode_mla', '_BatchMLAPagedAttentionTrtllmGenBackend', ((3584, 1, 64, 512), (3584, 1, 2176), (3584,), (3584, 1, 64, 512), (3584,)), (torch.float8_e4m3fn, torch.float8_e4m3fn, torch.bfloat16, 256, 512, 0, 64, 4096, 2176, True, True, True, 'bmm1_float', 'bmm2_float', None, None, False, True))": [
+    "_BatchMLAPagedAttentionTrtllmGenBackend",
+    -1,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold"
+    ]
+  ],
+  "('trtllm_batch_decode_mla', '_BatchMLAPagedAttentionTrtllmGenBackend', ((4, 1, 64, 512), (4, 1, 2176), (4,), (4, 1, 64, 512), (4,)), (torch.float8_e4m3fn, torch.float8_e4m3fn, torch.bfloat16, 256, 512, 0, 64, 4096, 2176, True, True, True, 'bmm1_float', 'bmm2_float', None, None, False, True))": [
+    "_BatchMLAPagedAttentionTrtllmGenBackend",
+    -1,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold"
+    ]
+  ],
+  "('trtllm_batch_decode_mla', '_BatchMLAPagedAttentionTrtllmGenBackend', ((4096, 1, 64, 512), (4096, 1, 2176), (4096,), (4096, 1, 64, 512), (4096,)), (torch.float8_e4m3fn, torch.float8_e4m3fn, torch.bfloat16, 256, 512, 0, 64, 4096, 2176, True, True, True, 'bmm1_float', 'bmm2_float', None, None, False, True))": [
+    "_BatchMLAPagedAttentionTrtllmGenBackend",
+    -1,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold"
+    ]
+  ],
+  "('trtllm_batch_decode_mla', '_BatchMLAPagedAttentionTrtllmGenBackend', ((512, 1, 64, 512), (512, 1, 2176), (512,), (512, 1, 64, 512), (512,)), (torch.float8_e4m3fn, torch.float8_e4m3fn, torch.bfloat16, 256, 512, 0, 64, 4096, 2176, True, True, True, 'bmm1_float', 'bmm2_float', None, None, False, True))": [
+    "_BatchMLAPagedAttentionTrtllmGenBackend",
+    -1,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold"
+    ]
+  ],
+  "('trtllm_batch_decode_mla', '_BatchMLAPagedAttentionTrtllmGenBackend', ((64, 1, 64, 512), (64, 1, 2176), (64,), (64, 1, 64, 512), (64,)), (torch.float8_e4m3fn, torch.float8_e4m3fn, torch.bfloat16, 256, 512, 0, 64, 4096, 2176, True, True, True, 'bmm1_float', 'bmm2_float', None, None, False, True))": [
+    "_BatchMLAPagedAttentionTrtllmGenBackend",
+    -1,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold"
+    ]
+  ],
+  "('trtllm_batch_decode_mla', '_BatchMLAPagedAttentionTrtllmGenBackend', ((768, 1, 64, 512), (768, 1, 2176), (768,), (768, 1, 64, 512), (768,)), (torch.float8_e4m3fn, torch.float8_e4m3fn, torch.bfloat16, 256, 512, 0, 64, 4096, 2176, True, True, True, 'bmm1_float', 'bmm2_float', None, None, False, True))": [
+    "_BatchMLAPagedAttentionTrtllmGenBackend",
+    -1,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold"
+    ]
+  ],
+  "('trtllm_batch_decode_mla', '_BatchMLAPagedAttentionTrtllmGenBackend', ((8, 1, 64, 512), (8, 1, 2176), (8,), (8, 1, 64, 512), (8,)), (torch.float8_e4m3fn, torch.float8_e4m3fn, torch.bfloat16, 256, 512, 0, 64, 4096, 2176, True, True, True, 'bmm1_float', 'bmm2_float', None, None, False, True))": [
+    "_BatchMLAPagedAttentionTrtllmGenBackend",
+    -1,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold"
+    ]
+  ],
+  "('trtllm_batch_decode_mla', '_BatchMLAPagedAttentionTrtllmGenBackend', ((8192, 1, 64, 512), (8192, 1, 2176), (8192,), (8192, 1, 64, 512), (8192,)), (torch.float8_e4m3fn, torch.float8_e4m3fn, torch.bfloat16, 256, 512, 0, 64, 4096, 2176, True, True, True, 'bmm1_float', 'bmm2_float', None, None, False, True))": [
+    "_BatchMLAPagedAttentionTrtllmGenBackend",
+    -1,
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "cold"
+    ]
+  ],
+  "_generation": "fc1b3bcb62a054ac91ea8d5b0d195a57e128b00d94fb4246573f4366a25dc2f8"
+}

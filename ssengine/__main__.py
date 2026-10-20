@@ -1,5 +1,6 @@
 """ssengine serve [<model>] [options]                                     the server, vLLM style (ssengine/serve/launch.py);
-                                                                     <model> defaults to nvidia/GLM-5.3-Flash-NVFP4
+                                                                     <model> defaults to nvidia/GLM-5.3-Flash-NVFP4;
+                                                                     zai-org/GLM-5.3-Flash serves the official FP8
 python -m ssengine serve --config <yaml> [--port P] [--run-dir D]   controller + HTTP server (spawns the workers)
 python -m ssengine worker --config <yaml> --stage S                    one stage worker (spawned by serve)
 python -m ssengine intake --config <yaml> --index I                    one HTTP intake process (spawned by serve)"""
@@ -18,7 +19,7 @@ from ssengine.config import CHECKPOINT_REPO, load_config
 def main():
     ap = argparse.ArgumentParser(prog="ssengine", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
-    s = sub.add_parser("serve", help="the OpenAI-compatible server (GLM-5.3-Flash NVFP4 on 4 GPUs)")
+    s = sub.add_parser("serve", help="the OpenAI-compatible server (GLM-5.3-Flash, NVFP4 or FP8, on 4 GPUs)")
     from ssengine.serve.launch import add_arguments
     add_arguments(s)
     w = sub.add_parser("worker")
@@ -36,7 +37,7 @@ def main():
                               served_model_name=a.served_model_name, max_model_len=a.max_model_len)
         else:
             from ssengine.serve.launch import build_config
-            a.model = a.model or CHECKPOINT_REPO   # the one model served
+            a.model = a.model or CHECKPOINT_REPO   # the default checkpoint (NVFP4)
             cfg = build_config(a)
         from ssengine.serve.server import serve
         serve(cfg)

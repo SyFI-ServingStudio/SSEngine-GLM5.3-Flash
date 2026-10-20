@@ -3,21 +3,24 @@
 #SBATCH --time=01:00:00
 #SBATCH -J pp-reference
 # Correctness reference (1_contract.md §4) for the §2.1 one-request prompts:
-# vLLM fork TP4 + EP serving GLM-5.3-Flash NVFP4, driven by req-frontend (vllm-tokens)
+# vLLM fork TP4 + EP serving GLM-5.3-Flash (the checkpoint's quantization: NVFP4, or FP8 with
+# SSENGINE_CHECKPOINT=<zai-org/GLM-5.3-Flash snapshot>), driven by req-frontend (vllm-tokens)
 # on data/bringup/one_<L>.csv through a recording proxy, then a logprobs pass. Usage, from the repo root:
 #   sbatch -p main -o research/measured/logs/%x-%j.out research/bench/slurm/reference.sbatch
+# LENGTHS="1k 2k" runs a subset; REF_RUNS moves the output (default measured/runs; FP8: measured/runs_fp8).
 set -u
 source "${SLURM_SUBMIT_DIR:-$(dirname "$0")/../../..}/benchmarks/jobs/env.sh"
 # the same paths the Python side uses (benchmarks/common.py, ssengine/config.py)
 eval "$($PY -c "
 from benchmarks.common import ENWIK9, HANDOFF, REQ_FRONTEND
-from ssengine.config import CHECKPOINT
-print(f'RF={REQ_FRONTEND} HANDOFF={HANDOFF} SNAP={CHECKPOINT} ENWIK9={ENWIK9}')")"
-RUNS=$ROOT/measured/runs
+from ssengine.config import CHECKPOINT, checkpoint_quantization
+print(f'RF={REQ_FRONTEND} HANDOFF={HANDOFF} SNAP={CHECKPOINT} ENWIK9={ENWIK9} QUANT={checkpoint_quantization(CHECKPOINT)}')")"
+DEFAULT_RUNS=$ROOT/measured/runs; [ "$QUANT" = nvfp4 ] || DEFAULT_RUNS=$ROOT/measured/runs_$QUANT
+RUNS=${REF_RUNS:-$DEFAULT_RUNS}
 LOGS=$RUNS/reference_logs/$SLURM_JOB_ID
 mkdir -p "$LOGS"
 PORT=$((20000 + SLURM_JOB_ID % 10000)); PROXY_PORT=$((PORT + 1))
-MODEL=glm53-flash-nvfp4
+MODEL=glm53-flash-$QUANT
 {
   echo "job=$SLURM_JOB_ID cvd=$CUDA_VISIBLE_DEVICES start=$(date -Is) port=$PORT proxy=$PROXY_PORT"
   echo "uptime: $(uptime)"
@@ -52,7 +55,7 @@ $PY research/bench/reference/record_proxy.py --listen-port $PROXY_PORT --upstrea
 PROXY=$!
 sleep 3
 
-for L in 1k 2k 4k 8k 16k 32k 64k 128k; do
+for L in ${LENGTHS:-1k 2k 4k 8k 16k 32k 64k 128k}; do
   OUT=$RUNS/reference_one_$L
   mkdir -p "$OUT"
   cat > "$OUT/run.yaml" <<YAML

@@ -15,7 +15,7 @@ A request without a token always counts.
 Writes <run dir>/token_check.json and prints a summary. Exit status: 0 if at least one request was judged and none
 failed, 1 otherwise.
 
-usage: python -m benchmarks.check_tokens <run dir> [--reference benchmarks/data/reference.jsonl] [--min-margin 3]
+usage: python -m benchmarks.check_tokens <run dir> [--reference benchmarks/data/reference[_fp8].jsonl] [--min-margin 3]
 """
 
 import argparse
@@ -24,7 +24,24 @@ import re
 import sys
 from pathlib import Path
 
-DEFAULT_REFERENCE = Path(__file__).resolve().parent / "data" / "reference.jsonl"
+# one reference per quantization (vLLM TP4 + EP on the same checkpoint); a run's is its server's checkpoint's
+REFERENCES = {"nvfp4": Path(__file__).resolve().parent / "data" / "reference.jsonl",
+              "fp8": Path(__file__).resolve().parent / "data" / "reference_fp8.jsonl"}
+DEFAULT_REFERENCE = REFERENCES["nvfp4"]
+
+
+def run_reference(run_dir: Path) -> Path:
+    """The reference of the run's checkpoint (server_config.yaml `checkpoint`, else SSENGINE_CHECKPOINT/default)."""
+    import yaml
+
+    from ssengine.config import CHECKPOINT, checkpoint_quantization
+
+    cfg = run_dir / "server_config.yaml"
+    ckpt = (yaml.safe_load(cfg.read_text()) or {}).get("checkpoint") if cfg.is_file() else None
+    try:
+        return REFERENCES[checkpoint_quantization(ckpt or CHECKPOINT)]
+    except (OSError, ValueError):
+        return DEFAULT_REFERENCE
 MIN_MARGIN = 3.0   # nats
 
 
@@ -84,11 +101,11 @@ def check(run_dir: Path, reference: Path, min_margin: float = MIN_MARGIN) -> dic
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("run_dir", type=Path)
-    ap.add_argument("--reference", type=Path, default=DEFAULT_REFERENCE)
+    ap.add_argument("--reference", type=Path, help="default: the reference of the run's checkpoint's quantization")
     ap.add_argument("--min-margin", type=float, default=MIN_MARGIN,
                     help="judge only references whose top-1 margin is at least this (nats)")
     a = ap.parse_args(argv)
-    res = check(a.run_dir, a.reference, a.min_margin)
+    res = check(a.run_dir, a.reference or run_reference(a.run_dir), a.min_margin)
     s = res["summary"]
     print(f"{s['run_dir']}: {s['pass']} pass, {s['fail']} fail, {s['no_token']} without a token, "
           f"{s['near_tie']} near tie (margin < {s['min_margin']:g}, not judged), "

@@ -1,8 +1,10 @@
 # SSEngine
 
-A pipeline-parallel prefill server for GLM-5.3-Flash NVFP4 on 4×B200 with HBM, DRAM and SSD KV-cache tiers.
+A pipeline-parallel prefill server for GLM-5.3-Flash (NVFP4 or FP8) on 4×B200 with HBM, DRAM and SSD KV-cache tiers.
 
-SSEngine serves one model, [`nvidia/GLM-5.3-Flash-NVFP4`](https://huggingface.co/nvidia/GLM-5.3-Flash-NVFP4), as
+SSEngine serves one model, GLM-5.3-Flash, in either of its two checkpoints:
+[`nvidia/GLM-5.3-Flash-NVFP4`](https://huggingface.co/nvidia/GLM-5.3-Flash-NVFP4) (the default) or the official FP8
+[`zai-org/GLM-5.3-Flash`](https://huggingface.co/zai-org/GLM-5.3-Flash) ([docs/results/fp8.md](docs/results/fp8.md)). It runs as
 4 pipeline stages on 4 NVIDIA B200 GPUs. Its exact prefix cache keeps whole sessions' context (KV and KDA state) in
 HBM. Two optional tiers sit behind HBM: pinned host DRAM and NVMe SSD. The server is OpenAI-compatible
 (`/v1/completions`, `/v1/chat/completions`). The design was chosen and sized with the
@@ -59,7 +61,7 @@ smaller-HBM settings. The baselines' setup is in [docs/results/vllm_baselines.md
 
 | | Supported | Tested |
 |---|---|---|
-| Model | `nvidia/GLM-5.3-Flash-NVFP4` (`Glm5NextForConditionalGeneration`, NVFP4). Any other model is refused at start. | revision `da920bb0b9f4a06727223a349e55468e38352348` (~191 GB) |
+| Model | `nvidia/GLM-5.3-Flash-NVFP4` (NVFP4) or `zai-org/GLM-5.3-Flash` (128 × 128 block FP8), `Glm5NextForConditionalGeneration`; the quantization is read from `config.json`. Any other model is refused at start. | NVFP4 revision `da920bb0b9f4a06727223a349e55468e38352348` (~191 GB); FP8 revision `03eb5366286afd40d2221b1d9c63a6dd1ba4832e` (~306 GB), from source |
 | GPUs | 4 × B200 in one NVLink domain | HGX B200, every pair NV18 ([docs/results/setup.md](docs/results/setup.md)) |
 | Driver / CUDA | driver ≥ 580, CUDA 13.0 | 580.178.04 |
 | OS | Linux x86_64 | Ubuntu 24.04 (the image); [docs/results/setup.md](docs/results/setup.md) has the host |
@@ -114,6 +116,7 @@ STEPS="venv vllm conv1d install jit check" env/make_env.sh   # .venv, third_part
 .venv/bin/hf download nvidia/GLM-5.3-Flash-NVFP4 --revision da920bb0b9f4a06727223a349e55468e38352348
 
 .venv/bin/ssengine serve                                     # port 8000, HBM only
+.venv/bin/ssengine serve zai-org/GLM-5.3-Flash               # the FP8 checkpoint instead (~306 GB download)
 ```
 
 `env/make_env.sh` builds the pinned environment from public sources and checks it with `env/check_env.py`. Its
@@ -176,8 +179,8 @@ evaluation ("st10"):
 
 | Option | Default | Meaning |
 |---|---|---|
-| `<model>` | `nvidia/GLM-5.3-Flash-NVFP4` | Hugging Face repo id or local checkpoint directory; only this model is accepted |
-| `--revision` | `da920bb0b9` (for the default model) | Hugging Face revision |
+| `<model>` | `nvidia/GLM-5.3-Flash-NVFP4` | Hugging Face repo id or local checkpoint directory; `nvidia/GLM-5.3-Flash-NVFP4` or `zai-org/GLM-5.3-Flash` (FP8) |
+| `--revision` | `da920bb0b9` (NVFP4), `03eb536628` (FP8) | Hugging Face revision |
 | `--host`, `--port` | `0.0.0.0`, `8000` | HTTP address. The engine also uses the next 11 ports (`port+1` … `port+11`) on 127.0.0.1 |
 | `--served-model-name` | `<model>` as given | the model name of the API |
 | `--max-model-len` | 1,048,576 | longest prompt + 1; also capped by what the KV pool holds |
@@ -384,6 +387,7 @@ First start of a fresh container (empty cache volume), until `/health` returns 2
 | [docs/results/v3_8h_steady.md](docs/results/v3_8h_steady.md) | 8-hour steady state with and without SSD (simulator) |
 | [docs/results/kda_ckpt_k_recompute_v3.md](docs/results/kda_ckpt_k_recompute_v3.md) | Extra prefill from keeping 1, 2 or 4 KDA states per context (simulator) |
 | [docs/results/ssd_backend_ab.md](docs/results/ssd_backend_ab.md) | The SSD tier's backends: Linux AIO vs io_uring (disk only, bring-up, sessions) |
+| [docs/results/fp8.md](docs/results/fp8.md) | The FP8 checkpoint vs NVFP4: single request, saturated, prefix cache, M6 N = 300 |
 | [docs/results/setup.md](docs/results/setup.md) | The node and software the measurements ran on |
 
 The bring-up measurements (single-request iteration times, prefix cache, scheduler, kernel timings and identity
@@ -484,7 +488,7 @@ node.
 
 | Variable | Default | What |
 |---|---|---|
-| `SSENGINE_CHECKPOINT` | the snapshot above under `$HF_HOME/hub` | the checkpoint directory |
+| `SSENGINE_CHECKPOINT` | the NVFP4 snapshot above under `$HF_HOME/hub` | the checkpoint directory; the FP8 snapshot runs FP8 (quantization from its `config.json`) |
 | `SSENGINE_HANDOFF` | `third_party/handoff` | the handoff directory: `doc/handoff/glm53_flash_pp4_b200_v2` of ServingStudioSim at `5153041a` (traces, targets, microbatch fit) |
 | `SSENGINE_SIM` | `third_party/ServingStudioSim` | ServingStudioSim at `820adda0` |
 | `SSENGINE_ENWIK9` | `third_party/enwik9` | the prompt corpus |
@@ -541,7 +545,7 @@ is in use`**: another server holds every set. Create another set with `--sets K`
 
 **Address already in use.** The server uses `--port` and the next 11 ports. Pick a port block that is free for all 12.
 
-**`unsupported model`.** Only `nvidia/GLM-5.3-Flash-NVFP4` is served; the check reads `config.json` before anything
+**`unsupported model`.** Only GLM-5.3-Flash is served, `nvidia/GLM-5.3-Flash-NVFP4` or `zai-org/GLM-5.3-Flash`; the check reads `config.json` before anything
 else is downloaded.
 
 **`max_tokens 16: this engine computes prefill and one output token`.** By design: see the note at the top.

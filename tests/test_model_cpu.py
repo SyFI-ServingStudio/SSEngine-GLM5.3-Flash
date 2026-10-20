@@ -221,3 +221,56 @@ def test_kv_groups_place_layers_by_the_design_split(monkeypatch, caplog):
     assert dist_utils.get_pp_indices is vllm_split
     assert n == 5      # stage KDA/DSA [9/3, 9/2, 8/3, 8/3]: ceil(9/2)
     assert "unevenly" not in caplog.text
+
+
+def test_fp8_manifest_takes_the_traced_fp8_stages():
+    """Kernel names of the FP8 checkpoint's chain at 1,024 tokens (8685, all four stages, DeepGEMM MoE): every stage passes the FP8
+    manifest (no unknown, nothing missing but the indexer configs a 1k prompt skips), while the NVFP4 manifest flags
+    the FP8 GEMM/quantization kernels as unknown and its NVFP4 configs as missing."""
+    names = [
+        "_count_expert_num_tokens",
+        "_fwd_kernel_ep_gather",
+        "_fwd_kernel_ep_scatter_1",
+        "_fwd_kernel_ep_scatter_2",
+        "_silu_mul_quant_fp8_packed_kernel",
+        "fmhaSm100fKernel_QkvE4m3OBfloat16H512PagedKvDenseDynamicTokenSparseP1VarSeqQ64Kv128PersistentKeepsAbForGen",
+        "kda_conv_qkv_kernel",
+        "kda_conv_state_kernel",
+        "kernel_cutlass__pkd_TiledMMA_ThrLayoutVMNK11110000_PermutationMNK____MMAAtom_ThrID10_ShapeMNK1283216_TVLayoutA1128161281128_TVLayoutB1321632132_TVLayoutC1128321",
+        "mhc_post_tilelang_kernel",
+        "mhc_pre_big_fuse_with_norm_tilelang_kernel",
+        "nvjet_sm100_tss_32x64_64x16_1x2_2cta_h_bz_TNN",
+        "nvjet_sm100_tst_112x128_64x9_1x2_2cta_h_bz_TNN",
+        "nvjet_sm100_tst_128x128_64x8_2x2_2cta_h_bz_TNT",
+        "nvjet_sm100_tst_128x256_64x6_2x1_2cta_v_bz_NNT",
+        "nvjet_sm100_tst_128x256_64x6_2x2_2cta_h_bz_TNT",
+        "nvjet_sm100_tst_192x8_64x8_2x1_v_bz_splitK_TNT",
+        "nvjet_sm100_tst_256x128_64x5_2x2_2cta_h_bz_TNT",
+        "nvjet_sm100_tst_32x64_64x16_1x2_2cta_h_bz_TNN",
+        "nvjet_sm100_tst_64x32_64x16_2x2_2cta_h_bz_splitK_TNT",
+        "sparse_mla_index_remap_kernel",
+        "void deep_gemm::sm100_fp8_fp4_gemm_1d1d_impl<(cute::UMMA::Major)0, (cute::UMMA::Major)0, 128u, 128u, 128u, 0u, 24576u, 4096u, 128u, 224u, 128u, 1u, 128u, 128u, ",
+        "void deep_gemm::sm100_fp8_fp4_gemm_1d1d_impl<(cute::UMMA::Major)0, (cute::UMMA::Major)0, 128u, 128u, 128u, 0u, 4096u, 12288u, 128u, 256u, 128u, 1u, 128u, 128u, ",
+        "void deep_gemm::sm100_fp8_fp4_gemm_1d1d_impl<(cute::UMMA::Major)0, (cute::UMMA::Major)0, 128u, 128u, 128u, 0u, 4096u, 2048u, 128u, 128u, 128u, 288u, 128u, 128u,",
+        "void deep_gemm::sm100_fp8_fp4_gemm_1d1d_impl<(cute::UMMA::Major)0, (cute::UMMA::Major)0, 128u, 128u, 128u, 0u, 4096u, 2048u, 128u, 256u, 128u, 1u, 128u, 128u, 1",
+        "void deep_gemm::sm100_fp8_fp4_gemm_1d1d_impl<(cute::UMMA::Major)0, (cute::UMMA::Major)0, 128u, 128u, 128u, 0u, 4096u, 4096u, 128u, 128u, 128u, 288u, 128u, 128u,",
+        "void deep_gemm::sm100_fp8_fp4_gemm_1d1d_impl<(cute::UMMA::Major)0, (cute::UMMA::Major)0, 128u, 128u, 128u, 0u, 4096u, 4096u, 128u, 256u, 128u, 1u, 128u, 128u, 1",
+        "void deep_gemm::sm100_mega_mhc_impl<4096u, 16u, 148u, false, true, false, 0u>(CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CU",
+        "void deep_gemm::sm100_tf32_hc_prenorm_gemm_impl<24u, 16384u, 64u, 32u, 64u, 9u, 128u, 12u, 128u, 128u>(unsigned int, CUtensorMap_st, CUtensorMap_st, CUtensorMap",
+        "void deep_gemm::transpose_and_pack_fp32_into_ue8m0<512u, 48u, 32u, 128u, 1u, false>(float*, unsigned int*, unsigned int, unsigned int const*, unsigned int)",
+        "void per_token_group_quant_8bit_kernel<c10::BFloat16, c10::Float8_e4m3fn, false, true, float, false>(c10::BFloat16 const*, void*, float*, int, int, int, float, ",
+        "void per_token_group_quant_8bit_packed_register_kernel<c10::BFloat16, c10::Float8_e4m3fn, 128, 16, 1>(c10::BFloat16 const*, void*, unsigned int*, int, int, int,",
+        "void vllm::concat_and_cache_mla_kernel<__nv_bfloat16, unsigned char, (vllm::Fp8KVCacheDataType)1>(__nv_bfloat16 const*, __nv_bfloat16 const*, unsigned char*, lo",
+        "void vllm::moe::single_group_topk::detail::single_group_topk_block_kernel<float, float, int, (vllm::moe::ScoringFunc)1, 384, 8>(float const*, float*, int*, floa",
+        "void vllm::rms_norm_kernel<c10::BFloat16, 8, 2, true>(c10::BFloat16*, c10::BFloat16 const*, long, long, long, long, long, c10::BFloat16 const*, long, float, int",
+        "kernel",
+    ]
+    for stage in range(4):
+        r = K.check_trace(names, stage, optional=frozenset({19, 20, 21}), quant="fp8")
+        assert r.ok, r.summary()
+        assert {12, 14, 27, 29, 30, 31, 32} <= set(r.matched) and (stage > 0 or {8, 9, 10, 11} <= set(r.matched))
+    r = K.check_trace(names, 0, optional=frozenset({19, 20, 21}))
+    assert not r.ok and r.unknown and {8, 9, 10, 11, 29} <= set(r.missing)
+    assert K.by_config(30, "fp8").kind == "fp8_block_fused_moe" and K.by_config(30).kind == "nvfp4_fused_moe"
+    trtllm = "bmm_E4m3_E4m3E4m3_Fp32_t128x16x128u2_s6_et64x16_m64x16x32_c1x1x1_rM_BN_transOut_dsFp8_sm100f"
+    assert (30, trtllm) in K.check_trace(names + [trtllm], 1, quant="fp8").forbidden   # the fork's default MoE
