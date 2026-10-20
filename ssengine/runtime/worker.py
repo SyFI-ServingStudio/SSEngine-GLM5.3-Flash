@@ -237,6 +237,18 @@ def build_model(cfg: RunConfig, stage: int, device: torch.device):
 # SSENGINE_TIER_SWITCH_S=S: the GIL switch interval with tiers on (default 0: Python's 5 ms). For the A/B under session
 # load (job 7966, idle: no effect; in session runs a tier op's submit waits for the GIL behind the launch thread).
 TIER_SWITCH_S = float(os.environ.get("SSENGINE_TIER_SWITCH_S", "0"))
+MEM_LOG_EVERY = 2000   # microbatches between the device memory lines (log_memory)
+
+
+def log_memory(stage: int, device, mbs: int) -> None:
+    """The allocator's current and peak bytes and the device's free bytes, against the start-up KV profile's headroom
+    (StageModel.kv_profile): a run that comes close to the device's capacity shows it here before it runs out."""
+    m = torch.cuda.memory_stats(device)
+    g = lambda k: round(m.get(k, 0) / 2**30, 2)
+    print(f"stage {stage} memory after {mbs} microbatches: " + json.dumps({
+        "allocated_gib": g("allocated_bytes.all.current"), "peak_allocated_gib": g("allocated_bytes.all.peak"),
+        "reserved_gib": g("reserved_bytes.all.current"), "peak_reserved_gib": g("reserved_bytes.all.peak"),
+        "free_gib": round(torch.cuda.mem_get_info(device)[0] / 2**30, 2)}), flush=True)
 
 
 @torch.inference_mode()   # all of it: model construction, warm-up, receive, forward, send (StageModel's warm-up
@@ -357,11 +369,15 @@ def run_worker(cfg: RunConfig, stage: int):   # makes inference tensors, which a
                 reporter.q.put((stage, plan.mb_id, start, end, anchor, wait, out, tok_ids, host))
             if cuda:
                 torch.cuda.nvtx.range_pop()
+                if mbs % MEM_LOG_EVERY == 0:
+                    log_memory(stage, device, mbs)
             window.after(plan.mb_id)
     except BaseException:
         reporter.q.put(WorkerError(stage, traceback.format_exc()))
         raise
     finally:
+        if cuda:
+            log_memory(stage, device, mbs)
         if tiers is not None:
             tiers.close()
         reporter.q.put(None)
