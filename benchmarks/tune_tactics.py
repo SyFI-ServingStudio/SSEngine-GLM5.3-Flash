@@ -1,4 +1,5 @@
-"""Tune FlashInfer's tactics once and persist them (`ssengine.model.stage.TACTICS`), or verify a persisted file.
+"""Tune FlashInfer's tactics once and persist them (`ssengine.model.stage.TACTICS`, one file per quantization: the
+checkpoint's, SSENGINE_CHECKPOINT), or verify a persisted file.
 
     python -m benchmarks.tune_tactics tune   [--out PATH] --routing RUN_DIR [--routing ...] | --routing-json PATH  # 1 GPU
     python -m benchmarks.tune_tactics verify [--lengths 1024,8192,131072]  # fresh process: load, Ready time, cache misses
@@ -70,7 +71,7 @@ def tune(out: Path, profile: dict[int, list[int]], sources: list[str]) -> None:
         out.unlink()            # a fresh file: no merge with entries tuned elsewhere
     AutoTuner.get().save_configs(str(out))
     data = json.loads(out.read_text())
-    moe = sorted(int(k.split("((")[1].split(",")[0]) for k in data if "trtllm_fp4_block_scale_moe" in k)
+    moe = sorted(int(k.split("((")[1].split(",")[0]) for k in data if "_block_scale_moe" in k)
     side = out.with_suffix(".routing.json")
     side.write_text(json.dumps({"sources": sources, "moe_buckets": moe,
                                 "tuned_on": {str(k): {"max": max(h), "active": sum(1 for x in h if x), "hist": h}
@@ -163,14 +164,15 @@ def verify(lengths: list[int]) -> None:
 
 
 def main() -> None:
-    from ssengine.model.stage import TACTICS
+    from ssengine.config import CHECKPOINT, checkpoint_quantization
+    from ssengine.model.stage import tactics_file
 
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("mode", choices=["tune", "verify", "merge"])
     ap.add_argument("--base", type=Path)
     ap.add_argument("--ab", type=Path, action="append", default=[])
     ap.add_argument("--routing-name", default="real")
-    ap.add_argument("--out", type=Path, default=TACTICS)
+    ap.add_argument("--out", type=Path, default=tactics_file(checkpoint_quantization(CHECKPOINT)))
     ap.add_argument("--lengths", default="1024,2048,4096,4352,6144,8192,131072")
     ap.add_argument("--routing", type=Path, action="append", default=[], help="run dir with experts_stage*.jsonl")
     ap.add_argument("--routing-json", type=Path)

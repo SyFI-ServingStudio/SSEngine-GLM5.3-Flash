@@ -1,4 +1,4 @@
-"""One pipeline stage of GLM-5.3-Flash NVFP4, built from the vLLM fork's glm5next modules (runtime/README.md).
+"""One pipeline stage of GLM-5.3-Flash (NVFP4 or FP8: `ssengine.config.quantization` of the checkpoint), built from the vLLM fork's glm5next modules (runtime/README.md).
 
 Construction:
 1. VllmConfig from `EngineArgs` (text model only, FP8 KV, `max_num_batched_tokens` = the run's microbatch budget so a
@@ -37,7 +37,7 @@ import torch
 os.environ.setdefault("VLLM_USE_BREAKABLE_CUDAGRAPH", "1")
 
 from ssengine import kernels  # noqa: E402
-from ssengine.config import CHECKPOINT, PAGE_TOKENS  # noqa: E402
+from ssengine.config import CHECKPOINT, PAGE_TOKENS, checkpoint_quantization  # noqa: E402
 from ssengine.engine.kv import block_pages  # noqa: E402
 from ssengine.model import kv_tensors, pp_patch, sm_h2d  # noqa: E402
 from ssengine.model.metadata import StageMetadata  # noqa: E402
@@ -46,8 +46,13 @@ HIDDEN_WIDTH = 4 * 4096
 # FlashInfer tactics, tuned once (benchmarks/tune_tactics.py) and loaded at warm-up with tuning off, as vLLM loads its
 # persisted configs: start-up skips ~150 s of MoE profiling and every stage, run and test uses the same tactics.
 # The file's own metadata (FlashInfer/CUDA/cuBLAS/cuDNN versions, GPU) decides whether it is valid here.
-TACTICS = Path(os.environ.get("SSENGINE_FI_TACTICS",
-                              Path(__file__).resolve().parents[1] / "data" / "flashinfer_tactics_b200.json"))
+# One file per quantization (the ops differ: trtllm FP4 vs FP8 block-scale MoE, mm_fp4); SSENGINE_FI_TACTICS overrides.
+_DATA = Path(__file__).resolve().parents[1] / "data"
+TACTICS = {"nvfp4": _DATA / "flashinfer_tactics_b200.json", "fp8": _DATA / "flashinfer_tactics_b200_fp8.json"}
+
+
+def tactics_file(quant: str) -> Path:
+    return Path(os.environ.get("SSENGINE_FI_TACTICS") or TACTICS[quant])
 RESERVE_GB = 13.6     # 1_contract.md §1: activations and workspace beside weights and KV (and the CUDA graph pool)
 # token counts captured as CUDA graphs: 128, then every 256 to 8192 (33). A microbatch pads to its bucket, so
 # coarse buckets cost compute: with powers of 2 a 3,000-token prompt ran as 4,096 (round 0 TTFT 114 vs 96.7 ms
@@ -129,14 +134,14 @@ def bench_config(mb_tokens: int, checkpoint: str | None = None, cuda_graphs: boo
 NINJA = "/usr/bin/ninja"
 
 
-def load_tactics(path: Path | None = None) -> dict:
+def load_tactics(path: Path) -> dict:
     """Load the persisted FlashInfer tactics into the autotuner (lookup only, no profiling). Returns what a run
     records: source "file" with path and sha256, or source "missing"/"invalid" with the reason."""
     import hashlib
 
     from flashinfer.autotuner import AutoTuner
 
-    path = Path(path or TACTICS)
+    path = Path(path)
     if not path.is_file():
         return {"source": "missing", "file": str(path), "reason": f"{path} does not exist"}
     sha = hashlib.sha256(path.read_bytes()).hexdigest()
@@ -210,6 +215,7 @@ class StageModel:
         self.hidden_width = HIDDEN_WIDTH
         torch.cuda.set_device(device)
         ckpt = st["checkpoint"]
+        self.quant = checkpoint_quantization(ckpt)     # "nvfp4" or "fp8"; anything else raises
         # one-request runs set mb_tokens >= the prompt, so the whole prompt is one call; at least 8192
         max_tokens = max(st["mb_tokens"], 8192)
         os.environ.setdefault("VLLM_SSM_CONV_STATE_LAYOUT", "SD")
@@ -306,11 +312,11 @@ class StageModel:
 
     def install_host_trims(self) -> dict:
         mods = [m for m in (*self.layers, self.embed, self.norm, self.lm_head) if m is not None]
-        return pp_patch.install_host_trims(mods)
+        return pp_patch.install_host_trims(mods, self.quant)
 
     def warmup(self, tune: str = "auto") -> None:
         """Before `Ready`: run every kernel once (first launches load modules) with FlashInfer's tactics settled.
-        `tune`: "auto" loads `TACTICS` (tuning off) and tunes in this process, loudly, only when the file is missing
+        `tune`: "auto" loads the quantization's `tactics_file` (tuning off) and tunes in this process, loudly, only when the file is missing
         or invalid here; "force" tunes in this process (benchmarks/tune_tactics.py); "off" uses neither. Tuning is one
         autotuned pass at the microbatch budget, as vLLM's `kernel_warmup` does. Shapes: one request at the full
         budget (indexer and both top-k paths), then two requests, one continuing a cached prefix (conv and KDA initial
@@ -334,14 +340,14 @@ class StageModel:
             yield NS(mb_id=-1, chunks=[chunk("w0", 0, T, 1)])
             yield NS(mb_id=-2, chunks=[chunk("w1", 0, 512, 1), chunk("w2", 1024, 1024, 1 + 1 + 6)])
 
-        self.tactics = load_tactics() if tune == "auto" else {"source": tune}
+        self.tactics = load_tactics(tactics_file(self.quant)) if tune == "auto" else {"source": tune}
         ctx = contextlib.nullcontext()
         if tune == "force" or (tune == "auto" and self.tactics["source"] != "file"):
             from flashinfer.autotuner import autotune as fi_autotune
 
             if tune == "auto":
                 msg = (f"FlashInfer tactics not loaded ({self.tactics['reason']}): tuning in this process (~150 s, "
-                       f"tactics may differ per process). Run benchmarks/tune_tactics.py to write {TACTICS}.")
+                       f"tactics may differ per process). Run benchmarks/tune_tactics.py to write {tactics_file(self.quant)}.")
                 warnings.warn(msg, stacklevel=2)
                 print(f"WARNING: {msg}", flush=True)
                 self.tactics["source"] = "tuned_in_process"
