@@ -68,10 +68,21 @@ def graph_bucket(num_tokens: int, buckets) -> int | None:
 MAX_MODEL_LEN = 1_048_576
 
 
-def build_vllm_config(checkpoint: str, max_num_batched_tokens: int, max_model_len: int = MAX_MODEL_LEN):
+# The routed-expert backend per quantization (vLLM `moe_backend`; "auto" = the fork's choice). FP8: DeepGEMM, the
+# fastest correct block-FP8 MoE from 2k tokens up (research/bench/fp8_moe_backends.py, job 8684, layer 4 as served:
+# 1.32x / 1.35x / 1.61x the fork's default FLASHINFER_TRTLLM at 4k / 8k / 16k, tied at 2k, 0.69x / 0.85x at 256 / 1k;
+# FLASHINFER_CUTLASS does not take 128 x 128 block weights, the fork disables VLLM_CUTLASS, Triton is slower
+# everywhere). One backend for every shape: the two layouts (TRTLLM shuffled weights, DeepGEMM UE8M0 scales) cannot share
+# one copy of the expert weights, and the microbatches are mostly past 2k.
+MOE_BACKEND = {"nvfp4": "auto", "fp8": "deep_gemm"}
+
+
+def build_vllm_config(checkpoint: str, max_num_batched_tokens: int, max_model_len: int = MAX_MODEL_LEN,
+                      moe_backend: str | None = None):
     from vllm.engine.arg_utils import EngineArgs
 
-    args = EngineArgs(model=checkpoint, tensor_parallel_size=1, pipeline_parallel_size=1,
+    moe_backend = moe_backend or MOE_BACKEND[checkpoint_quantization(checkpoint)]
+    args = EngineArgs(model=checkpoint, tensor_parallel_size=1, pipeline_parallel_size=1, moe_backend=moe_backend,
                       kv_cache_dtype="fp8_e4m3", enable_prefix_caching=False, language_model_only=True,
                       max_model_len=max_model_len, max_num_batched_tokens=max_num_batched_tokens,
                       max_num_seqs=max(64, max_num_batched_tokens // 128), enforce_eager=True,

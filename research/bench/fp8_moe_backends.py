@@ -36,6 +36,7 @@ from pathlib import Path
 
 BACKENDS = ("flashinfer_trtllm", "flashinfer_cutlass", "deep_gemm", "cutlass", "triton")
 TOKENS = (256, 1024, 2048, 4096, 8192, 16384)
+# --backends auto with SSENGINE_CHECKPOINT=<NVFP4 snapshot> --check-tokens 0: the NVFP4 MoE as served, same scope
 OUT = Path(__file__).resolve().parents[1] / "measured" / "fp8_moe"
 ROUTING = Path(os.environ.get("SSENGINE_ROUTING_RUN",
                               "/raid/kanzhu/ServingStudio/pp-impl/old-wt/m5-routing/measured/runs_m5r/"
@@ -59,8 +60,7 @@ def build(backend: str, layer: int, max_tokens: int):
 
     dev = torch.device("cuda", 0)
     torch.cuda.set_device(dev)
-    vc = build_vllm_config(CHECKPOINT, max_tokens)
-    vc.kernel_config.moe_backend = backend
+    vc = build_vllm_config(CHECKPOINT, max_tokens, moe_backend=backend)
     ctx = set_current_vllm_config(vc)
     ctx.__enter__()
     import vllm.ir
@@ -123,6 +123,7 @@ def reference(layer: int, x, logits, cfg) -> "torch.Tensor":
 def one(backend: str, tokens: list[int], layer: int, iters: int, check_tokens: int, out: Path) -> dict:
     import torch
     from flashinfer.autotuner import autotune
+    from ssengine.config import CHECKPOINT, checkpoint_quantization
     from ssengine.model import moe_tuning
     from vllm.forward_context import set_forward_context
 
@@ -154,17 +155,18 @@ def one(backend: str, tokens: list[int], layer: int, iters: int, check_tokens: i
             return moe(xbuf[:T])
 
     with torch.inference_mode():
-        # accuracy, real router on N(0, 1) rows
-        T = check_tokens
+        # accuracy, real router on N(0, 1) rows (FP8 checkpoint only: the reference dequantizes FP8 blocks)
+        T = check_tokens or 1
         fixed["logits"][:T] = (xbuf[:T].float() @ gate.weight.float().T).to(fixed["logits"].dtype)
         got = call(T).float()
-        ref = reference(layer, xbuf[:T], fixed["logits"][:T], cfg)
+        ref = reference(layer, xbuf[:T], fixed["logits"][:T], cfg) if check_tokens else got
         d = got - ref
-        res["check"] = {"tokens": T, "rel_fro": (d.norm() / ref.norm()).item(),
+        res["check"] = None if not check_tokens else {"tokens": T, "rel_fro": (d.norm() / ref.norm()).item(),
                         "min_cos": torch.nn.functional.cosine_similarity(got, ref, dim=1).min().item(),
                         "finite": bool(torch.isfinite(got).all().item())}
         out.write_text(json.dumps(res, indent=1))
         print(f"[moe] {backend} check {res['check']}", flush=True)
+        res["checkpoint_quant"] = checkpoint_quantization(CHECKPOINT)
         res["times"] = {}
         for T in tokens:
             fixed["logits"][:T] = moe_tuning.forced_logits(moe_tuning.profile_for(profile, T), T,
