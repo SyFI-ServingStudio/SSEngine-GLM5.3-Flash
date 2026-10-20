@@ -4,6 +4,7 @@ model check, the config it builds, the chat template as transformers renders it,
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -14,7 +15,7 @@ import yaml
 
 from conftest import free_port_block
 from e2e import ROOT, Server
-from ssengine.config import CHECKPOINT
+from ssengine.config import CHECKPOINT, CHECKPOINTS, checkpoint_quantization, hub_snapshot
 from ssengine.model.fake import fake_token
 from ssengine.serve import launch
 
@@ -22,6 +23,9 @@ from ssengine.serve import launch
 GLM53_FLASH = {"architectures": ["Glm5NextForConditionalGeneration"], "model_type": "glm5_next",
                "text_config": dict(launch.TEXT_CONFIG),
                "quantization_config": {"quant_algo": "NVFP4", "quant_method": "modelopt"}}
+# and of zai-org/GLM-5.3-Flash (the official FP8)
+FP8_QUANT = {"activation_scheme": "dynamic", "fmt": "e4m3", "quant_method": "fp8", "weight_block_size": [128, 128]}
+GLM53_FLASH_FP8 = {**GLM53_FLASH, "quantization_config": FP8_QUANT}
 CPU = {"model": "fake", "device": "cpu", "fake": {"us_per_token": 2.0, "hidden_width": 64, "num_blocks": 30}}
 WORDS = ["<|endoftext|>", "[gMASK]", "<|user|>", "<|assistant|>", "hello", "world", "what", "is", "2+2?"]
 TEMPLATE = ("[gMASK] {% for m in messages %}<|{{ m.role }}|> {{ m.content }} {% endfor %}"
@@ -51,8 +55,16 @@ def args(model: str, **kw) -> argparse.Namespace:
     return a
 
 
-def test_check_model_takes_only_glm53_flash_nvfp4():
-    launch.check_model(GLM53_FLASH, "glm")
+def test_check_model_takes_only_glm53_flash_nvfp4_or_fp8():
+    assert launch.check_model(GLM53_FLASH, "glm") == "nvfp4"
+    assert launch.check_model(GLM53_FLASH_FP8, "glm") == "fp8"
+    for k, v in (("weight_block_size", [1, 128]), ("activation_scheme", "static"), ("fmt", "e5m2")):
+        odd = {**GLM53_FLASH_FP8, "quantization_config": {**FP8_QUANT, k: v}}
+        with pytest.raises(launch.UnsupportedModel, match=re.escape(f"quantization fp8 with ") + ".*" + re.escape(f"{k} {v}")):
+            launch.check_model(odd, "odd")
+    awq = {**GLM53_FLASH, "quantization_config": {"quant_method": "awq", "bits": 4}}
+    with pytest.raises(launch.UnsupportedModel, match="quantization awq \\(want NVFP4 or FP8\\).*zai-org/GLM-5.3-Flash"):
+        launch.check_model(awq, "awq")
     other = {"architectures": ["Qwen3ForCausalLM"], "num_hidden_layers": 36}
     with pytest.raises(launch.UnsupportedModel, match="unsupported model q: architecture Qwen3ForCausalLM"):
         launch.check_model(other, "q")
@@ -68,6 +80,15 @@ def test_check_model_takes_only_glm53_flash_nvfp4():
 @pytest.mark.skipif(not Path(CHECKPOINT, "config.json").is_file(), reason="no checkpoint")
 def test_the_checkpoint_passes_the_check():
     launch.check_model(json.loads(Path(CHECKPOINT, "config.json").read_text()), "ckpt")
+
+
+@pytest.mark.parametrize("quant", CHECKPOINTS)
+def test_each_served_checkpoint_has_its_quantization(quant):
+    snap = Path(hub_snapshot(CHECKPOINTS[quant]))
+    if not (snap / "config.json").is_file():
+        pytest.skip(f"{CHECKPOINTS[quant].repo} not in the HF cache")
+    assert launch.check_model(json.loads((snap / "config.json").read_text()), quant) == quant
+    assert checkpoint_quantization(snap) == quant
 
 
 def test_build_config_is_the_design_setting(tmp_path):
@@ -102,6 +123,8 @@ def test_build_config_is_the_design_setting(tmp_path):
         launch.build_config(args(str(model_dir(tmp_path / "llama", {"architectures": ["LlamaForCausalLM"]}))))
     with pytest.raises(launch.UnsupportedModel, match="neither a local directory"):
         launch.build_config(args(str(tmp_path / "missing")))
+    fp8 = model_dir(tmp_path / "fp8", GLM53_FLASH_FP8)
+    assert launch.build_config(args(str(fp8))).checkpoint == str(fp8)
 
 
 def test_cli_refuses_another_model_before_starting(tmp_path):

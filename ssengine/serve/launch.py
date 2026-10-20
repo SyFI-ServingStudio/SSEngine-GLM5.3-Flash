@@ -1,8 +1,9 @@
 """`ssengine serve <model>`: the run config from a model, like `vllm serve <model>` (README "Serve").
 
 <model> is a Hugging Face repo id or a local checkpoint directory. Only the model this engine is built for is served:
-GLM-5.3-Flash NVFP4 as 4 pipeline stages (`check_model`); anything else is refused before a weight is read or
-downloaded. The config is the design setting of the M6 evaluation (docs/results/eval_m6.md, "st10"): the
+GLM-5.3-Flash as 4 pipeline stages, in either of its two quantizations (`ssengine.config.CHECKPOINTS`: NVFP4, the
+default, or the official FP8), read from the checkpoint's config.json (`check_model`); anything else is refused before
+a weight is read or downloaded. The config is the design setting of the M6 evaluation (docs/results/eval_m6.md, "st10"): the
 scheduler of 6_scheduler.md step "good", the exact prefix cache (kept sessions) and, when a DRAM or SSD tier is given,
 exclusive DRAM writes and a 10% loading area (dev:research/TIERS.md); without one, HBM only. A `--config` YAML is applied on top of
 that, the command-line options last.
@@ -18,8 +19,8 @@ from pathlib import Path
 import msgspec
 import yaml
 
-from ssengine.config import (CHECKPOINT_REPO, CHECKPOINT_REVISION, HIDDEN_WIDTH, LAYER_SPLIT, SCHEDULER_STEPS,
-                           RunConfig, TierConfig)
+from ssengine.config import (CHECKPOINT_REPO, CHECKPOINTS, HIDDEN_WIDTH, LAYER_SPLIT, SCHEDULER_STEPS, RunConfig,
+                           TierConfig, quantization)
 
 # The engine's model length: the stage models' vLLM config (ssengine/model/stage.py MAX_MODEL_LEN), = the checkpoint's
 # max_position_embeddings. A prompt must also fit the KV pool (controller).
@@ -36,28 +37,32 @@ class UnsupportedModel(SystemExit):
     pass
 
 
-def check_model(config: dict, name: str) -> None:
-    """Refuse every model but GLM-5.3-Flash NVFP4 (config.json, with its quantization config)."""
+def check_model(config: dict, name: str) -> str:
+    """Refuse every model but GLM-5.3-Flash in one of its two quantizations (config.json, with its quantization
+    config); returns the quantization ("nvfp4" or "fp8")."""
     archs = config.get("architectures") or []
     text = config.get("text_config") or {}
-    quant = config.get("quantization_config") or {}
-    why = []
+    why, quant = [], None
     if ARCHITECTURE not in archs:
         why.append(f"architecture {', '.join(archs) or 'none'} (want {ARCHITECTURE})")
     else:
         why += [f"text_config.{k} = {text.get(k)} (want {v})" for k, v in TEXT_CONFIG.items() if text.get(k) != v]
-        if quant.get("quant_algo") != "NVFP4":
-            why.append(f"quantization {quant.get('quant_algo') or quant.get('quant_method') or 'none'} (want NVFP4)")
+        try:
+            quant = quantization(config)
+        except ValueError as e:
+            why.append(str(e))
     if why:
+        served = " or ".join(f"{c.repo} ({q.upper()})" for q, c in CHECKPOINTS.items())
         raise UnsupportedModel(
-            f"unsupported model {name}: " + "; ".join(why) + f". ssengine serves only {CHECKPOINT_REPO} "
-            f"(GLM-5.3-Flash NVFP4, {ARCHITECTURE}) as a {len(LAYER_SPLIT)}-stage pipeline on {len(LAYER_SPLIT)} GPUs")
+            f"unsupported model {name}: " + "; ".join(why) + f". ssengine serves only GLM-5.3-Flash, {served} "
+            f"({ARCHITECTURE}), as a {len(LAYER_SPLIT)}-stage pipeline on {len(LAYER_SPLIT)} GPUs")
+    return quant
 
 
 def resolve_model(model: str, revision: str | None = None) -> str:
     """The checkpoint directory of `model`: a local directory, or a Hugging Face repo id fetched into the HF cache
     (HF_HOME) as vLLM does. config.json is fetched and checked first, so an unsupported model downloads nothing more.
-    The default revision of nvidia/GLM-5.3-Flash-NVFP4 is the one this repo is measured on."""
+    The default revision of each repo in `CHECKPOINTS` is the one this repo is measured on."""
     path = Path(model).expanduser()
     if path.is_dir():
         cfg = path / "config.json"
@@ -69,10 +74,12 @@ def resolve_model(model: str, revision: str | None = None) -> str:
         raise UnsupportedModel(f"{model}: neither a local directory nor a Hugging Face repo id")
     from huggingface_hub import hf_hub_download, snapshot_download
 
-    if revision is None and model == CHECKPOINT_REPO:
-        revision = CHECKPOINT_REVISION
-    check_model(json.loads(Path(hf_hub_download(model, "config.json", revision=revision)).read_text()), model)
-    print(f"ssengine: {model} at revision {revision or 'main'} into the HF cache (~191 GB the first time)", flush=True)
+    known = {c.repo: c for c in CHECKPOINTS.values()}.get(model)
+    if revision is None and known:
+        revision = known.revision
+    quant = check_model(json.loads(Path(hf_hub_download(model, "config.json", revision=revision)).read_text()), model)
+    size = f" (~{known.size_gb} GB the first time)" if known and revision == known.revision else ""
+    print(f"ssengine: {model} ({quant.upper()}) at revision {revision or 'main'} into the HF cache{size}", flush=True)
     return snapshot_download(model, revision=revision)
 
 
@@ -168,15 +175,18 @@ def build_config(a) -> RunConfig:
 
 def add_arguments(s) -> None:
     """The `serve` options (ssengine/__main__.py)."""
-    s.add_argument("model", nargs="?", help="Hugging Face repo id or local checkpoint directory (only "
-                   f"{CHECKPOINT_REPO}, the default); with --config and no model, the YAML is the whole run config")
+    s.add_argument("model", nargs="?", help="Hugging Face repo id or local checkpoint directory of GLM-5.3-Flash: "
+                   + " or ".join(f"{c.repo} ({q.upper()})" for q, c in CHECKPOINTS.items())
+                   + f" (default {CHECKPOINT_REPO}); the quantization is read from its config.json. With --config "
+                   "and no model, the YAML is the whole run config")
     s.add_argument("--config", help="run config YAML (ssengine/config.py RunConfig); with a model, applied on top of the "
                    "design setting")
     s.add_argument("--host", help="HTTP address (with a model: default 0.0.0.0)")
     s.add_argument("--port", type=int, help="HTTP port (default 8000); the engine also uses the next 11 ports on "
                    "127.0.0.1")
     s.add_argument("--run-dir", help="logs and per-run files (default ./run)")
-    s.add_argument("--revision", help=f"Hugging Face revision (default for {CHECKPOINT_REPO}: {CHECKPOINT_REVISION[:10]})")
+    s.add_argument("--revision", help="Hugging Face revision (default: "
+                   + ", ".join(f"{c.repo} {c.revision[:10]}" for c in CHECKPOINTS.values()) + ")")
     s.add_argument("--served-model-name", help="the model name of the OpenAI API (default: <model> as given)")
     s.add_argument("--max-model-len", type=int, help=f"longest prompt + output (default and maximum {MAX_MODEL_LEN})")
     s.add_argument("--dram-gb", type=float, help="DRAM tier per GPU in GB (the evaluation's full setting: 50)")
