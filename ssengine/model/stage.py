@@ -299,6 +299,7 @@ class StageModel:
         attn_layers = get_layers_from_vllm_config(vc, AttentionLayerBase)
         local_spec = {n: l.get_kv_cache_spec(vc) for n, l in attn_layers.items()}
         per_block = kv_tensors.bytes_per_block(vc, local_spec)
+        self.moe_workspace_gib = self._settle_moe_workspace(max_tokens)
         if num_blocks is None:
             free, _ = torch.cuda.mem_get_info(device)
             num_blocks = kv_tensors.blocks_that_fit(per_block, free, int(RESERVE_GB * 1e9),
@@ -320,6 +321,27 @@ class StageModel:
                 self._regrow()
             self.graph_info["warmup_s"] = warmup_s
             self.graph_info["jit_warmup"] = self.jit_warmup
+
+    def _settle_moe_workspace(self, tokens: int) -> float:
+        """Grow vLLM's persistent workspace (`current_workspace_manager`, shared by every layer) to what the routed
+        experts take at the microbatch budget, before the KV pool is sized from the free memory, as vLLM's profile
+        run does. The modular MoE kernels (the FP8 checkpoint's DeepGEMM experts: permuted FP8 rows padded per
+        expert, the FC1 output) keep that scratch there; the NVFP4 trtllm MoE is monolithic and takes none. One MoE
+        layer's forward on `tokens` zero rows; returns the GiB it kept."""
+        from vllm.forward_context import set_forward_context
+
+        moe = next((layer.mlp for layer in self.layers if hasattr(layer.mlp, "experts")), None)
+        if moe is None:
+            return 0.0
+        torch.cuda.synchronize(self.device)
+        free0 = torch.cuda.mem_get_info(self.device)[0]
+        with torch.inference_mode(), set_forward_context(None, self.vc, num_tokens=tokens):
+            moe(torch.zeros(tokens, self.hidden_width // 4, dtype=torch.bfloat16, device=self.device))
+        torch.cuda.synchronize(self.device)
+        torch.cuda.empty_cache()
+        kept = round((free0 - torch.cuda.mem_get_info(self.device)[0]) / 2**30, 3)
+        print(f"stage {self.stage}: MoE workspace at {tokens} tokens kept {kept} GiB", flush=True)
+        return kept
 
     def install_host_trims(self) -> dict:
         mods = [m for m in (*self.layers, self.embed, self.norm, self.lm_head) if m is not None]
