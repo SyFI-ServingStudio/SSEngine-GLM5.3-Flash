@@ -263,8 +263,34 @@ nav.lang a[aria-current="page"] { background: var(--accent); color: var(--surfac
 <tr><td>400</td><td>40.51 (full)</td><td>135.0k / 136.0k</td><td>0.61 / 1.52 / 60.43</td><td>4.64</td><td>17.4k / 113.6k</td><td>48.31 / 148.23 / 212.89</td><td>1.17</td><td>7.1k / 64.0k</td><td>319.95 / 344.78 / 349.48</td><td>8.7×</td></tr>
 </tbody></table></div>
 <p class="src">docs/results/vllm_baselines.md · docs/results/eval_m6.md</p>
-<h3 id="perf-4">N sweep (in progress)</h3>
-<p>N → r/s and N → TTFT curves for SSEngine full (N = 50–400 in steps of 50, current main code) and vLLM DP4/EP4 are being measured and will be added here.</p>
+<h3 id="perf-4">N sweep <span class="tag">v3 trace</span></h3>
+<p>Same v3 load, same 4 B200s; the client's maximum concurrent sessions N from 50 to 400 in steps of 50. SSEngine runs the full setting (DRAM 50 GB + SSD 128 GB, staged loading 0.10); vLLM DP4/EP4 uses vllm-router cache_aware, HBM only; vLLM TP4 runs at N = 50 / 100 / 200 / 300 / 400. The table is minutes 10–20, TTFT p50 / p90 / p99 (s).</p>
+<ul>
+<li>At N = 50 all three are bound by the arrival rate (4.6–4.9 r/s); SSEngine's TTFT p50 is 0.09 s, DP4/EP4 0.76 s, TP4 0.35 s.</li>
+<li>vLLM DP4/EP4 peaks at N = 200 (12.55 r/s) and falls as N grows, to 4.64 r/s and a 48 s TTFT p50 at N = 400. SSEngine keeps rising to 40.54 r/s at N = 400 (8.7×).</li>
+<li>vLLM TP4 serves 0.85–1.17 r/s from N = 200 on, with TTFT p50 above 200 s.</li>
+<li>SSEngine has no rounds over 60 s up to N = 250, with p99 under 1 s; at N = 300 / 350 / 400 there are 13 / 99 / 230 such rounds (minutes 10–20), and the share of hits from HBM falls to 98.0% / 96.6% / 94.5%.</li>
+</ul>
+<figure>
+  <div class="fighead"><span class="q">N → throughput and TTFT</span>
+    <div class="segs">
+    <div class="seg" data-for="fns" data-key="w"><button data-v="10-20">minutes 10–20</button><button data-v="0-20">minutes 0–20</button></div>
+    <div class="seg" data-for="fns" data-key="m"><button data-v="rps">r/s</button><button data-v="p50">TTFT p50</button><button data-v="p90">p90</button><button data-v="p99">p99</button></div>
+    </div></div>
+  <div id="fns" class="chart" role="img" aria-label="From N 50 to 400 SSEngine's throughput rises to 40.5 r/s, vLLM DP4/EP4 peaks at 12.6 r/s at N 200 and then falls, TP4 stays below 1.2 r/s from N 200; TTFT on a log scale"></div>
+  <figcaption>TTFT on a log scale (s). SSEngine runs 8541–8548 (main 94c33ac); vLLM DP4/EP4 8550 / 8457 / 8551 / 8552 / 8553 / 8549 / 8554 / 8250 (N = 300 is the MNBT 16384 re-run, the others 32768); TP4 8555 / 8458 / 8556 / 8420 / 8419.</figcaption>
+</figure>
+<div class="tbl"><table><thead><tr><th>N</th><th>SSEngine r/s</th><th>TTFT</th><th>&gt;60 s</th><th>DP4/EP4 r/s</th><th>TTFT</th><th>&gt;60 s</th><th>TP4 r/s</th><th>TTFT</th><th>r/s vs DP4/EP4</th></tr></thead><tbody>
+<tr><td>50</td><td>4.59</td><td>0.09 / 0.19 / 0.39</td><td>0</td><td>4.93</td><td>0.76 / 1.53 / 2.44</td><td>0</td><td>4.84</td><td>0.35 / 0.85 / 2.60</td><td>0.9×</td></tr>
+<tr><td>100</td><td>8.62</td><td>0.09 / 0.17 / 0.36</td><td>0</td><td>7.46</td><td>1.31 / 2.24 / 3.72</td><td>0</td><td>7.26</td><td>0.76 / 3.81 / 7.92</td><td>1.2×</td></tr>
+<tr><td>150</td><td>15.36</td><td>0.11 / 0.19 / 0.49</td><td>0</td><td>11.09</td><td>2.61 / 4.43 / 8.80</td><td>0</td><td>–</td><td>–</td><td>1.4×</td></tr>
+<tr><td>200</td><td>21.72</td><td>0.14 / 0.21 / 0.55</td><td>0</td><td>12.55</td><td>5.22 / 10.39 / 18.39</td><td>0</td><td>0.85</td><td>202.51 / 262.19 / 271.70</td><td>1.7×</td></tr>
+<tr><td>250</td><td>27.89</td><td>0.17 / 0.26 / 0.96</td><td>0</td><td>11.46</td><td>11.03 / 19.84 / 30.75</td><td>0</td><td>–</td><td>–</td><td>2.4×</td></tr>
+<tr><td>300</td><td>33.78</td><td>0.18 / 0.35 / 2.65</td><td>13</td><td>10.22</td><td>18.26 / 28.63 / 42.00</td><td>0</td><td>0.99</td><td>275.57 / 299.96 / 306.23</td><td>3.3×</td></tr>
+<tr><td>350</td><td>37.52</td><td>0.37 / 0.85 / 9.48</td><td>99</td><td>7.50</td><td>31.40 / 56.38 / 97.10</td><td>356</td><td>–</td><td>–</td><td>5.0×</td></tr>
+<tr><td>400</td><td>40.54</td><td>0.60 / 1.50 / 52.53</td><td>230</td><td>4.64</td><td>48.31 / 148.23 / 212.89</td><td>910</td><td>1.17</td><td>319.95 / 344.78 / 349.48</td><td>8.7×</td></tr>
+</tbody></table></div>
+<p class="src">docs/results/n_sweep.md · docs/results/n_sweep.json</p>
 
 <!-- ============================== 1 ============================== -->
 <h2 id="s1"><span class="no">1</span>Background and targets</h2>
@@ -1464,6 +1490,7 @@ const D = {
                p50: { tiers: [0.09, 0.22, 0.84], full: [null, 0.19, 0.61], dp: [1.31, 19.37, 48.31], tp: [0.76, 275.57, 319.95] },
                p90: { tiers: [0.17, 0.42, 3.81], full: [null, 0.34, 1.52], dp: [2.24, 29.47, 148.23], tp: [3.81, 299.96, 344.78] },
                p99: { tiers: [0.36, 4.36, 60.66], full: [null, 2.87, 60.43], dp: [3.72, 34.94, 212.89], tp: [7.92, 306.23, 349.48] } } },
+  ns: {"0-20":{"rps":{"ours":[4.86,9.39,15.59,21.83,27.61,32.02,34.77,36.44],"vllm":[4.67,8.05,11.05,12.03,11.06,9.82,8.56,6.58],"tp4":[4.73,7.46,null,3.12,null,1.81,null,1.78]},"p50":{"ours":[0.098,0.108,0.137,0.161,0.182,0.223,0.459,0.715],"vllm":[0.719,1.773,2.985,6.051,11.711,18.518,26.163,36.23],"tp4":[0.336,2.286,null,21.905,null,68.743,null,147.102]},"p90":{"ours":[0.201,0.222,0.27,0.384,0.583,0.972,1.37,1.965],"vllm":[1.757,4.216,7.491,12.254,19.653,29.524,46.134,67.529],"tp4":[1.092,7.727,null,108.955,null,289.89,null,333.854]},"p99":{"ours":[0.545,0.936,1.366,2.53,6.842,20.424,60.548,60.95],"vllm":[4.817,7.918,13.403,21.399,32.082,43.697,78.115,201.684],"tp4":[7.787,13.94,null,266.58,null,303.05,null,346.843]}},"10-20":{"rps":{"ours":[4.59,8.62,15.36,21.72,27.89,33.78,37.52,40.54],"vllm":[4.93,7.46,11.09,12.55,11.46,10.22,7.5,4.64],"tp4":[4.84,7.26,null,0.85,null,0.99,null,1.17]},"p50":{"ours":[0.095,0.089,0.111,0.143,0.172,0.185,0.365,0.603],"vllm":[0.756,1.311,2.61,5.224,11.03,18.257,31.398,48.314],"tp4":[0.35,0.757,null,202.508,null,275.571,null,319.946]},"p90":{"ours":[0.194,0.172,0.195,0.213,0.261,0.345,0.848,1.498],"vllm":[1.529,2.236,4.429,10.392,19.844,28.626,56.377,148.231],"tp4":[0.852,3.815,null,262.188,null,299.96,null,344.777]},"p99":{"ours":[0.388,0.358,0.488,0.552,0.958,2.65,9.476,52.525],"vllm":[2.435,3.721,8.799,18.393,30.747,42.005,97.098,212.894],"tp4":[2.596,7.924,null,271.699,null,306.229,null,349.483]}},"n":[50,100,150,200,250,300,350,400]},
   coll: { h25d50: { C: 48.6, sim: [2532,2905,3452,3610,2415,496,144,162,143,153], real: [2395,2860,3023,2941,2139,476,402,483,454,427],
                     wsim: [15.9,33.1,42.8,49.5,52.9,54.1,54.3,54.2,54.3,54.4], wreal: [15.3,32.8,42.7,47.6,50.6,51.7,53.0,53.0,54.5,55.6] },
           h25d75: { C: 65.3, sim: [2532,2905,3716,4933,4895,4219,3073,3811,3842,3143], real: [2407,2762,3297,4027,4325,3733,3176,2965,2877,3062],
@@ -1694,6 +1721,20 @@ reg("f6g", { w: "w0", m: "rps" }, s => {
     ],
   });
 });
+reg("fns", { w: "10-20", m: "rps" }, s => {
+  const d = D.ns[s.w][s.m], isT = s.m !== "rps";
+  return base({
+    tooltip: Object.assign(base().tooltip, { valueFormatter: v => v == null ? "–" : v + (isT ? " s" : " r/s") }),
+    xAxis: ax("category", "N", { data: D.ns.n.map(String) }),
+    yAxis: isT ? ax("log", `TTFT ${s.m} (s, log)`, { min: 0.01, max: 1000 }) : ax("value", "rounds/s", { min: 0 }),
+    series: [
+      ln("SSEngine full", css("--c-real"), d.ours),
+      Object.assign(ln("vLLM DP4/EP4", css("--c-sim"), d.vllm, { dash: "dashed" }), { connectNulls: true }),
+      Object.assign(ln("vLLM TP4", css("--c-alt2"), d.tp4, { dash: "dotted" }), { connectNulls: true }),
+    ],
+  });
+});
+
 /* §7 */
 reg("f7a", { s: "h25d50" }, s => {
   const d = D.coll[s.s];
