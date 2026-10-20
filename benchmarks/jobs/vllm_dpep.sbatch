@@ -7,7 +7,11 @@
 #   N=400 OFFLOAD_GB=50 sbatch ... --mem=450G ...         # B: native CPU offload, 50 GB (1e9 B) per GPU
 #   SMOKE=1 N=8 sbatch -p <partition> --time=00:30:00 ...    # smoke: 3 min of client
 #   TP=4 N=400 sbatch ...                                 # pure tensor parallel: one TP4 engine, no EP, no router
-# Variables: N (client --max-concurrency), TRACE (the session trace csv, required; the M6 runs used the v3 sessions_2ps_v3.csv), OFFLOAD_GB (per GPU; --kv-offloading-size is per DP engine in GiB, since
+#   RUN=m3 WORKLOADS="one_8k:<csv>:independent:0:10m sat_8k:<csv>:independent:0:30m" sbatch ...   several client runs
+# WORKLOADS: client runs on the one server, in order, each name:trace:format:N:timeout (format independent or
+# session = text-generation-independent / -session-execution-v2; N 0 = no --max-concurrency); the prefix cache is reset
+# before each (VLLM_SERVER_DEV_MODE=1), and each writes <run dir>/<name>/. Without it, one run of TRACE at N in <run dir>.
+# Variables: N (client --max-concurrency), TRACE (the session trace csv, required without WORKLOADS; the M6 runs used the v3 sessions_2ps_v3.csv), OFFLOAD_GB (per GPU; --kv-offloading-size is per DP engine in GiB, since
 # CPUOffloadingSpec divides by the engine's world size = TP x PP = 1), CLIENT_TIMEOUT (default 22m; SMOKE 3m),
 # OUT (default <main tree>/runs/vllm_dpep), RUN (run name), VLLM_EXTRA (extra server args),
 # POLICY (vllm-router policy in front of the server, default cache_aware = prefix-aware; none = no router, the client
@@ -44,8 +48,16 @@ H=${SSENGINE_HANDOFF:-$MAIN/third_party/handoff}/data
 # (job 8191). The workload path is unchanged. Build: clone third_party/req-frontend at 8723d90, apply the patch,
 # cargo build --release --features runtime --bin session_runner (CARGO_TARGET_DIR below).
 CLIENT=${CLIENT:-$MAIN/tmp/vllm_dpep_client/build/release/session_runner}
-TRACE=${TRACE:?TRACE (session trace csv, e.g. the v3 sessions_2ps_v3.csv)}
-N=${N:?N (client max concurrency)}
+WORKLOADS=${WORKLOADS:-}
+if [ -z "$WORKLOADS" ]; then
+  TRACE=${TRACE:?TRACE (session trace csv, e.g. the v3 sessions_2ps_v3.csv)}
+  N=${N:?N (client max concurrency)}
+else
+  : "${RUN:?RUN (the run name) with WORKLOADS}"
+  for w in $WORKLOADS; do IFS=: read -r _ t f _ _ <<< "$w"; [ -f "$t" ] && [[ $f =~ ^(independent|session)$ ]] \
+    || { echo "WORKLOADS entry $w: no trace file or format not independent/session"; exit 1; }; done
+  export VLLM_SERVER_DEV_MODE=1   # POST /reset_prefix_cache (broadcast to every DP engine)
+fi
 OFF=${OFFLOAD_GB:-}
 POLICY=${POLICY:-cache_aware}
 MNBT=${MNBT:-32768}
@@ -57,6 +69,7 @@ TAG=$([ -n "$OFF" ] && echo "off${OFF}" || echo hbm)
 [ "$MNBT" != 32768 ] && TAG=${TAG}_mnbt${MNBT}
 [ -n "${SMOKE:-}" ] && TAG=smoke_$TAG
 RUN=${RUN:-${TAG}_n${N}}_$JOB
+[ -n "$WORKLOADS" ] && RUN=${RUN%_$JOB}_${TAG}_$JOB
 RD=${OUT:-$ROOT/runs/vllm_dpep}/$RUN
 mkdir -p "$RD/prom"
 P=$((20000 + JOB % 120 * 100 + 50))           # job-derived, below 32768 (notes.md); DP RPC port P+10
@@ -104,7 +117,7 @@ trap 'stop_server; rm -rf "$TMPDIR"' EXIT
     f=$(awk '/^full/ {split($2, x, "="); print int(x[2])}' /proc/pressure/memory)
     if (( a < 40 || f > 20 )); then
       echo "host memory: MemAvailable ${a} GiB, PSI full avg10 ${f}% at $(date -Is)" > "$RD/INVALID.txt"
-      kill -INT -- -$SRV; pkill -INT -f "$RD/requests.jsonl"; exit; fi
+      kill -INT -- -$SRV; pkill -INT -f -- "--log-path $RD/"; exit; fi
   done ) &
 WD=$!
 
@@ -133,32 +146,58 @@ if [ "$POLICY" != none ]; then
   echo "== router up: ${RCMD[*]}"
 fi
 
-# --- client: exactly the M6 command (client_command.txt of runs_m6/st_tiers_n400) but base URL and paths
-CT=${CLIENT_TIMEOUT:-$([ -n "${SMOKE:-}" ] && echo 3m || echo 22m)}
-CMD=(timeout "$CT" "$CLIENT" --trace "$TRACE" --input-file-format text-generation-session-execution-v2
-     --text-file "${SSENGINE_ENWIK9:-$MAIN/third_party/enwik9}" --tokenizer "$CKPT/tokenizer.json"
-     --model glm53-flash-pp4 --backend vllm-tokens --base-url "$URL" --temperature 0
-     --arrival-mode trace-timed --stream-idle-timeout-secs 600 --stop-session-on-error true --timeline true
-     --log-path "$RD/requests.jsonl" --summary-path "$RD/summary.json" --timeline-path "$RD/timeline.parquet"
-     --max-concurrency "$N" --max-model-len 1048576)
-echo "${CMD[*]}" > "$RD/client_command.txt"
-sha256sum "$CLIENT" >> "$RD/client_command.txt"
-C0=$(date +%s)
-"${CMD[@]}" > "$RD/client.log" 2>&1 &
-CL=$!
-while kill -0 $CL 2>/dev/null; do            # /metrics every 60 s (queue, preemption, prefix and offload counters)
-  e=$(( $(date +%s) - C0 )); curl -s -m 10 "http://127.0.0.1:$P/metrics" > "$RD/prom/t$(printf %04d $e).prom"
-  [ "$POLICY" != none ] && curl -s -m 10 "http://127.0.0.1:$((P + 30))/metrics" > "$RD/prom/router_t$(printf %04d $e).prom"
-  nvidia-smi --query-gpu=index,memory.used,utilization.gpu --format=csv,noheader | sed "s/^/$e,/" >> "$RD/gpu_samples.csv"
-  for _ in $(seq 60); do kill -0 $CL 2>/dev/null || break; sleep 1; done
-done
-wait $CL; rc=$?
-echo "== client rc=$rc after $(( $(date +%s) - C0 )) s"
-curl -s -m 10 "http://127.0.0.1:$P/metrics" > "$RD/prom/end.prom"
-[ "$POLICY" != none ] && curl -s -m 10 "http://127.0.0.1:$((P + 30))/metrics" > "$RD/prom/router_end.prom"
+# --- client: exactly the M6 command (client_command.txt of runs_m6/st_tiers_n400) but base URL, paths, and with
+# WORKLOADS the format and concurrency of each run
+run_client() {   # <dir> <trace> <format> <N, 0 none> <timeout>
+  local D=$1 TR=$2 FMT=$3 NC=$4 CT=$5 C0 CL rc e
+  mkdir -p "$D/prom"
+  CMD=(timeout "$CT" "$CLIENT" --trace "$TR" --input-file-format "$FMT"
+       --text-file "${SSENGINE_ENWIK9:-$MAIN/third_party/enwik9}" --tokenizer "$CKPT/tokenizer.json"
+       --model glm53-flash-pp4 --backend vllm-tokens --base-url "$URL" --temperature 0
+       --arrival-mode trace-timed --stream-idle-timeout-secs 600 --stop-session-on-error true --timeline true
+       --log-path "$D/requests.jsonl" --summary-path "$D/summary.json" --timeline-path "$D/timeline.parquet"
+       --max-model-len 1048576)
+  (( NC > 0 )) && CMD+=(--max-concurrency "$NC")
+  echo "${CMD[*]}" > "$D/client_command.txt"
+  sha256sum "$CLIENT" >> "$D/client_command.txt"
+  C0=$(date +%s)
+  "${CMD[@]}" > "$D/client.log" 2>&1 &
+  CL=$!
+  while kill -0 $CL 2>/dev/null; do            # /metrics every 60 s (queue, preemption, prefix and offload counters)
+    e=$(( $(date +%s) - C0 )); curl -s -m 10 "http://127.0.0.1:$P/metrics" > "$D/prom/t$(printf %04d $e).prom"
+    [ "$POLICY" != none ] && curl -s -m 10 "http://127.0.0.1:$((P + 30))/metrics" > "$D/prom/router_t$(printf %04d $e).prom"
+    nvidia-smi --query-gpu=index,memory.used,utilization.gpu --format=csv,noheader | sed "s/^/$e,/" >> "$D/gpu_samples.csv"
+    for _ in $(seq 60); do kill -0 $CL 2>/dev/null || break; sleep 1; done
+  done
+  wait $CL; rc=$?
+  echo "== client rc=$rc after $(( $(date +%s) - C0 )) s"
+  curl -s -m 10 "http://127.0.0.1:$P/metrics" > "$D/prom/end.prom"
+  [ "$POLICY" != none ] && curl -s -m 10 "http://127.0.0.1:$((P + 30))/metrics" > "$D/prom/router_end.prom"
+  if [ "$FMT" = text-generation-session-execution-v2 ]; then
+    $PY "$H/metrics.py" "$D/requests.jsonl" > "$D/metrics.json" && cat "$D/metrics.json"
+    $PY -m benchmarks.vllm_dpep_summary "$D" --trace "$TR" || true
+  fi
+  return $rc
+}
+
+if [ -z "$WORKLOADS" ]; then
+  run_client "$RD" "$TRACE" text-generation-session-execution-v2 "$N" \
+      "${CLIENT_TIMEOUT:-$([ -n "${SMOKE:-}" ] && echo 3m || echo 22m)}"; rc=$?
+else
+  rc=0
+  for w in $WORKLOADS; do
+    IFS=: read -r name tr fmt nc ct <<< "$w"
+    [ -f "$RD/INVALID.txt" ] && break
+    kill -0 $SRV 2>/dev/null || { echo "== server gone before $name"; rc=3; break; }
+    curl -sf -X POST "http://127.0.0.1:$P/reset_prefix_cache" > /dev/null || { echo "== prefix cache reset failed before $name"; rc=3; break; }
+    echo "== $(date -Is) start $name ($tr, $fmt, N $nc, $ct)"
+    run_client "$RD/$name" "$tr" "text-generation-$([ "$fmt" = session ] && echo session-execution-v2 || echo independent)" \
+        "$nc" "$ct"; r=$?
+    echo "== $(date -Is) done $name rc=$r"
+    (( r == 0 || r == 124 )) || rc=$r
+  done
+fi
 kill $WD 2>/dev/null
-$PY "$H/metrics.py" "$RD/requests.jsonl" > "$RD/metrics.json" && cat "$RD/metrics.json"
-$PY -m benchmarks.vllm_dpep_summary "$RD" --trace "$TRACE" || true
 [ -f "$RD/INVALID.txt" ] && echo "== run invalid: $(cat "$RD/INVALID.txt")"
 uptime
 echo "== done $(date -Is)"
