@@ -216,7 +216,8 @@ def _chain_worker(rank: int, L: int, port: int, profile: bool) -> None:
             try:
                 names = sorted({e.name() for e in prof.profiler.kineto_results.events()
                                 if e.device_type() == torch.autograd.DeviceType.CUDA})
-                chk = km.check_trace(names, rank, optional=frozenset({19, 20, 21} if L <= 2048 else set()))
+                chk = km.check_trace(names, rank, optional=frozenset({19, 20, 21} if L <= 2048 else set()),
+                                     quant=m.quant)
                 result["trace_check"] = {"ok": chk.ok, "summary": chk.summary(), "kernels": names}
             except Exception as e:  # noqa: BLE001 - the token result must still be written
                 result["trace_check"] = {"ok": False, "summary": f"trace check failed: {type(e).__name__}: {e}"}

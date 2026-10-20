@@ -6,6 +6,9 @@ call-path verdict (`research/measured/kernels_identity.md`), and the GPU kernel 
 
 - the M1 identity check against the profiler rows (`research/measured/kernels_identity.md` is the table form of this file);
 - one entry point for `research/bench/` and the tests (`CONFIGS`, `by_position`);
+`MANIFESTS` holds one manifest per checkpoint quantization: `CONFIGS` (NVFP4, the handoff's) and `FP8_CONFIGS` (the
+same positions with the FP8 checkpoint's GEMMs, quantization and MoE).
+
 - `check_trace`: a stage's traced GPU kernel names must be exactly the manifest's, with none of the fallbacks a
   silent backend switch would launch (FlashKDA, the fork's Triton conv, the TileLang fused mHC at a layer boundary,
   ...).
@@ -208,6 +211,48 @@ CONFIGS: tuple[KernelConfig, ...] = (
 _NAMES_TRACED = frozenset({1, 4, 5, 7, 8, 9, 10, 11, 19, 21, 23, 24, 25, 29, 30, 33, 34})
 CONFIGS = tuple(replace(c, names_verified=c.config in _NAMES_TRACED) for c in CONFIGS)
 
+# ---- FP8 checkpoint (zai-org/GLM-5.3-Flash) ----------------------------------------------------------------------
+# Same positions; what the fork runs for 128 x 128 block FP8 weights on B200 (traced: chain 1k, job 8681). The dense FFN,
+# the shared expert and the DSA projections q_a/kv_a (config 12), q_b (14) and o (27) are FP8: DeepGEMM's 1d1d block
+# GEMM (vLLM DeepGemmFp8BlockScaledMMKernel) after a per-128-channel activation quantization; the routed experts run
+# the trtllm FP8 block-scale MoE. The handoff has no rows for them: not covered.
+ROW_NONE = "none (the handoff prices the NVFP4 checkpoint)"
+_FP8_QUANT = (r"per_token_group_quant_8bit",)            # plain (MoE input) and UE8M0-packed (DeepGEMM) variants
+_DEEPGEMM_FP8 = (r"deep_gemm::sm100_fp8_fp4_gemm_1d1d_impl",)
+_FP8_GEMM_FALLBACKS = (r"_w8a8_block_fp8_matmul", r"(?i)blockwise_scaled", r"cutlass_scaled_mm")
+
+
+def _fp8_gemm(c: KernelConfig) -> KernelConfig:
+    return replace(c, kind="single_gemm", backend="deepgemm_fp8_block",
+                   callable="vllm DeepGemmFp8BlockScaledMMKernel: deep_gemm.fp8_gemm_nt (sm100 1d1d, 128 x 128 blocks)",
+                   row_call="-", row_version=ROW_NONE, verdict="FP8 only", covered=False, route="fork",
+                   names=_DEEPGEMM_FP8, forbidden=_FP8_GEMM_FALLBACKS)
+
+
+def _fp8_quant(c: KernelConfig) -> KernelConfig:
+    return replace(c, kind="fp8_block_quant", backend="vllm_cuda", fixed=c.fixed.replace("swizzled, ", "").replace(
+                       "linear scales, ", "") + ", per 128 channels",
+                   callable="vllm per_token_group_quant_fp8 (FP32 scales; UE8M0-packed for DeepGEMM)", row_call="-",
+                   row_version=ROW_NONE, verdict="FP8 only", covered=False, route="fork", names=_FP8_QUANT)
+
+
+def _fp8_config(c: KernelConfig) -> KernelConfig:
+    if c.config in (8, 10, 29):
+        return _fp8_quant(c)
+    if c.config in (9, 11, 12, 14, 27, 31, 32):
+        return _fp8_gemm(c)
+    if c.config == 30:
+        return replace(c, kind="fp8_block_fused_moe", fixed=c.fixed.replace(", scale 5/2", "") + ", 128 x 128 blocks",
+                       callable="flashinfer.fused_moe.trtllm_fp8_block_scale_moe (vLLM FLASHINFER_TRTLLM Fp8 MoE)",
+                       row_call="-", row_version=ROW_NONE, verdict="FP8 only", covered=False)
+    return c
+
+
+FP8_CONFIGS = tuple(_fp8_config(c) for c in CONFIGS)
+_FP8_NAMES_TRACED = _NAMES_TRACED | {12, 14, 27, 31, 32}
+FP8_CONFIGS = tuple(replace(c, names_verified=c.config in _FP8_NAMES_TRACED) for c in FP8_CONFIGS)
+MANIFESTS = {"nvfp4": CONFIGS, "fp8": FP8_CONFIGS}
+
 # Glue the targets price as `elementwise / triton` (2_kernels.md §6): embedding, hc_expand, state gather/scatter,
 # gated norm, act_and_mul, indexer k_norm / q_fwht_quant / weight_scale / kpool writes, expand_pools, DSA glue,
 # MoE input/combine glue, hc_contract mean, q_fp8_quant. Any Triton kernel, PyTorch elementwise/reduce/copy/
@@ -250,13 +295,13 @@ def stage_layer_types(stage: int, split=SPLIT) -> set[str]:
     return types
 
 
-def by_config(n: int) -> KernelConfig:
-    return CONFIGS[n - 1]
+def by_config(n: int, quant: str = "nvfp4") -> KernelConfig:
+    return MANIFESTS[quant][n - 1]
 
 
-def by_position(layer_type_: str, position: str, backend: str | None = None) -> list[KernelConfig]:
+def by_position(layer_type_: str, position: str, backend: str | None = None, quant: str = "nvfp4") -> list[KernelConfig]:
     """Configs at `pp.<layer type>.<position>` (layer_targets.jsonl naming)."""
-    return [c for c in CONFIGS if layer_type_ in c.layer_types and position in c.positions
+    return [c for c in MANIFESTS[quant] if layer_type_ in c.layer_types and position in c.positions
             and (backend is None or c.backend == backend)]
 
 
@@ -302,6 +347,7 @@ class TraceCheck:
     forbidden: list[tuple[int, str]] = field(default_factory=list)  # (config whose fallback it is, kernel name)
     unverifiable: dict[int, list[str]] = field(default_factory=dict)  # by_name=False configs -> candidate names
     missing: list[int] = field(default_factory=list)                # configs of this stage with no kernel
+    quant: str = "nvfp4"                                            # the manifest checked against
 
     @property
     def ok(self) -> bool:
@@ -311,8 +357,9 @@ class TraceCheck:
         lines = [f"ok={self.ok} matched={sorted(self.matched)} glue={len(self.glue)}"]
         lines += [f"  forbidden (config {c}): {n}" for c, n in self.forbidden]
         lines += [f"  unknown: {n}" for n in sorted(set(self.unknown))]
-        lines += [f"  missing: config {c} {by_config(c).kind}/{by_config(c).backend}" for c in self.missing]
-        lines += [f"  unverifiable by name: config {c} {by_config(c).kind}/{by_config(c).backend} "
+        cfg = functools.partial(by_config, quant=self.quant)
+        lines += [f"  missing: config {c} {cfg(c).kind}/{cfg(c).backend}" for c in self.missing]
+        lines += [f"  unverifiable by name: config {c} {cfg(c).kind}/{cfg(c).backend} "
                   f"(candidate kernels: {', '.join(sorted(set(n)))})" for c, n in sorted(self.unverifiable.items())]
         return "\n".join(lines)
 
@@ -323,14 +370,16 @@ def _any(patterns, name: str) -> bool:
 
 # Configs whose kernel names are not distinctive (cuBLAS GEMMs are shared by many positions): a trace can show that
 # some GEMM ran, not which position it served. They count as present when any cuBLAS kernel ran.
-_SHARED_NAMES = frozenset(c.config for c in CONFIGS if set(_CUBLAS) & set(c.names))
+def _shared_names(configs) -> frozenset[int]:
+    return frozenset(c.config for c in configs if set(_CUBLAS) & set(c.names))
 
 
 def _distinct(c: KernelConfig) -> tuple[str, ...]:
     return tuple(p for p in c.names if p not in _CUBLAS)
 
 
-def check_trace(kernel_names: list[str], stage: int, split=SPLIT, optional: frozenset[int] = frozenset()) -> TraceCheck:
+def check_trace(kernel_names: list[str], stage: int, split=SPLIT, optional: frozenset[int] = frozenset(),
+                quant: str = "nvfp4") -> TraceCheck:
     """Classify a stage's traced GPU kernel names against the manifest.
 
     A name goes to every non-GEMM config whose `names` match (one kernel can serve two positions, e.g. configs 8 and
@@ -338,17 +387,18 @@ def check_trace(kernel_names: list[str], stage: int, split=SPLIT, optional: froz
     config 13's Triton `kernel`) is never matched: its candidate names go to `unverifiable`, listed in the summary,
     and it is missing when no candidate ran. `forbidden` lists fallbacks of configs this stage runs. `missing` lists
     this stage's configs with no kernel (`optional`: configs that may legitimately not run, e.g. the indexer on a
-    microbatch of short prefills, or one of the two top-k backends).
+    microbatch of short prefills, or one of the two top-k backends). `quant`: the checkpoint's manifest (`MANIFESTS`).
     """
     types = stage_layer_types(stage, split)
-    active = [c for c in CONFIGS if set(c.layer_types) & types]
-    out = TraceCheck()
+    active = [c for c in MANIFESTS[quant] if set(c.layer_types) & types]
+    shared = _shared_names(active)
+    out = TraceCheck(quant=quant)
     for name in kernel_names:
         hits = [c for c in active if c.by_name and _any(_distinct(c), name)]
         weak = [c for c in active if not c.by_name and _any(_distinct(c), name)]
         if not hits and _any(_CUBLAS, name):
             for c in active:
-                if c.config in _SHARED_NAMES:
+                if c.config in shared:
                     out.matched.setdefault(c.config, []).append(name)
             continue
         bad = next((c for c in active if _any(c.forbidden, name)), None)
