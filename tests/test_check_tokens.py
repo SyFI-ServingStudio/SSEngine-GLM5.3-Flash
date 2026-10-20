@@ -122,3 +122,20 @@ def test_near_ties_not_judged():
         (t / "run" / "server_requests.jsonl").write_text("".join(json.dumps(r) + "\n" for r in reqs))
         s = check_tokens.check(t / "run", t / "ref.jsonl")["summary"]
         assert (s["no_token"], s["ok"]) == (1, False)
+
+
+def test_run_reference_follows_the_servers_checkpoint(tmp_path):
+    import yaml
+
+    from benchmarks.check_tokens import REFERENCES, run_reference
+
+    for quant, qc in (("nvfp4", {"quant_algo": "NVFP4"}),
+                      ("fp8", {"quant_method": "fp8", "fmt": "e4m3", "activation_scheme": "dynamic",
+                               "weight_block_size": [128, 128]})):
+        ck = tmp_path / quant
+        ck.mkdir()
+        (ck / "config.json").write_text(json.dumps({"quantization_config": qc}))
+        run = tmp_path / f"run_{quant}"
+        run.mkdir()
+        (run / "server_config.yaml").write_text(yaml.safe_dump({"checkpoint": str(ck)}))
+        assert run_reference(run) == REFERENCES[quant]
