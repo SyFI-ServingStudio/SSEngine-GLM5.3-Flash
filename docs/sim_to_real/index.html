@@ -176,6 +176,7 @@ nav.lang a[aria-current="page"] { background: var(--accent); color: var(--surfac
 </ul>
 
 <nav class="toc" aria-label="目录"><b>目录</b>
+<p style="margin:0.3em 0"><a href="#perf">★ 性能总览</a></p>
 <ol start="1">
 <li><a href="#s1">背景与目标</a></li>
 <li><a href="#s2">sim 如何指导实现</a></li>
@@ -189,6 +190,107 @@ nav.lang a[aria-current="page"] { background: var(--accent); color: var(--surfac
 <li><a href="#s10">结论与下一步</a></li>
 <li><a href="#s11">附录：作业、实验与提交</a></li>
 </ol></nav>
+
+<h2 id="perf"><span class="no">★</span>性能总览</h2>
+<div class="tk"><b>要点</b><ul>
+<li>M1–M5 的每项里程碑测量都按 handoff 的判定通过；少数超出的格子都标在下表里。</li>
+<li>M6（v3 trace，三层）：真机是 sim 的 0.99–1.00 倍（N100/300）和 0.95–0.96 倍（N400）。</li>
+<li>同一负载第 10–20 分钟，N400 时吞吐是 vLLM DP4/EP4 的 8.7 倍，TTFT p50 0.61 s 对 48.31 s。</li>
+</ul></div>
+<h3 id="perf-1">里程碑测量</h3>
+<div class="tbl"><table class="wrap"><thead><tr><th>里程碑</th><th>负载</th><th>测什么</th><th>目标 / 判定</th><th>实测</th><th>结论</th></tr></thead><tbody>
+<tr><td><a href="#s4-2">M1 kernel</a></td><td><span class="tag">合成</span></td><td>15 个配置 3,084 行重测，真机 ÷ profile DB</td><td>±10%</td><td>中位比值 0.95–1.08（多数 0.96–1.01）；35 配置抽查 105 行中位 0.999</td><td>通过：超出 ±10% 的行对 stage 时间影响 ≤ 0.35%</td></tr>
+<tr><td><a href="#s4-3">M2 单层</a></td><td><span class="tag">合成</span></td><td>每层、每个 prompt 长度，真机 ÷ 目标</td><td>≤ ×1.10</td><td>全部达标，例外 input_head 1k ×1.13、output_head 1k ×1.10（均 < stage 的 0.2%）；stage 合计 ×0.87–0.99</td><td>通过</td></tr>
+<tr><td><a href="#s4-4">M3 单请求</a></td><td><span class="tag">合成</span></td><td>1k–128k，GPU 总时间与 TTFT，真机 ÷ 目标</td><td>±10%</td><td>GPU 总时间 ×0.91–1.00；TTFT ×0.93–1.02</td><td>通过</td></tr>
+<tr><td><a href="#s4-5">M3 饱和（t = 0 同时到达）</a></td><td><span class="tag">合成</span></td><td>1k–128k，吞吐与 TTFT，真机 ÷ 目标</td><td>±10%</td><td>吞吐 ×0.93–1.00；TTFT 各分位 ×0.99–1.07</td><td>通过</td></tr>
+<tr><td><a href="#s4-6">M3 正确性</a></td><td><span class="tag">合成</span></td><td>输出 token 对 vLLM；KV 与数值审计</td><td>token 相同（近似平局不判）</td><td>token 全部相同或近似平局；32k 内 KV 在噪声内；512k logits KL ≤ 6e-4（噪声 2e-4），top-1 相同</td><td>通过</td></tr>
+<tr><td><a href="#s5-2">M4 prefix bring-up</a></td><td><span class="tag">合成</span></td><td>40 个两轮 session，P 命中、只算 A</td><td>命中 = P；TTFT ±10%</td><td>命中 40/40；TTFT 除 32k + 1k 第 1 轮 ×1.11 外都过；cache 开/关 token 40/40 相同</td><td>通过（1 格 ×1.11）</td></tr>
+<tr><td><a href="#s5-3">M4 session</a></td><td><span class="tag">旧 trace · HBM</span></td><td>20 分钟闭环，r/s 真机 ÷ 目标</td><td>—</td><td>N400 24.2 对 24.9（0.97）；N500 21.6 对 22.8（0.95）</td><td>被接受（tag m4-done）</td></tr>
+<tr><td><a href="#s5-4">M5 调度检查</a></td><td><span class="tag">合成</span></td><td>26 个请求同时到达，microbatch 与 TTFT</td><td>逐 chunk 相同</td><td>5 步都逐 chunk 相同；最大 TTFT 偏差 5.3–7.6%</td><td>通过</td></tr>
+<tr><td><a href="#s5-4">M5 强制调度检查</a></td><td><span class="tag">合成</span></td><td>32k 被 1k 洪流淹没，32k TTFT</td><td>同目标</td><td>步 4：60.9 对 61.0 s；步 3 的 1k p50 ×1.10</td><td>通过（步 3 p50 ×1.10）</td></tr>
+<tr><td><a href="#s5-5">M5 session</a></td><td><span class="tag">旧 trace · HBM</span></td><td>20 分钟闭环，r/s 真机 ÷ sim</td><td>—</td><td>N200 12.12 / 12.13；N300 19.77 / 19.78；N400 24.73–24.76 / 25.06；N500 25.06 / 25.44</td><td>被接受（tag m5-done）</td></tr>
+<tr><td><a href="#s6-9">M6 eval</a></td><td><span class="tag">v3 trace · 三层</span></td><td>20 分钟闭环，第 10–20 分钟 r/s 真机 ÷ sim</td><td>—</td><td>N100 1.00；N300 0.99–1.00；N400 0.95–0.96（见下表）</td><td>eval 完成</td></tr>
+</tbody></table></div>
+<h4 id="perf-m1">M1 kernel：真机 ÷ profile DB（15 个重测配置） <span class="tag">合成</span> <a href="#s4-2">§4.2</a></h4>
+<div class="tbl"><table><thead><tr><th>配置</th><th>行数</th><th>中位</th><th>最小</th><th>最大</th></tr></thead><tbody><tr><td>mHC pre norm</td><td>68</td><td>0.989</td><td>0.951</td><td>1.109</td></tr><tr><td>KDA chunk prefill</td><td>512</td><td>1.001</td><td>0.970</td><td>1.022</td></tr><tr><td>mHC post+pre</td><td>88</td><td>1.000</td><td>0.972</td><td>1.054</td></tr><tr><td>GEMM FP4 n24576</td><td>68</td><td>0.964</td><td>0.843</td><td>1.053</td></tr><tr><td>GEMM FP4 n4096 k12288</td><td>68</td><td>0.995</td><td>0.914</td><td>1.107</td></tr><tr><td>GEMM n2048 k4096</td><td>68</td><td>0.989</td><td>0.877</td><td>1.094</td></tr><tr><td>GEMM n4096 k1536</td><td>68</td><td>1.009</td><td>0.807</td><td>1.237</td></tr><tr><td>GEMM n160</td><td>68</td><td>1.040</td><td>0.926</td><td>1.264</td></tr><tr><td>GEMM n128</td><td>68</td><td>1.075</td><td>0.873</td><td>1.373</td></tr><tr><td>DSA top-k</td><td>412</td><td>1.001</td><td>0.856</td><td>1.187</td></tr><tr><td>sparse MLA</td><td>1324</td><td>1.030</td><td>0.916</td><td>1.197</td></tr><tr><td>NVFP4 MoE</td><td>73</td><td>1.003</td><td>0.953</td><td>1.057</td></tr><tr><td>GEMM n4096 k4096</td><td>68</td><td>0.973</td><td>0.907</td><td>1.301</td></tr><tr><td>GEMM n4096 k2048</td><td>68</td><td>0.982</td><td>0.738</td><td>1.240</td></tr><tr><td>RMSNorm</td><td>63</td><td>0.948</td><td>0.897</td><td>1.285</td></tr></tbody></table></div>
+<p class="src">research/measured/kernels.md · kernels.jsonl</p>
+<h4 id="perf-m2">M2 单层：真机 ÷ 目标（stage 0，router 路由） <span class="tag">合成</span> <a href="#s4-3">§4.3</a></h4>
+<div class="tbl"><table><thead><tr><th>层</th><th>1k</th><th>2k</th><th>4k</th><th>8k</th><th>16k</th><th>32k</th><th>64k</th><th>128k</th></tr></thead><tbody><tr><td><code>input_head</code></td><td><b>1.120</b></td><td>0.929</td><td>0.888</td><td><b>1.105</b></td><td>1.092</td><td>1.091</td><td>1.071</td><td>1.065</td></tr><tr><td><code>first_kda_dense</code></td><td>0.901</td><td>0.856</td><td>0.811</td><td>0.796</td><td>0.775</td><td>0.777</td><td>0.774</td><td>0.759</td></tr><tr><td><code>kda_dense</code></td><td>0.888</td><td>0.842</td><td>0.806</td><td>0.791</td><td>0.776</td><td>0.783</td><td>0.797</td><td>0.820</td></tr><tr><td><code>kda_moe</code></td><td>0.915</td><td>0.887</td><td>0.858</td><td>0.838</td><td>0.863</td><td>0.896</td><td>0.914</td><td>0.927</td></tr><tr><td><code>dsa_moe</code></td><td>0.988</td><td>0.993</td><td>0.979</td><td>0.971</td><td>0.977</td><td>1.035</td><td>1.084</td><td>1.077</td></tr><tr><td><code>output_head</code></td><td><b>1.115</b></td><td>1.018</td><td>0.868</td><td>0.678</td><td>0.483</td><td>0.304</td><td>0.175</td><td>0.097</td></tr><tr><td><code>stage0_forward</code></td><td>0.956</td><td>0.927</td><td>0.895</td><td>0.875</td><td>0.884</td><td>0.918</td><td>0.942</td><td>0.950</td></tr></tbody></table></div>
+<p class="src">measured/layers.md · jobs 7068–7070, 7080</p>
+<h4 id="perf-m3">M3 单请求：真机 ÷ 目标 <span class="tag">合成</span> <a href="#s4-4">§4.4</a></h4>
+<div class="tbl"><table><thead><tr><th>指标</th><th>1k</th><th>2k</th><th>4k</th><th>8k</th><th>16k</th><th>32k</th><th>64k</th><th>128k</th></tr></thead><tbody><tr><td>GPU 总时间</td><td>0.95</td><td>0.95</td><td>0.94</td><td>0.91</td><td>0.92</td><td>0.92</td><td>0.96</td><td>1.00</td></tr><tr><td>TTFT</td><td>1.02</td><td>1.01</td><td>0.97</td><td>0.93</td><td>0.93</td><td>0.93</td><td>0.96</td><td>1.01</td></tr><tr><td>stage 0</td><td>1.05</td><td>0.98</td><td>0.94</td><td>0.90</td><td>0.91</td><td>0.92</td><td>0.95</td><td>0.99</td></tr></tbody></table></div>
+<p class="src">research/measured/iteration.md</p>
+<h4 id="perf-m4">M3 饱和：所有请求在 t = 0 同时到达 <span class="tag">合成</span> <a href="#s4-5">§4.5</a></h4>
+<div class="tbl"><table><thead><tr><th>长度</th><th>请求数</th><th>真机 tok/s</th><th>目标 tok/s</th><th>比值</th><th>TTFT p50 真机 / 目标 (s)</th><th>TTFT p99 真机 / 目标 (s)</th></tr></thead><tbody><tr><td>1k</td><td>16,384</td><td>149.2k</td><td>149.3k</td><td>1.00</td><td>55.55 / 56.34</td><td>110.58 / 111.37</td></tr><tr><td>2k</td><td>8,192</td><td>146.5k</td><td>149.9k</td><td>0.98</td><td>56.88 / 56.11</td><td>113.21 / 110.91</td></tr><tr><td>4k</td><td>4,096</td><td>142.8k</td><td>147.5k</td><td>0.97</td><td>58.53 / 57.03</td><td>116.21 / 112.74</td></tr><tr><td>8k</td><td>2,048</td><td>138.4k</td><td>143.4k</td><td>0.97</td><td>60.55 / 58.65</td><td>120.02 / 115.91</td></tr><tr><td>16k</td><td>1,024</td><td>136.8k</td><td>143.4k</td><td>0.95</td><td>61.25 / 58.7</td><td>121.36 / 115.96</td></tr><tr><td>32k</td><td>512</td><td>136.4k</td><td>143.0k</td><td>0.95</td><td>61.68 / 58.92</td><td>121.8 / 116.27</td></tr><tr><td>64k</td><td>256</td><td>134.2k</td><td>141.8k</td><td>0.95</td><td>62.63 / 59.55</td><td>123.82 / 117.29</td></tr><tr><td>128k</td><td>128</td><td>129.4k</td><td>138.4k</td><td>0.93</td><td>65.29 / 61.23</td><td>128.52 / 120.15</td></tr></tbody></table></div>
+<p class="src">research/measured/iteration.md · saturated.jsonl</p>
+<h4 id="perf-m5">M3 正确性：对照 vLLM <span class="tag">合成</span> <a href="#s4-6">§4.6</a></h4>
+<div class="tbl"><table class="wrap"><thead><tr><th>检查</th><th>结果</th></tr></thead><tbody><tr><td>输出 token，8 个长度 × 5 个请求</td><td>全部相同或近似平局（top-2 差 &lt; 3 nats）</td></tr><tr><td>每层 KV（MLA、indexer、KDA state、conv），≤ 32k</td><td>在噪声内；最差第 43 层 MLA 0.24，噪声 0.18 / 0.24</td></tr><tr><td>8,192 分块 vs 整段，32k 与 128k</td><td>逐位相同</td></tr><tr><td>最终 logits，512k</td><td>KL ≤ 6e-4（噪声 2e-4），top-1 相同</td></tr></tbody></table></div>
+<p class="src">research/measured/reference.md · kvaudit.md</p>
+<h4 id="perf-m6">M4 prefix bring-up：两轮 session 的 TTFT 中位数（ms） <span class="tag">合成</span> <a href="#s5-2">§5.2</a></h4>
+<div class="tbl"><table><thead><tr><th>P + A</th><th>第 1 轮 真机</th><th>目标</th><th>比值</th><th>第 0 轮 真机</th><th>目标</th><th>比值</th></tr></thead><tbody><tr><td>8k+1k</td><td>57.2</td><td>53.3</td><td>1.07</td><td>210.0</td><td>223.6</td><td>0.94</td></tr><tr><td>8k+8k</td><td>215.7</td><td>223.8</td><td>0.96</td><td>209.7</td><td>223.6</td><td>0.94</td></tr><tr><td>32k+1k</td><td>59.8</td><td>53.8</td><td><b>1.11</b></td><td>401.2</td><td>396.8</td><td>1.01</td></tr><tr><td>32k+8k</td><td>222.5</td><td>226.4</td><td>0.98</td><td>401.1</td><td>396.8</td><td>1.01</td></tr><tr><td>128k+1k</td><td>68.4</td><td>55.4</td><td><b>1.23</b></td><td>1185.5</td><td>1118.2</td><td>1.06</td></tr><tr><td>128k+8k</td><td>251.9</td><td>239.0</td><td>1.05</td><td>1180.2</td><td>1118.2</td><td>1.06</td></tr><tr><td>512k+1k</td><td>112.8</td><td>64.3</td><td><b>1.75</b></td><td>5110.0</td><td>4408.1</td><td>1.16</td></tr><tr><td>512k+8k</td><td>386.3</td><td>287.7</td><td><b>1.34</b></td><td>5117.2</td><td>4408.1</td><td>1.16</td></tr></tbody></table></div>
+<p class="src">research/measured/prefix_cache.md · prefix_bringup.jsonl · job 7404</p>
+<h4 id="perf-m7">M4 session：真机 / 目标 / sim ×1.06 <span class="tag">旧 trace · HBM</span> <a href="#s5-3">§5.3</a></h4>
+<div class="tbl"><table><thead><tr><th>N</th><th>作业</th><th>r/s</th><th>新 tok/s</th><th>真机 TTFT p50 / p90 / p99</th><th>目标 TTFT</th></tr></thead><tbody><tr><td>400</td><td>7683</td><td>24.2 / 24.9 / 24.6</td><td>84.4k / 87.5k / 86.3k</td><td>0.64 / 4.43 / 7.57</td><td>0.55 / 3.66 / 5.98</td></tr><tr><td>500</td><td>7693</td><td>21.6 / 22.8 / 22.0</td><td>83.1k / 86.6k / 84.5k</td><td>3.22 / 14.26 / 26.77</td><td>3.01 / 13.03 / 23.93</td></tr></tbody></table></div>
+<p class="src">research/measured/prefix_cache.md</p>
+<h4 id="perf-m8">M5 调度检查：26 个请求同时到达（真机 / 目标，ms） <span class="tag">合成</span> <a href="#s5-4">§5.4</a></h4>
+<div class="tbl"><table><thead><tr><th>步</th><th>microbatch</th><th>TTFT 128k</th><th>32k</th><th>8k 单独</th><th>1k 单独</th><th>最大 TTFT 偏差</th></tr></thead><tbody><tr><td>0 plain</td><td>28 / 28</td><td>1142 / 1118</td><td>1376 / 1344</td><td>212 / 224</td><td>52 / 52</td><td>5.3%</td></tr><tr><td>1 SRPT</td><td>28 / 28</td><td>1713 / 1679</td><td>734 / 729</td><td>209 / 224</td><td>52 / 52</td><td>6.5%</td></tr><tr><td>2 budget</td><td>55 / 55</td><td>1841 / 1742</td><td>741 / 711</td><td>154 / 155</td><td>53 / 52</td><td>5.7%</td></tr><tr><td>3 even split</td><td>58 / 58</td><td>1847 / 1742</td><td>743 / 711</td><td>131 / 132</td><td>51 / 51</td><td>6.1%</td></tr><tr><td>4 force (7932)</td><td>58 / 58</td><td>–</td><td>–</td><td>–</td><td>–</td><td>7.6%</td></tr></tbody></table></div>
+<p class="src">research/measured/scheduler.md</p>
+<h4 id="perf-m9">M5 强制调度检查：32k 被 1k 洪流淹没（真机 / 目标） <span class="tag">合成</span> <a href="#s5-4">§5.4</a></h4>
+<div class="tbl"><table><thead><tr><th>步</th><th>32k TTFT (s)</th><th>1k TTFT 真机 (s)</th><th>1k TTFT 目标 (s)</th><th>microbatch</th></tr></thead><tbody><tr><td>0 plain</td><td>0.41 / 0.40</td><td>15.42 / 27.72 / 30.48</td><td>15.26 / 27.13 / 29.80</td><td>2005 / 2004</td></tr><tr><td>1 SRPT</td><td>108.7 / 110.1</td><td>14.20 / 25.68 / 28.27</td><td>15.08 / 26.95 / 29.62</td><td>2005 / 2004</td></tr><tr><td>2 budget</td><td>106.1 / 107.5</td><td>15.15 / 21.80 / 25.36</td><td>14.77 / 23.90 / 26.89</td><td>1349 / 1429</td></tr><tr><td>3 even split</td><td>107.8 / 107.5</td><td>16.29 / 22.88 / 27.06</td><td>14.77 / 23.90 / 26.89</td><td>1276 / 1429</td></tr><tr><td>4 force</td><td>60.9 / 61.0</td><td>15.23 / 22.06 / 25.68</td><td>14.77 / 24.09 / 27.12</td><td>1342 / 1429</td></tr></tbody></table></div>
+<p class="src">research/measured/scheduler.md · force_check.jsonl</p>
+<h4 id="perf-m10">M5 session：真机 vs sim <span class="tag">旧 trace · HBM</span> <a href="#s5-5">§5.5</a></h4>
+<div class="tbl"><table><thead><tr><th>N</th><th>真机 r/s</th><th>Sim r/s</th><th>比值</th><th>真机 TTFT</th><th>Sim TTFT</th><th>&gt;60 s 真机 / sim</th><th>作业</th></tr></thead><tbody><tr><td>200</td><td>12.12</td><td>12.13</td><td>1.00</td><td>0.114 / 0.219 / 1.014</td><td>0.11 / 0.22 / 1.00</td><td>0 / 0</td><td>7934</td></tr><tr><td>300</td><td>19.77</td><td>19.78</td><td>1.00</td><td>0.155 / 0.479 / 3.04</td><td>0.147 / 0.488 / 3.30</td><td>22 / 24</td><td>7902</td></tr><tr><td>400</td><td>24.73 · 24.76</td><td>25.06</td><td>0.99</td><td>0.18 / 1.19 / 30.07 · 0.18 / 1.18 / 39.96</td><td>0.16 / 1.07 / 25.54</td><td>257 · 273 / 240</td><td>7900 · 7933</td></tr><tr><td>500</td><td>25.06</td><td>25.44</td><td>0.99</td><td>0.41 / 5.28 / 61.87</td><td>0.39 / 5.43 / 61.73</td><td>1052 / 1008</td><td>7901</td></tr></tbody></table></div>
+<p class="src">research/measured/scheduler.md</p>
+<h4 id="perf-2">M6 eval：真机 vs sim <span class="tag">v3 trace</span></h4>
+<p>第 10–20 分钟；TTFT 为 p50 / p90 / p99（s）。full = HBM + DRAM 50 GB + SSD 128 GB（每 GPU）；tiers = HBM 20 + DRAM 20 + SSD 128；ssdheavy = 12.5 / 12.5 / 128；hbmonly 只有 HBM。新 tok/s = 本轮新 prompt token；计算 tok/s = 实际 prefill 的 token（含被淘汰后重算的上下文），两者之差就是重算。N400 hbmonly 用 128-token 页（8475），sim 在此处双稳态，* 为其中 19.07 r/s 的单次运行。</p>
+<div class="tbl"><table><thead><tr><th>N</th><th>配置</th><th>真机 r/s</th><th>Sim r/s</th><th>真机 / sim</th><th>真机 新 / 计算 tok/s</th><th>sim 新 / 计算 tok/s</th><th>真机 TTFT</th><th>Sim TTFT</th></tr></thead><tbody>
+<tr><td>100</td><td>tiers</td><td>8.62</td><td>8.62</td><td>1.00</td><td>27.4k / 27.4k</td><td>27.4k / 27.4k</td><td>0.09 / 0.17 / 0.36</td><td>0.08 / 0.16 / 0.36</td></tr>
+<tr><td>300</td><td>full</td><td>33.70</td><td>33.97</td><td>0.99</td><td>113.0k / 113.6k</td><td>115.3k / 115.7k</td><td>0.19 / 0.34 / 2.87</td><td>0.15 / 0.25 / 1.65</td></tr>
+<tr><td>300</td><td>tiers</td><td>33.45</td><td>33.77</td><td>0.99</td><td>110.8k / 113.5k</td><td>114.5k / 117.5k</td><td>0.22 / 0.42 / 4.36</td><td>0.18 / 0.29 / 1.89</td></tr>
+<tr><td>300</td><td>ssdheavy</td><td>33.76</td><td>33.80</td><td>1.00</td><td>112.5k / 115.5k</td><td>114.0k / 117.1k</td><td>0.20 / 0.39 / 3.08</td><td>0.19 / 0.31 / 2.02</td></tr>
+<tr><td>300</td><td>hbmonly</td><td>27.24</td><td>30.03</td><td>0.91</td><td>88.1k / 123.1k</td><td>97.3k / 128.1k</td><td>0.36 / 3.01 / 60.90</td><td>0.20 / 1.99 / 20.47</td></tr>
+<tr><td>400</td><td>full</td><td>40.51</td><td>42.26</td><td>0.96</td><td>135.0k / 136.0k</td><td>139.6k / 140.0k</td><td>0.61 / 1.52 / 60.43</td><td>0.48 / 1.30 / 33.28</td></tr>
+<tr><td>400</td><td>tiers</td><td>37.66</td><td>39.77</td><td>0.95</td><td>126.3k / 137.8k</td><td>131.5k / 139.9k</td><td>0.84 / 3.81 / 60.66</td><td>0.65 / 2.53 / 44.99</td></tr>
+<tr><td>400</td><td>ssdheavy</td><td>36.71</td><td>38.36</td><td>0.96</td><td>120.8k / 133.1k</td><td>126.6k / 138.1k</td><td>0.84 / 3.40 / 60.59</td><td>0.63 / 2.83 / 48.38</td></tr>
+<tr><td>400</td><td>hbmonly</td><td>16.16</td><td>≈16 (13.9–19.1)</td><td>≈1.0</td><td>60.0k / 132.6k</td><td>68.8k / 142.0k *</td><td>1.90 / 60.84 / 69.34</td><td>2.12 / 60.66 / 64.58 *</td></tr>
+</tbody></table></div>
+<p class="src">docs/results/eval_m6.md · <a href="#s5-6">§5.6</a> · <a href="#s6-9">§6.9</a></p>
+<h3 id="perf-3">和 vLLM 对比 <span class="tag">v3 trace</span></h3>
+<p>第 10–20 分钟；r/s 与 TTFT p50 / p90 / p99（s）。vLLM DP4/EP4 用 vllm-router cache_aware，只有 HBM；TP4 为单个 TP4 实例。vLLM 的计算 tok/s 远高于新 tok/s：上下文被淘汰后整段重算。0–20 分钟和超过 60 s 的轮数见 <a href="#s6-10">§6.10</a>.</p>
+<div class="tbl"><table><thead><tr><th>N</th><th>本引擎 r/s</th><th>新 / 计算 tok/s</th><th>TTFT</th><th>DP4/EP4 r/s</th><th>新 / 计算 tok/s</th><th>TTFT</th><th>TP4 r/s</th><th>新 / 计算 tok/s</th><th>TTFT</th><th>r/s 对 DP4/EP4</th></tr></thead><tbody>
+<tr><td>100</td><td>8.62 (tiers)</td><td>27.4k / 27.4k</td><td>0.09 / 0.17 / 0.36</td><td>7.46</td><td>23.7k / 56.7k</td><td>1.31 / 2.24 / 3.72</td><td>7.26</td><td>24.5k / 48.1k</td><td>0.76 / 3.81 / 7.92</td><td>1.2×</td></tr>
+<tr><td>300</td><td>33.70 (full)</td><td>113.0k / 113.6k</td><td>0.19 / 0.34 / 2.87</td><td>10.10</td><td>37.2k / 96.8k</td><td>19.37 / 29.47 / 34.94</td><td>0.99</td><td>6.5k / 63.4k</td><td>275.57 / 299.96 / 306.23</td><td>3.3×</td></tr>
+<tr><td>400</td><td>40.51 (full)</td><td>135.0k / 136.0k</td><td>0.61 / 1.52 / 60.43</td><td>4.64</td><td>17.4k / 113.6k</td><td>48.31 / 148.23 / 212.89</td><td>1.17</td><td>7.1k / 64.0k</td><td>319.95 / 344.78 / 349.48</td><td>8.7×</td></tr>
+</tbody></table></div>
+<p class="src">docs/results/vllm_baselines.md · docs/results/eval_m6.md</p>
+<h3 id="perf-4">N 扫描 <span class="tag">v3 trace</span></h3>
+<p>同一 v3 负载、同样 4 张 B200，client 最大并发 session 数 N 从 50 到 400，每 50 一个点。本引擎为 full 档（DRAM 50 GB + SSD 128 GB，staged loading 0.10）；vLLM DP4/EP4 用 vllm-router cache_aware，只有 HBM；vLLM TP4 在 N = 50 / 100 / 200 / 300 / 400。表为第 10–20 分钟，TTFT 为 p50 / p90 / p99（s）。</p>
+<ul>
+<li>N = 50 时三者的吞吐都受到达率限制（4.6–4.9 r/s），本引擎 TTFT p50 0.09 s，DP4/EP4 0.76 s，TP4 0.35 s。</li>
+<li>vLLM DP4/EP4 的吞吐在 N = 200 最高（12.55 r/s），之后随 N 下降，N = 400 只有 4.64 r/s，TTFT p50 48 s。本引擎一直上升到 N = 400 的 40.54 r/s（8.7 倍）。</li>
+<li>vLLM TP4 从 N = 200 起只有 0.85–1.17 r/s，TTFT p50 超过 200 s。</li>
+<li>本引擎 N ≤ 250 没有超过 60 s 的轮，p99 不超过 1 s；N = 300 / 350 / 400 超过 60 s 的轮为 13 / 99 / 230（第 10–20 分钟），从 HBM 命中的份额降到 98.0% / 96.6% / 94.5%。</li>
+</ul>
+<figure>
+  <div class="fighead"><span class="q">N → 吞吐与 TTFT</span>
+    <div class="segs">
+    <div class="seg" data-for="fns" data-key="w"><button data-v="10-20">10–20 分钟</button><button data-v="0-20">0–20 分钟</button></div>
+    <div class="seg" data-for="fns" data-key="m"><button data-v="rps">r/s</button><button data-v="p50">TTFT p50</button><button data-v="p90">p90</button><button data-v="p99">p99</button></div>
+    </div></div>
+  <div id="fns" class="chart" role="img" aria-label="N 从 50 到 400，本引擎吞吐一直上升到 40.5 r/s，vLLM DP4/EP4 在 N = 200 达到 12.6 r/s 后下降，TP4 从 N = 200 起低于 1.2 r/s；TTFT 用对数坐标"></div>
+  <figcaption>TTFT 用对数坐标（秒）。本引擎运行 8541–8548（main 94c33ac）；vLLM DP4/EP4 8550 / 8457 / 8551 / 8552 / 8553 / 8549 / 8554 / 8250（N = 300 为 MNBT 16384 的重跑，其余 32768）；TP4 8555 / 8458 / 8556 / 8420 / 8419。</figcaption>
+</figure>
+<div class="tbl"><table><thead><tr><th>N</th><th>本引擎 r/s</th><th>TTFT</th><th>&gt;60 s</th><th>DP4/EP4 r/s</th><th>TTFT</th><th>&gt;60 s</th><th>TP4 r/s</th><th>TTFT</th><th>r/s 对 DP4/EP4</th></tr></thead><tbody>
+<tr><td>50</td><td>4.59</td><td>0.09 / 0.19 / 0.39</td><td>0</td><td>4.93</td><td>0.76 / 1.53 / 2.44</td><td>0</td><td>4.84</td><td>0.35 / 0.85 / 2.60</td><td>0.9×</td></tr>
+<tr><td>100</td><td>8.62</td><td>0.09 / 0.17 / 0.36</td><td>0</td><td>7.46</td><td>1.31 / 2.24 / 3.72</td><td>0</td><td>7.26</td><td>0.76 / 3.81 / 7.92</td><td>1.2×</td></tr>
+<tr><td>150</td><td>15.36</td><td>0.11 / 0.19 / 0.49</td><td>0</td><td>11.09</td><td>2.61 / 4.43 / 8.80</td><td>0</td><td>–</td><td>–</td><td>1.4×</td></tr>
+<tr><td>200</td><td>21.72</td><td>0.14 / 0.21 / 0.55</td><td>0</td><td>12.55</td><td>5.22 / 10.39 / 18.39</td><td>0</td><td>0.85</td><td>202.51 / 262.19 / 271.70</td><td>1.7×</td></tr>
+<tr><td>250</td><td>27.89</td><td>0.17 / 0.26 / 0.96</td><td>0</td><td>11.46</td><td>11.03 / 19.84 / 30.75</td><td>0</td><td>–</td><td>–</td><td>2.4×</td></tr>
+<tr><td>300</td><td>33.78</td><td>0.18 / 0.35 / 2.65</td><td>13</td><td>10.22</td><td>18.26 / 28.63 / 42.00</td><td>0</td><td>0.99</td><td>275.57 / 299.96 / 306.23</td><td>3.3×</td></tr>
+<tr><td>350</td><td>37.52</td><td>0.37 / 0.85 / 9.48</td><td>99</td><td>7.50</td><td>31.40 / 56.38 / 97.10</td><td>356</td><td>–</td><td>–</td><td>5.0×</td></tr>
+<tr><td>400</td><td>40.54</td><td>0.60 / 1.50 / 52.53</td><td>230</td><td>4.64</td><td>48.31 / 148.23 / 212.89</td><td>910</td><td>1.17</td><td>319.95 / 344.78 / 349.48</td><td>8.7×</td></tr>
+</tbody></table></div>
+<p class="src">docs/results/n_sweep.md · docs/results/n_sweep.json</p>
 
 <!-- ============================== 1 ============================== -->
 <h2 id="s1"><span class="no">1</span>背景与目标</h2>
@@ -1395,6 +1497,7 @@ const D = {
                p50: { tiers: [0.09, 0.22, 0.84], full: [null, 0.19, 0.61], dp: [1.31, 19.37, 48.31], tp: [0.76, 275.57, 319.95] },
                p90: { tiers: [0.17, 0.42, 3.81], full: [null, 0.34, 1.52], dp: [2.24, 29.47, 148.23], tp: [3.81, 299.96, 344.78] },
                p99: { tiers: [0.36, 4.36, 60.66], full: [null, 2.87, 60.43], dp: [3.72, 34.94, 212.89], tp: [7.92, 306.23, 349.48] } } },
+  ns: {"0-20":{"rps":{"ours":[4.86,9.39,15.59,21.83,27.61,32.02,34.77,36.44],"vllm":[4.67,8.05,11.05,12.03,11.06,9.82,8.56,6.58],"tp4":[4.73,7.46,null,3.12,null,1.81,null,1.78]},"p50":{"ours":[0.098,0.108,0.137,0.161,0.182,0.223,0.459,0.715],"vllm":[0.719,1.773,2.985,6.051,11.711,18.518,26.163,36.23],"tp4":[0.336,2.286,null,21.905,null,68.743,null,147.102]},"p90":{"ours":[0.201,0.222,0.27,0.384,0.583,0.972,1.37,1.965],"vllm":[1.757,4.216,7.491,12.254,19.653,29.524,46.134,67.529],"tp4":[1.092,7.727,null,108.955,null,289.89,null,333.854]},"p99":{"ours":[0.545,0.936,1.366,2.53,6.842,20.424,60.548,60.95],"vllm":[4.817,7.918,13.403,21.399,32.082,43.697,78.115,201.684],"tp4":[7.787,13.94,null,266.58,null,303.05,null,346.843]}},"10-20":{"rps":{"ours":[4.59,8.62,15.36,21.72,27.89,33.78,37.52,40.54],"vllm":[4.93,7.46,11.09,12.55,11.46,10.22,7.5,4.64],"tp4":[4.84,7.26,null,0.85,null,0.99,null,1.17]},"p50":{"ours":[0.095,0.089,0.111,0.143,0.172,0.185,0.365,0.603],"vllm":[0.756,1.311,2.61,5.224,11.03,18.257,31.398,48.314],"tp4":[0.35,0.757,null,202.508,null,275.571,null,319.946]},"p90":{"ours":[0.194,0.172,0.195,0.213,0.261,0.345,0.848,1.498],"vllm":[1.529,2.236,4.429,10.392,19.844,28.626,56.377,148.231],"tp4":[0.852,3.815,null,262.188,null,299.96,null,344.777]},"p99":{"ours":[0.388,0.358,0.488,0.552,0.958,2.65,9.476,52.525],"vllm":[2.435,3.721,8.799,18.393,30.747,42.005,97.098,212.894],"tp4":[2.596,7.924,null,271.699,null,306.229,null,349.483]}},"n":[50,100,150,200,250,300,350,400]},
   coll: { h25d50: { C: 48.6, sim: [2532,2905,3452,3610,2415,496,144,162,143,153], real: [2395,2860,3023,2941,2139,476,402,483,454,427],
                     wsim: [15.9,33.1,42.8,49.5,52.9,54.1,54.3,54.2,54.3,54.4], wreal: [15.3,32.8,42.7,47.6,50.6,51.7,53.0,53.0,54.5,55.6] },
           h25d75: { C: 65.3, sim: [2532,2905,3716,4933,4895,4219,3073,3811,3842,3143], real: [2407,2762,3297,4027,4325,3733,3176,2965,2877,3062],
@@ -1622,6 +1725,20 @@ reg("f6g", { w: "w0", m: "rps" }, s => {
       bar("本引擎 Tiers", css("--c-dram"), f(d.tiers)),
       bar("vLLM DP4/EP4", css("--c-sim"), f(d.dp)),
       bar("vLLM TP4", css("--c-alt2"), f(d.tp)),
+    ],
+  });
+});
+
+reg("fns", { w: "10-20", m: "rps" }, s => {
+  const d = D.ns[s.w][s.m], isT = s.m !== "rps";
+  return base({
+    tooltip: Object.assign(base().tooltip, { valueFormatter: v => v == null ? "–" : v + (isT ? " s" : " r/s") }),
+    xAxis: ax("category", "N", { data: D.ns.n.map(String) }),
+    yAxis: isT ? ax("log", `TTFT ${s.m} (s，对数)`, { min: 0.01, max: 1000 }) : ax("value", "rounds/s", { min: 0 }),
+    series: [
+      ln("本引擎 full", css("--c-real"), d.ours),
+      Object.assign(ln("vLLM DP4/EP4", css("--c-sim"), d.vllm, { dash: "dashed" }), { connectNulls: true }),
+      Object.assign(ln("vLLM TP4", css("--c-alt2"), d.tp4, { dash: "dotted" }), { connectNulls: true }),
     ],
   });
 });

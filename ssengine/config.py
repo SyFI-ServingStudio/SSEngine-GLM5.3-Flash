@@ -24,14 +24,54 @@ MB_TOKENS = 8192             # plain scheduler: microbatch budget and chunk size
 MAX_IN_FLIGHT = 4
 LAYER_SPLIT = [12, 11, 11, 11]
 
-# The weights: Hugging Face nvidia/GLM-5.3-Flash-NVFP4 at this revision, in the hub cache under HF_HOME
-# (`hf download nvidia/GLM-5.3-Flash-NVFP4 --revision <CHECKPOINT_REVISION>`). SSENGINE_CHECKPOINT names another
-# directory.
-CHECKPOINT_REPO = "nvidia/GLM-5.3-Flash-NVFP4"
-CHECKPOINT_REVISION = "da920bb0b9f4a06727223a349e55468e38352348"
-CHECKPOINT = os.environ.get("SSENGINE_CHECKPOINT") or str(
-    Path(os.environ.get("HF_HOME") or Path.home() / ".cache" / "huggingface") / "hub"
-    / f"models--{CHECKPOINT_REPO.replace('/', '--')}" / "snapshots" / CHECKPOINT_REVISION)
+class Checkpoint(msgspec.Struct, frozen=True):
+    repo: str            # Hugging Face repo id
+    revision: str        # the revision this repo is measured on (the default when serving the repo id)
+    size_gb: int         # the whole repo, as downloaded
+
+
+# The two checkpoints served, by quantization (`quantization`: read from the checkpoint's config.json, never a flag).
+# The same model and tensor names; NVFP4 quantizes the dense FFN and the routed experts (modelopt), FP8 also the
+# shared experts and the DSA projections (128 x 128 weight blocks, activations quantized per 128 channels at run time).
+CHECKPOINTS = {
+    "nvfp4": Checkpoint("nvidia/GLM-5.3-Flash-NVFP4", "da920bb0b9f4a06727223a349e55468e38352348", 191),
+    "fp8": Checkpoint("zai-org/GLM-5.3-Flash", "03eb5366286afd40d2221b1d9c63a6dd1ba4832e", 306),
+}
+QUANTIZATIONS = tuple(CHECKPOINTS)
+
+
+def quantization(config: dict) -> str:
+    """The quantization of a GLM-5.3-Flash config.json: "nvfp4" (modelopt NVFP4) or "fp8" (block FP8 E4M3, dynamic
+    activations, 128 x 128 weight blocks). Anything else raises ValueError naming what was found."""
+    q = config.get("quantization_config") or {}
+    if q.get("quant_algo") == "NVFP4":
+        return "nvfp4"
+    if q.get("quant_method") == "fp8":
+        fp8 = {"fmt": "e4m3", "activation_scheme": "dynamic", "weight_block_size": [128, 128]}
+        if all(q.get(k) == v for k, v in fp8.items()):
+            return "fp8"
+        raise ValueError("quantization fp8 with " + ", ".join(f"{k} {q.get(k)}" for k in fp8)
+                         + " (want " + ", ".join(f"{k} {v}" for k, v in fp8.items()) + ")")
+    raise ValueError(f"quantization {q.get('quant_algo') or q.get('quant_method') or 'none'} (want NVFP4 or FP8)")
+
+
+def checkpoint_quantization(checkpoint: str | Path) -> str:
+    """`quantization` of a checkpoint directory's config.json."""
+    import json
+
+    return quantization(json.loads((Path(checkpoint) / "config.json").read_text()))
+
+
+def hub_snapshot(ck: Checkpoint) -> str:
+    """Where `ck` is in the Hugging Face hub cache under HF_HOME (`hf download <repo> --revision <revision>`)."""
+    return str(Path(os.environ.get("HF_HOME") or Path.home() / ".cache" / "huggingface") / "hub"
+               / f"models--{ck.repo.replace('/', '--')}" / "snapshots" / ck.revision)
+
+
+# The default weights: nvidia/GLM-5.3-Flash-NVFP4 at its revision. SSENGINE_CHECKPOINT names another directory (the
+# benches and tests read CHECKPOINT; `ssengine serve <model>` resolves its own).
+CHECKPOINT_REPO = CHECKPOINTS["nvfp4"].repo
+CHECKPOINT = os.environ.get("SSENGINE_CHECKPOINT") or hub_snapshot(CHECKPOINTS["nvfp4"])
 
 
 class SchedulerConfig(msgspec.Struct, forbid_unknown_fields=True):

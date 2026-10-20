@@ -1,4 +1,4 @@
-"""One pipeline stage of GLM-5.3-Flash NVFP4, built from the vLLM fork's glm5next modules (runtime/README.md).
+"""One pipeline stage of GLM-5.3-Flash (NVFP4 or FP8: `ssengine.config.quantization` of the checkpoint), built from the vLLM fork's glm5next modules (runtime/README.md).
 
 Construction:
 1. VllmConfig from `EngineArgs` (text model only, FP8 KV, `max_num_batched_tokens` = the run's microbatch budget so a
@@ -37,7 +37,7 @@ import torch
 os.environ.setdefault("VLLM_USE_BREAKABLE_CUDAGRAPH", "1")
 
 from ssengine import kernels  # noqa: E402
-from ssengine.config import CHECKPOINT, PAGE_TOKENS  # noqa: E402
+from ssengine.config import CHECKPOINT, PAGE_TOKENS, checkpoint_quantization  # noqa: E402
 from ssengine.engine.kv import block_pages  # noqa: E402
 from ssengine.model import kv_tensors, pp_patch, sm_h2d  # noqa: E402
 from ssengine.model.metadata import StageMetadata  # noqa: E402
@@ -46,9 +46,16 @@ HIDDEN_WIDTH = 4 * 4096
 # FlashInfer tactics, tuned once (benchmarks/tune_tactics.py) and loaded at warm-up with tuning off, as vLLM loads its
 # persisted configs: start-up skips ~150 s of MoE profiling and every stage, run and test uses the same tactics.
 # The file's own metadata (FlashInfer/CUDA/cuBLAS/cuDNN versions, GPU) decides whether it is valid here.
-TACTICS = Path(os.environ.get("SSENGINE_FI_TACTICS",
-                              Path(__file__).resolve().parents[1] / "data" / "flashinfer_tactics_b200.json"))
-RESERVE_GB = 13.6     # 1_contract.md §1: activations and workspace beside weights and KV (and the CUDA graph pool)
+# One file per quantization (the ops differ: trtllm FP4 vs FP8 block-scale MoE, mm_fp4); SSENGINE_FI_TACTICS overrides.
+_DATA = Path(__file__).resolve().parents[1] / "data"
+TACTICS = {"nvfp4": _DATA / "flashinfer_tactics_b200.json", "fp8": _DATA / "flashinfer_tactics_b200_fp8.json"}
+
+
+def tactics_file(quant: str) -> Path:
+    return Path(os.environ.get("SSENGINE_FI_TACTICS") or TACTICS[quant])
+# beside the KV pool: the warm-up and graph-capture peak measured at start (`_profile_blocks`), plus this much for
+# the allocator's layout differing between the profile pass and the served one
+PROFILE_MARGIN_GB = 1.0
 # token counts captured as CUDA graphs: 128, then every 256 to 8192 (33). A microbatch pads to its bucket, so
 # coarse buckets cost compute: with powers of 2 a 3,000-token prompt ran as 4,096 (round 0 TTFT 114 vs 96.7 ms
 # target, x1.18; job 7462), and on the N=400 smoke's stage-0 sizes (7569) the pad was 3.8% of the tokens (every 1024:
@@ -63,10 +70,21 @@ def graph_bucket(num_tokens: int, buckets) -> int | None:
 MAX_MODEL_LEN = 1_048_576
 
 
-def build_vllm_config(checkpoint: str, max_num_batched_tokens: int, max_model_len: int = MAX_MODEL_LEN):
+# The routed-expert backend per quantization (vLLM `moe_backend`; "auto" = the fork's choice). FP8: DeepGEMM, the
+# fastest correct block-FP8 MoE from 2k tokens up (research/bench/fp8_moe_backends.py, job 8684, layer 4 as served:
+# 1.32x / 1.35x / 1.61x the fork's default FLASHINFER_TRTLLM at 4k / 8k / 16k, tied at 2k, 0.69x / 0.85x at 256 / 1k;
+# FLASHINFER_CUTLASS does not take 128 x 128 block weights, the fork disables VLLM_CUTLASS, Triton is slower
+# everywhere). One backend for every shape: the two layouts (TRTLLM shuffled weights, DeepGEMM UE8M0 scales) cannot share
+# one copy of the expert weights, and the microbatches are mostly past 2k.
+MOE_BACKEND = {"nvfp4": "auto", "fp8": "deep_gemm"}
+
+
+def build_vllm_config(checkpoint: str, max_num_batched_tokens: int, max_model_len: int = MAX_MODEL_LEN,
+                      moe_backend: str | None = None):
     from vllm.engine.arg_utils import EngineArgs
 
-    args = EngineArgs(model=checkpoint, tensor_parallel_size=1, pipeline_parallel_size=1,
+    moe_backend = moe_backend or MOE_BACKEND[checkpoint_quantization(checkpoint)]
+    args = EngineArgs(model=checkpoint, tensor_parallel_size=1, pipeline_parallel_size=1, moe_backend=moe_backend,
                       kv_cache_dtype="fp8_e4m3", enable_prefix_caching=False, language_model_only=True,
                       max_model_len=max_model_len, max_num_batched_tokens=max_num_batched_tokens,
                       max_num_seqs=max(64, max_num_batched_tokens // 128), enforce_eager=True,
@@ -129,14 +147,14 @@ def bench_config(mb_tokens: int, checkpoint: str | None = None, cuda_graphs: boo
 NINJA = "/usr/bin/ninja"
 
 
-def load_tactics(path: Path | None = None) -> dict:
+def load_tactics(path: Path) -> dict:
     """Load the persisted FlashInfer tactics into the autotuner (lookup only, no profiling). Returns what a run
     records: source "file" with path and sha256, or source "missing"/"invalid" with the reason."""
     import hashlib
 
     from flashinfer.autotuner import AutoTuner
 
-    path = Path(path or TACTICS)
+    path = Path(path)
     if not path.is_file():
         return {"source": "missing", "file": str(path), "reason": f"{path} does not exist"}
     sha = hashlib.sha256(path.read_bytes()).hexdigest()
@@ -199,7 +217,8 @@ class StageModel:
     def __init__(self, cfg, stage: int, device: torch.device, *, layers: range | None = None,
                  first: bool | None = None, last: bool | None = None, num_blocks: int | None = None,
                  max_model_len: int | None = None, warmup: bool = True,
-                 host_trims: bool = True, cuda_graphs: bool | None = None, ipc_kv: bool = False):
+                 host_trims: bool = True, cuda_graphs: bool | None = None, ipc_kv: bool = False,
+                 extra_blocks: int = 0):
         st = stage_settings(cfg)
         check_ninja()
         split = st["layer_split"]
@@ -210,6 +229,7 @@ class StageModel:
         self.hidden_width = HIDDEN_WIDTH
         torch.cuda.set_device(device)
         ckpt = st["checkpoint"]
+        self.quant = checkpoint_quantization(ckpt)     # "nvfp4" or "fp8"; anything else raises
         # one-request runs set mb_tokens >= the prompt, so the whole prompt is one call; at least 8192
         max_tokens = max(st["mb_tokens"], 8192)
         os.environ.setdefault("VLLM_SSM_CONV_STATE_LAYOUT", "SD")
@@ -282,35 +302,88 @@ class StageModel:
         attn_layers = get_layers_from_vllm_config(vc, AttentionLayerBase)
         local_spec = {n: l.get_kv_cache_spec(vc) for n, l in attn_layers.items()}
         per_block = kv_tensors.bytes_per_block(vc, local_spec)
+        self.max_tokens = max_tokens
+        self._local_spec, self._ipc_kv = local_spec, ipc_kv
+        graphs = st["cuda_graphs"] if cuda_graphs is None else cuda_graphs
+        self.kv_profile = None
         if num_blocks is None:
-            free, _ = torch.cuda.mem_get_info(device)
-            num_blocks = kv_tensors.blocks_that_fit(per_block, free, int(RESERVE_GB * 1e9),
-                                                    st["pool_tokens"])
-        self.kv = kv_tensors.allocate(vc, vc.compilation_config.static_forward_context, local_spec, num_blocks,
-                                      device, ipc=ipc_kv)
+            num_blocks = self._profile_blocks(per_block, st["pool_tokens"], graphs, extra_blocks)
+        self._build_kv(num_blocks)
+        if warmup:
+            self._warm(graphs)
+
+    def _build_kv(self, num_blocks: int) -> None:
+        self.kv = kv_tensors.allocate(self.vc, self.vc.compilation_config.static_forward_context, self._local_spec,
+                                      num_blocks, self.device, ipc=self._ipc_kv)
         self.num_blocks = num_blocks
         assert self.kv.page_tokens == PAGE_TOKENS, (self.kv.page_tokens, PAGE_TOKENS)   # the controller's KV pages
-        self.meta = StageMetadata(vc, self.kv, device)
-        self.max_tokens = max_tokens
+        self.meta = StageMetadata(self.vc, self.kv, self.device)
         self.graphs: dict[int, GraphEntry] = {}
         self.graph_info: dict = {"enabled": False}
-        if warmup:
-            t0 = time.perf_counter()
-            self.warmup()
-            warmup_s = round(time.perf_counter() - t0, 1)
-            if st["cuda_graphs"] if cuda_graphs is None else cuda_graphs:
-                self.capture_graphs()
-                self._regrow()
-            self.graph_info["warmup_s"] = warmup_s
-            self.graph_info["jit_warmup"] = self.jit_warmup
+
+    def _warm(self, graphs: bool) -> None:
+        t0 = time.perf_counter()
+        self.warmup()
+        warmup_s = round(time.perf_counter() - t0, 1)
+        if graphs:
+            self.capture_graphs()
+            self._regrow()
+        self.graph_info["warmup_s"] = warmup_s
+        self.graph_info["jit_warmup"] = self.jit_warmup
+
+    def _profile_blocks(self, per_block: int, pool_tokens: int | None, graphs: bool, extra_blocks: int = 0) -> int:
+        """KV blocks this stage can back, measured as vLLM's profile run measures them: on a probe pool that holds
+        every warm-up shape (the longest context at max_model_len, 16 fresh requests), run the warm-up and graph
+        capture at this microbatch budget, take the allocator's peak beyond the probe pool (activations, MoE and
+        attention workspaces, the graph pool), drop the probe pool and graphs, and fit the pool in the HBM left after
+        that peak. The peak grows with the budget (one-request runs set it to the prompt) and with the quantization
+        (FP8's DeepGEMM MoE keeps its scratch in vLLM's workspace). `extra_blocks`: device memory allocated after the
+        pool, in blocks of this stage (the tiers' two-hop ring)."""
+        import gc
+
+        from vllm.v1.worker.utils import clear_layer_kv_caches
+
+        B = self.vc.cache_config.block_size
+        longest = max(self.max_tokens, self.vc.model_config.max_model_len, LONG_WARMUP + 1256)
+        torch.cuda.synchronize(self.device)
+        gc.collect()
+        torch.cuda.empty_cache()
+        fit = kv_tensors.blocks_that_fit(per_block, torch.cuda.mem_get_info(self.device)[0], 0, pool_tokens)
+        probe = min(fit, -(-longest // B) + 16 * (kv_tensors.STATE_BLOCKS + 1) + 1)
+        before = torch.cuda.memory_allocated(self.device)
+        self._build_kv(probe)
+        probe_bytes = torch.cuda.memory_allocated(self.device) - before
+        torch.cuda.reset_peak_memory_stats(self.device)
+        self._warm(graphs)
+        torch.cuda.synchronize(self.device)
+        peak = torch.cuda.max_memory_reserved(self.device)
+        live = torch.cuda.memory_allocated(self.device)
+        self.graphs.clear()
+        self.kv = self.meta = self._capture_stream = None
+        clear_layer_kv_caches(self.vc.compilation_config.static_forward_context.values())
+        gc.collect()
+        torch.cuda.empty_cache()
+        held = torch.cuda.memory_reserved(self.device)   # weights and what warm-up keeps (vLLM's workspace)
+        released = live - torch.cuda.memory_allocated(self.device)
+        assert released >= probe_bytes, f"probe pool not released: {released / 2**30:.2f} of {probe_bytes / 2**30:.2f} GiB"
+        free = torch.cuda.mem_get_info(self.device)[0]
+        # + one indexer prefill logits call at its cap: a served microbatch of long contexts makes it beside
+        # activations the profile shapes do not hold at the same time (FP8 prefix_n400 ran out of memory there)
+        need = (peak - probe_bytes - held + int(PROFILE_MARGIN_GB * 2**30) + pp_patch.INDEXER_MAX_LOGITS_BYTES
+                + extra_blocks * per_block)
+        n = kv_tensors.blocks_that_fit(per_block, free, need, pool_tokens)
+        self.kv_profile = {"probe_blocks": probe, "peak_beyond_kv_gib": round((peak - probe_bytes - held) / 2**30, 3),
+                           "free_gib": round(free / 2**30, 2), "blocks": n}
+        print(f"stage {self.stage}: KV profile {json_dumps(self.kv_profile)}", flush=True)
+        return n
 
     def install_host_trims(self) -> dict:
         mods = [m for m in (*self.layers, self.embed, self.norm, self.lm_head) if m is not None]
-        return pp_patch.install_host_trims(mods)
+        return pp_patch.install_host_trims(mods, self.quant)
 
     def warmup(self, tune: str = "auto") -> None:
         """Before `Ready`: run every kernel once (first launches load modules) with FlashInfer's tactics settled.
-        `tune`: "auto" loads `TACTICS` (tuning off) and tunes in this process, loudly, only when the file is missing
+        `tune`: "auto" loads the quantization's `tactics_file` (tuning off) and tunes in this process, loudly, only when the file is missing
         or invalid here; "force" tunes in this process (benchmarks/tune_tactics.py); "off" uses neither. Tuning is one
         autotuned pass at the microbatch budget, as vLLM's `kernel_warmup` does. Shapes: one request at the full
         budget (indexer and both top-k paths), then two requests, one continuing a cached prefix (conv and KDA initial
@@ -334,14 +407,14 @@ class StageModel:
             yield NS(mb_id=-1, chunks=[chunk("w0", 0, T, 1)])
             yield NS(mb_id=-2, chunks=[chunk("w1", 0, 512, 1), chunk("w2", 1024, 1024, 1 + 1 + 6)])
 
-        self.tactics = load_tactics() if tune == "auto" else {"source": tune}
+        self.tactics = load_tactics(tactics_file(self.quant)) if tune == "auto" else {"source": tune}
         ctx = contextlib.nullcontext()
         if tune == "force" or (tune == "auto" and self.tactics["source"] != "file"):
             from flashinfer.autotuner import autotune as fi_autotune
 
             if tune == "auto":
                 msg = (f"FlashInfer tactics not loaded ({self.tactics['reason']}): tuning in this process (~150 s, "
-                       f"tactics may differ per process). Run benchmarks/tune_tactics.py to write {TACTICS}.")
+                       f"tactics may differ per process). Run benchmarks/tune_tactics.py to write {tactics_file(self.quant)}.")
                 warnings.warn(msg, stacklevel=2)
                 print(f"WARNING: {msg}", flush=True)
                 self.tactics["source"] = "tuned_in_process"
@@ -393,7 +466,7 @@ class StageModel:
         allocate their eager-path buffers from the driver: 35 more device allocations per stage and +37 ms on the
         first 4x1k microbatch (sched_check_good 7738), +80 ms with expandable segments. Run the shapes that set the
         allocator's peak once more: several fresh prompts, the largest microbatch, and the largest one continuing
-        long contexts."""
+        long contexts (four requests, and one request of the whole budget)."""
         from types import SimpleNamespace as NS
 
         T = self.max_tokens
@@ -402,6 +475,9 @@ class StageModel:
         if (sum(-(-(st + n) // self.kv.block_tokens) + 6 for st, n in long) <= self.num_blocks - 1
                 and LONG_WARMUP + T <= self.vc.model_config.max_model_len):
             shapes.append(long)
+            # the whole budget continuing a long context: the indexer's prefill logits reach their per-call cap
+            # (pp_patch.INDEXER_MAX_LOGITS_BYTES; 8192 rows x 64k keys), which the profile pass must see
+            shapes.append([(LONG_WARMUP, T)])
         with torch.inference_mode():
             for i, specs in enumerate(shapes):
                 if sum(n for _, n in specs) > T:

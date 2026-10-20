@@ -55,7 +55,7 @@ import msgspec
 import numpy as np
 import zmq
 
-from ssengine.config import BLOCK_TOKENS, CONTRACT_BLOCKS, PAGE_TOKENS, RunConfig, dump_config
+from ssengine.config import BLOCK_TOKENS, PAGE_TOKENS, RunConfig, dump_config
 from ssengine.engine.kv import KvManager, kv_pages_for, pool_size
 from ssengine.engine.scheduler import ChunkSpec, Request, Scheduler
 from ssengine.kvpool import BalancedKVPool
@@ -194,12 +194,6 @@ class Controller:
                 p.kill()
             raise
         self._pin()
-        if cfg.tiers is not None and cfg.model != "fake" and cfg.pool_tokens is None \
-                and min(r.num_blocks for r in ready) < CONTRACT_BLOCKS:
-            for p in self.procs:                 # the tiers' HBM (staging, IPC-shareable KV) must not shrink the pool
-                p.kill()
-            raise RuntimeError(f"tiers on: Ready blocks {[r.num_blocks for r in ready]} below the contract's "
-                               f"{CONTRACT_BLOCKS}")
         num_blocks = pool_size([r.num_blocks for r in ready], cfg.pool_tokens)
         self.rule = DispatchRule(cfg.max_in_flight, cfg.form_lead_ms, self.n)
         pool = self._pool(ready) if cfg.tiers is not None else None
