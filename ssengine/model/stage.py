@@ -53,7 +53,9 @@ TACTICS = {"nvfp4": _DATA / "flashinfer_tactics_b200.json", "fp8": _DATA / "flas
 
 def tactics_file(quant: str) -> Path:
     return Path(os.environ.get("SSENGINE_FI_TACTICS") or TACTICS[quant])
-RESERVE_GB = 13.6     # 1_contract.md §1: activations and workspace beside weights and KV (and the CUDA graph pool)
+# beside the KV pool: the warm-up and graph-capture peak measured at start (`_profile_blocks`), plus this much for
+# the allocator's layout differing between the profile pass and the served one
+PROFILE_MARGIN_GB = 1.0
 # token counts captured as CUDA graphs: 128, then every 256 to 8192 (33). A microbatch pads to its bucket, so
 # coarse buckets cost compute: with powers of 2 a 3,000-token prompt ran as 4,096 (round 0 TTFT 114 vs 96.7 ms
 # target, x1.18; job 7462), and on the N=400 smoke's stage-0 sizes (7569) the pad was 3.8% of the tokens (every 1024:
@@ -299,49 +301,76 @@ class StageModel:
         attn_layers = get_layers_from_vllm_config(vc, AttentionLayerBase)
         local_spec = {n: l.get_kv_cache_spec(vc) for n, l in attn_layers.items()}
         per_block = kv_tensors.bytes_per_block(vc, local_spec)
-        self.moe_workspace_gib = self._settle_moe_workspace(max_tokens)
+        self.max_tokens = max_tokens
+        self._local_spec, self._ipc_kv = local_spec, ipc_kv
+        graphs = st["cuda_graphs"] if cuda_graphs is None else cuda_graphs
+        self.kv_profile = None
         if num_blocks is None:
-            free, _ = torch.cuda.mem_get_info(device)
-            num_blocks = kv_tensors.blocks_that_fit(per_block, free, int(RESERVE_GB * 1e9),
-                                                    st["pool_tokens"])
-        self.kv = kv_tensors.allocate(vc, vc.compilation_config.static_forward_context, local_spec, num_blocks,
-                                      device, ipc=ipc_kv)
+            num_blocks = self._profile_blocks(per_block, st["pool_tokens"], graphs)
+        self._build_kv(num_blocks)
+        if warmup:
+            self._warm(graphs)
+
+    def _build_kv(self, num_blocks: int) -> None:
+        self.kv = kv_tensors.allocate(self.vc, self.vc.compilation_config.static_forward_context, self._local_spec,
+                                      num_blocks, self.device, ipc=self._ipc_kv)
         self.num_blocks = num_blocks
         assert self.kv.page_tokens == PAGE_TOKENS, (self.kv.page_tokens, PAGE_TOKENS)   # the controller's KV pages
-        self.meta = StageMetadata(vc, self.kv, device)
-        self.max_tokens = max_tokens
+        self.meta = StageMetadata(self.vc, self.kv, self.device)
         self.graphs: dict[int, GraphEntry] = {}
         self.graph_info: dict = {"enabled": False}
-        if warmup:
-            t0 = time.perf_counter()
-            self.warmup()
-            warmup_s = round(time.perf_counter() - t0, 1)
-            if st["cuda_graphs"] if cuda_graphs is None else cuda_graphs:
-                self.capture_graphs()
-                self._regrow()
-            self.graph_info["warmup_s"] = warmup_s
-            self.graph_info["jit_warmup"] = self.jit_warmup
 
-    def _settle_moe_workspace(self, tokens: int) -> float:
-        """Grow vLLM's persistent workspace (`current_workspace_manager`, shared by every layer) to what the routed
-        experts take at the microbatch budget, before the KV pool is sized from the free memory, as vLLM's profile
-        run does. The modular MoE kernels (the FP8 checkpoint's DeepGEMM experts: permuted FP8 rows padded per
-        expert, the FC1 output) keep that scratch there; the NVFP4 trtllm MoE is monolithic and takes none. One MoE
-        layer's forward on `tokens` zero rows; returns the GiB it kept."""
-        from vllm.forward_context import set_forward_context
+    def _warm(self, graphs: bool) -> None:
+        t0 = time.perf_counter()
+        self.warmup()
+        warmup_s = round(time.perf_counter() - t0, 1)
+        if graphs:
+            self.capture_graphs()
+            self._regrow()
+        self.graph_info["warmup_s"] = warmup_s
+        self.graph_info["jit_warmup"] = self.jit_warmup
 
-        moe = next((layer.mlp for layer in self.layers if hasattr(layer.mlp, "experts")), None)
-        if moe is None:
-            return 0.0
+    def _profile_blocks(self, per_block: int, pool_tokens: int | None, graphs: bool) -> int:
+        """KV blocks this stage can back, measured as vLLM's profile run measures them: on a probe pool that holds
+        every warm-up shape (the longest context at max_model_len, 16 fresh requests), run the warm-up and graph
+        capture at this microbatch budget, take the allocator's peak beyond the probe pool (activations, MoE and
+        attention workspaces, the graph pool), drop the probe pool and graphs, and fit the pool in the HBM left after
+        that peak. The peak grows with the budget (one-request runs set it to the prompt) and with the quantization
+        (FP8's DeepGEMM MoE keeps its scratch in vLLM's workspace)."""
+        import gc
+
+        from vllm.v1.worker.utils import clear_layer_kv_caches
+
+        B = self.vc.cache_config.block_size
+        longest = max(self.max_tokens, self.vc.model_config.max_model_len, LONG_WARMUP + 1256)
         torch.cuda.synchronize(self.device)
-        free0 = torch.cuda.mem_get_info(self.device)[0]
-        with torch.inference_mode(), set_forward_context(None, self.vc, num_tokens=tokens):
-            moe(torch.zeros(tokens, self.hidden_width // 4, dtype=torch.bfloat16, device=self.device))
-        torch.cuda.synchronize(self.device)
+        gc.collect()
         torch.cuda.empty_cache()
-        kept = round((free0 - torch.cuda.mem_get_info(self.device)[0]) / 2**30, 3)
-        print(f"stage {self.stage}: MoE workspace at {tokens} tokens kept {kept} GiB", flush=True)
-        return kept
+        fit = kv_tensors.blocks_that_fit(per_block, torch.cuda.mem_get_info(self.device)[0], 0, pool_tokens)
+        probe = min(fit, -(-longest // B) + 16 * (kv_tensors.STATE_BLOCKS + 1) + 1)
+        before = torch.cuda.memory_allocated(self.device)
+        self._build_kv(probe)
+        probe_bytes = torch.cuda.memory_allocated(self.device) - before
+        torch.cuda.reset_peak_memory_stats(self.device)
+        self._warm(graphs)
+        torch.cuda.synchronize(self.device)
+        peak = torch.cuda.max_memory_reserved(self.device)
+        live = torch.cuda.memory_allocated(self.device)
+        self.graphs.clear()
+        self.kv = self.meta = self._capture_stream = None
+        clear_layer_kv_caches(self.vc.compilation_config.static_forward_context.values())
+        gc.collect()
+        torch.cuda.empty_cache()
+        held = torch.cuda.memory_reserved(self.device)   # weights and what warm-up keeps (vLLM's workspace)
+        released = live - torch.cuda.memory_allocated(self.device)
+        assert released >= probe_bytes, f"probe pool not released: {released / 2**30:.2f} of {probe_bytes / 2**30:.2f} GiB"
+        free = torch.cuda.mem_get_info(self.device)[0]
+        need = peak - probe_bytes - held + int(PROFILE_MARGIN_GB * 2**30)
+        n = kv_tensors.blocks_that_fit(per_block, free, need, pool_tokens)
+        self.kv_profile = {"probe_blocks": probe, "peak_beyond_kv_gib": round((peak - probe_bytes - held) / 2**30, 3),
+                           "free_gib": round(free / 2**30, 2), "blocks": n}
+        print(f"stage {self.stage}: KV profile {json_dumps(self.kv_profile)}", flush=True)
+        return n
 
     def install_host_trims(self) -> dict:
         mods = [m for m in (*self.layers, self.embed, self.norm, self.lm_head) if m is not None]

@@ -277,7 +277,7 @@ def run_worker(cfg: RunConfig, stage: int):   # makes inference tensors, which a
                   f"{time.monotonic() - t_attach:.1f} s (first-touch wait {tiers.touch_wait_s:.1f} s)", flush=True)
         # which FlashInfer tactics the stage runs with (StageModel.tactics: source file|tuned_in_process, file, sha256)
         info = {"stage": stage, "tactics": getattr(model, "tactics", None),
-                "cuda_graphs": getattr(model, "graph_info", None)}
+                "cuda_graphs": getattr(model, "graph_info", None), "kv_profile": getattr(model, "kv_profile", None)}
         print(f"stage {stage}: {json.dumps(info)}", flush=True)
         (Path(cfg.run_dir) / f"stage{stage}.json").write_text(json.dumps(info) + "\n")
         clock = Clock(device)
