@@ -215,7 +215,7 @@ CONFIGS = tuple(replace(c, names_verified=c.config in _NAMES_TRACED) for c in CO
 # Same positions; what the fork runs for 128 x 128 block FP8 weights on B200 (traced: chain 1k, job 8681). The dense FFN,
 # the shared expert and the DSA projections q_a/kv_a (config 12), q_b (14) and o (27) are FP8: DeepGEMM's 1d1d block
 # GEMM (vLLM DeepGemmFp8BlockScaledMMKernel) after a per-128-channel activation quantization; the routed experts run
-# the trtllm FP8 block-scale MoE. The handoff has no rows for them: not covered.
+# vLLM's DEEPGEMM MoE (traced: job 8685). The handoff has no rows for them: not covered.
 ROW_NONE = "none (the handoff prices the NVFP4 checkpoint)"
 _FP8_QUANT = (r"per_token_group_quant_8bit",)            # plain (MoE input) and UE8M0-packed (DeepGEMM) variants
 _DEEPGEMM_FP8 = (r"deep_gemm::sm100_fp8_fp4_gemm_1d1d_impl",)
@@ -242,9 +242,18 @@ def _fp8_config(c: KernelConfig) -> KernelConfig:
     if c.config in (9, 11, 12, 14, 27, 31, 32):
         return _fp8_gemm(c)
     if c.config == 30:
-        return replace(c, kind="fp8_block_fused_moe", fixed=c.fixed.replace(", scale 5/2", "") + ", 128 x 128 blocks",
-                       callable="flashinfer.fused_moe.trtllm_fp8_block_scale_moe (vLLM FLASHINFER_TRTLLM Fp8 MoE)",
-                       row_call="-", row_version=ROW_NONE, verdict="FP8 only", covered=False)
+        # vLLM DEEPGEMM Fp8 MoE (stage.MOE_BACKEND, job 8684): routing (single_group_topk), scatter into the contiguous
+        # per-expert layout, DeepGEMM's grouped 1d1d GEMMs (the same kernel as the dense GEMMs, 288 groups), SiLU-mul
+        # with FP8 requantization, gather. TritonOrDeepGemmExperts may take Triton's fused_moe_kernel for small M.
+        # The trtllm MoE (the fork's default) is a fallback here.
+        return replace(c, kind="fp8_block_fused_moe", backend="vllm_deep_gemm",
+                       fixed=c.fixed.replace(", scale 5/2", "") + ", 128 x 128 blocks",
+                       callable="vLLM DEEPGEMM Fp8 MoE (TritonOrDeepGemmExperts: deep_gemm m_grouped_fp8_gemm_nt_contiguous)",
+                       row_call="-", row_version=ROW_NONE, verdict="FP8 only", covered=False, route="stage.MOE_BACKEND",
+                       names=(r"single_group_topk", r"_fwd_kernel_ep_scatter", r"_fwd_kernel_ep_gather",
+                              r"_silu_mul_quant_fp8", r"_count_expert_num_tokens", r"transpose_and_pack_fp32_into_ue8m0",
+                              r"fused_moe_kernel") + _DEEPGEMM_FP8,
+                       forbidden=(r"^bmm_", r"moe::dev::"))
     return c
 
 
