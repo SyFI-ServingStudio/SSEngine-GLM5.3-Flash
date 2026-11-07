@@ -11,6 +11,8 @@
 set -uo pipefail
 {   # one brace group: bash parses it whole before running, so editing this file mid-job cannot break the job
 source "${SLURM_SUBMIT_DIR:-$(dirname "$0")/../..}/benchmarks/jobs/env.sh"
-export CUDA_DEVICE_ORDER=PCI_BUS_ID PATH=/usr/bin:$PATH   # /usr/bin/ninja first (FlashInfer JIT, notes.md)
+# /usr/bin/ninja first (FlashInfer JIT, notes.md), but /usr/local/bin before it: cayenne's docker there is the wrapper
+# that runs containers in the job's rootless Podman with its GPUs and /scratch/hf; /usr/bin/docker bypasses it
+export CUDA_DEVICE_ORDER=PCI_BUS_ID PATH=/usr/local/bin:/usr/bin:$PATH
 exec "$PY" -m benchmarks.agentx run --python "$PY" "$@"
 }
