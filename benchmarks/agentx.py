@@ -268,7 +268,11 @@ def run(a) -> Path:
     server = router = None
     t0 = time.time()
     try:
-        server = _start(srv, rd / "server.log")
+        # vLLM closes an idle keep-alive connection after 5 s (VLLM_HTTP_TIMEOUT_KEEP_ALIVE) while AIPerf keeps pooled
+        # connections up to 300 s (AIPERF_HTTP_KEEPALIVE_TIMEOUT): a request sent on one vLLM is closing gets a
+        # connection reset, and one failed root warm-up request aborts an AgentX run (job 18115).
+        env = dict(os.environ, VLLM_HTTP_TIMEOUT_KEEP_ALIVE="600") if a.engine == "vllm" else None
+        server = _start(srv, rd / "server.log", env)
         while not _ready(f"http://127.0.0.1:{p['server']}"):
             if server.poll() is not None:
                 raise SystemExit(f"server exited during start-up ({server.returncode}): {rd / 'server.log'}")
