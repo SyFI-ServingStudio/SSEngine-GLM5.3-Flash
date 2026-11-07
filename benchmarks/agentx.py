@@ -202,6 +202,13 @@ def client_argv(url: str, ckpt: str, concurrency: int, duration_s: int, out: Pat
     return argv
 
 
+def server_ready_path(engine: str) -> str:
+    """The path that answers 200 once the engine takes load. SGLang serves /v1/models before its own start-up warm-up
+    request has returned; /health is 503 until then (server_status Starting -> Up, v0.5.23 http_server.py). Loading
+    the client earlier starves that request: at c512 it timed out after 600 s and the server exited (job 18150)."""
+    return "/health" if engine == "sglang" else "/v1/models"
+
+
 def _ready(url: str, path: str = "/v1/models") -> bool:
     """The engines answer /v1/models once loaded; vllm-router has no /v1/models (an HTML 404), only /health."""
     try:
@@ -308,7 +315,7 @@ def run(a) -> Path:
         # connection reset, and one failed root warm-up request aborts an AgentX run (job 18115).
         env = dict(os.environ, VLLM_HTTP_TIMEOUT_KEEP_ALIVE=VLLM_KEEP_ALIVE_S) if a.engine == "vllm" else None
         server = _start(srv, rd / "server.log", env)
-        while not _ready(f"http://127.0.0.1:{p['server']}"):
+        while not _ready(f"http://127.0.0.1:{p['server']}", server_ready_path(a.engine)):
             if server.poll() is not None:
                 raise SystemExit(f"server exited during start-up ({server.returncode}): {rd / 'server.log'}")
             if time.time() - t0 > READY_TIMEOUT_S:
