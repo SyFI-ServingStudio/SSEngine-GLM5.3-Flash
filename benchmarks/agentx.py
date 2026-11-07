@@ -126,7 +126,8 @@ def server_argv(engine: str, lay: Layout, ckpt: str, port: int, run_dir: Path, p
     if engine == "sglang":
         world = lay.tp * lay.dp
         argv = ["docker", "run", "--rm", "--name", f"agentx-sglang-{os.environ.get('SLURM_JOB_ID', 'local')}",
-                "--network", "host", "--ipc", "host", "--shm-size", "32g", "-v", f"{run_dir}:{run_dir}",
+                # --ipc host shares the host's /dev/shm: Podman refuses --shm-size with it (container create fails)
+                "--network", "host", "--ipc", "host", "-v", f"{run_dir}:{run_dir}",
                 SGLANG_IMAGE, "python3", "-m", "sglang.launch_server", "--model-path", ckpt,
                 "--served-model-name", SERVED_NAME, "--host", "127.0.0.1", "--port", str(p["server"]),
                 "--tp-size", str(world), "--pp-size", str(lay.pp), "--context-length", str(MAX_MODEL_LEN),
