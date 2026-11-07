@@ -34,6 +34,13 @@ def test_ssengine_pp4_only():
         server_argv("ssengine", parse_layout("tp4"), "/ck", 20060, RD, "py")
 
 
+def test_ssengine_image():
+    a = server_argv("ssengine", parse_layout("pp4"), "/ck", 20060, RD, "py", ["--dram-gb", "50"], ssengine_image="ss:arm")
+    i = a.index("ss:arm")
+    assert a[:2] == ["docker", "run"] and a[i + 1:i + 3] == ["serve", "/ck"] and f"{RD}:{RD}" in a
+    assert flag(a, "--run-dir") == str(RD / "server") and a[-2:] == ["--dram-gb", "50"]
+
+
 def test_vllm_layouts():
     a = server_argv("vllm", parse_layout("dp4-ep"), "/ck", 20060, RD, "py")
     assert (flag(a, "--tensor-parallel-size"), flag(a, "--data-parallel-size"), flag(a, "--pipeline-parallel-size")) \
