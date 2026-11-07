@@ -120,9 +120,9 @@ def _worker(rank: int, port: int, out_dir: str):
 
         def move(op_id, op, kv, st, b_lo, tier="dram", host=None):
             if host is None:
-                mv = TierMove(op_id, op, tier, None, b_lo, n0, 0, [kv], [st], slots, sslots, [], [])
+                mv = TierMove(op_id, op, tier, None, b_lo, n0, 0, [block_pages(kv)], [st], slots, sslots, [], [])
             else:                           # SSD: file slots = the DRAM ones' ids; host side DRAM or staging
-                mv = TierMove(op_id, op, tier, host, b_lo, n0, 0, [kv], [st], slots, sslots, slots, sslots)
+                mv = TierMove(op_id, op, tier, host, b_lo, n0, 0, [block_pages(kv)], [st], slots, sslots, slots, sslots)
             eng.submit(mv)
             if tier == "ssd":
                 eng._ssd_op(*eng.ssd_q[eng.direction(mv)].get())
@@ -162,7 +162,7 @@ def _worker(rank: int, port: int, out_dir: str):
         eng._ssd_op(*eng.ssd_q["read"].get())
         res["fetch_bytes"] = eng.q["read"].get()[3]
         dist.barrier()
-        hop = TierMove(6, "read", "dram", None, 0, n0, 0, [K4], [S4], area[:n0], area[n0:], [], [])
+        hop = TierMove(6, "read", "dram", None, 0, n0, 0, [block_pages(K4)], [S4], area[:n0], area[n0:], [], [])
         eng.submit(hop)
         _, ev, _, res["hop_bytes"], _, _ = eng.q["read"].get()
         ev.synchronize()
