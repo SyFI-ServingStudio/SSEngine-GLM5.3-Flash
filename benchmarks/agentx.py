@@ -81,9 +81,7 @@ def _docker(name: str, image: str | None = None) -> list[str]:
     """`docker run` head for one container; an engine `image` also gets its own persistent /root/.cache."""
     argv = ["docker", "run", "--rm", "--name", f"agentx-{name}-{os.environ.get('SLURM_JOB_ID', 'local')}", *DOCKER_ARGS]
     if image is not None:
-        cache = CACHE_DIR / re.sub(r"[^A-Za-z0-9_.-]+", "_", image)
-        cache.mkdir(parents=True, exist_ok=True)
-        argv += ["-v", f"{cache}:/root/.cache"]
+        argv += ["-v", f"{CACHE_DIR / re.sub(r'[^A-Za-z0-9_.-]+', '_', image)}:/root/.cache"]   # run() creates it
     return argv
 VLLM_KEEP_ALIVE_S = "600"   # see run(): vLLM's 5 s keep-alive close races AIPerf's pooled reuse (job 18115)
 ROUTER = MAIN / "tmp" / "vllm-router-venv" / "bin" / "vllm-router"
@@ -278,6 +276,9 @@ def run(a) -> Path:
     duration = a.duration or (SMOKE_DURATION_S if a.smoke else DURATION_S)
     entries = a.entries or (SMOKE_ENTRIES if a.smoke else None)
     srv = server_argv(a.engine, lay, ckpt, port, rd, a.python, a.server_arg, a.vllm_image, a.ssengine_image)
+    for i, x in enumerate(srv[:-1]):
+        if x == "-v" and srv[i + 1].endswith(":/root/.cache"):
+            Path(srv[i + 1].rsplit(":", 1)[0]).mkdir(parents=True, exist_ok=True)
     rtr = router_argv(a.engine, lay, port, rd)
     url = f"http://127.0.0.1:{p['router'] if rtr else p['server']}"
     cli = client_argv(url, ckpt, a.concurrency, duration, rd / "aiperf", a.smoke, entries, a.seed, a.warmup_per_lane)
