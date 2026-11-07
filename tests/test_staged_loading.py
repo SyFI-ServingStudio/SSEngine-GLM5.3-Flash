@@ -8,9 +8,17 @@ import math
 import pytest
 
 from ssengine.config import BLOCK_PAGES as P, BLOCK_TOKENS as B, SchedulerConfig, TierConfig
-from ssengine.engine.kv import KvManager, pages_for
+from ssengine.engine.kv import KvManager
+from ssengine.engine.kv import pages_for as _pages_for
 from ssengine.engine.scheduler import Request, Scheduler
 from ssengine.kvpool import BalancedKVPool, KVViews
+from ssengine.engine.kv import StateShape
+
+BLOCK_STATE = StateShape(6, 67)   # the policy checks below count states in whole blocks (vLLM's 6, the old layout)
+
+
+def pages_for(tokens: int, states: int = 1) -> int:
+    return _pages_for(tokens, states, BLOCK_STATE)
 
 SLOT = 1_000_000
 MB = 8192
@@ -27,7 +35,7 @@ def cfg(area=14, blocks=60, dram=0.020, ssd=0.100, **kw):
 def sched(blocks=60, force_ms=None, **kw):
     """The byte gate counts what HBM holds here (a block per 8,576 tokens and 6 state blocks, a slot each), so the
     tests below reason in blocks; `test_area_is_a_fraction_of_hbm` checks the gate's real sizing."""
-    kv = KvManager(blocks, keep_sessions=True)
+    kv = KvManager(blocks, keep_sessions=True, state=BLOCK_STATE)
     pool = BalancedKVPool(cfg(blocks=blocks, **kw))
     s = Scheduler(kv, SchedulerConfig(mb_tokens=MB, force_after_ms=force_ms), pool, dispatch_ahead=0)
     if s.staged:
@@ -93,7 +101,7 @@ def test_area_is_a_fraction_of_hbm():
     assert t.wb[0].reserve == -(-(kv.area + pages_for(MB)) // P) * SLOT    # DRAM -> SSD: one batch period's room
     with pytest.raises(ValueError):
         sched(area=30)                                                     # half of HBM: not a loading area
-    off = Scheduler(KvManager(60, keep_sessions=True), SchedulerConfig(mb_tokens=MB),
+    off = Scheduler(KvManager(60, keep_sessions=True, state=BLOCK_STATE), SchedulerConfig(mb_tokens=MB),
                     BalancedKVPool(TierConfig(dram_gb=0.02, ssd_gb=None, slot_bytes=SLOT)))
     assert not off.staged and off.kv.area == 0
 
@@ -102,7 +110,7 @@ def test_area_gates_reads_by_tier_bytes_as_the_simulator():
     """Reads start while their bytes as a tier holds them (KV per token + one state) fit the area's bytes (the
     area's tokens at HBM's bytes per token); HBM counts max(blocks held, area), so more reads fit than the area's
     blocks when a state costs fewer bytes in a tier than its blocks in HBM."""
-    kv = KvManager(60, keep_sessions=True)
+    kv = KvManager(60, keep_sessions=True, state=BLOCK_STATE)
     c = cfg(area=14, bytes_per_token=200, dram=None, ssd=0.1)
     pool = BalancedKVPool(c)
     pool.state_bytes = 2 * SLOT

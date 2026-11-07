@@ -8,10 +8,18 @@ import random
 import pytest
 
 from ssengine.config import BLOCK_PAGES, BLOCK_TOKENS as B, SchedulerConfig, TierConfig
-from ssengine.engine.kv import KvManager, pages_for
+from ssengine.engine.kv import KvManager
+from ssengine.engine.kv import pages_for as _pages_for
 from ssengine.engine.scheduler import Request, Scheduler
 from ssengine.kvpool import BalancedKVPool, Hit, KVViews
 from ssengine.kvpool.manager import TierManager
+from ssengine.engine.kv import StateShape
+
+BLOCK_STATE = StateShape(6, 67)   # the policy checks below count states in whole blocks (vLLM's 6, the old layout)
+
+
+def pages_for(tokens: int, states: int = 1) -> int:
+    return _pages_for(tokens, states, BLOCK_STATE)
 
 SLOT = 1_000_000          # 1 MB slots: dram_gb=0.01 is 10 slots
 
@@ -152,7 +160,7 @@ def finish(s, r, now=0):
 
 def test_kept_context_pinned_until_its_write_is_done():
     """A kept context being written back is pinned: not evicted, and its next round waits to take it over."""
-    kv = KvManager(20, keep_sessions=True)
+    kv = KvManager(20, keep_sessions=True, state=BLOCK_STATE)
     pool = BalancedKVPool(cfg(dram=1.0, hbm_write_ahead=0.1))   # 7 of 20 blocks > 10%: written ahead at once
     s = Scheduler(kv, SchedulerConfig(mb_tokens=8192), pool, dispatch_ahead=0)
     finish(s, rnd(1, 0, 100))
@@ -170,7 +178,7 @@ def test_kept_context_pinned_until_its_write_is_done():
 
 
 def test_read_lands_on_op_done():
-    kv = KvManager(20, keep_sessions=True)
+    kv = KvManager(20, keep_sessions=True, state=BLOCK_STATE)
     pool = BalancedKVPool(cfg(dram=1.0))
     t = pool.manager
     s = Scheduler(kv, SchedulerConfig(mb_tokens=8192), pool, dispatch_ahead=0)
@@ -329,7 +337,7 @@ def test_ssd_loss_makes_the_dram_entry_dirty_again():
 def test_scheduler_writes_back_ahead_and_evicts_only_written_contexts():
     """HBM of 20 blocks; sessions of 1 KV + 6 state blocks. Above 70% the LRU tail is written ahead (the same
     `WriteBack` as DRAM's); a request that needs the room of a context not yet written starts its write and waits."""
-    kv = KvManager(21, keep_sessions=True)
+    kv = KvManager(21, keep_sessions=True, state=BLOCK_STATE)
     pool = BalancedKVPool(cfg(dram=1.0, ssd=None, hbm_write_ahead=0.7))
     s = Scheduler(kv, SchedulerConfig(mb_tokens=8192), pool, dispatch_ahead=0)
     hbm = pool.hbm.wb
@@ -425,7 +433,7 @@ def test_dram_entry_the_ssd_holds_whole_is_clean():
 
 def test_inclusive_hbm_hit_keeps_the_write_ahead_copy():
     """Inclusive DRAM writes ahead: a kept context taken over by its next round (an HBM hit) stays in DRAM."""
-    kv = KvManager(21, keep_sessions=True)
+    kv = KvManager(21, keep_sessions=True, state=BLOCK_STATE)
     pool = BalancedKVPool(cfg(dram=1.0, ssd=None, hbm_write_ahead=0.0))
     s = Scheduler(kv, SchedulerConfig(mb_tokens=8192), pool, dispatch_ahead=0)
     finish(s, rnd(1, 0, 100))
@@ -442,7 +450,7 @@ def test_exclusive_writes_at_eviction_and_the_blocks_wait_for_it():
     """Exclusive DRAM (the simulator's rule): nothing is written ahead, an HBM eviction writes the context at once
     (urgent), the eviction does not wait, and the evicted blocks are busy until the write is done; a read into them
     depends on it."""
-    kv = KvManager(21, keep_sessions=True)
+    kv = KvManager(21, keep_sessions=True, state=BLOCK_STATE)
     pool = BalancedKVPool(cfg(dram=1.0, ssd=None, hbm_write_ahead=0.0, dram_writes=EXCL))
     s = Scheduler(kv, SchedulerConfig(mb_tokens=8192), pool, dispatch_ahead=0)
     finish(s, rnd(1, 0, 100))
@@ -455,7 +463,7 @@ def test_exclusive_writes_at_eviction_and_the_blocks_wait_for_it():
     assert 1 in pool.manager.tiers[0].entries and pool.hbm_busy(pages) and pool.hbm_busy([], states)
     (w,) = pool.ready_ops()
     assert w.op == "write" and w.urgent and w.kv_pages[0] == pages and w.state_blocks[0] == states
-    reuse = [states[0] * BLOCK_PAGES + 5]           # a page of an evicted state block, reused as KV
+    reuse = [states[0] * BLOCK_PAGES + 5]           # a page of an evicted state's run, reused as KV
     assert pool.hbm_busy(reuse) and not pool.hbm_busy([max(pages) + 1])
     o = pool.manager._emit("read", "dram", 9, token_start=0, token_end=B, kv_pages=[reuse], state_blocks=[[]])
     assert w.op_id in o.deps

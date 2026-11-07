@@ -147,19 +147,27 @@ class BalancedPlacement:
         state: block j's rows at its HBM pages kv_pages[j * BLOCK_PAGES:(j + 1) * BLOCK_PAGES] (those that exist),
         its host side in slot slots[j - block_start] (offsets are slot * slot_bytes + offset within the slot, from the
         start of the tier's arena or file). `kv_pages` / `state_blocks`: one list for every stage (flat, or a list of
-        one list), or one list per stage (n lists). `stage`: the stage whose views a piece is in."""
+        one list), or one list per stage (n lists). `state_blocks` holds k states' runs one state after another and
+        `state_slots` their slots the same way (k = len(state_slots) / state_slots). `stage`: the stage whose views a
+        piece is in."""
         devs, hosts, lens, stages = [], [], [], []
         if b_hi > b_lo:
             for a, x in zip((devs, hosts, lens, stages), self._kv_pieces(kv_pages, slots, b_lo, b_hi, block_start)):
                 a.append(x)
-        if len(state_slots):
+        if len(state_slots):                     # k states (k2: a write moves both): runs and slots state by state
             st = _shared(state_blocks)
-            sb = st[self.st_group] if st.ndim == 1 else st[self.st_stage, self.st_group]
-            ss = np.asarray(state_slots, dtype=np.int64)[self.st_slot]
-            devs.append(self.st_dev + sb * self.st_stride)
-            hosts.append(ss * self.slot_bytes + self.st_off)
-            lens.append(self.st_len)
-            stages.append(self.st_stage)
+            k, rem = divmod(len(state_slots), self.state_slots)
+            assert k >= 1 and rem == 0 and st.shape[-1] % k == 0, (len(state_slots), self.state_slots, st.shape)
+            R = st.shape[-1] // k
+            for i in range(k):
+                sti = st[..., i * R:(i + 1) * R]
+                sb = sti[self.st_group] if sti.ndim == 1 else sti[self.st_stage, self.st_group]
+                ss = np.asarray(state_slots[i * self.state_slots:(i + 1) * self.state_slots],
+                                dtype=np.int64)[self.st_slot]
+                devs.append(self.st_dev + sb * self.st_stride)
+                hosts.append(ss * self.slot_bytes + self.st_off)
+                lens.append(self.st_len)
+                stages.append(self.st_stage)
         if not devs:
             z = np.zeros(0, dtype=np.int64)
             return z, z, z, z

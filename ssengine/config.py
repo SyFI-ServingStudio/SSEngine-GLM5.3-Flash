@@ -11,10 +11,12 @@ import yaml
 # 1_contract.md §1 and README "Design".
 BLOCK_TOKENS = 8576          # one block: 8,576 tokens of DSA KV, or one KDA layer's state
 CONTRACT_BLOCKS = 7144       # 1_contract.md §1: KV blocks per stage, incl. the null block
-STATE_BLOCKS = 6             # KDA state blocks per request (5 cache groups + 1 scratch)
+STATE_BLOCKS = 6             # vLLM's KDA state blocks per request (5 cache groups + kpool tail): the simulator's token
+                             # ledger only; the engine's states are compact (engine/kv.py StateShape)
 # The KV allocation unit (engine/kv.py): the smallest token range every KV kernel addresses through its own page table,
 # lcm of FlashInfer sparse MLA's 64-token kernel block and the kpool indexer's storage page (DeepGEMM paged MQA: 32
-# pooled entries x index_kpool 4 = 128 tokens). A block is BLOCK_PAGES pages; a KDA state still takes a whole block.
+# pooled entries x index_kpool 4 = 128 tokens). A block is BLOCK_PAGES pages; a KDA state takes R runs of c pages
+# (model/state_layout.py).
 # Each stage derives it from its vLLM specs and checks it (`kv_tensors.page_tokens`).
 PAGE_TOKENS = 128
 BLOCK_PAGES = BLOCK_TOKENS // PAGE_TOKENS    # 67
@@ -170,6 +172,8 @@ class RunConfig(msgspec.Struct, forbid_unknown_fields=True):
                                       # 16: first TTFT at 8k 0.25 s vs 0.42 s with 4 (research/measured/runs_intake)
     profile_mbs: list[int] | None = None  # [a, b, ...]: profiler start at mb a, stop after b-1, per pair (run.py --nsys)
     keep_sessions: bool = False       # phase B: exact prefix cache (kept sessions, LRU eviction of whole sessions)
+    kept_states: int = 2              # KDA states a kept context keeps: 1 (its end) or 2 (k2: also the one its round
+                                      # resumed from; copy-on-resume, docs/design/kept_states.md)
     hold_requests: int = 0            # form no microbatch before this many requests have arrived (6_scheduler.md §6:
                                       # the scheduling check's 26 requests at t = 0 are all queued before the first)
     # mb_tokens: one-request runs set it >= the prompt

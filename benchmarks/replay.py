@@ -715,7 +715,7 @@ def run_writeback(run: Path, lat: OpLatency | None = None, t_mode: str = "measur
             row = dict(arrival_ms=arrival, cached=hbm)
             if hit is not None and hit.tokens > hbm:
                 a = kv.held[req.req_id]
-                pool.load(req.session, hit, KVViews(a.kv_pages, a.state_blocks, hit.tokens, hbm), now[0], req.req_id)
+                pool.load(req.session, hit, KVViews(a.kv_pages, a.read_state, hit.tokens, hbm), now[0], req.req_id)
                 row |= dict(cached=hit.tokens, tier=hit.tier, tier_tokens=hit.tokens - hbm)
             got.append(row)
             waits.append((now[0] - at) / MS)

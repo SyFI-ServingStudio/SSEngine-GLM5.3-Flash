@@ -8,7 +8,8 @@ import pytest
 
 from benchmarks import run as bench_run
 from conftest import free_port_block
-from e2e import Server, blocks_per_request, check_microbatches, check_responses, send_all
+from e2e import Server, check_microbatches, check_responses, pages_per_request, send_all
+from ssengine.config import BLOCK_PAGES
 
 CPU = {"device": "cpu", "fake": {"us_per_token": 2.0, "hidden_width": 64, "num_blocks": 30}}
 
@@ -21,7 +22,7 @@ ONE_1K_0_SHA256 = "bf4c22dedc655d529f3c205732200a134076384f6cc1df3545d8cb2952ea3
 def test_serve_http_cpu(tmp_path, intake_procs):
     lengths = [1, 100, 1000, 5000, 8191, 8192, 8193, 20000, 3000, 12000, 7, 16384] * 2
     prompts = {f"req{i}": n for i, n in enumerate(lengths)}
-    assert max(blocks_per_request(n) for n in lengths) <= 29 < sum(blocks_per_request(n) for n in lengths)
+    assert max(pages_per_request(n) for n in lengths) <= 29 * BLOCK_PAGES < sum(pages_per_request(n) for n in lengths)
     port = free_port_block()
     srv = Server(tmp_path / "run", port, intake_procs=intake_procs, **CPU)
     try:
@@ -55,7 +56,7 @@ def test_rejects_what_it_cannot_serve(tmp_path, intake_procs):
         import httpx
         u = f"http://127.0.0.1:{port}/inference/v1/generate"
         assert httpx.post(u, json={"token_ids": [1, 2], "sampling_params": {"max_tokens": 4}}).status_code == 400
-        assert httpx.post(u, json={"token_ids": [1] * (24 * 8576)}).status_code == 400   # larger than the pool
+        assert httpx.post(u, json={"token_ids": [1] * (28 * 8576)}).status_code == 400   # with its state: > the pool
         assert httpx.post(u, json={"token_ids": []}).status_code == 400
         assert httpx.post(u, json={"token_ids": [1, 2, 3]}).status_code == 200
     finally:

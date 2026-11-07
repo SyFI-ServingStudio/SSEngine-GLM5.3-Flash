@@ -12,7 +12,7 @@ from pathlib import Path
 import httpx
 import yaml
 
-from ssengine.config import BLOCK_TOKENS, STATE_BLOCKS
+from ssengine.engine.kv import pages_for
 from ssengine.model.fake import fake_token
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -149,5 +149,5 @@ def check_microbatches(run_dir: Path, prompts: dict[str, int], *, stages=4, mb_t
     return by_mb, peak
 
 
-def blocks_per_request(n: int) -> int:
-    return -(-n // BLOCK_TOKENS) + STATE_BLOCKS
+def pages_per_request(n: int) -> int:
+    return pages_for(n)

@@ -8,7 +8,8 @@ import pytest
 
 from conftest import free_port_block
 from e2e import Server
-from ssengine.config import STATE_BLOCKS
+from ssengine.config import BLOCK_PAGES
+from ssengine.engine.kv import pages_for
 from test_prefix_e2e_cpu import CPU, Client, chunks_of, sreq_of
 
 TIERS = {**CPU, "tiers": {"dram_gb": 0.5, "ssd_gb": None, "dram_read_gb_s": 5.0}}
@@ -25,10 +26,12 @@ def server(request, tmp_path):
 
 def test_hbm_evicted_session_resumes_from_dram(server):
     """As the prefix cache's LRU test: A..D fill HBM, E evicts B. B's round 1 now reads its 5,000 tokens from DRAM
-    (not recomputed) and computes 100; C, evicted for it, also reads."""
+    (not recomputed) and computes 100; it holds two states (the one read and its working copy), so C and D are
+    evicted for it, and both read back too."""
     srv, c = server
     n = 5000
-    assert 4 * (1 + STATE_BLOCKS) <= 29 < 5 * (1 + STATE_BLOCKS)
+    one = pages_for(n)
+    assert 3 * one + pages_for(n + 100, 2) <= 29 * BLOCK_PAGES < 4 * one + pages_for(n + 100, 2)
     r0 = {s: c.new_tokens(n) for s in "ABCDE"}
     tok = {}
     for s in "ABCD":
@@ -37,7 +40,7 @@ def test_hbm_evicted_session_resumes_from_dram(server):
     assert c.send("A_r1", r0["A"] + [tok["A"]] + c.new_tokens(99))[1] == n
     assert c.send("E_r0", r0["E"])[1] == 0                     # B leaves HBM
     assert c.send("B_r1", r0["B"] + [tok["B"]] + c.new_tokens(99))[1] == n    # from DRAM
-    assert c.send("D_r1", r0["D"] + [tok["D"]] + c.new_tokens(99))[1] == n    # HBM
+    assert c.send("D_r1", r0["D"] + [tok["D"]] + c.new_tokens(99))[1] == n    # from DRAM
     assert c.send("C_r1", r0["C"] + [tok["C"]] + c.new_tokens(99))[1] == n    # from DRAM
     srv.stop()
     ch = chunks_of(srv.run_dir)
@@ -45,11 +48,11 @@ def test_hbm_evicted_session_resumes_from_dram(server):
     sr = sreq_of(srv.run_dir)
     assert sr["B_r1"]["tier"] == "dram" and sr["B_r1"]["tier_tokens"] == n and sr["B_r1"]["hbm_tokens"] == 0
     assert sr["B_r1"]["read_land_ms"] >= sr["B_r1"]["read_start_ms"]
-    assert "tier" not in sr["D_r1"]
+    assert sr["D_r1"]["tier"] == "dram"
     ops = [json.loads(x) for x in (srv.run_dir / "tier_ops.jsonl").read_text().splitlines()]
     kinds = [o["kind"] for o in ops]
     reads = [o for o in ops if o["kind"] == "read"]
-    assert {o["req"] for o in reads} == {"B_r1", "C_r1"}                 # B and C read back
+    assert {o["req"] for o in reads} == {"B_r1", "C_r1", "D_r1"}         # B, C and D read back
     cache = json.loads((srv.run_dir / "cache.json").read_text())
     # written back only near eviction (the LRU tail above 90% of the pool, or when evicting), not every round's
     hb = cache["write_back"]["hbm"]
@@ -59,7 +62,7 @@ def test_hbm_evicted_session_resumes_from_dram(server):
     assert all(o["slots"] == 1 + 3 and len(set(o["bytes"])) == 1 for o in reads)   # 1 block + 3 state slots
     tiers = json.loads((srv.run_dir / "tiers.json").read_text())
     assert tiers["state_slots"] == 3 and tiers["slots"]["dram"] == int(0.5e9 // tiers["slot_bytes"])
-    assert cache["tiers"][0]["reads"] == 2 and cache["tier_ops_in_flight"] == 0
+    assert cache["tiers"][0]["reads"] == 3 and cache["tier_ops_in_flight"] == 0
 
 
 def test_dram_evictions_go_to_ssd_and_resume_from_there(tmp_path):
@@ -91,8 +94,9 @@ def test_dram_evictions_go_to_ssd_and_resume_from_there(tmp_path):
 
 
 def test_staged_loading_end_to_end(tmp_path):
-    """Staged loading (exclusive DRAM, loading areas of 0.25): HBM's 29 blocks keep a 485-page area (one 5,000-token
-    context: 40 + 402 pages), so 3 contexts stay kept; DRAM (8 slots) keeps a 2-slot area, the rest for contexts. A..E: A and B leave HBM and DRAM.
+    """Staged loading (exclusive DRAM, loading areas of 0.25): HBM's 29 blocks (1,943 pages) keep a 485-page area (a
+    5,000-token context with two states: 40 + 640 pages fit only with the free pages), so 4 contexts of 360 pages stay
+    kept; DRAM (8 slots) keeps a 2-slot area, the rest for one context. A..F: A and B leave HBM, then A leaves DRAM.
     A's next round is fetched from SSD into DRAM's area (larger than the area: it starts with the area empty) and
     hops to HBM's."""
     from ssengine.kvpool.member import FAKE_BLOCK_BYTES
@@ -106,8 +110,8 @@ def test_staged_loading_end_to_end(tmp_path):
         srv.wait_ready()
         c = Client(port)
         n = 5000
-        r0 = {s: c.new_tokens(n) for s in "ABCDE"}
-        tok = {s: c.send(f"{s}_r0", r0[s])[0] for s in "ABCDE"}
+        r0 = {s: c.new_tokens(n) for s in "ABCDEF"}
+        tok = {s: c.send(f"{s}_r0", r0[s])[0] for s in "ABCDEF"}
         assert c.send("B_r1", r0["B"] + [tok["B"]] + c.new_tokens(99))[1] == n
         assert c.send("A_r1", r0["A"] + [tok["A"]] + c.new_tokens(99))[1] == n
     finally:

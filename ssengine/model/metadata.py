@@ -16,11 +16,12 @@ vLLM's own builder classes build the MLA, indexer and kpool-tail metadata (as `G
   decode metadata kernel takes the width as a Triton constexpr, so each distinct width compiled a kernel in the
   middle of a run (smoke 7658: 670 and 1,072 columns, ~75 ms each, every stage); vLLM's own tables are always
   full width. Rounding bounds the widths to 8, all run by `StageModel.warmup`.
-- g1 (kpool tail): one block per request, its state_blocks[5]; the builder computes its own slots.
+- g1 (kpool tail): one row per request, the start page of its state's tail run (state_blocks[tail_run], compact
+  states: docs/design/kept_states.md); the builder computes its own slots.
 - kpool pools a chunk starts inside (start % 4 != 0: prefix hits, odd chunk ends): `pp_patch.KPOOL_HEADS`, keyed by
   the indexer metadata's prefill slot mapping, read by the kpool insert override.
-- KDA (g2..g6): `pp_patch.KdaPrefillMeta`, read by our KDA prefill forward (the fork's GDN metadata is not built:
-  the `_forward` that reads it is replaced).
+- KDA: `pp_patch.KdaPrefillMeta` per state run (the layers whose state is in run r address it by state_blocks[r]),
+  read by our KDA prefill forward (the fork's GDN metadata is not built: the `_forward` that reads it is replaced).
 
 Everything is built on the host, packed into one pinned staging buffer and copied to the device in stream order on
 the compute stream (`Pack`), so building microbatch k+1 never waits for the GPU work of microbatch k. On a GPU the
@@ -56,6 +57,7 @@ class Batch:
     last_rows: torch.Tensor           # int64 rows whose token stage 3 returns, in plan chunk order of is_last chunks
     bucket: int | None = None         # CUDA graph bucket (padded token count) when the plan runs as a graph replay
     graph_rows: torch.Tensor | None = None   # int64 [2 or 3, bucket], device: `graph_rows` of this microbatch
+    copies: list | None = None        # copy-on-resume: (source runs, own runs) of chunks with `state_from`, run first
 
 
 _NP = {torch.int32: np.int32, torch.int64: np.int64, torch.bool: np.bool_}
@@ -225,7 +227,7 @@ class StageMetadata:
         width = self.table_width(int(max(-(-int(s) // self.block_tokens) for s in seq_lens)))
         table, slots = g0_table([chunks[i].kv_pages for i in order], seq_lens, positions, qsl, width,
                                 self.page_tokens)
-        tail_table = np.array([[chunks[i].state_blocks[kv_tensors.TAIL_STATE]] for i in order], dtype=np.int64)
+        tail_table = np.array([[chunks[i].state_blocks[self.kv.tail_run]] for i in order], dtype=np.int64)
 
         # every host array of this microbatch -> one pinned buffer -> one H2D copy (M3: was 16 pinned allocations,
         # 16 copies and 2 fills per build)
@@ -239,11 +241,11 @@ class StageMetadata:
 
         h_g0 = cm_arrays(table, slots)
         h_tail = cm_arrays(tail_table, np.full(T, PAD_SLOT_ID, dtype=np.int64))
-        h_kda = [pk.add([chunks[i].state_blocks[g] for i in order], torch.int64)
-                 for g in range(len(self.kv.kda_groups))]
-        kda_seqs = [[(int(qsl[r]), int(qsl[r + 1]), chunks[i].state_blocks[g], bool(starts[r] > 0))
-                     for r, i in enumerate(order)] for g in range(len(self.kv.kda_groups))]
-        h_conv = [tuple(pk.add(a, torch.int32) for a in kda_conv.tables(sq)) for sq in kda_seqs]
+        runs = [g for g, names in enumerate(self.kv.kda_groups) if names]
+        h_kda = {g: pk.add([chunks[i].state_blocks[g] for i in order], torch.int64) for g in runs}
+        kda_seqs = {g: [(int(qsl[r]), int(qsl[r + 1]), chunks[i].state_blocks[g], bool(starts[r] > 0))
+                        for r, i in enumerate(order)] for g in runs}
+        h_conv = {g: tuple(pk.add(a, torch.int32) for a in kda_conv.tables(sq)) for g, sq in kda_seqs.items()}
         h_init = pk.add(starts > 0, torch.int32)
         tok = (np.concatenate([np.asarray(chunks[i].token_ids, dtype=np.int64) for i in order]) if with_tokens
                else None)
@@ -297,10 +299,11 @@ class StageMetadata:
                 if heads[nd] is not None:
                     KPOOL_HEADS[md.slot_mapping[int(md.num_decode_tokens):].data_ptr()] = heads[nd]
 
-        # KDA: one meta per state group (the sequences and plan are shared, the state blocks differ)
+        # KDA: one meta per state run (the sequences and plan are shared, the state rows differ)
         _, G, mid, flags, has_split, full = kda_host
         kda_plan = (*(pk.dev(h) for h in h_plan), G, mid, flags, has_split, full)
-        for g, names in enumerate(self.kv.kda_groups):
+        for g in runs:
+            names = self.kv.kda_groups[g]
             meta = KdaPrefillMeta(
                 num_tokens=T, seqs=kda_seqs[g], slots=pk.dev(h_kda[g]), plan=kda_plan,
                 conv_tabs=tuple(pk.dev(h) for h in h_conv[g]), inits=pk.dev(h_init))
@@ -309,5 +312,6 @@ class StageMetadata:
 
         token_ids = None if h_tok is None else pk.dev(h_tok)
         last_rows = pk.dev(h_last)
+        copies = [(c.state_from, c.state_blocks) for c in chunks if getattr(c, "state_from", None)] or None
         return Batch(T, order, pos_dev, token_ids, attn, slot_map, last_rows, bucket,
-                     None if h_graph is None else pk.dev(h_graph))
+                     None if h_graph is None else pk.dev(h_graph), copies)

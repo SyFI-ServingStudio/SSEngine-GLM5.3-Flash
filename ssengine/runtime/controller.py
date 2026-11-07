@@ -56,7 +56,7 @@ import numpy as np
 import zmq
 
 from ssengine.config import BLOCK_TOKENS, PAGE_TOKENS, RunConfig, dump_config
-from ssengine.engine.kv import KvManager, kv_pages_for, pool_size
+from ssengine.engine.kv import KvManager, StateShape, kv_pages_for, pool_size
 from ssengine.engine.scheduler import ChunkSpec, Request, Scheduler
 from ssengine.kvpool import BalancedKVPool
 from ssengine.kvpool.manager import TierOp
@@ -198,7 +198,12 @@ class Controller:
         self.rule = DispatchRule(cfg.max_in_flight, cfg.form_lead_ms, self.n)
         pool = self._pool(ready) if cfg.tiers is not None else None
         # the scheduler's in-flight limits are the rule's (net of `exiting`, 2 ahead)
-        self.sched = Scheduler(KvManager(num_blocks, keep_sessions=cfg.keep_sessions, content_keys=True),
+        geo = {(r.state_runs, r.state_run_pages) for r in ready}
+        if len(geo) != 1 or not ready[0].state_runs:
+            raise RuntimeError(f"workers report KDA state geometries (runs, pages per run) {sorted(geo)}")
+        state = StateShape(ready[0].state_runs, ready[0].state_run_pages)
+        self.sched = Scheduler(KvManager(num_blocks, keep_sessions=cfg.keep_sessions, content_keys=True,
+                                         kept_states=cfg.kept_states, state=state),
                                cfg.scheduler, pool, *self.rule.sched_limits)
         self.mb_log = open(self.run_dir / "microbatches.jsonl", "w")
         self.host_log = open(self.run_dir / "worker_host.jsonl", "w")
@@ -208,6 +213,7 @@ class Controller:
         (self.run_dir / "pool.json").write_text(json.dumps(
             {"ready_blocks": [r.num_blocks for r in ready], "num_blocks": num_blocks,
              "pool_tokens": num_blocks * BLOCK_TOKENS, "page_tokens": PAGE_TOKENS, "keep_sessions": cfg.keep_sessions,
+             "kept_states": cfg.kept_states, "state_runs": state.runs, "state_run_pages": state.run_pages,
              "loading_area_pages": self.sched.kv.area, "loading_area_bytes": self.sched.kv.area_bytes,
              "dram_area_slots": pool.manager.tiers[0].area if pool is not None and pool.manager.tiers else 0}))
         self._write_cache()
@@ -325,7 +331,7 @@ class Controller:
         info = {"keep_sessions": kv.keep_sessions, "num_blocks": kv.num_blocks,
                 "pool_tokens": kv.num_blocks * BLOCK_TOKENS, **kv.stats, "kept_sessions": len(kv.kept),
                 "kept_tokens": sum(k.tokens for k in kv.kept.values()), "used_tokens": kv.used_tokens,
-                "free_pages": kv.pool.num_free, "free_whole_blocks": kv.pool.num_whole,
+                "free_pages": kv.pool.num_free, "free_whole_blocks": kv.pool.num_whole, "free_runs": kv.pool.free_runs(),
                 "time_ms": self._ms(time.time_ns()) if self.t0_ns else None,
                 "scheduler": dict(self.sched.stats),
                 "loading_area": {"pages": kv.area, "held": kv.area_held, "reads": len(kv.reads)}}    # busy_waits: rounds that waited for a tier write (dev:research/TIERS.md §5)
@@ -610,8 +616,13 @@ class Controller:
             r = c.req
             end = c.start + c.num_tokens
             ids = r.token_ids[c.start:end]
-            chunks.append(Chunk(r.req_id, c.start, c.num_tokens, r.alloc.kv_pages[:kv_pages_for(end)],
-                                r.alloc.state_blocks, c.is_last, ids if isinstance(ids, list) else ids.tolist()))
+            a = r.alloc
+            state_from = None
+            if a.copy_pending:                           # copy-on-resume (k2): before its first chunk, every stage
+                state_from, a.copy_pending = a.base, False   # copies the resumed state into its own
+            chunks.append(Chunk(r.req_id, c.start, c.num_tokens, a.kv_pages[:kv_pages_for(end)],
+                                a.state_blocks, c.is_last, ids if isinstance(ids, list) else ids.tolist(),
+                                state_from))
             info = self.reqs[r.req_id][2]
             if "first_dispatch_ms" not in info:
                 info["first_dispatch_ms"] = self._ms(now)

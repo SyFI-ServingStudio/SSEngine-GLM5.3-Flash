@@ -349,7 +349,7 @@ class StageModel:
         gc.collect()
         torch.cuda.empty_cache()
         fit = kv_tensors.blocks_that_fit(per_block, torch.cuda.mem_get_info(self.device)[0], 0, pool_tokens)
-        probe = min(fit, -(-longest // B) + 16 * (kv_tensors.STATE_BLOCKS + 1) + 1)
+        probe = min(fit, -(-longest // B) + 16 * (kv_tensors.state_geometry(self._local_spec).runs + 1) + 1)
         before = torch.cuda.memory_allocated(self.device)
         self._build_kv(probe)
         probe_bytes = torch.cuda.memory_allocated(self.device) - before
@@ -401,7 +401,7 @@ class StageModel:
         def chunk(rid, start, n, base):
             kv = list(range(base, base + -(-(start + n) // B)))
             return NS(req_id=rid, start=start, num_tokens=n, kv_pages=block_pages(kv), is_last=True,
-                      state_blocks=list(range(base + len(kv), base + len(kv) + 6)), token_ids=[1] * n)
+                      state_blocks=self.kv.state_at(base + len(kv)), token_ids=[1] * n)
 
         def plans():
             yield NS(mb_id=-1, chunks=[chunk("w0", 0, T, 1)])
@@ -489,14 +489,14 @@ class StageModel:
 
     def _warm_chunks(self, specs: list[tuple[int, int]]) -> list:
         """Warm-up chunks (start, tokens), each continuing a cached prefix of `start` tokens, on blocks 1.. laid out
-        one request after another (6 state blocks each)."""
+        one request after another (a state at the next 6 blocks each: R <= 6 runs, one per block)."""
         from types import SimpleNamespace as NS
 
         B, base, out = self.kv.block_tokens, 1, []
         for i, (start, n) in enumerate(specs):
             nb = -(-(start + n) // B)
             out.append(NS(req_id=f"ws{i}", start=start, num_tokens=n, kv_pages=block_pages(range(base, base + nb)),
-                          is_last=True, state_blocks=list(range(base + nb, base + nb + 6)), token_ids=[1] * n))
+                          is_last=True, state_blocks=self.kv.state_at(base + nb), token_ids=[1] * n))
             base += nb + 6
         return out
 
@@ -634,7 +634,7 @@ class StageModel:
             for Tb in buckets:
                 plan = NS(mb_id=-10, chunks=[NS(req_id="g", start=0, num_tokens=Tb, kv_pages=block_pages([1]),
                                                 is_last=True,
-                                                state_blocks=list(range(2, 8)), token_ids=[1] * Tb)])
+                                                state_blocks=self.kv.state_at(2), token_ids=[1] * Tb)])
                 b = self.meta.build(plan, with_tokens=self.first, bucket=Tb)
                 e = GraphEntry(Tb, torch.empty_like(b.graph_rows), None if hidden is None else hidden[:Tb])
                 e.rows.copy_(b.graph_rows)
@@ -722,9 +722,17 @@ class StageModel:
             bucket = graph_bucket(sum(c.num_tokens for c in plan.chunks), self.graphs)
         return self.meta.build(plan, with_tokens=self.first, bucket=bucket)
 
+    @property
+    def state_geometry(self) -> tuple[int, int]:
+        """(pages per run, runs) of a compact KDA state (docs/design/kept_states.md), for `Ready`."""
+        g = self.kv.geometry
+        return g.run_pages, g.runs
+
     def run(self, b, hidden_in: torch.Tensor | None) -> torch.Tensor:
         from vllm.forward_context import set_forward_context
 
+        if b.copies:      # copy-on-resume (k2, docs/design/kept_states.md): KDA updates states in place, so a
+            self.kv.state.copy(b.copies)   # resumed state is copied into the request's own first, on this stream
         if b.bucket is not None:
             return self._run_graph(b, hidden_in)
         with set_forward_context(b.attn, self.vc, num_tokens=b.num_tokens, slot_mapping=b.slots):

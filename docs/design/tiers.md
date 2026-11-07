@@ -14,6 +14,9 @@ The HBM layout is vLLM's: one tensor per layer, block-major, 8,576 tokens per bl
 | KV page, per DSA layer | MLA page + indexer page of one block: 8,576 × 545 B = 4.67 MB. Stages 0, 2, 3 have 3 DSA layers, stage 1 has 2 |
 | KDA state, per KDA layer | recurrent fp32 [64, 128, 128] (4 MiB) + conv bf16 (144 KiB) = 4.34 MB; 9 / 9 / 8 / 8 layers per stage |
 
+In HBM a context's states sit in the first 64 pages of 5 blocks ([kept_states.md](kept_states.md)); the tiers move
+the same pieces by their real bytes.
+
 ## Balanced storage
 
 Every byte range a context owns (each KV page of each DSA layer of each stage, each KDA state) is cut into 4 equal
@@ -21,7 +24,7 @@ contiguous quarters, and GPU q stores and moves quarter q of every range. Each G
 quarter of every context, 12.86 MB per KV block and 36.9 MB of state, whatever the stage split.
 
 - **Slots.** A tier slot holds GPU q's quarter of one KV block of all 4 stages, packed stage by stage and layer by
-  layer, rounded up to 4 KiB for O_DIRECT. A context of P tokens takes ceil(P / 8,576) KV slots plus 3 state slots.
+  layer, rounded up to 4 KiB for O_DIRECT. A context of P tokens takes ceil(P / 8,576) KV slots plus 3 state slots per kept state (k2: up to 2).
   The slot ids are the same on every GPU: the controller's index allocates them, the workers only execute.
 - **Two hops.** The host ↔ GPU q copy is one contiguous slot copy at line rate. The pieces that belong to the other
   stages move between GPU q's staging ring and their own GPU over NVLink. A direct copy from host to another GPU's HBM

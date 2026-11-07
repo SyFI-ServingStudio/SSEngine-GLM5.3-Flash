@@ -42,7 +42,8 @@ class Chunk(msgspec.Struct):
     start: int                 # tokens of this request already in KV: cached (a prefix hit) + computed by earlier chunks
     num_tokens: int            # tokens computed in this chunk
     kv_blocks: list[int]       # DSA blocks covering [0, start + num_tokens)
-    state_blocks: list[int]    # 6 KDA state blocks
+    state_blocks: list[int]    # its KDA state: the block of each run (docs/design/kept_states.md)
+    state_from: list[int] | None   # k2: copy this state into state_blocks first (copy-on-resume)
     is_last: bool              # last chunk of the prompt: stage 3 returns this request's token
     token_ids: list[int] | None  # the chunk's prompt tokens; sent to stage 0 only, None elsewhere
 

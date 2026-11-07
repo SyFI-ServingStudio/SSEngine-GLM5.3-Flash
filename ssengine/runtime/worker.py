@@ -308,7 +308,8 @@ def run_worker(cfg: RunConfig, stage: int):   # makes inference tensors, which a
         # walk what serving allocates.
         gc.collect()
         gc.freeze()
-        reporter.q.put(Ready(stage, model.num_blocks, *slots))
+        run_pages, runs = model.state_geometry
+        reporter.q.put(Ready(stage, model.num_blocks, *slots, state_run_pages=run_pages, state_runs=runs))
         while True:
             while not plans.poll(1000):
                 if os.getppid() != parent:

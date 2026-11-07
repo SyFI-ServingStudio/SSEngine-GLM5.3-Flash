@@ -22,9 +22,10 @@ class Chunk(msgspec.Struct, array_like=True):
     start: int                    # tokens of this request already in KV (cached + computed by earlier chunks)
     num_tokens: int               # tokens computed in this chunk
     kv_pages: list[int]           # DSA KV pages (config.PAGE_TOKENS each) covering [0, start + num_tokens)
-    state_blocks: list[int]       # 6 KDA state blocks
+    state_blocks: list[int]       # its KDA state: the first page of each of its R runs (docs/design/kept_states.md)
     is_last: bool                 # last chunk of the prompt: stage 3 returns this request's token
     token_ids: list[int] | None   # the chunk's prompt tokens; stage 0 only
+    state_from: list[int] | None = None   # copy-on-resume (k2): copy the state at these runs into state_blocks first
 
 
 class Plan(msgspec.Struct, tag=True):
@@ -72,6 +73,8 @@ class Ready(msgspec.Struct, tag=True):
     slot_bytes: int = 0           # tiers: one tier slot (this GPU's 1/n of one KV block of all stages)
     state_slots: int = 0          # tiers: slots of one context's state
     state_bytes: int = 0          # tiers: bytes of one context's state in them
+    state_run_pages: int = 0      # a compact KDA state: runs of this many pages (docs/design/kept_states.md)
+    state_runs: int = 0           # ... and this many runs (the same on every stage)
 
 
 class StageDone(msgspec.Struct, tag=True):

@@ -2,8 +2,9 @@
 (7_offloading.md §2). Pure policy on the leader, no torch: it decides, the members move the bytes. Every decision
 that moves bytes becomes a `TierOp` the leader sends to all n members (n = PP degree).
 
-- **What a tier keeps.** One entry per key (a session): its latest context, KV of the prompt's tokens plus the KDA
-  state at the prompt's end. Each tier evicts on its own, least recently used first, a whole entry at a time; a read
+- **What a tier keeps.** One entry per key (a session): its latest context, KV of the prompt's tokens plus its kept
+  KDA states: the one at the prompt's end and, with k2, the inner one its round resumed from (`TierEntry.inner`;
+  docs/design/kept_states.md). A read moves the KV it needs plus only the state it resumes from. Each tier evicts on its own, least recently used first, a whole entry at a time; a read
   refreshes its entry.
 - **Accounting.** Bytes (`TierConfig.slot_bytes` None: replay, the target's own accounting, bytes per token plus one
   state per context) or slots (the server, dev:research/TIERS.md §3): a tier is a free list of fixed slots, one slot per KV block
@@ -20,7 +21,7 @@ that moves bytes becomes a `TierOp` the leader sends to all n members (n = PP de
   a round admitted on HBM's kept context releases the DRAM copy write-ahead made of it (`taken_over`): DRAM holds only
   what HBM lacks, and HBM evicting the context again writes it whole. SSD stays inclusive. When a
   session's next round is admitted, every entry it does not resume from is dropped (`drop_stale`), so entries stay
-  prefixes of the session's latest context (a KDA state exists only at a context's end). Writes are free in the
+  prefixes of the session's latest context (KDA states exist only at a context's kept state points). Writes are free in the
   target; the engine issues them and goes on.
 - **Reads** (`lookup`, `prepare_load`). One channel per tier: reads queue one after another at the tier's bandwidth;
   the two tiers read in parallel. A read moves the tokens HBM lacks plus the KDA state. `Hit.wait_ns` is how long a
@@ -62,9 +63,10 @@ class KVViews:
     One KVViews names the same blocks on every stage (this engine: one allocation for all); a list of n names each
     stage's own. A load fills tokens [hbm_tokens, tokens): HBM already holds the first hbm_tokens."""
     kv_pages: list[int]
-    state_blocks: list[int]
+    state_blocks: list[int]         # its states' runs, one state after another (a write of a k2 context: end, inner)
     tokens: int = 0
     hbm_tokens: int = 0
+    inner: int = 0                  # a write: tokens of the inner state (0: one state)
 
 
 @dataclass(frozen=True)
@@ -131,7 +133,12 @@ class TierEntry:
     tokens: int
     content: object | None             # the context's token ids (kv.prefix_content), None in replay
     slots: list[int] = field(default_factory=list)        # slot mode: one per KV block
-    state: list[int] = field(default_factory=list)
+    state: list[int] = field(default_factory=list)        # slot mode: its states' slots (end, then inner)
+    inner: int = 0                     # k2: tokens of its inner state (0: none)
+
+    @property
+    def states(self) -> int:
+        return 1 + bool(self.inner)
 
 
 class SlotGuard:
@@ -194,16 +201,27 @@ class TierStore:
     def num_slots(self) -> int:
         return int(self.capacity // self.slot_bytes) if self.slot_bytes else 0
 
-    def charge(self, tokens: int) -> float:
+    def charge(self, tokens: int, states: int = 1) -> float:
         if self.slot_bytes:
-            return (kv_blocks_for(tokens) + self.state_slots) * self.slot_bytes
-        return tokens * self.bpt + self.state_bytes
+            return (kv_blocks_for(tokens) + states * self.state_slots) * self.slot_bytes
+        return tokens * self.bpt + states * self.state_bytes
 
-    def move_bytes(self, token_start: int, token_end: int) -> float:
-        """What a read or write of tokens [token_start, token_end) plus the state moves on one GPU."""
+    def entry_charge(self, e: TierEntry) -> float:
+        return self.charge(e.tokens, e.states)
+
+    def move_bytes(self, token_start: int, token_end: int, states: int = 1) -> float:
+        """What a read or write of tokens [token_start, token_end) plus `states` states moves on one GPU."""
         if self.slot_bytes:
-            return (kv_blocks_for(token_end) - token_start // BLOCK_TOKENS + self.state_slots) * self.slot_bytes
-        return (token_end - token_start) * self.bpt + self.state_bytes
+            return (kv_blocks_for(token_end) - token_start // BLOCK_TOKENS + states * self.state_slots) \
+                * self.slot_bytes
+        return (token_end - token_start) * self.bpt + states * self.state_bytes
+
+    def state_of(self, e: TierEntry, tokens: int) -> list[int]:
+        """The slots of the entry's state at `tokens` (its end or its inner point)."""
+        if tokens == e.tokens or not e.inner:
+            return list(e.state[:self.state_slots])
+        assert tokens == e.inner, (tokens, e.tokens, e.inner)
+        return list(e.state[self.state_slots:2 * self.state_slots])
 
     def release(self, slots: list[int]):
         self.free.extend(slots)
@@ -217,7 +235,7 @@ class TierStore:
 
     def _evict_lru(self) -> tuple[object, TierEntry]:
         victim, e = self.entries.popitem(last=False)
-        self.used -= self.charge(e.tokens)
+        self.used -= self.entry_charge(e)
         self.release(e.slots + e.state)
         self.stats["evicted"] += 1
         self.stats["evicted_tokens"] += e.tokens
@@ -244,31 +262,34 @@ class TierStore:
     def remove(self, key) -> TierEntry | None:
         e = self.entries.pop(key, None)
         if e is not None:
-            self.used -= self.charge(e.tokens)
+            self.used -= self.entry_charge(e)
         return e
 
     def touch(self, key):
         if key in self.entries:
             self.entries.move_to_end(key)
 
-    def store(self, key, tokens: int, content, keeps: int) -> tuple[bool, list[tuple[object, TierEntry]]]:
-        """Store the session's context; `keeps` tokens of the old entry are still valid (written already).
+    def store(self, key, tokens: int, content, keeps: int, inner: int = 0
+              ) -> tuple[bool, list[tuple[object, TierEntry]]]:
+        """Store the session's context (with its inner state at `inner` tokens, k2); `keeps` tokens of the old entry
+        are still valid (written already).
         Returns (stored, what left the tier: LRU victims, or the context itself when it exceeds the tier).
         Slot mode: the old entry's full blocks below `keeps` keep their slots; everything else gets new slots, which
         may be the victims' (the caller emits the victims' demotes before this context's write)."""
         old = self.remove(key)
-        c = self.charge(tokens)
+        states = 1 + bool(inner)
+        c = self.charge(tokens, states)
         reuse = old.slots[:keeps // BLOCK_TOKENS] if (old is not None and self.slot_bytes) else []
         if old is not None and self.slot_bytes:
             self.release(old.slots[len(reuse):] + old.state)
-        need = kv_blocks_for(tokens) - len(reuse) + self.state_slots if self.slot_bytes else 0
+        need = kv_blocks_for(tokens) - len(reuse) + states * self.state_slots if self.slot_bytes else 0
         if c > self.capacity - self.area * (self.slot_bytes or 0):
             self.release(reuse)
-            return False, [(key, TierEntry(tokens, content))]
+            return False, [(key, TierEntry(tokens, content, inner=inner))]
         left = []
         while self._short(c, need):
             left.append(self._evict_lru())
-        e = TierEntry(tokens, content)
+        e = TierEntry(tokens, content, inner=inner)
         if self.slot_bytes:
             fresh = [self.free.popleft() for _ in range(need)]
             n_kv = kv_blocks_for(tokens) - len(reuse)
@@ -276,7 +297,7 @@ class TierStore:
         self.entries[key] = e
         self.used += c
         self.stats["stored"] += 1
-        self.stats["written_bytes"] += self.move_bytes(keeps, tokens)
+        self.stats["written_bytes"] += self.move_bytes(keeps, tokens, states)
         return True, left
 
     def take(self, n: int) -> list[int]:
@@ -305,7 +326,7 @@ class _TierLevel:
 
     def write(self, key, entry=None):
         e = entry or self.t.entries[key]
-        _, op = self.m._store_in(self.i + 1, key, e.tokens, e.content, "demote", src=e)
+        _, op = self.m._store_in(self.i + 1, key, e.tokens, e.content, "demote", src=e, inner=e.inner)
         return op
 
 
@@ -341,6 +362,7 @@ class TierManager:
         self._keys: dict[int, object] = {}
         self._next_op = 0
         self.gone: list = []        # keys whose entry left the fastest tier (HBM's kept copy is then no longer held)
+        self.run_pages = BLOCK_PAGES    # HBM pages of one run of a state (`BalancedKVPool.hbm_level` sets it)
         # slot mode: each tier with one below writes back to it (DRAM -> SSD); the same policy as HBM -> DRAM
         self.wb: dict[int, WriteBack] = {i: WriteBack(t.name, _TierLevel(self, i), cfg.dram_write_ahead)
                                          for i, t in enumerate(self.tiers[:-1])} if self.slot_mode else {}
@@ -363,15 +385,14 @@ class TierManager:
         self._out.append(o)
         return o
 
-    @staticmethod
-    def _touches(o: TierOp) -> tuple[list, list]:
+    def _touches(self, o: TierOp) -> tuple[list, list]:
         """(written, read) slot keys of a byte-moving op."""
         t = [(o.tier, s) for s in o.slots + o.state_slots]
         h = [(o.host_tier, s) for s in o.host_slots + o.host_state]
         b_lo, b_hi = o.blocks           # HBM pages: a write copies from them, a read fills them
         hbm = {("hbm", p) for bl in o.kv_pages for p in bl[b_lo * BLOCK_PAGES:min(b_hi * BLOCK_PAGES,
                                                                                     kv_pages_for(o.token_end))]}
-        hbm |= {("hbm", p) for bl in o.state_blocks for b in bl for p in range(b * BLOCK_PAGES, (b + 1) * BLOCK_PAGES)}
+        hbm |= {("hbm", p) for bl in o.state_blocks for b in bl for p in range(b * BLOCK_PAGES, b * BLOCK_PAGES + self.run_pages)}
         if o.op == "write":
             return t + h, list(hbm)     # SSD write through staging: staging written, then read, by this op
         if o.op in ("read", "fetch"):
@@ -427,7 +448,7 @@ class TierManager:
                 if m is not None and m[0] is e and m[1] == e.tokens:   # compared before (a long prompt: ~0.1 ms)
                     n = m[2]
                 else:
-                    n = resumable_tokens(e.tokens, e.content, prompt, self.partial_hits)
+                    n = resumable_tokens(e.tokens, e.content, prompt, self.partial_hits, e.inner)
                     if memo is not False:
                         memo[i] = (e, e.tokens, n)
                 if n > 0 and (best is None or n > best[1]):
@@ -473,11 +494,12 @@ class TierManager:
         n = kv_blocks_for(tokens)
         if t.name == "dram":
             b0 = hbm_tokens // BLOCK_TOKENS
-            self._emit("read", t.name, key, block_start=b0, slots=e.slots[b0:n], state_slots=list(e.state), **kw)
+            self._emit("read", t.name, key, block_start=b0, slots=e.slots[b0:n], state_slots=t.state_of(e, tokens),
+                       **kw)
             self._release_read(tier, key)
             return self._take(), land
         hs = self.staging.take(n + self.staging.state_slots)       # SSD: the whole context through staging
-        self._emit("read", t.name, key, slots=e.slots[:n], state_slots=list(e.state), host_tier="staging",
+        self._emit("read", t.name, key, slots=e.slots[:n], state_slots=t.state_of(e, tokens), host_tier="staging",
                    host_slots=hs[:n], host_state=hs[n:], **kw)
         return self._take(), land
 
@@ -545,7 +567,7 @@ class TierManager:
         t.stats["read_bytes"] += t.move_bytes(0, tokens)
         t.touch(key)
         self._emit("fetch", "ssd", key, token_start=0, token_end=tokens, req_id=req_id, land_ns=land,
-                   slots=e.slots[:n], state_slots=list(e.state), host_tier="dram", host_slots=area[:n],
+                   slots=e.slots[:n], state_slots=t.state_of(e, tokens), host_tier="dram", host_slots=area[:n],
                    host_state=area[n:])
         return self._take(), land, area
 
@@ -566,19 +588,19 @@ class TierManager:
 
     # --- writes: the victim chain ---------------------------------------------------------------------------------
 
-    def prepare_write_back(self, key, tokens: int, content, views=None) -> list[TierOp]:
-        """HBM lets go of (or will soon let go of) its kept context of `key`, `tokens` long, in `views`: write what
-        the fastest tier's entry lacks (nothing if it holds it all: the entry is refreshed). Returns the ops; a write
-        among them reads `views` until done."""
+    def prepare_write_back(self, key, tokens: int, content, views=None, inner: int = 0) -> list[TierOp]:
+        """HBM lets go of (or will soon let go of) its kept context of `key`, `tokens` long (an inner state at `inner`,
+        k2), in `views`: write what the fastest tier's entry lacks (nothing if it holds it all: the entry is
+        refreshed). Returns the ops; a write among them reads `views` until done."""
         t = self.tiers[0]
         e = t.entries.get(key)
         if e is not None and e.tokens >= tokens:
             t.touch(key)
             return []
-        self._store_in(0, key, tokens, content, "write", views)
+        self._store_in(0, key, tokens, content, "write", views, inner=inner)
         return self._take()
 
-    def hbm_evicted(self, key, tokens: int, content, views=None) -> list[TierOp]:
+    def hbm_evicted(self, key, tokens: int, content, views=None, inner: int = 0) -> list[TierOp]:
         """HBM evicted its kept context of `key`. A tier holding it all is refreshed. Otherwise it is written now, as
         the simulator does, when `views` (its blocks) are given: write at eviction (exclusive DRAM, `HbmLevel`), the
         write urgent, and the blocks' next users wait for it (`hbm_busy`, `_touches`); byte mode writes take no time.
@@ -590,21 +612,21 @@ class TierManager:
                 t.touch(key)
                 return []
         if not self.slot_mode:
-            return self.prepare_write_back(key, tokens, content)
+            return self.prepare_write_back(key, tokens, content, inner=inner)
         if views is None:
             return []
-        ops = self.prepare_write_back(key, tokens, content, views)
+        ops = self.prepare_write_back(key, tokens, content, views, inner)
         for o in ops:
             o.urgent = True
         return ops
 
     def hbm_busy(self, pages, state_blocks=()) -> bool:
-        """Whether a write not yet done still copies from any of these HBM pages or state blocks (freed by an
-        eviction). A state block is its pages: the memory a page of an evicted context's state may be reused as."""
+        """Whether a write not yet done still copies from any of these HBM pages or states' runs (freed by an
+        eviction). A run is its pages: the memory a page of an evicted context's state may be reused as."""
         readers = self.guard.readers
         return bool(readers) and (any(("hbm", p) in readers for p in pages)
                                   or any(("hbm", p) in readers for b in state_blocks
-                                         for p in range(b * BLOCK_PAGES, (b + 1) * BLOCK_PAGES)))
+                                         for p in range(b * BLOCK_PAGES, b * BLOCK_PAGES + self.run_pages)))
 
     def drop_stale(self, key, req) -> list[TierOp]:
         """The session's next round `req` was admitted: an entry it does not resume from is dropped (byte mode with
@@ -617,8 +639,8 @@ class TierManager:
             if n == e.tokens:
                 continue
             if n and not self.slot_mode:
-                t.used -= t.charge(e.tokens) - t.charge(n)
-                e.tokens = n
+                t.used -= t.entry_charge(e) - t.charge(n)
+                e.tokens, e.inner = n, 0
             else:
                 self._drop(i, key)
         return self._take()
@@ -634,7 +656,7 @@ class TierManager:
         if i == 0:
             self.gone.append(key)
         elif (wb := self.wb.get(i - 1)) is not None and (up := self.tiers[i - 1].entries.get(key)) is not None:
-            wb.lost(key, self.tiers[i - 1].charge(up.tokens))
+            wb.lost(key, self.tiers[i - 1].entry_charge(up))
 
     def _drop(self, i: int, key):
         t = self.tiers[i]
@@ -667,21 +689,21 @@ class TierManager:
                 held = nxt.entries.get(key)
                 state = "clean" if held is not None and held.tokens >= e.tokens else "dirty"
                 if state == "dirty":
-                    self._store_in(i + 1, key, e.tokens, e.content, "demote", src=e)
+                    self._store_in(i + 1, key, e.tokens, e.content, "demote", src=e, inner=e.inner)
             if state == "clean":
                 nxt.touch(key)
         self._removed(i, key)
         self._emit("drop", t.name, key)
 
     def _store_in(self, i: int, key, tokens: int, content, op: str, views=None,
-                  src: TierEntry | None = None) -> tuple[TierEntry | None, TierOp | None]:
+                  src: TierEntry | None = None, inner: int = 0) -> tuple[TierEntry | None, TierOp | None]:
         """Store into tier i (op "write" from HBM, "demote" DRAM -> SSD from `src`), only what its entry lacks. What
         the tier evicts for it goes down to the next tier first. A context larger than the whole tier goes straight
         to the next one. Returns (the new entry or None, the op that moves its bytes or None)."""
         t = self.tiers[i]
         old = t.entries.get(key)
         keeps = self._keeps(old, tokens, content)
-        stored, left = t.store(key, tokens, content, keeps)
+        stored, left = t.store(key, tokens, content, keeps, inner)
         entry = t.entries.get(key) if stored else None
         too_large = False
         for victim, e in left:
@@ -696,7 +718,7 @@ class TierManager:
                 if below is not None and below.tokens >= tokens:
                     self.wb[i].remove(key)          # the tier below holds it whole already: clean
                 else:
-                    self.wb[i].add(key, t.charge(tokens))
+                    self.wb[i].add(key, t.entry_charge(entry))
             kw = _blocks(views)
             if self.slot_mode:
                 b0 = keeps // BLOCK_TOKENS
@@ -705,7 +727,7 @@ class TierManager:
                     kw |= dict(host_tier="dram", host_slots=src.slots[b0:kv_blocks_for(tokens)],
                                host_state=list(src.state))
                 elif t.name == "ssd":               # write to SSD from HBM (no DRAM): through the staging area
-                    hs = self.staging.take(len(entry.slots) - b0 + self.staging.state_slots)
+                    hs = self.staging.take(len(entry.slots) - b0 + len(entry.state))
                     kw |= dict(host_tier="staging", host_slots=hs[:len(entry.slots) - b0],
                                host_state=hs[len(entry.slots) - b0:])
             moved = self._emit(op, t.name, key, token_start=keeps, token_end=tokens, **kw)
@@ -713,7 +735,7 @@ class TierManager:
             self._removed(i, key)
             self._emit("drop", t.name, key)
         if too_large and i + 1 < len(self.tiers) and op == "write":
-            return self._store_in(i + 1, key, tokens, content, "write", views)
+            return self._store_in(i + 1, key, tokens, content, "write", views, inner=inner)
         return entry, moved
 
     # --- reporting ----------------------------------------------------------------------------------------------

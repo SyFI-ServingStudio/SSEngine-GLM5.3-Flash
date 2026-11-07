@@ -10,10 +10,12 @@ import pytest
 
 from conftest import free_port_block
 from e2e import Server
-from ssengine.config import BLOCK_TOKENS, STATE_BLOCKS
+from ssengine.config import BLOCK_PAGES, BLOCK_TOKENS
+from ssengine.engine.kv import pages_for
 from ssengine.model.fake import fake_token
 
-# 30 blocks reported, 29 usable: four 1-block contexts (7 blocks each with their state blocks) fit, a fifth does not.
+# 30 blocks reported, 29 usable (1,943 pages): four 5,000-token contexts (40 pages + a 320-page state each) and one
+# context's second state (k2) fit, a fifth context does not.
 CPU = {"device": "cpu", "keep_sessions": True,
        "fake": {"us_per_token": 0.5, "hidden_width": 64, "num_blocks": 30}}
 
@@ -107,12 +109,13 @@ def test_unaligned_hits_resume_exactly(server):
 
 
 def test_lru_evicts_whole_sessions_and_an_evicted_session_recomputes(server):
-    """29 blocks; a 5,000-token context holds 1 + 6 blocks. A..D fill 28; A's round 1 refreshes it; a new session
-    E evicts B (least recently used), not A, and all of B; B's round 1 recomputes its whole prompt and evicts C; D
-    still hits."""
+    """29 blocks (1,943 pages); a 5,000-token context holds 40 + 320 pages, and A after its round 1 (k2: its end and
+    the state it resumed from) 40 + 640. A..D with A's two states fill 1,760; a new session E evicts B (least recently
+    used), not A, and all of B; B's round 1 recomputes its whole prompt and evicts C; D still hits."""
     srv, c = server
     n = 5000
-    assert 4 * (1 + STATE_BLOCKS) <= 29 < 5 * (1 + STATE_BLOCKS)
+    one = pages_for(n)
+    assert 3 * one + pages_for(n + 100, 2) <= 29 * BLOCK_PAGES < 4 * one + pages_for(n + 100, 2)
     r0 = {s: c.new_tokens(n) for s in "ABCDE"}
     tok = {}
     for s in "ABCD":
@@ -120,7 +123,7 @@ def test_lru_evicts_whole_sessions_and_an_evicted_session_recomputes(server):
         assert cached == 0
     ra1 = r0["A"] + [tok["A"]] + c.new_tokens(99)              # stays within A's own block: no eviction
     assert c.send("A_r1", ra1)[1] == n
-    assert c.send("E_r0", r0["E"])[1] == 0                     # needs 7 blocks, 1 free: B goes
+    assert c.send("E_r0", r0["E"])[1] == 0                     # needs 360 pages, 183 free: B goes
     rb1 = r0["B"] + [tok["B"]] + c.new_tokens(99)
     assert c.send("B_r1", rb1)[1] == 0                          # evicted: no hit; C goes for it
     rd1 = r0["D"] + [tok["D"]] + c.new_tokens(99)
@@ -167,23 +170,24 @@ def test_no_hit_unless_the_prompt_starts_with_the_whole_kept_context(server):
 def test_short_contexts_and_exact_repeat(server):
     """A context shorter than a hash block still hits. A prompt equal to a kept context (req-frontend's
     preflight sends one prompt twice) has nothing new to compute: it gets that prompt's token, all of it cached,
-    and runs no microbatch."""
+    and runs no microbatch. A prompt that diverges inside the kept context, after the point its round resumed from,
+    resumes from that point (k2's inner state)."""
     srv, c = server
     r0 = c.new_tokens(10)
     tok, _ = c.send("y_r0", r0)
     r1 = r0 + [tok] + c.new_tokens(5)
     assert c.send("y_r1", r1)[1] == 10
     assert c.send("y_r2", list(r1), token_of="y_r1")[1] == len(r1)
-    assert c.send("y_r3", list(r0) + [tok])[1] == 0              # a prefix of the kept context: computed again
+    assert c.send("y_r3", list(r0) + [tok])[1] == 10             # a prefix of the kept context: from its inner state
     srv.stop()
     ch = chunks_of(srv.run_dir)
-    assert "y_r2" not in ch and ch["y_r3"] == [(0, 11)]
+    assert "y_r2" not in ch and ch["y_r3"] == [(10, 1)]
     cache = json.loads((srv.run_dir / "cache.json").read_text())
-    assert cache["repeats"] == 1 and cache["hits"] == 1
+    assert cache["repeats"] == 1 and cache["hits"] == 2
     sr = sreq_of(srv.run_dir)
-    # y_r3 is a prefix of the kept context (its 16 tokens), which it does not start with: no hit
+    # y_r3 is a prefix of the kept context (its 16 tokens) that extends the point y_r1 resumed from (10 tokens)
     assert [sr[i]["hit_kind"] for i in ("y_r0", "y_r1", "y_r2", "y_r3")] == ["none_first_round", "full", "repeat",
-                                                                              "none_first_round"]
+                                                                              "inner"]
 
 
 def test_off_by_default(tmp_path):
@@ -201,7 +205,17 @@ def test_off_by_default(tmp_path):
     assert cache["keep_sessions"] is False and cache["hits"] == 0 and cache["kept_sessions"] == 0
 
 
-def test_long_prompts_through_the_slab(server):
+@pytest.fixture(params=[0, 2], ids=["intake0", "intake2"])
+def big_server(request, tmp_path):
+    """32 blocks (2,077 pages): two 64k-token contexts, one of them with its second state (k2)."""
+    port = free_port_block()
+    srv = Server(tmp_path / "run", port, intake_procs=request.param, **{**CPU, "fake": {**CPU["fake"], "num_blocks": 32}})
+    srv.wait_ready()
+    yield srv, Client(port)
+    assert srv.stop() == 0, (tmp_path / "run/server.log").read_text()
+
+
+def test_long_prompts_through_the_slab(big_server):
     """Prompts of at least SLAB_FROM bytes of ids go through an intake's shared-memory slab (intake2); the controller
     admits them on a view of the slab and copies them out before the intake reuses the range: the kept context, the
     exact repeat and the logged prompt hash are the prompt's own after later long prompts reuse the range. (A kept
@@ -210,8 +224,9 @@ def test_long_prompts_through_the_slab(server):
     from ssengine.runtime.controller import prompt_sha256
     from ssengine.serve.slab import SLAB_FROM
 
-    srv, c = server
-    n = SLAB_FROM // 4 + 500                    # 8 KV blocks: two such contexts fit the pool
+    srv, c = big_server
+    n = SLAB_FROM // 4 + 500                    # 516 KV pages: a's context with two states and b's fit the pool
+    assert pages_for(n + 6, 2) + pages_for(n) <= 31 * BLOCK_PAGES
     a = c.new_tokens(n)
     tok, _ = c.send("s_a0", a)
     b = c.new_tokens(n)
