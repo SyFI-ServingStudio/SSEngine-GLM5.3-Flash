@@ -277,7 +277,9 @@ def run(a) -> Path:
         print(f"ready after {meta['ready_s']} s", flush=True)
         if rtr:
             router = _start(rtr, rd / "router.log")
-            while not _ready(url, "/health"):
+            # sglang-router's /health is OK before it has registered the worker (it does that in the background, and
+            # routes 503 until then); its /v1/models goes through a worker. vllm-router has only /health.
+            while not _ready(url, "/v1/models" if a.engine == "sglang" else "/health"):
                 if router.poll() is not None:
                     raise SystemExit(f"router exited ({router.returncode}): {rd / 'router.log'}")
                 time.sleep(2)
