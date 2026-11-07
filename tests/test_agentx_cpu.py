@@ -43,7 +43,7 @@ def test_vllm_layouts():
     b = server_argv("vllm", parse_layout("tp2-pp2"), "/ck", 20060, RD, "py")
     assert (flag(b, "--tensor-parallel-size"), flag(b, "--pipeline-parallel-size")) == ("2", "2")
     assert "--enable-expert-parallel" not in b and "--data-parallel-rpc-port" not in b
-    r = router_argv(parse_layout("dp4-ep"), 20060, RD)
+    r = router_argv("vllm", parse_layout("dp4-ep"), 20060, RD)
     assert flag(r, "--intra-node-data-parallel-size") == "4" and flag(r, "--port") == "20080"
 
 
@@ -54,6 +54,10 @@ def test_sglang_layouts():
     b = server_argv("sglang", parse_layout("tp2-pp2"), "/ck", 20060, RD, "py")
     assert (flag(b, "--tp-size"), flag(b, "--pp-size")) == ("2", "2")
     assert "--dp-size" not in b and "--ep-size" not in b
+    r = router_argv("sglang", parse_layout("dp4-ep"), 20060, RD)
+    assert "sglang_router.launch_router" in r and "--dp-aware" in r and flag(r, "--policy") == "cache_aware"
+    assert router_argv("sglang", parse_layout("tp4"), 20060, RD) is None
+    assert router_argv("ssengine", parse_layout("pp4"), 20060, RD) is None
 
 
 def test_client_prefill_only():

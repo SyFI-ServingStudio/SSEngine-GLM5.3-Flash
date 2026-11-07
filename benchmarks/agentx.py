@@ -26,7 +26,9 @@ of a stage. Per engine:
             (AgentX sends chat requests).
   sglang    SGLANG_IMAGE in a container (podman inside a Slurm job); --tp-size tp x dp, --pp-size, dp > 1 ->
             --dp-size + --enable-dp-attention, ep -> --ep-size tp x dp. SGLang's own defaults otherwise, plus the
-            shared ones: fp8 KV, the 1M context, and the cached-token report.
+            shared ones: fp8 KV, the 1M context, and the cached-token report. dp > 1 puts the image's sglang-router
+            (cache_aware, --dp-aware) in front, for the same reason as vLLM's: SGLang's own DP balancing
+            (--load-balance-method) has no prefix-aware choice.
 
 Run dir (default runs/agentx/<engine>_<layout>_c<N>[_smoke]_<job>): run.json (both commands, versions), server.log,
 router.log, gpu_samples.csv (5 s), aiperf/ (AIPerf's exports: profile_export.jsonl has one record per request with its
@@ -140,9 +142,16 @@ def server_argv(engine: str, lay: Layout, ckpt: str, port: int, run_dir: Path, p
     raise ValueError(f"engine {engine!r}: ssengine, vllm or sglang")
 
 
-def router_argv(lay: Layout, port: int, run_dir: Path) -> list[str] | None:
-    """vllm-router in front of a vLLM DP engine (its DP-aware workers keep prefix affinity), else None."""
+def router_argv(engine: str, lay: Layout, port: int, run_dir: Path) -> list[str] | None:
+    """A cache-aware, DP-rank-aware router in front of a DP engine (prefix affinity per rank), else None."""
+    if lay.dp == 1 or engine == "ssengine":
+        return None
     p = ports(port)
+    if engine == "sglang":
+        return ["docker", "run", "--rm", "--name", f"agentx-router-{os.environ.get('SLURM_JOB_ID', 'local')}",
+                "--network", "host", SGLANG_IMAGE, "python3", "-m", "sglang_router.launch_router",
+                "--host", "127.0.0.1", "--port", str(p["router"]), "--worker-urls", f"http://127.0.0.1:{p['server']}",
+                "--dp-aware", "--policy", "cache_aware"]
     return [str(ROUTER), "--host", "127.0.0.1", "--port", str(p["router"]),
             "--worker-urls", f"http://127.0.0.1:{p['server']}", "--intra-node-data-parallel-size", str(lay.dp),
             "--policy", "cache_aware", "--max-tree-size", "200000000",
@@ -233,7 +242,7 @@ def run(a) -> Path:
     duration = a.duration or (SMOKE_DURATION_S if a.smoke else DURATION_S)
     entries = a.entries or (SMOKE_ENTRIES if a.smoke else None)
     srv = server_argv(a.engine, lay, ckpt, port, rd, a.python, a.server_arg)
-    rtr = router_argv(lay, port, rd) if a.engine == "vllm" and lay.dp > 1 else None
+    rtr = router_argv(a.engine, lay, port, rd)
     url = f"http://127.0.0.1:{p['router'] if rtr else p['server']}"
     cli = client_argv(url, ckpt, a.concurrency, duration, rd / "aiperf", a.smoke, entries, a.seed)
     meta = {"engine": a.engine, "layout": str(lay), "gpus": lay.gpus, "concurrency": a.concurrency,
@@ -252,6 +261,7 @@ def run(a) -> Path:
             raise SystemExit(f"port {q} in use: not started")
     print("server:", shlex.join(srv), flush=True)
     container = srv[srv.index("--name") + 1] if a.engine == "sglang" else None
+    rtr_container = rtr[rtr.index("--name") + 1] if rtr and rtr[0] == "docker" else None
     sampler = _gpu_sampler(rd / "gpu_samples.csv") if not a.no_gpu_samples else None
     server = router = None
     t0 = time.time()
@@ -283,7 +293,7 @@ def run(a) -> Path:
                             cwd=ROOT).returncode
         meta["client_rc"], meta["client_s"] = rc, round(time.time() - t1, 1)
     finally:
-        _stop(router)
+        _stop(router, rtr_container)
         _stop(server, container)
         if sampler:
             _stop(sampler)
@@ -383,7 +393,7 @@ def main(argv: list[str] | None = None) -> None:
         port = a.port or default_port()
         rd = Path(a.out) / "<run>"
         ckpt = a.checkpoint or "<checkpoint>"
-        rtr = router_argv(lay, port, rd) if a.engine == "vllm" and lay.dp > 1 else None
+        rtr = router_argv(a.engine, lay, port, rd)
         url = f"http://127.0.0.1:{ports(port)['router' if rtr else 'server']}"
         print("server:", shlex.join(server_argv(a.engine, lay, ckpt, port, rd, a.python, a.server_arg)))
         if rtr:
