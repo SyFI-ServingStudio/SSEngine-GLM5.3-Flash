@@ -145,6 +145,8 @@ def test_lru_evicts_whole_sessions_and_an_evicted_session_recomputes(server):
 
 
 def test_no_hit_unless_the_prompt_starts_with_the_whole_kept_context(server):
+    """A prompt that shares a kept context's first tokens but not all of it gets no hit and leaves that context kept
+    (a sibling: its own lineage), so a later prompt that does extend it still hits."""
     srv, c = server
     r0 = c.new_tokens(3000)
     tok, _ = c.send("x_r0", r0)
@@ -152,19 +154,18 @@ def test_no_hit_unless_the_prompt_starts_with_the_whole_kept_context(server):
     changed[2000] = changed[2000] % 1000 + 1                    # same first tokens, differs inside the context
     x1 = changed + [tok] + c.new_tokens(50)
     tok1, cached = c.send("x_r1", x1)
-    assert cached == 0                                          # and x_r0's context is dropped
-    assert c.send("x_r2", r0 + [tok] + c.new_tokens(50))[1] == 0      # x_r0's context is gone
+    assert cached == 0
+    assert c.send("x_r2", r0 + [tok] + c.new_tokens(50))[1] == 3000   # x_r0's context is still kept
     srv.stop()
     cache = json.loads((srv.run_dir / "cache.json").read_text())
-    assert cache["hits"] == 0 and cache["dropped_stale"] == 2
+    assert cache["hits"] == 1 and cache["dropped_stale"] == 0 and cache["kept_sessions"] == 2
     sr = sreq_of(srv.run_dir)
-    for rid, kept in (("x_r1", 3000), ("x_r2", 3051)):    # the kept context and the prompt part at token 2,000
-        assert sr[rid]["hit_kind"] == "superseded" and sr[rid]["kept_tokens"] == kept
-        assert sr[rid]["common_prefix_tokens"] == 2000
+    assert sr["x_r1"]["hit_kind"] == "none_first_round"
+    assert sr["x_r2"]["hit_kind"] == "full" and sr["x_r2"]["kept_tokens"] == 3000
 
 
 def test_short_contexts_and_exact_repeat(server):
-    """A context shorter than the content key still hits. A prompt equal to a kept context (req-frontend's
+    """A context shorter than a hash block still hits. A prompt equal to a kept context (req-frontend's
     preflight sends one prompt twice) has nothing new to compute: it gets that prompt's token, all of it cached,
     and runs no microbatch."""
     srv, c = server
@@ -180,7 +181,7 @@ def test_short_contexts_and_exact_repeat(server):
     cache = json.loads((srv.run_dir / "cache.json").read_text())
     assert cache["repeats"] == 1 and cache["hits"] == 1
     sr = sreq_of(srv.run_dir)
-    # y_r3 is shorter than the kept context's content key (its 16 tokens): no kept context is found for it
+    # y_r3 is a prefix of the kept context (its 16 tokens), which it does not start with: no hit
     assert [sr[i]["hit_kind"] for i in ("y_r0", "y_r1", "y_r2", "y_r3")] == ["none_first_round", "full", "repeat",
                                                                               "none_first_round"]
 

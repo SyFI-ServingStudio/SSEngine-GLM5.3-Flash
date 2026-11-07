@@ -19,12 +19,15 @@ HBM: it hears of every kept context (`kept`, `unkept`, `evicted`) and admission 
 back ahead of eviction, and says which may be evicted now (`evictable`: written whole below) and how much charge is
 not yet (`held_back`, `make_room`). A request that fits only once writes land waits (`blocked_by_write`).
 
-Matching (server, `content_keys`): a kept context is found by content, not by a session id. Its key is its first
-`SESSION_KEY_TOKENS` token ids (all of them if it is shorter); a new prompt looks up the key of its own first tokens
-(`find_session`), and the hit then needs the prompt to start with the whole kept context, compared token by token
-(`resumable_tokens`). req-frontend starts every session at its own corpus offset, so sessions share no first tokens
-(5_prefix_cache.md §2). Two prompts that share their first tokens but not the whole kept context get no hit, and the
-newer context replaces the older one.
+Matching (server, `content_keys`): a kept context is found by its whole content, not by a session id. Every context is
+indexed by the chained hash of its whole `HASH_BLOCK_TOKENS`-token blocks (`block_hashes`: block i's hash covers
+tokens [0, 64 (i + 1)), as vLLM's prefix cache does); the tokens past its last whole block are compared directly. A new
+prompt walks its own block hashes and takes the longest context, in HBM or a tier below, that it starts with
+(`find_session`); a prompt identical to a context finds it too (`repeat_token`). Each context has its own key: a
+prompt that resumes one keeps its next context under the same key (one key per lineage, which the tiers replace and
+drop by, `drop_stale`); any other prompt gets a new key. Contexts that share their first tokens (agent trees under
+one system prompt, sibling subagents) therefore no longer replace one another: each stays until it is resumed or
+evicted.
 
 Loading area (staged loading, `area` > 0; the scheduler's docstring). `area` blocks are held for tier reads whether
 used or not: running requests and kept contexts never use them (`hard + kept + max(area_held, area) <= capacity`, in
@@ -44,6 +47,8 @@ request costs prompt + 1 + 51,456 tokens and a kept session prompt + 51,456, aga
 then come from an unbounded virtual pool.
 """
 
+import hashlib
+import itertools
 from collections import Counter, OrderedDict, deque
 from dataclasses import dataclass
 
@@ -53,7 +58,7 @@ from ssengine.config import BLOCK_PAGES, BLOCK_TOKENS, NULL_BLOCK, PAGE_TOKENS, 
 
 STATE_TOKENS = STATE_BLOCKS * BLOCK_TOKENS     # 51,456: what the 6 state blocks cost in tokens
 STATE_PAGES = STATE_BLOCKS * BLOCK_PAGES       # 402: the same in pages
-SESSION_KEY_TOKENS = 64                        # content key of a kept context: its first 64 token ids
+HASH_BLOCK_TOKENS = 64                         # content index: tokens per chained block hash
 
 
 def kv_blocks_for(tokens: int) -> int:
@@ -101,10 +106,17 @@ def prefix_content(token_ids, n: int) -> np.ndarray:
     return np.asarray(token_ids[:n], dtype=np.int32)
 
 
-def session_key(token_ids, n: int | None = None) -> bytes:
-    """Content key of a context: its first SESSION_KEY_TOKENS token ids (of its first n tokens)."""
+def block_hashes(token_ids, n: int | None = None) -> list[bytes]:
+    """Chained hashes of the first n tokens' whole HASH_BLOCK_TOKENS-token blocks, with the empty prefix's first:
+    entry i covers tokens [0, HASH_BLOCK_TOKENS * i)."""
     n = len(token_ids) if n is None else n
-    return prefix_content(token_ids, min(n, SESSION_KEY_TOKENS)).tobytes()
+    arr = prefix_content(token_ids, n)
+    out = [b""]
+    h = b""
+    for i in range(n // HASH_BLOCK_TOKENS):
+        h = hashlib.blake2b(h + arr[i * HASH_BLOCK_TOKENS:(i + 1) * HASH_BLOCK_TOKENS].tobytes(), digest_size=16).digest()
+        out.append(h)
+    return out
 
 
 def resumable_tokens(tokens: int, content: np.ndarray | None, req, partial: bool = False) -> int:
@@ -271,8 +283,11 @@ class KvManager:
         assert accounting in ("pages", "tokens")
         self.accounting = accounting
         self.keep_sessions = keep_sessions
-        self.content_keys = content_keys               # server: kept contexts keyed by session_key, not req.session
-        self._short = Counter()                        # content keys: lengths of kept contexts under the key size
+        self.content_keys = content_keys               # server: contexts found by content (find_session)
+        self._index: dict[bytes, set] = {}             # content keys: hash of a context's whole blocks -> keys of
+                                                       # contexts that ended in the block after them (kept, in a tier
+                                                       # below, or evicted; pruned lazily in find_session)
+        self._new_keys = itertools.count(1)            # content keys: keys of new lineages
         self.partial_hits = partial_hits
         self.pool = PagePool(num_blocks, virtual=accounting == "tokens")
         self.capacity = num_blocks * BLOCK_PAGES if accounting == "pages" else num_blocks * BLOCK_TOKENS
@@ -432,8 +447,11 @@ class KvManager:
     # --- pins: a kept context a tier write copies from ------------------------------------------------------------
 
     def kept_key(self, req):
-        """The key `release` keeps the request's context under."""
-        return session_key(req.token_ids) if self.content_keys else req.session
+        """The key `release` keeps the request's context under: its session's (content keys: the lineage it resumed or
+        started; a new one if another request already kept a context under that key)."""
+        if self.content_keys and (req.session is None or req.session in self.kept):
+            return next(self._new_keys)
+        return req.session
 
     def pin(self, key):
         self.pinned[key] += 1
@@ -456,16 +474,48 @@ class KvManager:
 
     # --- lookups ------------------------------------------------------------------------------------------------
 
-    def find_session(self, token_ids) -> bytes:
-        """Content keys: the key of the kept context this prompt may continue (its own key if none is kept)."""
+    def find_session(self, token_ids):
+        """Content keys: the key of the longest context, in HBM or a tier below, that this prompt starts with (or
+        equals, for `repeat_token`); else that of the longest evicted context whose whole blocks it starts with (the
+        backlog counts its tokens as shared, `shared_prefix`); else a new key."""
         n = len(token_ids)
-        key = session_key(token_ids)
-        if key not in self.kept:
-            for m in sorted(m for m, c in self._short.items() if c and m < n):
-                short = session_key(token_ids, m)
-                if short in self.kept:
-                    return short
-        return key
+        arr = prefix_content(token_ids, n)
+        best, best_tokens, evicted, evicted_tokens = None, -1, None, -1
+        for i, h in enumerate(block_hashes(arr)):
+            keys = self._index.get(h)
+            if not keys:
+                continue
+            lo = i * HASH_BLOCK_TOKENS
+            for key in list(keys):
+                held = self._held_contexts(key)
+                live = [(t, c) for t, c in held if lo <= t < lo + HASH_BLOCK_TOKENS]
+                if not live and not (key in self.evicted and lo <= self.evicted[key] < lo + HASH_BLOCK_TOKENS):
+                    keys.discard(key)                  # its context here was resumed, replaced or dropped
+                    continue
+                for tokens, content in live:
+                    if best_tokens < tokens <= n and content is not None \
+                            and np.array_equal(arr[lo:tokens], content[lo:tokens]):
+                        best, best_tokens = key, tokens
+                if not live and evicted_tokens < self.evicted[key] <= n:
+                    evicted, evicted_tokens = key, self.evicted[key]
+            if not keys:
+                del self._index[h]
+        if best is not None:
+            return best
+        return evicted if evicted is not None else next(self._new_keys)
+
+    def _held_contexts(self, key) -> list:
+        """(tokens, content) of the key's context in HBM and its entries in the tiers below."""
+        out = []
+        k = self.kept.get(key)
+        if k is not None:
+            out.append((k.tokens, k.content))
+        if self.lower is not None:
+            for t in self.lower.pool.manager.tiers:
+                e = t.entries.get(key)
+                if e is not None:
+                    out.append((e.tokens, e.content))
+        return out
 
     def _hit(self, k: Kept, req) -> int:
         """resumable_tokens, remembered per (request, kept context): the scheduler asks again at every microbatch
@@ -518,8 +568,6 @@ class KvManager:
                 self.lower.evicted(k.session, k)
             else:
                 self.lower.unkept(k.session)
-        if self.content_keys and k.tokens < SESSION_KEY_TOKENS:
-            self._short[k.tokens] -= 1
 
     # --- allocation ---------------------------------------------------------------------------------------------
 
@@ -630,8 +678,9 @@ class KvManager:
         self.kept_charge += self.kept_cost(req.num_tokens)
         if self.lower is not None:
             self.lower.kept(key)
-        if self.content_keys and req.num_tokens < SESSION_KEY_TOKENS:
-            self._short[req.num_tokens] += 1
+        if self.content_keys and content is not None:
+            h = block_hashes(content)[-1]
+            self._index.setdefault(h, set()).add(key)
         self._make_room(0, 0)
         return key
 

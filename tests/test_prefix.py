@@ -235,3 +235,27 @@ def test_window_metrics_match_the_handoff_metrics_script(tmp_path):
         assert got["ttft_s"][p] == pytest.approx(ref["ttft_s"][p], rel=1e-12)
     short = window_metrics(rows, 60e3)
     assert short["rounds"] == int((rows[1] < 60e3).sum()) < got["rounds"]
+
+
+def test_content_keys_keep_contexts_that_share_first_tokens():
+    """Contexts found by content: siblings that share a long system prompt each keep their own context, a prompt takes
+    the longest one it starts with (also one ending mid hash block), and resuming keeps the lineage's key."""
+    kv = KvManager(200, keep_sessions=True, content_keys=True)
+    system = list(range(1_000_000, 1_000_000 + 5000))            # shared, 78 whole hash blocks and a tail
+    a = system + [1] * 1000
+    b = system + [2] * 1037
+    keys = {}
+    for name, tok in (("a0", a), ("b0", b)):
+        r = Request(name, len(tok), session=kv.find_session(tok), token_ids=tok)
+        assert serve(kv, r) == 0
+        keys[name] = r.session
+    assert len(kv.kept) == 2 and keys["a0"] != keys["b0"]
+    for name, base, sib in (("a1", a, "a0"), ("b1", b, "b0")):    # each sibling resumes its own context
+        tok = base + [7] * 300
+        r = Request(name, len(tok), session=kv.find_session(tok), token_ids=tok)
+        assert r.session == keys[sib]
+        assert serve(kv, r) == len(base)
+    assert len(kv.kept) == 2 and kv.stats["dropped_stale"] == 0
+    tok = system + [3] * 10                                      # a third sibling: a new lineage, nothing dropped
+    r = Request("c0", len(tok), session=kv.find_session(tok), token_ids=tok)
+    assert r.session not in keys.values() and serve(kv, r) == 0 and len(kv.kept) == 3
