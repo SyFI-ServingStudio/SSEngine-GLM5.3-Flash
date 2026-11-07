@@ -35,7 +35,7 @@ SSEngine's tiers ~4 x DRAM-GB of free host memory plus a local NVMe file system.
 
    | engine | how | x86_64 | aarch64 |
    |---|---|---|---|
-   | SSEngine | from source (`--python .venv/bin/python`, README "From source") or its image (`--ssengine-image`) | `docker build -f docker/Dockerfile` | same Dockerfile built natively on aarch64 (branch `lane-arm`) |
+   | SSEngine | from source (`--python .venv/bin/python`, README "From source") or its image (`--ssengine-image`) | `docker build -f docker/Dockerfile` | same Dockerfile built natively on aarch64 |
    | vLLM | upstream image: `--vllm-image docker.io/vllm/vllm-openai:v0.33.0` | yes | same tag (multi-arch) |
    | SGLang | image `docker.io/lmsysorg/sglang:v0.5.23-cu130-runtime` (default; `SSENGINE_SGLANG_IMAGE` overrides) | yes | same tag (multi-arch) |
 
@@ -51,7 +51,7 @@ SSEngine's tiers ~4 x DRAM-GB of free host memory plus a local NVMe file system.
 ### ARM (GB200 / GB300)
 
 - vLLM and SGLang: the same image tags carry arm64 builds. Not run by us on ARM.
-- SSEngine: `docker/Dockerfile` builds natively on aarch64 (branch `lane-arm`: `make_env.sh` picks the aarch64 vLLM
+- SSEngine: `docker/Dockerfile` builds natively on aarch64 (`make_env.sh` picks the aarch64 vLLM
   wheel). Built and smoke-tested on a GB10 (sm_121), which cannot hold the model. Its serving kernels are built for
   sm_100a (DeepSelect, trtllm-gen MoE/FMHA cubins, the baked FlashInfer JIT): GB200 (sm_100) should run them; GB300
   (sm_103) is untested and likely needs those rebuilt. Run `docker run --gpus all <image> check-env` and a short
