@@ -1,4 +1,4 @@
-from ssengine.config import BLOCK_PAGES, BLOCK_TOKENS, STATE_BLOCKS
+from ssengine.config import BLOCK_PAGES, BLOCK_TOKENS
 from ssengine.engine.kv import KvManager, pages_for
 from ssengine.engine.scheduler import PlainScheduler, Request
 
@@ -75,12 +75,12 @@ def test_dispatch_ahead_zero_forms_only_when_stage0_free():
 
 
 def test_admission_waits_in_arrival_order_and_resumes():
-    per = -(-20000 // BLOCK_TOKENS) + STATE_BLOCKS          # 3 + 6 = 9 blocks
-    s, reqs = make([20000, 20000, 1000], blocks=per + 7)     # r1 does not fit while r0 holds its blocks
+    blocks = 13                                              # 871 pages: 477 (r0) + 477 (r1) do not fit, 477 + 328 do
+    s, reqs = make([20000, 20000, 1000], blocks=blocks)      # r1 does not fit while r0 holds its pages
     mbs = drain(s)
     assert {c[0] for mb in mbs for c in mb} == {"r0"}        # r2 would fit but waits behind r1 (arrival order)
     assert [r.req_id for r in s.waiting] == ["r1", "r2"]
     s.finish(reqs[0])                                        # r0's blocks free: r1, then r2, are admitted
     assert drain(s) == [[("r1", 0, 8192, False)], [("r1", 8192, 8192, False)],
                         [("r1", 16384, 3616, True), ("r2", 0, 1000, True)]]
-    assert s.kv.pool.num_free == (per + 7) * BLOCK_PAGES - pages_for(20000) - pages_for(1000)
+    assert s.kv.pool.num_free == blocks * BLOCK_PAGES - pages_for(20000) - pages_for(1000)

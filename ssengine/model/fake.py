@@ -56,6 +56,14 @@ class FakeStageModel:
         b.synchronize()
         return cycles / a.elapsed_time(b)
 
+    @property
+    def state_geometry(self) -> tuple[int, int]:
+        """(pages per run, runs) of the model it stands in for (GLM-5.3-Flash at the design's split)."""
+        from ssengine.model.state_layout import glm53_geometry
+
+        g = glm53_geometry()
+        return g.run_pages, g.runs
+
     def stage_ms(self, num_tokens: int) -> float:
         return self.cfg.fake.us_per_token * num_tokens / 1e3
 

@@ -1,20 +1,22 @@
-"""One stage's KV tensors: vLLM's GLM-5.3 hybrid layout, backed by the controller's block-id space.
+"""One stage's KV tensors: vLLM's GLM-5.3 hybrid layout for KV, backed by the controller's page space, with compact
+KDA states (docs/design/kept_states.md).
 
-`1_contract.md` §1 and `ssengine/runtime/README.md`: a block is 8,576 tokens of DSA KV or one KDA layer's state; a
-request holds ceil(prompt / 8576) KV blocks and 6 state blocks. vLLM computes exactly this layout for the model
-(`Platform._align_hybrid_block_size` -> block_size 8576; `kv_cache_utils._get_kv_cache_groups_glm5_next`), so we
-reuse it instead of re-deriving it:
+`1_contract.md` §1 and `ssengine/runtime/README.md`: a block is 8,576 tokens of DSA KV, 67 pages of 128. vLLM computes
+the KV layout for the model (`Platform._align_hybrid_block_size` -> block_size 8576;
+`kv_cache_utils._get_kv_cache_groups_glm5_next`), so we reuse it to allocate:
 
 - The cache groups are computed from all four stages' layer specs (the GLM-5 branch balances KDA groups across
   pipeline stages), then projected onto this stage, exactly as vLLM's `get_kv_cache_configs` does for PP workers.
-  Global groups: g0 MLA + indexer K (one block table), g1 kpool tail (1 block per request), g2..g6 the 5 KDA groups
-  (1 state block per request each).
-- On a stage, KDA group g's i-th layer aliases the i-th DSA layer's MLA region; the tail aliases the indexer region.
+  Global groups: g0 MLA + indexer K (one block table), g1 kpool tail, g2..g6 the 5 KDA groups. vLLM aliases the KDA
+  and tail views onto the MLA and indexer tensors, a whole block per state.
 - Block ids are the controller's: block b of every tensor is the same id on every stage; block 0 is the null block.
-  A request's 6 state blocks map to g2..g6 (state_blocks[0..4]) and g1, the tail (state_blocks[5]).
+- States: vLLM's KDA and tail views are replaced by compact ones (`state_layout`): a request's state is R runs, each
+  the first c pages of a block, `state_blocks` holds the runs' block ids, and each KDA layer's conv / recurrent state
+  and each tail has a fixed (run, region, offset) over this stage's MLA and indexer tensors. `StageKV.kda_groups[r]` are the
+  KDA layers whose state is in run r, `tail_run` the run of every tail.
 
 Tensors are allocated by vLLM's `allocate_kv_cache` and bound by `bind_kv_cache_to_layers` (the MLA layer, indexer
-caches and KDA layers read their views from `layer.kv_cache`).
+caches and KDA layers read their views from `layer.kv_cache`); the state views are bound over them after.
 """
 
 from __future__ import annotations
@@ -28,13 +30,13 @@ from types import SimpleNamespace
 import torch
 
 from ssengine import kernels
-from ssengine.config import CONTRACT_BLOCKS
+from ssengine.config import BLOCK_PAGES, CONTRACT_BLOCKS
+from ssengine.model import state_layout
 
 PREFIX = "language_model.model.layers"
 NUM_LAYERS = 45
-STATE_BLOCKS = 6
+VLLM_KDA_GROUPS = 5       # vLLM's KDA cache groups (its own state layout, replaced by the compact one)
 KERNEL_BLOCK = 64         # g0's kernel block: FlashInfer sparse MLA's page (metadata.KERNEL_BLOCK)
-TAIL_STATE = 5            # state_blocks[5] backs the kpool tail group
 
 
 def layer_spec_names(i: int) -> list[str]:
@@ -119,10 +121,20 @@ class StageKV:
     mla_names: list[str]            # g0 MLA layers
     indexer_names: list[str]        # g0 indexer K caches
     tail_names: list[str]           # g1
-    kda_groups: list[list[str]]     # g2..g6, in order: KDA layer prefixes per state block 0..4
+    kda_groups: list[list[str]]     # per state run r: the KDA layer prefixes whose state is in run r
     mla_spec: object
     indexer_spec: object
     tail_spec: object
+    state: object = None            # state_layout.StateViews: the compact state views and the state copy
+    tail_run: int = 0               # the run holding every kpool tail
+
+    @property
+    def geometry(self):
+        return self.state.geo
+
+    def state_at(self, block: int) -> list[int]:
+        """A state with its runs in blocks block .. block + R - 1: warm-up shapes."""
+        return [block + r for r in range(self.geometry.runs)]
 
     @property
     def block_tokens(self) -> int:
@@ -140,6 +152,79 @@ class StageKV:
 
     def kda_state_index(self) -> dict[str, int]:
         return {name: g for g, names in enumerate(self.kda_groups) for name in names}
+
+
+def _stage_of(local_spec: dict) -> int:
+    first = min(int(n.split(".")[3]) for n in local_spec)
+    return next(s for s in range(len(kernels.SPLIT)) if first in kernels.stage_layers(s))
+
+
+def stage_pieces(local_spec: dict) -> list[state_layout.StagePieces]:
+    """Every stage's KV regions (bytes per page) and state pieces from the layer specs (all stages': the geometry is
+    global)."""
+    import torch
+
+    specs = all_stage_specs(local_spec)
+    out = []
+    for s in range(len(kernels.SPLIT)):
+        regions, kda, tails = [], [], []
+        for i in kernels.stage_layers(s):
+            names = layer_spec_names(i)
+            if i in kernels.DSA_LAYERS:
+                mla, idx, tail = names
+                for n in (mla, idx):
+                    assert specs[n].page_size_bytes % BLOCK_PAGES == 0, (n, specs[n].page_size_bytes)
+                    regions.append((n, specs[n].page_size_bytes // BLOCK_PAGES))
+                tails.append((tail, specs[tail].page_size_bytes))
+            else:
+                sp = specs[names[0]]
+                conv, rec = (math.prod(sh) * torch.empty(0, dtype=dt).element_size()
+                             for sh, dt in zip(sp.shapes, sp.dtypes))
+                kda.append((names[0], conv, rec))
+        out.append(state_layout.StagePieces(tuple(regions), tuple(kda), tuple(tails)))
+    return out
+
+
+def state_geometry(local_spec: dict) -> state_layout.Geometry:
+    return state_layout.geometry(stage_pieces(local_spec))
+
+
+def bind_states(ctx: dict, kv: "StageKV", local_spec: dict) -> None:
+    """Replace vLLM's KDA and tail views (a whole block per state) by the compact ones of `state_layout`."""
+    geo = state_geometry(local_spec)
+    places = geo.places[_stage_of(local_spec)]
+
+    def view(name):
+        v = ctx[name].kv_cache
+        return v[0] if isinstance(v, (list, tuple)) and len(v) == 1 else v
+
+    regions = {}
+    for name in kv.mla_names + kv.indexer_names:
+        t = view(name)
+        rows = t.shape[0] // kv.num_blocks
+        stride = t.stride(0) * t.element_size() * rows          # vLLM's block stride (layers may share blocks)
+        assert t[0].is_contiguous() and (rows == 1 or t.stride(0) * t.element_size() == t[0].numel()
+                                         * t.element_size()), name
+        assert stride >= local_spec[name].page_size_bytes, (name, stride, local_spec[name].page_size_bytes)
+        regions[name] = (t, stride)
+    pieces = {}
+    kda = [n for g in kv.kda_groups for n in g]
+    for name in kda:
+        for i, t in enumerate(view(name)):          # (conv, recurrent)
+            pieces[f"{name}#{i}"] = (tuple(t.shape[1:]), t.dtype)
+    for name in kv.tail_names:
+        t = view(name)
+        pieces[name] = (tuple(t.shape[1:]), t.dtype)
+    sv = state_layout.StateViews(regions, kv.num_blocks, geo, places, pieces)
+    for name in kda:
+        ctx[name].kv_cache = (sv.views[f"{name}#0"], sv.views[f"{name}#1"])
+    for name in kv.tail_names:
+        ctx[name].kv_cache = sv.views[name]
+    kv.state = sv
+    kv.kda_groups = [[n for n in kda if sv.run_of[f"{n}#1"] == r] for r in range(geo.runs)]
+    runs = {sv.run_of[n] for n in kv.tail_names}
+    assert len(runs) <= 1, runs
+    kv.tail_run = runs.pop() if runs else 0
 
 
 def resolve_layout(vc, static_ctx: dict, local_spec: dict):
@@ -178,7 +263,7 @@ def allocate(vc, static_ctx: dict, local_spec: dict, num_blocks: int, device: to
             for name in group.layer_names:
                 (idx if ".indexer." in name else mla).append(name)
             kernel_block_sizes.append(KERNEL_BLOCK)   # FlashInfer sparse MLA / indexer (select_common_block_size)
-    assert len(kda) == STATE_BLOCKS - 1, f"{len(kda)} KDA groups"
+    assert len(kda) == VLLM_KDA_GROUPS, f"{len(kda)} KDA groups"
     layout = resolve_layout(vc, static_ctx, local_spec)
     if hasattr(cfg, "kv_cache_layout"):
         cfg.kv_cache_layout = layout.name
@@ -192,8 +277,10 @@ def allocate(vc, static_ctx: dict, local_spec: dict, num_blocks: int, device: to
         if expandable:
             torch.cuda.memory._set_allocator_settings("expandable_segments:True")
     bind_kv_cache_to_layers(tensors, static_ctx, 1, kv_cache_groups=cfg.kv_cache_groups)
-    return StageKV(cfg, num_blocks, per_block, mla, idx, tail, kda,
-                   local_spec[mla[0]], local_spec[idx[0]], local_spec[tail[0]] if tail else None)
+    kv = StageKV(cfg, num_blocks, per_block, mla, idx, tail, kda,
+                 local_spec[mla[0]], local_spec[idx[0]], local_spec[tail[0]] if tail else None)
+    bind_states(static_ctx, kv, local_spec)
+    return kv
 
 
 def blocks_that_fit(per_block: int, free_bytes: int, reserve_bytes: int, pool_tokens: int | None,

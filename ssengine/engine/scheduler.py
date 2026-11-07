@@ -699,15 +699,15 @@ class Scheduler:
         if self.max_wait_ns is not None and hit.wait_ns > self.max_wait_ns:
             self.stats["passed_over"] += 1
             return "passed"
-        if not self.kv.fits(r):
+        if not self.kv.fits(r, read=True):
             self.stats["blocked_reads"] += 1
             if r.room_wait_ns is None:
                 r.room_wait_ns = now_ns
             self._room_blocked = r
             return "blocked"
-        r.hbm_tokens = self.kv.allocate(r)
+        r.hbm_tokens = self.kv.allocate(r, read=True)
         r.alloc = self.kv.held[r.req_id]
-        h = self.pool.load(r.session, hit, KVViews(r.alloc.kv_pages, r.alloc.state_blocks, hit.tokens, r.hbm_tokens),
+        h = self.pool.load(r.session, hit, KVViews(r.alloc.kv_pages, r.alloc.read_state, hit.tokens, r.hbm_tokens),
                            now_ns, r.req_id)
         r.read_start_ns = now_ns
         if h is None:       # the tier copy went while HBM made room (its own evictions): the round lands at once

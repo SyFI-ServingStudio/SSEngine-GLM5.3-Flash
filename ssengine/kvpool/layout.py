@@ -2,8 +2,9 @@
 
 Every byte range a context owns in HBM is one logical block's row of one cache view on one stage:
 - KV ranges: for each DSA layer, the MLA latent pages and the indexer K pages of one logical block (`kind="kv"`);
-- state ranges: for each KDA layer, its conv state and recurrent state rows of one state block, and for each DSA
-  layer its kpool tail row (`kind="state"`, `group` = which of the request's 6 state blocks backs it).
+- state ranges: for each KDA layer, its conv state and recurrent state, and for each DSA layer its kpool tail
+  (`kind="state"`, `group` = the run of the compact state holding it, docs/design/kept_states.md): a view with one
+  row per block, addressed by the run's block (`state_blocks[group]`).
 Nothing here knows tiers, slots or GPUs: `placement.py` decides which share of each range a GPU moves and where it
 sits on the host.
 """
@@ -21,7 +22,7 @@ class ViewRange:
     base: int                 # device address of logical block 0's row
     stride: int               # bytes from one logical block's row to the next
     nbytes: int               # bytes of one logical block's row
-    group: int = -1           # state: index into the request's state_blocks
+    group: int = -1           # state: index into the request's state_blocks (its run)
 
 
 def from_stage_kv(stage: int, ctx: dict, kv) -> list[ViewRange]:
@@ -50,10 +51,7 @@ def from_stage_kv(stage: int, ctx: dict, kv) -> list[ViewRange]:
     nb = kv.num_blocks
     for name in kv.mla_names + kv.indexer_names:
         out.append(rng(view(name), name, "kv", blocks=nb))
-    for name in kv.tail_names:
-        out.append(rng(view(name), name, "state", group=5))
-    for g, names in enumerate(kv.kda_groups):
-        for name in names:
-            for i, t in enumerate(view(name)):          # (conv, recurrent)
-                out.append(rng(t, f"{name}#{i}", "state", group=g))
+    sv = kv.state                                   # compact states: one row per block, the run's block
+    for name, t in sv.views.items():                # (docs/design/kept_states.md)
+        out.append(rng(t, name, "state", group=sv.run_of[name]))
     return out

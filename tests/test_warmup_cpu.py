@@ -25,8 +25,13 @@ def test_table_width_is_a_power_of_2_of_blocks_capped():
 
 
 def fake_stage(num_blocks=7143, max_tokens=8192, mml=1_048_576):
-    return NS(kv=NS(block_tokens=B), num_blocks=num_blocks, max_tokens=max_tokens,
-              vc=NS(model_config=NS(max_model_len=mml)))
+    from ssengine.model.kv_tensors import StageKV
+    from ssengine.model.state_layout import glm53_geometry
+
+    geo = glm53_geometry()
+    kv = NS(block_tokens=B, state=NS(geo=geo), geometry=geo)
+    kv.state_at = lambda block: StageKV.state_at(kv, block)
+    return NS(kv=kv, num_blocks=num_blocks, max_tokens=max_tokens, vc=NS(model_config=NS(max_model_len=mml)))
 
 
 def test_served_shapes_cover_every_table_width_and_decode_mix():
@@ -41,8 +46,9 @@ def test_served_shapes_cover_every_table_width_and_decode_mix():
     for s in shapes:
         assert sum(n for _, n in s) <= m.max_tokens and all(st + n <= 1_048_576 for st, n in s)
         chunks = StageModel._warm_chunks(m, s)
-        used = [p for c in chunks for p in c.kv_pages] + [b * P + i for c in chunks for b in c.state_blocks
-                                                          for i in range(P)]
+        c_run = m.kv.geometry.run_pages
+        used = [p for c in chunks for p in c.kv_pages] + [r * P + i for c in chunks for r in c.state_blocks
+                                                          for i in range(c_run)]
         assert len(used) == len(set(used)) and min(used) >= P and max(used) < m.num_blocks * P
 
 

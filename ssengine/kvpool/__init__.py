@@ -23,7 +23,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from ssengine.config import BLOCK_PAGES, BLOCK_TOKENS, PAGE_TOKENS, TierConfig
-from ssengine.engine.kv import pages_for
 from ssengine.kvpool.manager import Hit, KVViews, TierManager, TierOp
 from ssengine.kvpool.writeback import WriteBack
 
@@ -98,7 +97,7 @@ class BalancedKVPool:
         bpt, sb = self.cfg.slot_bytes / BLOCK_TOKENS, self.state_bytes
         kv.read_bytes = lambda tokens: int(tokens * bpt) + sb
         self.manager.set_dram_area(fraction)
-        reserve = area + pages_for(mb_tokens)                 # HBM pages
+        reserve = area + kv.footprint(mb_tokens)              # HBM pages
         if self.hbm is not None and self.hbm.wb is not None:
             self.hbm.wb.reserve = reserve
         for wb in self.manager.wb.values():                   # the tiers' slots: one per block
@@ -134,7 +133,7 @@ class BalancedKVPool:
         return h
 
     def hbm_busy(self, pages, state_blocks=()) -> bool:
-        """Whether a write at eviction still copies from any of these HBM pages or state blocks (their new user
+        """Whether a write at eviction still copies from any of these HBM pages or states' runs (their new user
         waits)."""
         return self.manager.slot_mode and self.manager.hbm_busy(pages, state_blocks)
 
@@ -145,14 +144,16 @@ class BalancedKVPool:
         """The tiers as HBM's lower level, for the KV manager `kv` (`KvManager.lower`): HBM's kept contexts are written
         here before HBM evicts them."""
         self.hbm = HbmLevel(self, kv)
+        self.manager.run_pages = kv.state.run_pages          # a state's runs, as HBM pages (`hbm_busy`)
         return self.hbm
 
     def write_back(self, key, tokens: int, content, views: KVViews) -> Handle:
-        """Write HBM's kept context of `key` (`tokens` long, in `views`) to the fastest tier, what its entry lacks.
-        The caller keeps the views unchanged until the handle is done (at once if nothing moves, and in byte
-        mode)."""
+        """Write HBM's kept context of `key` (`tokens` long, in `views`: its KV and every kept state, `views.inner`)
+        to the fastest tier, what its entry lacks. The caller keeps the views unchanged until the handle is done (at
+        once if nothing moves, and in byte mode)."""
         h = Handle("store", key, tokens)
-        self._track(h, [o for o in self.manager.prepare_write_back(key, tokens, content, views) if o.op == "write"])
+        self._track(h, [o for o in self.manager.prepare_write_back(key, tokens, content, views, views.inner)
+                        if o.op == "write"])
         if not h.ops:
             h.status = "done"
         return h
@@ -199,6 +200,11 @@ class BalancedKVPool:
         return out | {self.manager.tiers[i].name: dict(wb.stats) for i, wb in self.manager.wb.items()}
 
 
+def kept_views(k) -> KVViews:
+    """A kept context's KV and kept states (end, then inner) as a write reads them."""
+    return KVViews(k.alloc.kv_pages, k.alloc.state_blocks + k.alloc.base, k.tokens, inner=k.inner)
+
+
 class HbmLevel:
     """The tiers below HBM as the KV manager sees them (`KvManager.lower`), and HBM as the upper level of a
     `WriteBack` to the fastest tier (slot mode; the same policy as DRAM -> SSD, `TierConfig.hbm_write_ahead`).
@@ -239,7 +245,7 @@ class HbmLevel:
 
     def write(self, key, entry=None):
         k = self.kv.kept[key]
-        h = self.pool.write_back(key, k.tokens, k.content, KVViews(k.alloc.kv_pages, k.alloc.state_blocks, k.tokens))
+        h = self.pool.write_back(key, k.tokens, k.content, kept_views(k))
         if h.done():
             return None
         self._writes[h] = key
@@ -250,7 +256,7 @@ class HbmLevel:
 
     def kept(self, key):
         if self.wb is not None:
-            self.wb.add(key, self.kv.kept_cost(self.kv.kept[key].tokens))
+            self.wb.add(key, self.kv.kept_cost_of(key))
 
     def unkept(self, key):
         if self.wb is not None:
@@ -268,8 +274,8 @@ class HbmLevel:
 
     def evicted(self, key, k):
         self.unkept(key)
-        views = KVViews(k.alloc.kv_pages, k.alloc.state_blocks, k.tokens) if self.at_eviction else None
-        self.pool.manager.hbm_evicted(key, k.tokens, k.content, views)
+        views = kept_views(k) if self.at_eviction else None
+        self.pool.manager.hbm_evicted(key, k.tokens, k.content, views, k.inner)
 
     def admitted(self, key, req, hit: int = 0):
         """`req` was admitted, `hit` tokens of it taken over from HBM's kept context."""
@@ -287,4 +293,4 @@ class HbmLevel:
         """The fastest tier no longer holds `key`: HBM's kept copy, if any, is dirty again."""
         k = self.kv.kept.get(key)
         if k is not None:
-            self.wb.lost(key, self.kv.kept_cost(k.tokens))
+            self.wb.lost(key, self.kv.kept_cost(k.tokens, k.states))
