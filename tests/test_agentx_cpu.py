@@ -43,6 +43,9 @@ def test_vllm_layouts():
     b = server_argv("vllm", parse_layout("tp2-pp2"), "/ck", 20060, RD, "py")
     assert (flag(b, "--tensor-parallel-size"), flag(b, "--pipeline-parallel-size")) == ("2", "2")
     assert "--enable-expert-parallel" not in b and "--data-parallel-rpc-port" not in b
+    d = server_argv("vllm", parse_layout("tp4"), "/ck", 20060, RD, "py", vllm_image="img:v1")
+    assert d[0] == "docker" and d[d.index("--entrypoint") + 1:d.index("--entrypoint") + 4] == ["vllm", "img:v1", "serve"]
+    assert "VLLM_HTTP_TIMEOUT_KEEP_ALIVE=600" in d and flag(d, "--tensor-parallel-size") == "4"
     r = router_argv("vllm", parse_layout("dp4-ep"), 20060, RD)
     assert flag(r, "--intra-node-data-parallel-size") == "4" and flag(r, "--port") == "20080"
 

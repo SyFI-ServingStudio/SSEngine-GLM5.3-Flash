@@ -61,6 +61,9 @@ SMOKE_DURATION_S = 300
 SMOKE_ENTRIES = 8
 SERVED_NAME = "glm53-flash"
 SGLANG_IMAGE = os.environ.get("SSENGINE_SGLANG_IMAGE") or "docker.io/lmsysorg/sglang:v0.5.23-cu130-runtime"
+# vLLM from an image (an upstream release) instead of the fork in .venv; None: the fork
+VLLM_IMAGE = os.environ.get("SSENGINE_VLLM_IMAGE") or None
+VLLM_KEEP_ALIVE_S = "600"   # see run(): vLLM's 5 s keep-alive close races AIPerf's pooled reuse (job 18115)
 ROUTER = MAIN / "tmp" / "vllm-router-venv" / "bin" / "vllm-router"
 MAX_MODEL_LEN = 1_048_576
 READY_TIMEOUT_S = 2700
@@ -104,7 +107,7 @@ def ports(base: int) -> dict:
 
 
 def server_argv(engine: str, lay: Layout, ckpt: str, port: int, run_dir: Path, py: str,
-                extra: list[str] = ()) -> list[str]:
+                extra: list[str] = (), vllm_image: str | None = None) -> list[str]:
     p = ports(port)
     if engine == "ssengine":
         if lay != Layout(pp=4):
@@ -112,7 +115,11 @@ def server_argv(engine: str, lay: Layout, ckpt: str, port: int, run_dir: Path, p
         return [py, "-m", "ssengine", "serve", ckpt, "--host", "127.0.0.1", "--port", str(p["server"]),
                 "--served-model-name", SERVED_NAME, "--run-dir", str(run_dir / "server"), *extra]
     if engine == "vllm":
-        argv = [py, "-m", "vllm.entrypoints.cli.main", "serve", ckpt, "--served-model-name", SERVED_NAME,
+        head = [py, "-m", "vllm.entrypoints.cli.main"] if vllm_image is None else \
+            ["docker", "run", "--rm", "--name", f"agentx-vllm-{os.environ.get('SLURM_JOB_ID', 'local')}",
+             "--network", "host", "--ipc", "host", "-e", f"VLLM_HTTP_TIMEOUT_KEEP_ALIVE={VLLM_KEEP_ALIVE_S}",
+             "--entrypoint", "vllm", vllm_image]
+        argv = [*head, "serve", ckpt, "--served-model-name", SERVED_NAME,
                 "--host", "127.0.0.1", "--port", str(p["server"]),
                 "--kv-cache-dtype", "fp8_e4m3", "--enable-prefix-caching", "--mamba-cache-mode", "align",
                 "--max-model-len", str(MAX_MODEL_LEN), "--language-model-only", "--enable-prompt-tokens-details",
@@ -211,14 +218,16 @@ def _gpu_sampler(path: Path) -> subprocess.Popen:
                             stdout=path.open("w"), stderr=subprocess.DEVNULL, start_new_session=True)
 
 
-def _versions(engine: str) -> dict:
+def _versions(engine: str, vllm_image: str | None = None) -> dict:
     v = {"repo": subprocess.run(["git", "-C", str(ROOT), "rev-parse", "--short=10", "HEAD"], capture_output=True,
                                 text=True).stdout.strip()}
     if AGENTX.exists():
         v["agentx_harness"] = subprocess.run([str(AGENTX.parent / "python"), "-c",
                                               "from importlib.metadata import version; print(version('agentx-harness'))"],
                                              capture_output=True, text=True).stdout.strip()
-    if engine == "vllm":
+    if engine == "vllm" and vllm_image:
+        v["vllm_image"] = vllm_image
+    elif engine == "vllm":
         v["vllm"] = subprocess.run(["git", "-C", str(MAIN / "third_party" / "vllm"), "rev-parse", "--short=10", "HEAD"],
                                    capture_output=True, text=True).stdout.strip()
     if engine == "sglang":
@@ -243,14 +252,14 @@ def run(a) -> Path:
     p = ports(port)
     duration = a.duration or (SMOKE_DURATION_S if a.smoke else DURATION_S)
     entries = a.entries or (SMOKE_ENTRIES if a.smoke else None)
-    srv = server_argv(a.engine, lay, ckpt, port, rd, a.python, a.server_arg)
+    srv = server_argv(a.engine, lay, ckpt, port, rd, a.python, a.server_arg, a.vllm_image)
     rtr = router_argv(a.engine, lay, port, rd)
     url = f"http://127.0.0.1:{p['router'] if rtr else p['server']}"
     cli = client_argv(url, ckpt, a.concurrency, duration, rd / "aiperf", a.smoke, entries, a.seed, a.warmup_per_lane)
     meta = {"engine": a.engine, "layout": str(lay), "gpus": lay.gpus, "concurrency": a.concurrency,
             "duration_s": duration, "entries": entries, "smoke": a.smoke, "dataset": DATASET, "seed": a.seed,
             "checkpoint": ckpt, "job": job, "host": os.uname().nodename, "url": url,
-            "server_argv": srv, "router_argv": rtr, "client_argv": cli, "versions": _versions(a.engine),
+            "server_argv": srv, "router_argv": rtr, "client_argv": cli, "versions": _versions(a.engine, a.vllm_image),
             "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES")}
     (rd / "run.json").write_text(json.dumps(meta, indent=1) + "\n")
     if a.engine == "vllm" and lay.dp > 1 and not ROUTER.exists():
@@ -262,7 +271,7 @@ def run(a) -> Path:
         if subprocess.run(["ss", "-ltnH", f"sport = :{q}"], capture_output=True, text=True).stdout.strip():
             raise SystemExit(f"port {q} in use: not started")
     print("server:", shlex.join(srv), flush=True)
-    container = srv[srv.index("--name") + 1] if a.engine == "sglang" else None
+    container = srv[srv.index("--name") + 1] if srv[0] == "docker" else None
     rtr_container = rtr[rtr.index("--name") + 1] if rtr and rtr[0] == "docker" else None
     sampler = _gpu_sampler(rd / "gpu_samples.csv") if not a.no_gpu_samples else None
     server = router = None
@@ -271,7 +280,7 @@ def run(a) -> Path:
         # vLLM closes an idle keep-alive connection after 5 s (VLLM_HTTP_TIMEOUT_KEEP_ALIVE) while AIPerf keeps pooled
         # connections up to 300 s (AIPERF_HTTP_KEEPALIVE_TIMEOUT): a request sent on one vLLM is closing gets a
         # connection reset, and one failed root warm-up request aborts an AgentX run (job 18115).
-        env = dict(os.environ, VLLM_HTTP_TIMEOUT_KEEP_ALIVE="600") if a.engine == "vllm" else None
+        env = dict(os.environ, VLLM_HTTP_TIMEOUT_KEEP_ALIVE=VLLM_KEEP_ALIVE_S) if a.engine == "vllm" else None
         server = _start(srv, rd / "server.log", env)
         while not _ready(f"http://127.0.0.1:{p['server']}"):
             if server.poll() is not None:
@@ -384,6 +393,8 @@ def main(argv: list[str] | None = None) -> None:
         s.add_argument("--smoke", action="store_true", help=f"{SMOKE_ENTRIES} traces, short, --unsafe-override")
         s.add_argument("--entries", type=int, help="keep the first N eligible traces (--num-dataset-entries)")
         s.add_argument("--seed", type=int, default=SEED)
+        s.add_argument("--vllm-image", default=VLLM_IMAGE, help="run vLLM from this image (e.g. "
+                       "docker.io/vllm/vllm-openai:v0.33.0) instead of the fork in .venv")
         s.add_argument("--warmup-per-lane", type=int, help="AgentX warm-up requests per lane after the primers "
                        "(scenario: 10; not a valid submission when set)")
         s.add_argument("--checkpoint", help="weights directory (default ssengine.config.CHECKPOINT)")
@@ -405,7 +416,7 @@ def main(argv: list[str] | None = None) -> None:
         ckpt = a.checkpoint or "<checkpoint>"
         rtr = router_argv(a.engine, lay, port, rd)
         url = f"http://127.0.0.1:{ports(port)['router' if rtr else 'server']}"
-        print("server:", shlex.join(server_argv(a.engine, lay, ckpt, port, rd, a.python, a.server_arg)))
+        print("server:", shlex.join(server_argv(a.engine, lay, ckpt, port, rd, a.python, a.server_arg, a.vllm_image)))
         if rtr:
             print("router:", shlex.join(rtr))
         print("client:", shlex.join(client_argv(url, ckpt, a.concurrency, a.duration or DURATION_S, rd / "aiperf",
