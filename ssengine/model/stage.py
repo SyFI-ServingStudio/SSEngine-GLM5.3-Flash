@@ -728,11 +728,17 @@ class StageModel:
         g = self.kv.geometry
         return g.run_pages, g.runs
 
+    def copy_states(self, b) -> None:
+        """Copy-on-resume (k2, docs/design/kept_states.md): KDA updates states in place, so a resumed state is copied
+        into the request's own first, on this stream, before the microbatch's layers (`run`; callers of `run_layers`
+        call it themselves)."""
+        if b.copies:
+            self.kv.state.copy(b.copies)
+
     def run(self, b, hidden_in: torch.Tensor | None) -> torch.Tensor:
         from vllm.forward_context import set_forward_context
 
-        if b.copies:      # copy-on-resume (k2, docs/design/kept_states.md): KDA updates states in place, so a
-            self.kv.state.copy(b.copies)   # resumed state is copied into the request's own first, on this stream
+        self.copy_states(b)
         if b.bucket is not None:
             return self._run_graph(b, hidden_in)
         with set_forward_context(b.attn, self.vc, num_tokens=b.num_tokens, slot_mapping=b.slots):

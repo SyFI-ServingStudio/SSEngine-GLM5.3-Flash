@@ -58,6 +58,7 @@ def _run(m, pipe, rank, plans):
             pipe.send(out, done)
         else:
             b = m.prepare(plan)
+            m.copy_states(b)
             with set_forward_context(b.attn, m.vc, num_tokens=b.num_tokens, slot_mapping=b.slots):
                 x, r, po, co = m.run_layers(b, hidden)
                 if b.last_rows.shape[0]:
@@ -144,6 +145,8 @@ def _worker(rank: int, port: int, out_dir: str):
         res["read_bytes"] = move(1, "read", K1, S1, 0)
         got = _views(mine, dev, K1[:n0], S1)
         res["full_read_equal"] = all(torch.equal(a, b) for a, b in zip(want, got))
+        names = [(r.name, r.kind) for r in mine for _ in (K1[:n0] if r.kind == "kv" else [0])]
+        res["full_read_diff"] = sorted({f"{n}:{k}" for (n, k), a, b in zip(names, want, got) if not torch.equal(a, b)})[:12]
         res["partial_read_bytes"] = move(2, "read", K2, S2, 2)
         part = _views(mine, dev, K2[:n0], S2, b_lo=2)
         want2 = _views(mine, dev, K0[:n0], S0, b_lo=2)
