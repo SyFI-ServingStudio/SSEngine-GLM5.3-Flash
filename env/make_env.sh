@@ -57,9 +57,15 @@ if want vllm; then
     git clone --filter=blob:none --no-checkout https://github.com/serendipity-zk/vllm.git "$TP/vllm"
   fi
   git -C "$TP/vllm" -c advice.detachedHead=false checkout "$FORK_COMMIT"
-  WHL=$TP/downloads/vllm-0.30.1rc1.dev97+g04730e827-cp38-abi3-manylinux_2_28_x86_64.whl
-  fetch "https://wheels.vllm.ai/$BASE/vllm-0.30.1rc1.dev97%2Bg04730e827-cp38-abi3-manylinux_2_28_x86_64.whl" \
-    a6eb62ee6e2913a72a57dd41c870016c2f4d64e6546dda81ffbbd79b14a17f96 "$WHL"
+  # the upstream wheel of this host's architecture (x86_64: B200 hosts; aarch64: Grace / DGX Spark)
+  case "$(uname -m)" in
+    x86_64)  ARCH=x86_64  WHL_SHA=a6eb62ee6e2913a72a57dd41c870016c2f4d64e6546dda81ffbbd79b14a17f96 ;;
+    aarch64) ARCH=aarch64 WHL_SHA=d60145d7f66b0c0d9738d569c05d0d7abf7fe6d5c119e593bd57891b19521c8f ;;
+    *) echo "make_env.sh: no vLLM wheel for $(uname -m)" >&2; exit 1 ;;
+  esac
+  WHL=$TP/downloads/vllm-0.30.1rc1.dev97+g04730e827-cp38-abi3-manylinux_2_28_$ARCH.whl
+  fetch "https://wheels.vllm.ai/$BASE/vllm-0.30.1rc1.dev97%2Bg04730e827-cp38-abi3-manylinux_2_28_$ARCH.whl" \
+    "$WHL_SHA" "$WHL"
   VLLM_USE_PRECOMPILED=1 VLLM_PRECOMPILED_WHEEL_COMMIT=$BASE VLLM_PRECOMPILED_WHEEL_VARIANT=cu130 \
     VLLM_PRECOMPILED_WHEEL_LOCATION=$WHL uv pip install --python "$PY" --no-deps -e "$TP/vllm"
 fi
