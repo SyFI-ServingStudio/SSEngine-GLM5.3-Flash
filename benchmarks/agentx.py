@@ -162,9 +162,10 @@ def client_argv(url: str, ckpt: str, concurrency: int, duration_s: int, out: Pat
     return argv
 
 
-def _ready(url: str) -> bool:
+def _ready(url: str, path: str = "/v1/models") -> bool:
+    """The engines answer /v1/models once loaded; vllm-router has no /v1/models (an HTML 404), only /health."""
     try:
-        with urllib.request.urlopen(f"{url}/v1/models", timeout=5) as r:
+        with urllib.request.urlopen(f"{url}{path}", timeout=5) as r:
             return r.status == 200
     except Exception:
         return False
@@ -265,7 +266,7 @@ def run(a) -> Path:
         print(f"ready after {meta['ready_s']} s", flush=True)
         if rtr:
             router = _start(rtr, rd / "router.log")
-            while not _ready(url):
+            while not _ready(url, "/health"):
                 if router.poll() is not None:
                     raise SystemExit(f"router exited ({router.returncode}): {rd / 'router.log'}")
                 time.sleep(2)
