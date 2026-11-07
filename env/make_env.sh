@@ -18,6 +18,8 @@
 #                 jit                FlashInfer's JIT modules for sm_100a and the trtllm-gen cubins serving uses
 #                                    (env/bake_jit.py; no GPU, ~5 min): no compile or download at the first start
 #                 sim client corpus  the bench's handoff checkout, req-frontend and enwik9
+#                 agentx             the AgentX client (agentx-harness, benchmarks/agentx.py) in its own venv
+#                                    (not in the default list: it pins its own AIPerf)
 #                 check              env/check_env.py
 #   SSENGINE_ALLOW_ROOT=1   build as root: only inside a container build (docker/Dockerfile)
 # Each step skips what is already in place, so a failed run can be repeated.
@@ -32,7 +34,7 @@ STEPS=${STEPS:-venv vllm conv1d install jit sim client corpus check}
 mkdir -p "$TP/downloads"
 want() { [[ " $STEPS " == *" $1 "* ]]; }
 for s in $STEPS; do
-  case $s in venv|vllm|conv1d|install|jit|sim|client|corpus|check) ;; *) echo "unknown step $s (STEPS)"; exit 1 ;; esac
+  case $s in venv|vllm|conv1d|install|jit|sim|client|corpus|agentx|check) ;; *) echo "unknown step $s (STEPS)"; exit 1 ;; esac
 done
 
 fetch() {  # url sha256 file: download once, then always check the hash
@@ -122,6 +124,14 @@ if want corpus; then
     unzip -o -q "$TP/downloads/enwik9.zip" -d "$TP"
   fi
   echo "159b85351e5f76e60cbe32e04c677847a9ecba3adc79addab6f4c6c7aa3744bc  $TP/enwik9" | sha256sum -c --quiet -
+fi
+
+# 5b. The AgentX client: SemiAnalysis's agentx-harness (NVIDIA AIPerf fork + the `agentx` scenario), in its own venv,
+#     since it bundles an AIPerf that conflicts with upstream's.
+if want agentx; then
+  AX=$TP/agentx-venv
+  [ -x "$AX/bin/python" ] || uv venv --python 3.12 "$AX"
+  uv pip install --python "$AX/bin/python" agentx-harness==1.0.7
 fi
 
 if want check; then
