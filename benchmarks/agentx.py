@@ -4,6 +4,8 @@
   python -m benchmarks.agentx argv --engine sglang --layout tp4-ep --concurrency 32      print the commands only
   python -m benchmarks.agentx summarize <run dir>                                       summary.json of one run
   python -m benchmarks.agentx table <run dir>...                                        one row per run
+  python -m benchmarks.agentx compare <run dir>...                                      engines side by side, per
+                                                                                        concurrency and warm-up
 
 The client is AgentX's own: `agentx profile` of agentx-harness (NVIDIA AIPerf + SemiAnalysis's scenario), at
 AGENTX_VERSION in third_party/agentx-venv (env/make_env.sh step `agentx`). Its `agentx` scenario fixes the replay
@@ -359,16 +361,64 @@ def summarize(rd: Path) -> dict:
          "prompt_tok_per_s_per_gpu": round(prompt / dur / gpus) if dur else None,
          "computed_tok_per_s_per_gpu": round((prompt - cached) / dur / gpus) if dur else None,
          "cache_hit": round(cached / prompt, 4) if prompt else None,
-         "ready_s": meta.get("ready_s"), "client_rc": meta.get("client_rc")}
+         "ready_s": meta.get("ready_s"), "client_rc": meta.get("client_rc"),
+         "warmup_per_lane": _warmup_per_lane(meta["client_argv"]),
+         "engine_build": _engine_build(meta)}
     (rd / "summary.json").write_text(json.dumps(s, indent=1) + "\n")
     return s
+
+
+def _warmup_per_lane(cli: list[str]) -> int:
+    """The client's warm-up requests per lane: --warmup-requests-per-lane, else the scenario's 10."""
+    return int(cli[cli.index("--warmup-requests-per-lane") + 1]) if "--warmup-requests-per-lane" in cli else 10
+
+
+def _engine_build(meta: dict) -> str:
+    """What served the run: the image for container engines, else the engine's git commit."""
+    v = meta.get("versions") or {}
+    return v.get("vllm_image") or v.get("sglang_image") or v.get("vllm") or v.get("repo") or ""
+
+
+def _load(d: Path) -> dict:
+    return json.loads((Path(d) / "summary.json").read_text()) if (Path(d) / "summary.json").exists() else summarize(d)
+
+
+def compare(dirs: list[Path]) -> str:
+    """Runs side by side: one table per (concurrency, warm-up, smoke) group, engines as rows, best req/s first.
+    Only runs measured the same way are compared; failed runs are listed under their group."""
+    groups: dict[tuple, list[dict]] = {}
+    for d in dirs:
+        s = _load(d)
+        if "error" in s:
+            meta = json.loads((Path(d) / "run.json").read_text())
+            s = {**s, "engine": meta["engine"], "layout": meta["layout"], "concurrency": meta["concurrency"],
+                 "smoke": meta["smoke"], "warmup_per_lane": _warmup_per_lane(meta["client_argv"]),
+                 "engine_build": _engine_build(meta)}
+        s.setdefault("warmup_per_lane", 10)
+        groups.setdefault((s["concurrency"], s["warmup_per_lane"], s["smoke"]), []).append(s)
+    out = []
+    for (c, w, smoke), ss in sorted(groups.items()):
+        out += [f"### c{c}, warm-up {w}/lane{', smoke' if smoke else ''}", "",
+                "| engine | layout | build | req/s | cache hit | TTFT p50 / p90 / p99 (s) | prompt tok/s/GPU | "
+                "computed tok/s/GPU | requests | failed | run |", "|" + "---|" * 11]
+        for s in sorted(ss, key=lambda s: -(s.get("requests_per_s") or -1)):
+            if "error" in s:
+                out.append(f"| {s['engine']} | {s['layout']} | {s['engine_build']} | {s['error']} |||||||{s['run']} |")
+                continue
+            t = s["ttft_ms"]
+            ttft = " / ".join(f"{(t.get(k) or 0) / 1000:.2f}" for k in ("p50", "p90", "p99"))
+            out.append(f"| {s['engine']} | {s['layout']} | {s.get('engine_build', '')} | {s['requests_per_s']} | "
+                       f"{s['cache_hit']} | {ttft} | {s['prompt_tok_per_s_per_gpu']} | "
+                       f"{s['computed_tok_per_s_per_gpu']} | {s['requests']} | {s['failed']} | {s['run']} |")
+        out.append("")
+    return "\n".join(out)
 
 
 def table(dirs: list[Path]) -> str:
     rows = ["| run | engine | layout | GPUs | N | req/s | TTFT p50 / p90 / p99 (s) | prompt tok/s/GPU | computed tok/s/GPU "
             "| cache hit | failed |", "|" + "---|" * 11]
     for d in dirs:
-        s = json.loads((Path(d) / "summary.json").read_text()) if (Path(d) / "summary.json").exists() else summarize(d)
+        s = _load(d)
         if "error" in s:
             rows.append(f"| {s['run']} | {s['error']} |")
             continue
@@ -406,6 +456,7 @@ def main(argv: list[str] | None = None) -> None:
         s.add_argument("--no-gpu-samples", action="store_true")
     sub.add_parser("summarize").add_argument("run_dir", type=Path)
     sub.add_parser("table").add_argument("run_dirs", type=Path, nargs="+")
+    sub.add_parser("compare").add_argument("run_dirs", type=Path, nargs="+")
     a = ap.parse_args(argv)
     if a.cmd == "run":
         run(a)
@@ -423,6 +474,8 @@ def main(argv: list[str] | None = None) -> None:
                                                  a.smoke, a.entries, a.seed, a.warmup_per_lane)))
     elif a.cmd == "summarize":
         print(json.dumps(summarize(a.run_dir), indent=1))
+    elif a.cmd == "compare":
+        print(compare(a.run_dirs))
     else:
         print(table(a.run_dirs))
 
