@@ -65,3 +65,5 @@ def test_client_prefill_only():
     assert flag(c, "--extra-inputs") == "max_completion_tokens:1" and flag(c, "--concurrency") == "32"
     assert flag(c, "--public-dataset").endswith("_256k") and "--unsafe-override" not in c
     assert "--unsafe-override" in client_argv("http://h:1", "/ck", 2, 300, RD, smoke=True, entries=8)
+    w = client_argv("http://h:1", "/ck", 512, 900, RD, smoke=False, warmup_per_lane=1)
+    assert flag(w, "--warmup-requests-per-lane") == "1" and "--unsafe-override" in w
