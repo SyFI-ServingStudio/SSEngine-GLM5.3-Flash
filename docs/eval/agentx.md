@@ -93,6 +93,8 @@ Report per run: req/s, cache hit, TTFT p50/p90/p99, prompt and computed tokens/s
   error, then `server.log`.
 - **Connection reset by peer with a clean server log (vLLM).** vLLM closes idle keep-alive connections after 5 s,
   AIPerf reuses pooled ones for up to 300 s. The harness sets `VLLM_HTTP_TIMEOUT_KEEP_ALIVE=600` for vLLM.
+- **SGLang `Initialization failed. warmup error` at high concurrency.** SGLang answers `/v1/models` before its own
+  start-up warm-up request returns; the harness waits for `/health` (503 until then) so the client cannot starve it.
 - **A worker killed with no traceback.** On a shared cluster, check the host's GPU-idle killer (on cayenne
   `journalctl | grep idle_kill`): per-process NVML utilization can read low while the GPU is busy.
 - **Weights not found in a container.** The container sees only mounted paths; pass the checkpoint by a path that is

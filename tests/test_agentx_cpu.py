@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from benchmarks.agentx import Layout, client_argv, parse_layout, router_argv, server_argv
+from benchmarks.agentx import Layout, client_argv, parse_layout, router_argv, server_argv, server_ready_path
 
 RD = Path("/tmp/run")
 
@@ -90,3 +90,8 @@ def test_engine_cache_mount(monkeypatch, tmp_path):
     assert f"{tmp_path / 'img_v1'}:/root/.cache" in d
     assert ":/root/.cache" not in " ".join(server_argv("vllm", parse_layout("tp4"), "/ck", 20060, RD, "py"))
     assert ":/root/.cache" not in " ".join(router_argv("sglang", parse_layout("dp4-ep"), 20060, RD))
+
+
+def test_ready_path():
+    assert server_ready_path("sglang") == "/health"   # 503 until SGLang's own warm-up is done (job 18150)
+    assert server_ready_path("vllm") == server_ready_path("ssengine") == "/v1/models"
