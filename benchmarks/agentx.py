@@ -159,7 +159,7 @@ def router_argv(engine: str, lay: Layout, port: int, run_dir: Path) -> list[str]
 
 
 def client_argv(url: str, ckpt: str, concurrency: int, duration_s: int, out: Path, smoke: bool,
-                entries: int | None = None, seed: int = SEED) -> list[str]:
+                entries: int | None = None, seed: int = SEED, warmup_per_lane: int | None = None) -> list[str]:
     argv = [str(AGENTX), "profile", "--url", url, "--endpoint", "/v1/chat/completions", "--model", SERVED_NAME,
             "--tokenizer", ckpt, "--tokenizer-trust-remote-code", "--concurrency", str(concurrency), "--public-dataset", DATASET,
             "--use-server-token-count", "--extra-inputs", "max_completion_tokens:1",
@@ -167,8 +167,10 @@ def client_argv(url: str, ckpt: str, concurrency: int, duration_s: int, out: Pat
             "--output-artifact-dir", str(out)]
     if entries:
         argv += ["--num-dataset-entries", str(entries)]
-    if smoke or duration_s < 900:
-        argv.append("--unsafe-override")   # the scenario requires >= 900 s; stamps submission_valid: false
+    if warmup_per_lane is not None:   # the scenario's 10 per lane: at c512 ~5.6k warm-up requests, hours before profiling
+        argv += ["--warmup-requests-per-lane", str(warmup_per_lane)]
+    if smoke or duration_s < 900 or warmup_per_lane is not None:
+        argv.append("--unsafe-override")   # off the scenario's settings; stamps submission_valid: false
     return argv
 
 
@@ -244,7 +246,7 @@ def run(a) -> Path:
     srv = server_argv(a.engine, lay, ckpt, port, rd, a.python, a.server_arg)
     rtr = router_argv(a.engine, lay, port, rd)
     url = f"http://127.0.0.1:{p['router'] if rtr else p['server']}"
-    cli = client_argv(url, ckpt, a.concurrency, duration, rd / "aiperf", a.smoke, entries, a.seed)
+    cli = client_argv(url, ckpt, a.concurrency, duration, rd / "aiperf", a.smoke, entries, a.seed, a.warmup_per_lane)
     meta = {"engine": a.engine, "layout": str(lay), "gpus": lay.gpus, "concurrency": a.concurrency,
             "duration_s": duration, "entries": entries, "smoke": a.smoke, "dataset": DATASET, "seed": a.seed,
             "checkpoint": ckpt, "job": job, "host": os.uname().nodename, "url": url,
@@ -378,6 +380,8 @@ def main(argv: list[str] | None = None) -> None:
         s.add_argument("--smoke", action="store_true", help=f"{SMOKE_ENTRIES} traces, short, --unsafe-override")
         s.add_argument("--entries", type=int, help="keep the first N eligible traces (--num-dataset-entries)")
         s.add_argument("--seed", type=int, default=SEED)
+        s.add_argument("--warmup-per-lane", type=int, help="AgentX warm-up requests per lane after the primers "
+                       "(scenario: 10; not a valid submission when set)")
         s.add_argument("--checkpoint", help="weights directory (default ssengine.config.CHECKPOINT)")
         s.add_argument("--port", type=int, help="server port (default job-derived)")
         s.add_argument("--server-arg", action="append", default=[], help="extra server argument (repeat)")
@@ -401,7 +405,7 @@ def main(argv: list[str] | None = None) -> None:
         if rtr:
             print("router:", shlex.join(rtr))
         print("client:", shlex.join(client_argv(url, ckpt, a.concurrency, a.duration or DURATION_S, rd / "aiperf",
-                                                 a.smoke, a.entries, a.seed)))
+                                                 a.smoke, a.entries, a.seed, a.warmup_per_lane)))
     elif a.cmd == "summarize":
         print(json.dumps(summarize(a.run_dir), indent=1))
     else:
