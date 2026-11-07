@@ -44,6 +44,8 @@ SSEngine's tiers ~4 x DRAM-GB of free host memory plus a local NVMe file system.
 4. Containers: on a plain Docker host set `AGENTX_DOCKER_ARGS="--gpus all -v /path/to/hf:/path/to/hf"` (every
    container gets it; add `-v <ssd dir>:<ssd dir>` for SSEngine's SSD tier from its image). On cayenne leave it empty:
    its docker wrapper adds the job's GPUs and `/scratch/hf`.
+   Each engine image gets a persistent `/root/.cache` (JIT and autotune results) under `AGENTX_CACHE_DIR` (default
+   `~/.cache/agentx-engines`); without it SGLang pp4 re-tunes its MoE kernels for ~40 min on every run.
 5. SSEngine tiers: make the SSD shard files once (`python -m ssengine.kvpool.shards create --dir <nvme dir> --gb 128`;
    `--sets 2` to run two servers at once), then pass `--server-arg=--dram-gb --server-arg=100 --server-arg=--ssd-gb
    --server-arg=128 --server-arg=--ssd-dir --server-arg=<nvme dir>`.

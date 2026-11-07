@@ -14,5 +14,7 @@ source "${SLURM_SUBMIT_DIR:-$(dirname "$0")/../..}/benchmarks/jobs/env.sh"
 # /usr/bin/ninja first (FlashInfer JIT, notes.md), but /usr/local/bin before it: cayenne's docker there is the wrapper
 # that runs containers in the job's rootless Podman with its GPUs and /scratch/hf; /usr/bin/docker bypasses it
 export CUDA_DEVICE_ORDER=PCI_BUS_ID PATH=/usr/local/bin:/usr/bin:$PATH
+# Engine images' JIT/autotune caches: regenerable, so on /scratch (cayenne: $HOME is for what is worth keeping)
+export AGENTX_CACHE_DIR=${AGENTX_CACHE_DIR:-/scratch/$USER/agentx-engines}
 exec "$PY" -m benchmarks.agentx run --python "$PY" "$@"
 }
