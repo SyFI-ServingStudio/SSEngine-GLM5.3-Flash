@@ -77,3 +77,16 @@ def test_client_prefill_only():
     assert "--unsafe-override" in client_argv("http://h:1", "/ck", 2, 300, RD, smoke=True, entries=8)
     w = client_argv("http://h:1", "/ck", 512, 900, RD, smoke=False, warmup_per_lane=1)
     assert flag(w, "--warmup-requests-per-lane") == "1" and "--unsafe-override" in w
+
+
+def test_engine_cache_mount(monkeypatch, tmp_path):
+    import benchmarks.agentx as ax
+    monkeypatch.setattr(ax, "CACHE_DIR", tmp_path)
+    a = server_argv("sglang", parse_layout("pp4"), "/ck", 20060, RD, "py")
+    mounts = [a[i + 1] for i, x in enumerate(a) if x == "-v"]
+    cache = [m for m in mounts if m.endswith(":/root/.cache")]
+    assert len(cache) == 1 and cache[0].startswith(str(tmp_path)) and (tmp_path / cache[0].split(":")[0]).is_dir()
+    d = server_argv("vllm", parse_layout("tp4"), "/ck", 20060, RD, "py", vllm_image="img:v1")
+    assert f"{tmp_path / 'img_v1'}:/root/.cache" in d
+    assert ":/root/.cache" not in " ".join(server_argv("vllm", parse_layout("tp4"), "/ck", 20060, RD, "py"))
+    assert ":/root/.cache" not in " ".join(router_argv("sglang", parse_layout("dp4-ep"), 20060, RD))

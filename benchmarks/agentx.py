@@ -72,8 +72,19 @@ SSENGINE_IMAGE = os.environ.get("SSENGINE_IMAGE") or None
 DOCKER_ARGS = shlex.split(os.environ.get("AGENTX_DOCKER_ARGS", ""))
 
 
-def _docker(name: str) -> list[str]:
-    return ["docker", "run", "--rm", "--name", f"agentx-{name}-{os.environ.get('SLURM_JOB_ID', 'local')}", *DOCKER_ARGS]
+# Host directory for each engine image's /root/.cache (FlashInfer/DeepGEMM JIT and autotune, torch.compile). Without it
+# every run starts from an empty cache: SGLang pp4 re-tuned its FP4 MoE for ~40 min per run (job 18149).
+CACHE_DIR = Path(os.environ.get("AGENTX_CACHE_DIR") or Path.home() / ".cache" / "agentx-engines")
+
+
+def _docker(name: str, image: str | None = None) -> list[str]:
+    """`docker run` head for one container; an engine `image` also gets its own persistent /root/.cache."""
+    argv = ["docker", "run", "--rm", "--name", f"agentx-{name}-{os.environ.get('SLURM_JOB_ID', 'local')}", *DOCKER_ARGS]
+    if image is not None:
+        cache = CACHE_DIR / re.sub(r"[^A-Za-z0-9_.-]+", "_", image)
+        cache.mkdir(parents=True, exist_ok=True)
+        argv += ["-v", f"{cache}:/root/.cache"]
+    return argv
 VLLM_KEEP_ALIVE_S = "600"   # see run(): vLLM's 5 s keep-alive close races AIPerf's pooled reuse (job 18115)
 ROUTER = MAIN / "tmp" / "vllm-router-venv" / "bin" / "vllm-router"
 MAX_MODEL_LEN = 1_048_576
@@ -124,13 +135,13 @@ def server_argv(engine: str, lay: Layout, ckpt: str, port: int, run_dir: Path, p
         if lay != Layout(pp=4):
             raise ValueError(f"ssengine runs pp4 only (its 4-stage design), not {lay}")
         head = [py, "-m", "ssengine"] if ssengine_image is None else \
-            [*_docker("ssengine"), "--network", "host", "--ipc", "host", "--cap-add", "SYS_NICE",
+            [*_docker("ssengine", ssengine_image), "--network", "host", "--ipc", "host", "--cap-add", "SYS_NICE",
              "-v", f"{run_dir}:{run_dir}", ssengine_image]   # docker/compose.yaml's settings; --run-dir is mounted
         return [*head, "serve", ckpt, "--host", "127.0.0.1", "--port", str(p["server"]),
                 "--served-model-name", SERVED_NAME, "--run-dir", str(run_dir / "server"), *extra]
     if engine == "vllm":
         head = [py, "-m", "vllm.entrypoints.cli.main"] if vllm_image is None else \
-            [*_docker("vllm"), "--network", "host", "--ipc", "host", "-e", f"VLLM_HTTP_TIMEOUT_KEEP_ALIVE={VLLM_KEEP_ALIVE_S}",
+            [*_docker("vllm", vllm_image), "--network", "host", "--ipc", "host", "-e", f"VLLM_HTTP_TIMEOUT_KEEP_ALIVE={VLLM_KEEP_ALIVE_S}",
              "--entrypoint", "vllm", vllm_image]
         argv = [*head, "serve", ckpt, "--served-model-name", SERVED_NAME,
                 "--host", "127.0.0.1", "--port", str(p["server"]),
@@ -147,7 +158,7 @@ def server_argv(engine: str, lay: Layout, ckpt: str, port: int, run_dir: Path, p
         return argv + list(extra)
     if engine == "sglang":
         world = lay.tp * lay.dp
-        argv = [*_docker("sglang"),
+        argv = [*_docker("sglang", SGLANG_IMAGE),
                 # --ipc host shares the host's /dev/shm: Podman refuses --shm-size with it (container create fails)
                 "--network", "host", "--ipc", "host", "-v", f"{run_dir}:{run_dir}",
                 SGLANG_IMAGE, "python3", "-m", "sglang.launch_server", "--model-path", ckpt,
