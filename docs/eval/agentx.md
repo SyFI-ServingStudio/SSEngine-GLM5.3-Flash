@@ -65,9 +65,16 @@ The matrix (4 GPUs per run):
 
 | engine | layouts | notes |
 |---|---|---|
-| SSEngine | pp4 | with tiers: `--dram-gb 100 --ssd-gb 128` |
+| SSEngine | pp4 | with tiers: `--host-kv-gb 100` (= `--dram-gb 100`) plus `--ssd-gb 128` |
 | vLLM v0.33.0 | tp4, dp4-ep (router) | `--mamba-cache-mode align` is set by the harness |
+| vLLM v0.33.0 + CPU offloading | best layout of the row above | `--host-kv-gb 100` (native offloading) |
 | SGLang v0.5.23 | tp4, dp4-ep (router), pp4 | |
+| SGLang v0.5.23 + HiCache | best layout of the row above | `--host-kv-gb 100` (hierarchical cache) |
+
+`--host-kv-gb N` gives every engine the same host DRAM for KV, N GB per GPU, in each engine's own flag: SSEngine
+`--dram-gb N`, SGLang `--enable-hierarchical-cache --hicache-size N` (per rank), vLLM `--kv-offloading-size N x tp x pp
+--kv-offloading-backend native` (one engine's total). `compare` shows it as `host KV GB/GPU`. Give such a job host
+memory for 4 x N GB plus the engine (our SSEngine runs with N = 100 used ~490 GB; we request `--mem=600G`).
 
 Concurrency: 8 (smoke first), 64, 128, 256, 512, then higher for SSEngine until it saturates. One run takes
 model load (SSEngine ~2 min, vLLM ~6 min, SGLang ~12 min) + warm-up + measurement.
