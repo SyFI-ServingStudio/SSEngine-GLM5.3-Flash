@@ -65,16 +65,23 @@ The matrix (4 GPUs per run):
 
 | engine | layouts | notes |
 |---|---|---|
-| SSEngine | pp4 | with tiers: `--host-kv-gb 100` (= `--dram-gb 100`) plus `--ssd-gb 128` |
+| SSEngine | pp4 | with tiers: `--host-kv-gb 100 --ssd-gb 128 --ssd-dir <shard dir>` |
 | vLLM v0.33.0 | tp4, dp4-ep (router) | `--mamba-cache-mode align` is set by the harness |
 | vLLM v0.33.0 + CPU offloading | best layout of the row above | `--host-kv-gb 100` (native offloading) |
 | SGLang v0.5.23 | tp4, dp4-ep (router), pp4 | |
 | SGLang v0.5.23 + HiCache | best layout of the row above | `--host-kv-gb 100` (hierarchical cache) |
+| vLLM / SGLang + DRAM + SSD | best layout | `--host-kv-gb 100 --ssd-gb 128 --ssd-dir <nvme dir>` |
 
 `--host-kv-gb N` gives every engine the same host DRAM for KV, N GB per GPU, in each engine's own flag: SSEngine
 `--dram-gb N`, SGLang `--enable-hierarchical-cache --hicache-size N` (per rank), vLLM `--kv-offloading-size N x tp x pp
 --kv-offloading-backend native` (one engine's total). `compare` shows it as `host KV GB/GPU`. Give such a job host
 memory for 4 x N GB plus the engine (our SSEngine runs with N = 100 used ~490 GB; we request `--mem=600G`).
+
+`--ssd-gb M --ssd-dir D` adds a disk tier below DRAM, M GB per GPU, on a local NVMe: SSEngine `--ssd-gb M --ssd-dir D`
+(its shard set, made beforehand, see Setup); SGLang HiCache's `file` storage backend with `max_size` M GB per rank;
+vLLM's tiering offloading with an `fs` secondary tier. vLLM v0.33.0's fs tier has no size cap, so for vLLM M only
+switches it on (`compare` shows `no cap`). SGLang and vLLM write into `D/<run name>`, which the harness removes after
+the run, so no run hits files a previous run wrote. Put D on the same NVMe as SSEngine's shards.
 
 Concurrency: 8 (smoke first), 64, 128, 256, 512, then higher for SSEngine until it saturates. One run takes
 model load (SSEngine ~2 min, vLLM ~6 min, SGLang ~12 min) + warm-up + measurement.

@@ -44,6 +44,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -77,9 +78,12 @@ DOCKER_ARGS = shlex.split(os.environ.get("AGENTX_DOCKER_ARGS", ""))
 CACHE_DIR = Path(os.environ.get("AGENTX_CACHE_DIR") or Path.home() / ".cache" / "agentx-engines")
 
 
-def _docker(name: str, image: str | None = None) -> list[str]:
-    """`docker run` head for one container; an engine `image` also gets its own persistent /root/.cache."""
+def _docker(name: str, image: str | None = None, mounts: tuple[str, ...] = ()) -> list[str]:
+    """`docker run` head for one container; an engine `image` also gets its own persistent /root/.cache. `mounts`:
+    host directories the container sees at the same path (an SSD tier directory)."""
     argv = ["docker", "run", "--rm", "--name", f"agentx-{name}-{os.environ.get('SLURM_JOB_ID', 'local')}", *DOCKER_ARGS]
+    for m in mounts:
+        argv += ["-v", f"{m}:{m}"]
     if image is not None:
         argv += ["-v", f"{CACHE_DIR / re.sub(r'[^A-Za-z0-9_.-]+', '_', image)}:/root/.cache"]   # run() creates it
     return argv
@@ -126,34 +130,50 @@ def ports(base: int) -> dict:
     return {"server": base, "dp_rpc": base + 10, "router": base + 20}
 
 
-def host_kv_args(engine: str, lay: Layout, gb_per_gpu: int | None) -> list[str]:
+def host_kv_args(engine: str, lay: Layout, gb_per_gpu: int | None, ssd_gb: int | None = None,
+                 ssd_dir: str | None = None) -> list[str]:
     """Host-DRAM KV cache of `gb_per_gpu` GB per GPU, in each engine's own terms (None: the engine's default, none).
     SSEngine --dram-gb is per GPU. SGLang HiCache --hicache-size is per rank (pool_host/base.py; PP stages share the
     smallest token capacity). vLLM --kv-offloading-size is one engine's total over its tp x pp workers (cpu/spec.py
-    splits cpu_bytes_to_use by world_size); each DP rank is its own engine."""
+    splits cpu_bytes_to_use by world_size); each DP rank is its own engine.
+    `ssd_gb` per GPU in `ssd_dir` adds a disk tier below DRAM: SSEngine --ssd-gb (shard files made beforehand);
+    SGLang HiCache's file backend, max_size per rank (storage/file/lru_file_evictor.py); vLLM's tiering spec with an
+    fs secondary tier (kv_offload/tiering), which has no size cap in v0.33.0, so ssd_gb only switches it on."""
     if not gb_per_gpu:
+        if ssd_gb:
+            raise ValueError("an SSD tier sits below the DRAM tier: give --host-kv-gb too")
         return []
+    if ssd_gb and not ssd_dir:
+        raise ValueError("--ssd-gb needs --ssd-dir")
     if engine == "ssengine":
-        return ["--dram-gb", str(gb_per_gpu)]
+        return ["--dram-gb", str(gb_per_gpu), *(["--ssd-gb", str(ssd_gb), "--ssd-dir", ssd_dir] if ssd_gb else [])]
     if engine == "sglang":
-        return ["--enable-hierarchical-cache", "--hicache-size", str(gb_per_gpu)]
-    return ["--kv-offloading-size", str(gb_per_gpu * lay.tp * lay.pp), "--kv-offloading-backend", "native"]
+        return ["--enable-hierarchical-cache", "--hicache-size", str(gb_per_gpu), *([
+            "--hicache-storage-backend", "file", "--hicache-storage-backend-extra-config",
+            json.dumps({"file_storage_path": ssd_dir, "max_size": f"{ssd_gb}G"})] if ssd_gb else [])]
+    if not ssd_gb:
+        return ["--kv-offloading-size", str(gb_per_gpu * lay.tp * lay.pp), "--kv-offloading-backend", "native"]
+    return ["--kv-transfer-config", json.dumps({
+        "kv_connector": "OffloadingConnector", "kv_role": "kv_both", "kv_connector_extra_config": {
+            "spec_name": "TieringOffloadingSpec", "cpu_bytes_to_use": gb_per_gpu * lay.tp * lay.pp << 30,
+            "secondary_tiers": [{"type": "fs", "root_dir": ssd_dir}]}})]
 
 
 def server_argv(engine: str, lay: Layout, ckpt: str, port: int, run_dir: Path, py: str,
-                extra: list[str] = (), vllm_image: str | None = None, ssengine_image: str | None = None) -> list[str]:
+                extra: list[str] = (), vllm_image: str | None = None, ssengine_image: str | None = None,
+                mounts: tuple[str, ...] = ()) -> list[str]:
     p = ports(port)
     if engine == "ssengine":
         if lay != Layout(pp=4):
             raise ValueError(f"ssengine runs pp4 only (its 4-stage design), not {lay}")
         head = [py, "-m", "ssengine"] if ssengine_image is None else \
-            [*_docker("ssengine", ssengine_image), "--network", "host", "--ipc", "host", "--cap-add", "SYS_NICE",
+            [*_docker("ssengine", ssengine_image, mounts), "--network", "host", "--ipc", "host", "--cap-add", "SYS_NICE",
              "-v", f"{run_dir}:{run_dir}", ssengine_image]   # docker/compose.yaml's settings; --run-dir is mounted
         return [*head, "serve", ckpt, "--host", "127.0.0.1", "--port", str(p["server"]),
                 "--served-model-name", SERVED_NAME, "--run-dir", str(run_dir / "server"), *extra]
     if engine == "vllm":
         head = [py, "-m", "vllm.entrypoints.cli.main"] if vllm_image is None else \
-            [*_docker("vllm", vllm_image), "--network", "host", "--ipc", "host", "-e", f"VLLM_HTTP_TIMEOUT_KEEP_ALIVE={VLLM_KEEP_ALIVE_S}",
+            [*_docker("vllm", vllm_image, mounts), "--network", "host", "--ipc", "host", "-e", f"VLLM_HTTP_TIMEOUT_KEEP_ALIVE={VLLM_KEEP_ALIVE_S}",
              "--entrypoint", "vllm", vllm_image]
         argv = [*head, "serve", ckpt, "--served-model-name", SERVED_NAME,
                 "--host", "127.0.0.1", "--port", str(p["server"]),
@@ -170,7 +190,7 @@ def server_argv(engine: str, lay: Layout, ckpt: str, port: int, run_dir: Path, p
         return argv + list(extra)
     if engine == "sglang":
         world = lay.tp * lay.dp
-        argv = [*_docker("sglang", SGLANG_IMAGE),
+        argv = [*_docker("sglang", SGLANG_IMAGE, mounts),
                 # --ipc host shares the host's /dev/shm: Podman refuses --shm-size with it (container create fails)
                 "--network", "host", "--ipc", "host", "-v", f"{run_dir}:{run_dir}",
                 SGLANG_IMAGE, "python3", "-m", "sglang.launch_server", "--model-path", ckpt,
@@ -289,7 +309,8 @@ def run(a) -> Path:
     lay = parse_layout(a.layout)
     ckpt = a.checkpoint or str(CHECKPOINT)
     job = os.environ.get("SLURM_JOB_ID", "local")
-    name = a.run_name or (f"{a.engine}_{lay}{f'_kv{a.host_kv_gb}' if a.host_kv_gb else ''}_c{a.concurrency}"
+    name = a.run_name or (f"{a.engine}_{lay}{f'_kv{a.host_kv_gb}' if a.host_kv_gb else ''}"
+                          f"{f'_ssd{a.ssd_gb}' if a.ssd_gb else ''}_c{a.concurrency}"
                           f"{'_smoke' if a.smoke else ''}_{job}")
     rd = Path(a.out).resolve() / name
     rd.mkdir(parents=True, exist_ok=False)
@@ -297,8 +318,14 @@ def run(a) -> Path:
     p = ports(port)
     duration = a.duration or (SMOKE_DURATION_S if a.smoke else DURATION_S)
     entries = a.entries or (SMOKE_ENTRIES if a.smoke else None)
-    srv = server_argv(a.engine, lay, ckpt, port, rd, a.python, [*host_kv_args(a.engine, lay, a.host_kv_gb), *a.server_arg],
-                      a.vllm_image, a.ssengine_image)
+    # SSEngine's SSD tier is its pre-made shard set; the others write files, into a directory of this run only (a
+    # previous run's files would be hits this run did not earn), removed at the end.
+    ssd = None if not a.ssd_gb else a.ssd_dir if a.engine == "ssengine" else str(Path(a.ssd_dir).resolve() / name)
+    if ssd and a.engine != "ssengine":
+        Path(ssd).mkdir(parents=True)
+    srv = server_argv(a.engine, lay, ckpt, port, rd, a.python,
+                      [*host_kv_args(a.engine, lay, a.host_kv_gb, a.ssd_gb, ssd), *a.server_arg],
+                      a.vllm_image, a.ssengine_image, (ssd,) if ssd else ())
     for i, x in enumerate(srv[:-1]):
         if x == "-v" and srv[i + 1].endswith(":/root/.cache"):
             Path(srv[i + 1].rsplit(":", 1)[0]).mkdir(parents=True, exist_ok=True)
@@ -363,6 +390,8 @@ def run(a) -> Path:
         _stop(server, container)
         if sampler:
             _stop(sampler)
+        if ssd and a.engine != "ssengine":
+            shutil.rmtree(ssd, ignore_errors=True)
         (rd / "run.json").write_text(json.dumps(meta, indent=1) + "\n")
     s = summarize(rd)
     print(json.dumps(s, indent=1))
@@ -410,7 +439,7 @@ def summarize(rd: Path) -> dict:
          "cache_hit": round(cached / prompt, 4) if prompt else None,
          "ready_s": meta.get("ready_s"), "client_rc": meta.get("client_rc"),
          "warmup_per_lane": _warmup_per_lane(meta["client_argv"]),
-         "host_kv_gb_per_gpu": _host_kv_gb(meta), "engine_build": _engine_build(meta)}
+         "host_kv_gb_per_gpu": _host_kv_gb(meta), "ssd_gb_per_gpu": _ssd_gb(meta), "engine_build": _engine_build(meta)}
     (rd / "summary.json").write_text(json.dumps(s, indent=1) + "\n")
     return s
 
@@ -421,7 +450,22 @@ def _host_kv_gb(meta: dict) -> int:
     for flag, div in (("--dram-gb", 1), ("--hicache-size", 1), ("--kv-offloading-size", lay.tp * lay.pp)):
         if flag in a:
             return round(float(a[a.index(flag) + 1]) / div)
+    if "--kv-transfer-config" in a:
+        extra = json.loads(a[a.index("--kv-transfer-config") + 1]).get("kv_connector_extra_config", {})
+        return round(extra.get("cpu_bytes_to_use", 0) / (1 << 30) / (lay.tp * lay.pp))
     return 0
+
+
+def _ssd_gb(meta: dict) -> str:
+    """SSD KV tier GB per GPU the server ran with: '0' none, 'no cap' for vLLM's fs tier."""
+    a = meta["server_argv"]
+    if "--ssd-gb" in a:
+        return a[a.index("--ssd-gb") + 1]
+    if "--hicache-storage-backend-extra-config" in a:
+        return json.loads(a[a.index("--hicache-storage-backend-extra-config") + 1]).get("max_size", "?").rstrip("G")
+    if "--kv-transfer-config" in a and "secondary_tiers" in a[a.index("--kv-transfer-config") + 1]:
+        return "no cap"
+    return "0"
 
 
 def _warmup_per_lane(cli: list[str]) -> int:
@@ -449,24 +493,28 @@ def compare(dirs: list[Path]) -> str:
             meta = json.loads((Path(d) / "run.json").read_text())
             s = {**s, "engine": meta["engine"], "layout": meta["layout"], "concurrency": meta["concurrency"],
                  "smoke": meta["smoke"], "warmup_per_lane": _warmup_per_lane(meta["client_argv"]),
-                 "host_kv_gb_per_gpu": _host_kv_gb(meta), "engine_build": _engine_build(meta)}
-        if "host_kv_gb_per_gpu" not in s:   # summaries written before the field existed
-            s["host_kv_gb_per_gpu"] = _host_kv_gb(json.loads((Path(d) / "run.json").read_text()))
+                 "host_kv_gb_per_gpu": _host_kv_gb(meta), "ssd_gb_per_gpu": _ssd_gb(meta),
+                 "engine_build": _engine_build(meta)}
+        if "ssd_gb_per_gpu" not in s:   # summaries written before these fields existed
+            meta = json.loads((Path(d) / "run.json").read_text())
+            s["host_kv_gb_per_gpu"], s["ssd_gb_per_gpu"] = _host_kv_gb(meta), _ssd_gb(meta)
         s.setdefault("warmup_per_lane", 10)
         groups.setdefault((s["concurrency"], s["warmup_per_lane"], s["smoke"]), []).append(s)
     out = []
     for (c, w, smoke), ss in sorted(groups.items()):
         out += [f"### c{c}, warm-up {w}/lane{', smoke' if smoke else ''}", "",
-                "| engine | layout | host KV GB/GPU | build | req/s | cache hit | TTFT p50 / p90 / p99 (s) | "
-                "prompt tok/s/GPU | computed tok/s/GPU | requests | failed | run |", "|" + "---|" * 12]
+                "| engine | layout | DRAM KV GB/GPU | SSD KV GB/GPU | build | req/s | cache hit | TTFT p50 / p90 / p99 (s) | "
+                "prompt tok/s/GPU | computed tok/s/GPU | requests | failed | run |", "|" + "---|" * 13]
         for s in sorted(ss, key=lambda s: -(s.get("requests_per_s") or -1)):
             if "error" in s:
-                out.append(f"| {s['engine']} | {s['layout']} | {s['host_kv_gb_per_gpu']} | {s['engine_build']} | "
+                out.append(f"| {s['engine']} | {s['layout']} | {s['host_kv_gb_per_gpu']} | {s['ssd_gb_per_gpu']} | "
+                           f"{s['engine_build']} | "
                            f"{s['error']} |||||||{s['run']} |")
                 continue
             t = s["ttft_ms"]
             ttft = " / ".join(f"{(t.get(k) or 0) / 1000:.2f}" for k in ("p50", "p90", "p99"))
-            out.append(f"| {s['engine']} | {s['layout']} | {s['host_kv_gb_per_gpu']} | {s.get('engine_build', '')} | "
+            out.append(f"| {s['engine']} | {s['layout']} | {s['host_kv_gb_per_gpu']} | {s['ssd_gb_per_gpu']} | "
+                       f"{s.get('engine_build', '')} | "
                        f"{s['requests_per_s']} | "
                        f"{s['cache_hit']} | {ttft} | {s['prompt_tok_per_s_per_gpu']} | "
                        f"{s['computed_tok_per_s_per_gpu']} | {s['requests']} | {s['failed']} | {s['run']} |")
@@ -513,6 +561,8 @@ def main(argv: list[str] | None = None) -> None:
         s.add_argument("--port", type=int, help="server port (default job-derived)")
         s.add_argument("--host-kv-gb", type=int, help="host-DRAM KV cache, GB per GPU: SSEngine --dram-gb, SGLang "
                        "HiCache, vLLM native CPU offloading (default: none)")
+        s.add_argument("--ssd-gb", type=int, help="SSD KV tier below --host-kv-gb, GB per GPU (vLLM v0.33.0: no cap)")
+        s.add_argument("--ssd-dir", help="directory on a local NVMe for --ssd-gb (SSEngine: its shard set)")
         s.add_argument("--server-arg", action="append", default=[], help="extra server argument (repeat)")
         s.add_argument("--python", default=sys.executable, help="interpreter of ssengine / vLLM")
         s.add_argument("--out", default=str(ROOT / "runs" / "agentx"))
@@ -531,9 +581,10 @@ def main(argv: list[str] | None = None) -> None:
         ckpt = a.checkpoint or "<checkpoint>"
         rtr = router_argv(a.engine, lay, port, rd)
         url = f"http://127.0.0.1:{ports(port)['router' if rtr else 'server']}"
+        ssd = a.ssd_dir if a.ssd_gb else None
         print("server:", shlex.join(server_argv(a.engine, lay, ckpt, port, rd, a.python,
-                                                [*host_kv_args(a.engine, lay, a.host_kv_gb), *a.server_arg],
-                                                a.vllm_image, a.ssengine_image)))
+                                                [*host_kv_args(a.engine, lay, a.host_kv_gb, a.ssd_gb, ssd), *a.server_arg],
+                                                a.vllm_image, a.ssengine_image, (ssd,) if ssd else ())))
         if rtr:
             print("router:", shlex.join(rtr))
         print("client:", shlex.join(client_argv(url, ckpt, a.concurrency, a.duration or DURATION_S, rd / "aiperf",
