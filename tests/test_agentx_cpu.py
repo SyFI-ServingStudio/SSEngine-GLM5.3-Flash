@@ -4,7 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from benchmarks.agentx import Layout, client_argv, parse_layout, router_argv, server_argv, server_ready_path
+from benchmarks.agentx import (Layout, _host_kv_gb, client_argv, host_kv_args, parse_layout, router_argv, server_argv,
+                               server_ready_path)
 
 RD = Path("/tmp/run")
 
@@ -95,3 +96,17 @@ def test_engine_cache_mount(monkeypatch, tmp_path):
 def test_ready_path():
     assert server_ready_path("sglang") == "/health"   # 503 until SGLang's own warm-up is done (job 18150)
     assert server_ready_path("vllm") == server_ready_path("ssengine") == "/v1/models"
+
+
+def test_host_kv_args():
+    """--host-kv-gb is GB per GPU; each engine's flag in its own unit (vLLM: one engine's total over tp x pp)."""
+    assert host_kv_args("vllm", parse_layout("tp4"), None) == []
+    assert host_kv_args("ssengine", parse_layout("pp4"), 100) == ["--dram-gb", "100"]
+    assert host_kv_args("sglang", parse_layout("pp4"), 100) == ["--enable-hierarchical-cache", "--hicache-size", "100"]
+    assert flag(host_kv_args("vllm", parse_layout("tp4"), 100), "--kv-offloading-size") == "400"
+    assert flag(host_kv_args("vllm", parse_layout("dp4-ep"), 100), "--kv-offloading-size") == "100"
+    for eng, lay in (("vllm", "tp4"), ("vllm", "dp4-ep"), ("sglang", "pp4"), ("ssengine", "pp4")):
+        a = server_argv(eng, parse_layout(lay), "/ck", 20060, RD, "py", host_kv_args(eng, parse_layout(lay), 100))
+        assert _host_kv_gb({"server_argv": a, "layout": lay}) == 100
+    assert _host_kv_gb({"server_argv": server_argv("vllm", parse_layout("tp4"), "/ck", 20060, RD, "py"),
+                        "layout": "tp4"}) == 0

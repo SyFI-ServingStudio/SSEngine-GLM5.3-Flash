@@ -126,6 +126,20 @@ def ports(base: int) -> dict:
     return {"server": base, "dp_rpc": base + 10, "router": base + 20}
 
 
+def host_kv_args(engine: str, lay: Layout, gb_per_gpu: int | None) -> list[str]:
+    """Host-DRAM KV cache of `gb_per_gpu` GB per GPU, in each engine's own terms (None: the engine's default, none).
+    SSEngine --dram-gb is per GPU. SGLang HiCache --hicache-size is per rank (pool_host/base.py; PP stages share the
+    smallest token capacity). vLLM --kv-offloading-size is one engine's total over its tp x pp workers (cpu/spec.py
+    splits cpu_bytes_to_use by world_size); each DP rank is its own engine."""
+    if not gb_per_gpu:
+        return []
+    if engine == "ssengine":
+        return ["--dram-gb", str(gb_per_gpu)]
+    if engine == "sglang":
+        return ["--enable-hierarchical-cache", "--hicache-size", str(gb_per_gpu)]
+    return ["--kv-offloading-size", str(gb_per_gpu * lay.tp * lay.pp), "--kv-offloading-backend", "native"]
+
+
 def server_argv(engine: str, lay: Layout, ckpt: str, port: int, run_dir: Path, py: str,
                 extra: list[str] = (), vllm_image: str | None = None, ssengine_image: str | None = None) -> list[str]:
     p = ports(port)
@@ -275,14 +289,16 @@ def run(a) -> Path:
     lay = parse_layout(a.layout)
     ckpt = a.checkpoint or str(CHECKPOINT)
     job = os.environ.get("SLURM_JOB_ID", "local")
-    name = a.run_name or f"{a.engine}_{lay}_c{a.concurrency}{'_smoke' if a.smoke else ''}_{job}"
+    name = a.run_name or (f"{a.engine}_{lay}{f'_kv{a.host_kv_gb}' if a.host_kv_gb else ''}_c{a.concurrency}"
+                          f"{'_smoke' if a.smoke else ''}_{job}")
     rd = Path(a.out).resolve() / name
     rd.mkdir(parents=True, exist_ok=False)
     port = a.port or default_port()
     p = ports(port)
     duration = a.duration or (SMOKE_DURATION_S if a.smoke else DURATION_S)
     entries = a.entries or (SMOKE_ENTRIES if a.smoke else None)
-    srv = server_argv(a.engine, lay, ckpt, port, rd, a.python, a.server_arg, a.vllm_image, a.ssengine_image)
+    srv = server_argv(a.engine, lay, ckpt, port, rd, a.python, [*host_kv_args(a.engine, lay, a.host_kv_gb), *a.server_arg],
+                      a.vllm_image, a.ssengine_image)
     for i, x in enumerate(srv[:-1]):
         if x == "-v" and srv[i + 1].endswith(":/root/.cache"):
             Path(srv[i + 1].rsplit(":", 1)[0]).mkdir(parents=True, exist_ok=True)
@@ -394,9 +410,18 @@ def summarize(rd: Path) -> dict:
          "cache_hit": round(cached / prompt, 4) if prompt else None,
          "ready_s": meta.get("ready_s"), "client_rc": meta.get("client_rc"),
          "warmup_per_lane": _warmup_per_lane(meta["client_argv"]),
-         "engine_build": _engine_build(meta)}
+         "host_kv_gb_per_gpu": _host_kv_gb(meta), "engine_build": _engine_build(meta)}
     (rd / "summary.json").write_text(json.dumps(s, indent=1) + "\n")
     return s
+
+
+def _host_kv_gb(meta: dict) -> int:
+    """Host-DRAM KV GB per GPU the server ran with (0: none), read back from its argv."""
+    a, lay = meta["server_argv"], parse_layout(meta["layout"])
+    for flag, div in (("--dram-gb", 1), ("--hicache-size", 1), ("--kv-offloading-size", lay.tp * lay.pp)):
+        if flag in a:
+            return round(float(a[a.index(flag) + 1]) / div)
+    return 0
 
 
 def _warmup_per_lane(cli: list[str]) -> int:
@@ -424,21 +449,25 @@ def compare(dirs: list[Path]) -> str:
             meta = json.loads((Path(d) / "run.json").read_text())
             s = {**s, "engine": meta["engine"], "layout": meta["layout"], "concurrency": meta["concurrency"],
                  "smoke": meta["smoke"], "warmup_per_lane": _warmup_per_lane(meta["client_argv"]),
-                 "engine_build": _engine_build(meta)}
+                 "host_kv_gb_per_gpu": _host_kv_gb(meta), "engine_build": _engine_build(meta)}
+        if "host_kv_gb_per_gpu" not in s:   # summaries written before the field existed
+            s["host_kv_gb_per_gpu"] = _host_kv_gb(json.loads((Path(d) / "run.json").read_text()))
         s.setdefault("warmup_per_lane", 10)
         groups.setdefault((s["concurrency"], s["warmup_per_lane"], s["smoke"]), []).append(s)
     out = []
     for (c, w, smoke), ss in sorted(groups.items()):
         out += [f"### c{c}, warm-up {w}/lane{', smoke' if smoke else ''}", "",
-                "| engine | layout | build | req/s | cache hit | TTFT p50 / p90 / p99 (s) | prompt tok/s/GPU | "
-                "computed tok/s/GPU | requests | failed | run |", "|" + "---|" * 11]
+                "| engine | layout | host KV GB/GPU | build | req/s | cache hit | TTFT p50 / p90 / p99 (s) | "
+                "prompt tok/s/GPU | computed tok/s/GPU | requests | failed | run |", "|" + "---|" * 12]
         for s in sorted(ss, key=lambda s: -(s.get("requests_per_s") or -1)):
             if "error" in s:
-                out.append(f"| {s['engine']} | {s['layout']} | {s['engine_build']} | {s['error']} |||||||{s['run']} |")
+                out.append(f"| {s['engine']} | {s['layout']} | {s['host_kv_gb_per_gpu']} | {s['engine_build']} | "
+                           f"{s['error']} |||||||{s['run']} |")
                 continue
             t = s["ttft_ms"]
             ttft = " / ".join(f"{(t.get(k) or 0) / 1000:.2f}" for k in ("p50", "p90", "p99"))
-            out.append(f"| {s['engine']} | {s['layout']} | {s.get('engine_build', '')} | {s['requests_per_s']} | "
+            out.append(f"| {s['engine']} | {s['layout']} | {s['host_kv_gb_per_gpu']} | {s.get('engine_build', '')} | "
+                       f"{s['requests_per_s']} | "
                        f"{s['cache_hit']} | {ttft} | {s['prompt_tok_per_s_per_gpu']} | "
                        f"{s['computed_tok_per_s_per_gpu']} | {s['requests']} | {s['failed']} | {s['run']} |")
         out.append("")
@@ -482,6 +511,8 @@ def main(argv: list[str] | None = None) -> None:
                        "(scenario: 10; not a valid submission when set)")
         s.add_argument("--checkpoint", help="weights directory (default ssengine.config.CHECKPOINT)")
         s.add_argument("--port", type=int, help="server port (default job-derived)")
+        s.add_argument("--host-kv-gb", type=int, help="host-DRAM KV cache, GB per GPU: SSEngine --dram-gb, SGLang "
+                       "HiCache, vLLM native CPU offloading (default: none)")
         s.add_argument("--server-arg", action="append", default=[], help="extra server argument (repeat)")
         s.add_argument("--python", default=sys.executable, help="interpreter of ssengine / vLLM")
         s.add_argument("--out", default=str(ROOT / "runs" / "agentx"))
@@ -500,7 +531,9 @@ def main(argv: list[str] | None = None) -> None:
         ckpt = a.checkpoint or "<checkpoint>"
         rtr = router_argv(a.engine, lay, port, rd)
         url = f"http://127.0.0.1:{ports(port)['router' if rtr else 'server']}"
-        print("server:", shlex.join(server_argv(a.engine, lay, ckpt, port, rd, a.python, a.server_arg, a.vllm_image, a.ssengine_image)))
+        print("server:", shlex.join(server_argv(a.engine, lay, ckpt, port, rd, a.python,
+                                                [*host_kv_args(a.engine, lay, a.host_kv_gb), *a.server_arg],
+                                                a.vllm_image, a.ssengine_image)))
         if rtr:
             print("router:", shlex.join(rtr))
         print("client:", shlex.join(client_argv(url, ckpt, a.concurrency, a.duration or DURATION_S, rd / "aiperf",
