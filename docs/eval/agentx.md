@@ -46,9 +46,9 @@ SSEngine's tiers ~4 x DRAM-GB of free host memory plus a local NVMe file system.
    its docker wrapper adds the job's GPUs and `/scratch/hf`.
    Each engine image gets a persistent `/root/.cache` (JIT and autotune results) under `AGENTX_CACHE_DIR` (default
    `~/.cache/agentx-engines`); without it SGLang pp4 re-tunes its MoE kernels for ~40 min on every run.
-5. SSEngine tiers: make the SSD shard files once (`python -m ssengine.kvpool.shards create --dir <nvme dir> --gb 128`;
-   `--sets 2` to run two servers at once), then pass `--server-arg=--dram-gb --server-arg=100 --server-arg=--ssd-gb
-   --server-arg=128 --server-arg=--ssd-dir --server-arg=<nvme dir>`.
+5. SSEngine tiers: make the SSD shard files once (`python -m ssengine.kvpool.shards create --dir <nvme dir> --gb 512`,
+   4 x 512 GB; `--sets 2` to run two servers at once), then pass `--host-kv-gb 100 --ssd-gb 512 --ssd-dir <nvme dir>`.
+   SGLang and vLLM need no preparation; give them a directory on the same NVMe with ~2 TB free.
 
 ### ARM (GB200 / GB300)
 
@@ -65,12 +65,12 @@ The matrix (4 GPUs per run):
 
 | engine | layouts | notes |
 |---|---|---|
-| SSEngine | pp4 | with tiers: `--host-kv-gb 100 --ssd-gb 128 --ssd-dir <shard dir>` |
+| SSEngine | pp4 | with tiers: `--host-kv-gb 100 --ssd-gb 512 --ssd-dir <shard dir>` |
 | vLLM v0.33.0 | tp4, dp4-ep (router) | `--mamba-cache-mode align` is set by the harness |
 | vLLM v0.33.0 + CPU offloading | best layout of the row above | `--host-kv-gb 100` (native offloading) |
 | SGLang v0.5.23 | tp4, dp4-ep (router), pp4 | |
 | SGLang v0.5.23 + HiCache | best layout of the row above | `--host-kv-gb 100` (hierarchical cache) |
-| vLLM / SGLang + DRAM + SSD | best layout | `--host-kv-gb 100 --ssd-gb 128 --ssd-dir <nvme dir>` |
+| vLLM / SGLang + DRAM + SSD | best layout | `--host-kv-gb 100 --ssd-gb 512 --ssd-dir <nvme dir>` |
 
 `--host-kv-gb N` gives every engine the same host DRAM for KV, N GB per GPU, in each engine's own flag: SSEngine
 `--dram-gb N`, SGLang `--enable-hierarchical-cache --hicache-size N` (per rank), vLLM `--kv-offloading-size N x tp x pp
@@ -120,11 +120,13 @@ Report per run: req/s, cache hit, TTFT p50/p90/p99, prompt and computed tokens/s
 
 ## Reference numbers (cayenne, 4x B200, 2026-11-07)
 
-Our runs, for a sanity check of a new setup (vLLM here is our fork, not v0.33.0):
+Our runs, for a sanity check of a new setup (vLLM here is our fork, not v0.33.0; SGLang and vLLM without offloading).
+SSEngine ran with a 128 GB SSD tier, which was full at c512; the matrix above uses 512 GB.
 
 | c / warm-up | engine | req/s | cache hit | TTFT p50 / p90 / p99 (s) |
 |---|---|---|---|---|
 | 128 / 10 | SSEngine pp4 (DRAM 100 GB, SSD 128 GB per GPU) | 8.66 | 0.932 | 0.30 / 0.58 / 2.41 |
+| 128 / 10 | SGLang pp4 | 7.30 | 0.874 | 2.46 / 11.1 / 70.8 |
 | 128 / 10 | SGLang dp4-ep | 5.99 | 0.841 | 6.9 / 29.9 / 99.8 |
 | 128 / 10 | vLLM fork tp4 | 3.92 | 0.813 | 32.0 / 64.1 / 151 |
 | 512 / 1 | SSEngine pp4 | 17.3 | 0.922 | 2.6 / 61 / 112 |
