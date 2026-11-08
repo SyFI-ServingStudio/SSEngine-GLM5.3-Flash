@@ -110,3 +110,28 @@ def test_host_kv_args():
         assert _host_kv_gb({"server_argv": a, "layout": lay}) == 100
     assert _host_kv_gb({"server_argv": server_argv("vllm", parse_layout("tp4"), "/ck", 20060, RD, "py"),
                         "layout": "tp4"}) == 0
+
+
+def test_ssd_tier_args():
+    import json
+    from benchmarks.agentx import _ssd_gb
+    with pytest.raises(ValueError):
+        host_kv_args("sglang", parse_layout("pp4"), None, 128, "/nvme")
+    with pytest.raises(ValueError):
+        host_kv_args("sglang", parse_layout("pp4"), 100, 128, None)
+    s = host_kv_args("ssengine", parse_layout("pp4"), 100, 128, "/nvme")
+    assert flag(s, "--ssd-gb") == "128" and flag(s, "--ssd-dir") == "/nvme"
+    g = host_kv_args("sglang", parse_layout("pp4"), 100, 128, "/nvme/r")
+    assert flag(g, "--hicache-storage-backend") == "file"
+    assert json.loads(flag(g, "--hicache-storage-backend-extra-config")) == {"file_storage_path": "/nvme/r", "max_size": "128G"}
+    v = json.loads(flag(host_kv_args("vllm", parse_layout("tp4"), 100, 128, "/nvme/r"), "--kv-transfer-config"))
+    x = v["kv_connector_extra_config"]
+    assert v["kv_connector"] == "OffloadingConnector" and x["spec_name"] == "TieringOffloadingSpec"
+    assert x["cpu_bytes_to_use"] == 400 << 30 and x["secondary_tiers"] == [{"type": "fs", "root_dir": "/nvme/r"}]
+    for eng, lay, ssd in (("ssengine", "pp4", "128"), ("sglang", "pp4", "128"), ("vllm", "tp4", "no cap")):
+        a = server_argv(eng, parse_layout(lay), "/ck", 20060, RD, "py",
+                        host_kv_args(eng, parse_layout(lay), 100, 128, "/nvme/r"), mounts=("/nvme/r",))
+        meta = {"server_argv": a, "layout": lay}
+        assert _host_kv_gb(meta) == 100 and _ssd_gb(meta) == ssd
+        if a[0] == "docker":
+            assert "/nvme/r:/nvme/r" in a
