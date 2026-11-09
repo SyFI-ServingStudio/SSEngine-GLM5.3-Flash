@@ -82,14 +82,13 @@ So run all SSEngine tier runs first, then delete the shard set (`rm -r <nvme dir
 runs, or keep both on a file system with ~4 TB free. Watch `df` during the vLLM SSD runs: we have not run one long
 enough to fill a disk, so record the peak use, and treat a run that filled the disk as invalid.
 
-### ARM (GB200 / GB300)
+### ARM (GB200)
 
 - vLLM and SGLang: the same image tags carry arm64 builds. Not run by us on ARM.
 - SSEngine: `docker/Dockerfile` builds natively on aarch64 (`make_env.sh` picks the aarch64 vLLM
   wheel). Built and smoke-tested on a GB10 (sm_121), which cannot hold the model. Its serving kernels are built for
-  sm_100a (DeepSelect, trtllm-gen MoE/FMHA cubins, the baked FlashInfer JIT): GB200 (sm_100) should run them; GB300
-  (sm_103) is untested and likely needs those rebuilt. Run `docker run --gpus all <image> check-env` and a short
-  smoke (`--smoke`) first.
+  sm_100a (DeepSelect, trtllm-gen MoE/FMHA cubins, the baked FlashInfer JIT), which GB200 (sm_100) runs. Run
+  `docker run --gpus all <image> check-env` and a short smoke (`--smoke`) first.
 
 ## What to run
 
@@ -98,6 +97,7 @@ The matrix (4 GPUs per run):
 | engine | layouts | notes |
 |---|---|---|
 | SSEngine | pp4 | with tiers: `--host-kv-gb 100 --ssd-gb 512 --ssd-dir <shard dir>` |
+| SSEngine HBM only | pp4 | no tier flags: the baseline for the vLLM/SGLang rows without offloading |
 | vLLM v0.33.0 | tp4, dp4-ep (router) | `--mamba-cache-mode align` is set by the harness |
 | vLLM v0.33.0 + CPU offloading | best layout of the row above | `--host-kv-gb 100` (native offloading) |
 | SGLang v0.5.23 | tp4, dp4-ep (router), pp4 | |
@@ -119,10 +119,35 @@ the run, so no run hits files a previous run wrote. Put D on the same NVMe as SS
 own warm-up, so a valid submission); if two are within 5%, the one with the lower TTFT p90. Run the offloading rows
 at the same concurrencies as the plain rows.
 
-Concurrency: 8 (smoke first), 64, 128, 256, 512, then for SSEngine 768, 1024, 1536, ... (all with `--warmup-per-lane
-1`) until it saturates: TTFT p90 reaches ~60 s (the 60 s forced-request rule, see below) or req/s grows < 5% over the
-previous step. Our c512 run already had p90 61 s, but with a 128 GB SSD tier that was full; with 512 GB the knee may
-be later, so do not stop at c512 without the next step.
+Concurrency: every configuration runs a smoke (c8 `--smoke`) and then c64, c128, c256, c512. Both SSEngine
+configurations then go on with 768, 1024, 1536, ... (all with `--warmup-per-lane 1`) until they saturate: TTFT p90
+reaches ~60 s (the 60 s forced-request rule, see below) or req/s grows < 5% over the previous step; always run at least
+one step past c512 to show it. Our c512 run already had p90 61 s, but with a 128 GB SSD tier that was full; with
+512 GB the knee may be later.
+
+### Run list
+
+Every run below, 4 GPUs each. Skip none: a missing cell leaves a comparison open. Order matters: phase 2 needs the
+best layouts from phase 1, and on a ~2 TB disk the SSEngine shards are deleted between the phases (see "Disk").
+
+| phase | configuration | flags | runs |
+|---|---|---|---:|
+| 1 | SSEngine pp4, DRAM + SSD | `--host-kv-gb 100 --ssd-gb 512 --ssd-dir <shard dir>` | smoke, c64, c128, c256, c512, c768, ... until saturated (>= 6) |
+| 1 | SSEngine pp4, HBM only | | smoke, c64, c128, c256, c512, c768, ... until saturated (>= 6) |
+| 1 | vLLM v0.33.0 tp4 | `--vllm-image docker.io/vllm/vllm-openai:v0.33.0` | smoke, c64, c128, c256, c512 (5) |
+| 1 | vLLM v0.33.0 dp4-ep | same | 5 |
+| 1 | SGLang v0.5.23 tp4 | | 5 |
+| 1 | SGLang v0.5.23 dp4-ep | | 5 |
+| 1 | SGLang v0.5.23 pp4 | | 5 |
+| | pick the best vLLM and the best SGLang layout (rule above); delete the shard set if the disk needs it | | |
+| 2 | vLLM best layout, DRAM | `--host-kv-gb 100` | 5 |
+| 2 | SGLang best layout, DRAM (HiCache) | `--host-kv-gb 100` | 5 |
+| 2 | vLLM best layout, DRAM + SSD | `--host-kv-gb 100 --ssd-gb 512 --ssd-dir <nvme dir>` | 5 |
+| 2 | SGLang best layout, DRAM + SSD | `--host-kv-gb 100 --ssd-gb 512 --ssd-dir <nvme dir>` | 5 |
+
+Total: 11 configurations, 11 smokes and at least 46 measured runs, so >= 57 runs. With the budget below that is about
+52 hours of one 4-GPU node run after run (11 smokes x ~0.5 h + 46 x ~1 h); two nodes halve it. Re-run a failed run before
+moving on; `compare` lists failed runs so none goes unnoticed.
 
 ### Budget
 
