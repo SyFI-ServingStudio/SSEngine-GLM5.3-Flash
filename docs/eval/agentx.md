@@ -210,3 +210,33 @@ noise, but say which one you ran.
 | 512 / 1 | SSEngine pp4 | 17.3 | 0.922 | 2.6 / 61 / 112 |
 | 512 / 1 | SGLang dp4-ep | 1.73 | 0.379 | 109 / 478 / 558 |
 | 512 / 1 | vLLM fork tp4 | 0.87 | 0.144 | 241 / 496 / 614 |
+
+## Smoke runs of the offloading options (cayenne, 4x B200, 2026-11-07)
+
+Before the matrix, we ran each new DRAM and SSD option of vLLM v0.33.0 and SGLang v0.5.23 once at c8 (`--smoke`). All
+of them start, serve the trace and shut down cleanly with no failed request, and the harness removes the per-run SSD
+directory afterwards. The SSD tier here was 128 GB per GPU; the matrix uses 512 GB.
+
+| engine | layout | DRAM KV GB/GPU | SSD KV GB/GPU | req/s | cache hit | TTFT p50 / p90 / p99 (s) | job |
+|---|---|---:|---:|---:|---:|---|---|
+| vLLM v0.33.0 | tp4 | – | – | 0.278 | 91.0% | 0.29 / 0.71 / 2.60 | 18157 |
+| vLLM v0.33.0 | tp4 | 100 | – | 0.274 | 90.9% | 0.50 / 0.97 / 4.38 | 18252 |
+| vLLM v0.33.0 | tp4 | 100 | 128 (fs tier, no cap) | 0.299 | 91.0% | 0.31 / 0.71 / 1.59 | 18264 |
+| SGLang v0.5.23 | pp4 | 100 | – | 0.208 | 92.7% | 0.29 / 11.4 / 12.7 | 18253 |
+| SGLang v0.5.23 | pp4 | 100 | 128 (file backend) | 0.273 | 92.3% | 0.29 / 1.78 / 11.0 | 18265 |
+
+These smokes show that the options work, not that they help, and five things in them matter for the full runs:
+
+1. **c8 never reads from the lower tiers.** Every context fits in HBM, so vLLM's external (offload) hit rate is 0% in
+   both offloading runs, even though vLLM wrote 67 GB to the fs tier in 18264. The tiers matter only at high
+   concurrency, which is why the evaluation reports their hit rate at c128 and c512.
+2. **Both engines cache inclusively.** SGLang HiCache writes through to DRAM, and vLLM stores blocks to DRAM while a
+   request runs, so DRAM holds copies of what HBM holds. Their unique capacity is therefore about max(HBM, DRAM), not
+   the sum, and `--host-kv-gb 100` adds little on top of ~100 GB of HBM KV per GPU.
+3. **SGLang HiCache barely raises the number of contexts it can resume.** It has 1211 host Mamba-state slots per rank
+   against 1191 on the device, because the host pool is split between KV and Mamba state.
+4. **SGLang PP has a ~10-13 s TTFT tail at c8 with or without HiCache.** tp2-pp2 without HiCache (job 17898) shows
+   p90/p99 of 10.6/10.8 s. The slow requests are full cache hits, so the cause is not compute. We have not
+   investigated it; do not attribute it to offloading.
+5. **vLLM's fs tier has no size cap in v0.33.0.** For vLLM, `--ssd-gb` is only recorded, so the `--ssd-dir` volume
+   needs room (see "Disk").
