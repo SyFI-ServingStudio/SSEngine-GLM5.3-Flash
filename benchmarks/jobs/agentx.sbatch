@@ -9,7 +9,8 @@
 # Arguments go to `python -m benchmarks.agentx run`. Time: model load (SSEngine ~2 min, vLLM ~6 min, SGLang ~12 min;
 # SGLang pp4 with an empty AGENTX_CACHE_DIR ~36 min of MoE tuning) + dataset load and warm-up (our runs: c128 5-12 min,
 # c512 at 1/lane 12-32 min; the first run also downloads the dataset) + --duration (1800 s; smoke 300 s). Memory:
-# --host-kv-gb N needs 4 x N GB more (600G at N = 100). docs/eval/agentx.md, "Budget".
+# 4 x --host-kv-gb GB of KV + up to ~130 GiB for the engine (peak ~500 GiB at N = 100: 600G). docs/eval/agentx.md,
+# "Budget".
 set -uo pipefail
 {   # one brace group: bash parses it whole before running, so editing this file mid-job cannot break the job
 source "${SLURM_SUBMIT_DIR:-$(dirname "$0")/../..}/benchmarks/jobs/env.sh"

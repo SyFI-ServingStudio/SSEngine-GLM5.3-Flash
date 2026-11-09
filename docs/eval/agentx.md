@@ -107,8 +107,8 @@ The matrix (4 GPUs per run):
 
 `--host-kv-gb N` gives every engine the same host DRAM for KV, N GB per GPU, in each engine's own flag: SSEngine
 `--dram-gb N`, SGLang `--enable-hierarchical-cache --hicache-size N` (per rank), vLLM `--kv-offloading-size N x tp x pp
---kv-offloading-backend native` (one engine's total). `compare` shows it as `host KV GB/GPU`. Give such a job host
-memory for 4 x N GB plus the engine (our SSEngine runs with N = 100 used ~490 GB; we request `--mem=600G`).
+--kv-offloading-backend native` (one engine's total). `compare` shows it as `host KV GB/GPU`. Host memory per run is
+therefore 4 x N GB of KV plus the engine's own use (see "Budget").
 
 `--ssd-gb M --ssd-dir D` adds a disk tier below DRAM, M GB per GPU, on a local NVMe: SSEngine `--ssd-gb M --ssd-dir D`
 (its shard set, made beforehand, see Setup); SGLang HiCache's `file` storage backend with `max_size` M GB per rank;
@@ -156,8 +156,22 @@ moving on; `compare` lists failed runs so none goes unnoticed.
 Per run: model load (SSEngine ~2 min, vLLM ~6 min, SGLang ~12 min; SGLang pp4 with an empty `AGENTX_CACHE_DIR`
 ~36 min of MoE tuning) + dataset load and warm-up (our runs: c128 5-12 min, c512 at 1/lane 12-32 min, longest for
 the engine with the lowest hit rate) + `--duration` (1800 s; smoke 300 s). A Slurm time limit of 2.5 h covers every
-cell; a smoke needs ~45 min. Host memory: the engine plus 4 x `--host-kv-gb` GB (`--mem=600G` at 100; 400G without
-offloading).
+cell; a smoke needs ~45 min. 
+
+Host memory: the evaluation gives every engine 100 GB of DRAM KV per GPU, so a 4-GPU run holds 400 GB of KV, set by
+`--host-kv-gb` and the same for every engine. On top of that comes the engine's own use. The peak memory of our runs
+with N = 100 (Slurm MaxRSS) was:
+
+| engine | peak | KV (4 x 100 GB) | engine's own |
+|---|---:|---:|---:|
+| SGLang v0.5.23 pp4, HiCache (18253, 18265) | ~387 GiB | ~373 GiB | ~15 GiB |
+| vLLM v0.33.0 tp4, native offloading (18252, 18264) | ~446 GiB | 400 GiB (vLLM counts GiB) | ~46 GiB |
+| SSEngine pp4, DRAM + SSD (18017 c128, 18020 c512) | 465-504 GiB | ~373 GiB | ~90-130 GiB |
+
+So a run needs about 4 x N GB + 130 GiB, ~500 GiB at N = 100; we request `--mem=600G` for the margin (400G without
+offloading). A GB200 NVL72 compute tray (4 GPUs, 2 Grace CPUs with up to 480 GB each) holds that; check `free -g`
+first. If a host has clearly less than ~600 GB, lower `--host-kv-gb` by the same amount for every engine and report
+the value used.
 
 Warm-up: the scenario sends one full-history primer per live session, then 10 more requests per lane, and starts
 measuring only after all of them return (no time cap). At c512 that is ~5,600 requests, hours for an engine that
