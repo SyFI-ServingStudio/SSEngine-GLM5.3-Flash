@@ -19,7 +19,10 @@
 #                                    (env/bake_jit.py; no GPU, ~5 min): no compile or download at the first start
 #                 sim client corpus  the bench's handoff checkout, req-frontend and enwik9
 #                 agentx             the AgentX client (agentx-harness, benchmarks/agentx.py) in its own venv
-#                                    (not in the default list: it pins its own AIPerf)
+#                                    (not in the default list: it pins its own AIPerf); its python also runs the
+#                                    harness itself where the engines come from images (docs/eval/agentx.md)
+#                 router             vllm-router 0.1.15 in tmp/vllm-router-venv: the cache-aware router in front of
+#                                    vLLM DP layouts (benchmarks/agentx.py, benchmarks/jobs/vllm_dpep.sbatch)
 #                 check              env/check_env.py
 #   SSENGINE_ALLOW_ROOT=1   build as root: only inside a container build (docker/Dockerfile)
 # Each step skips what is already in place, so a failed run can be repeated.
@@ -34,7 +37,7 @@ STEPS=${STEPS:-venv vllm conv1d install jit sim client corpus check}
 mkdir -p "$TP/downloads"
 want() { [[ " $STEPS " == *" $1 "* ]]; }
 for s in $STEPS; do
-  case $s in venv|vllm|conv1d|install|jit|sim|client|corpus|agentx|check) ;; *) echo "unknown step $s (STEPS)"; exit 1 ;; esac
+  case $s in venv|vllm|conv1d|install|jit|sim|client|corpus|agentx|router|check) ;; *) echo "unknown step $s (STEPS)"; exit 1 ;; esac
 done
 
 fetch() {  # url sha256 file: download once, then always check the hash
@@ -137,7 +140,16 @@ fi
 if want agentx; then
   AX=$TP/agentx-venv
   [ -x "$AX/bin/python" ] || uv venv --python 3.12 "$AX"
-  uv pip install --python "$AX/bin/python" agentx-harness==1.0.7
+  # numpy, msgspec and pyyaml: what `python -m benchmarks.agentx` imports from this repo (ssengine.config,
+  # ssengine.engine.kv), so this venv runs the harness on a host without .venv (engines from images)
+  uv pip install --python "$AX/bin/python" agentx-harness==1.0.7 numpy msgspec pyyaml
+fi
+
+# 5c. vllm-router (PyPI wheels for x86_64 and aarch64), where benchmarks/agentx.py and vllm_dpep.sbatch look for it.
+if want router; then
+  RV=$DIR/tmp/vllm-router-venv
+  [ -x "$RV/bin/python" ] || uv venv --python 3.12 "$RV"
+  uv pip install --python "$RV/bin/python" vllm-router==0.1.15
 fi
 
 if want check; then

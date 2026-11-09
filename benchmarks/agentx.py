@@ -88,7 +88,8 @@ def _docker(name: str, image: str | None = None, mounts: tuple[str, ...] = ()) -
         argv += ["-v", f"{CACHE_DIR / re.sub(r'[^A-Za-z0-9_.-]+', '_', image)}:/root/.cache"]   # run() creates it
     return argv
 VLLM_KEEP_ALIVE_S = "600"   # see run(): vLLM's 5 s keep-alive close races AIPerf's pooled reuse (job 18115)
-ROUTER = MAIN / "tmp" / "vllm-router-venv" / "bin" / "vllm-router"
+# vllm-router for vLLM DP layouts: env/make_env.sh step `router` (SSENGINE_VLLM_ROUTER overrides the path)
+ROUTER = Path(os.environ.get("SSENGINE_VLLM_ROUTER") or MAIN / "tmp" / "vllm-router-venv" / "bin" / "vllm-router")
 MAX_MODEL_LEN = 1_048_576
 READY_TIMEOUT_S = 2700
 
@@ -304,48 +305,86 @@ def default_port() -> int:
     return 20000 + job % 120 * 100 + 60          # job-derived, below 32768, beside vllm_dpep's +50
 
 
-def run(a) -> Path:
-    from ssengine.config import CHECKPOINT
-    lay = parse_layout(a.layout)
-    ckpt = a.checkpoint or str(CHECKPOINT)
-    job = os.environ.get("SLURM_JOB_ID", "local")
-    name = a.run_name or (f"{a.engine}_{lay}{f'_kv{a.host_kv_gb}' if a.host_kv_gb else ''}"
+def run_name(a, lay: Layout) -> str:
+    """<engine>_<layout>[_kv<N>][_ssd<M>]_c<N>[_smoke]_<job>; outside Slurm the job is local-<date>-<time>, so
+    repeating a run on a plain host does not collide with the previous one's directory."""
+    job = os.environ.get("SLURM_JOB_ID") or time.strftime("local-%Y%m%d-%H%M%S")
+    return a.run_name or (f"{a.engine}_{lay}{f'_kv{a.host_kv_gb}' if a.host_kv_gb else ''}"
                           f"{f'_ssd{a.ssd_gb}' if a.ssd_gb else ''}_c{a.concurrency}"
                           f"{'_smoke' if a.smoke else ''}_{job}")
-    rd = Path(a.out).resolve() / name
-    rd.mkdir(parents=True, exist_ok=False)
+
+
+@dataclass
+class Plan:
+    """Everything one run executes, built the same way for `run` and `argv` (so `argv` prints what `run` runs)."""
+    lay: Layout
+    port: int
+    duration: int
+    entries: int | None
+    ssd: str | None       # the SSD tier directory the server gets: SSEngine's shard set, else <ssd dir>/<run name>
+    srv: list[str]
+    rtr: list[str] | None
+    url: str
+    cli: list[str]
+
+
+def plan(a, rd: Path, name: str, ckpt: str) -> Plan:
+    lay = parse_layout(a.layout)
     port = a.port or default_port()
     p = ports(port)
     duration = a.duration or (SMOKE_DURATION_S if a.smoke else DURATION_S)
     entries = a.entries or (SMOKE_ENTRIES if a.smoke else None)
     # SSEngine's SSD tier is its pre-made shard set; the others write files, into a directory of this run only (a
     # previous run's files would be hits this run did not earn), removed at the end.
-    ssd = None if not a.ssd_gb else a.ssd_dir if a.engine == "ssengine" else str(Path(a.ssd_dir).resolve() / name)
-    if ssd and a.engine != "ssengine":
-        Path(ssd).mkdir(parents=True)
+    ssd = None if not a.ssd_gb else a.ssd_dir if a.engine == "ssengine" or not a.ssd_dir else \
+        str(Path(a.ssd_dir).resolve() / name)
     srv = server_argv(a.engine, lay, ckpt, port, rd, a.python,
                       [*host_kv_args(a.engine, lay, a.host_kv_gb, a.ssd_gb, ssd), *a.server_arg],
                       a.vllm_image, a.ssengine_image, (ssd,) if ssd else ())
-    for i, x in enumerate(srv[:-1]):
-        if x == "-v" and srv[i + 1].endswith(":/root/.cache"):
-            Path(srv[i + 1].rsplit(":", 1)[0]).mkdir(parents=True, exist_ok=True)
     rtr = router_argv(a.engine, lay, port, rd)
     url = f"http://127.0.0.1:{p['router'] if rtr else p['server']}"
     cli = client_argv(url, ckpt, a.concurrency, duration, rd / "aiperf", a.smoke, entries, a.seed, a.warmup_per_lane)
+    return Plan(lay, port, duration, entries, ssd, srv, rtr, url, cli)
+
+
+def preflight(a, pl: Plan) -> None:
+    """What a run needs before it starts anything: checked before the run directory exists, so a failed check leaves
+    nothing behind."""
+    if a.engine == "vllm" and pl.lay.dp > 1 and not ROUTER.exists():
+        raise SystemExit(f"{ROUTER} missing: STEPS=router env/make_env.sh")
+    if not AGENTX.exists():
+        raise SystemExit(f"{AGENTX} missing: STEPS=agentx env/make_env.sh")
+    if a.ssd_gb and not Path(a.ssd_dir).is_dir():
+        raise SystemExit(f"--ssd-dir {a.ssd_dir}: not a directory")
+    p = ports(pl.port)
+    for q in {p["server"], p["dp_rpc"], p["router"]}:
+        if subprocess.run(["ss", "-ltnH", f"sport = :{q}"], capture_output=True, text=True).stdout.strip():
+            raise SystemExit(f"port {q} in use: not started (--port picks another base)")
+
+
+def run(a) -> Path:
+    from ssengine.config import CHECKPOINT
+    lay = parse_layout(a.layout)
+    ckpt = a.checkpoint or str(CHECKPOINT)
+    job = os.environ.get("SLURM_JOB_ID", "local")
+    name = run_name(a, lay)
+    rd = Path(a.out).resolve() / name
+    pl = plan(a, rd, name, ckpt)
+    preflight(a, pl)
+    rd.mkdir(parents=True, exist_ok=False)
+    p = ports(pl.port)
+    duration, entries, ssd, srv, rtr, url, cli = pl.duration, pl.entries, pl.ssd, pl.srv, pl.rtr, pl.url, pl.cli
+    if ssd and a.engine != "ssengine":
+        Path(ssd).mkdir(parents=True)
+    for i, x in enumerate(srv[:-1]):
+        if x == "-v" and srv[i + 1].endswith(":/root/.cache"):
+            Path(srv[i + 1].rsplit(":", 1)[0]).mkdir(parents=True, exist_ok=True)
     meta = {"engine": a.engine, "layout": str(lay), "gpus": lay.gpus, "concurrency": a.concurrency,
             "duration_s": duration, "entries": entries, "smoke": a.smoke, "dataset": DATASET, "seed": a.seed,
             "checkpoint": ckpt, "job": job, "host": os.uname().nodename, "url": url,
             "server_argv": srv, "router_argv": rtr, "client_argv": cli, "versions": _versions(a.engine, a.vllm_image, a.ssengine_image),
             "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES")}
     (rd / "run.json").write_text(json.dumps(meta, indent=1) + "\n")
-    if a.engine == "vllm" and lay.dp > 1 and not ROUTER.exists():
-        raise SystemExit(f"{ROUTER} missing: uv venv --python 3.12 {ROUTER.parents[1]} && "
-                         f"uv pip install --python {ROUTER.parents[1]}/bin/python vllm-router==0.1.15")
-    if not AGENTX.exists():
-        raise SystemExit(f"{AGENTX} missing: STEPS=agentx env/make_env.sh")
-    for q in {p["server"], p["dp_rpc"], p["router"]}:
-        if subprocess.run(["ss", "-ltnH", f"sport = :{q}"], capture_output=True, text=True).stdout.strip():
-            raise SystemExit(f"port {q} in use: not started")
     print("server:", shlex.join(srv), flush=True)
     container = srv[srv.index("--name") + 1] if srv[0] == "docker" else None
     rtr_container = rtr[rtr.index("--name") + 1] if rtr and rtr[0] == "docker" else None
@@ -483,10 +522,21 @@ def _load(d: Path) -> dict:
     return json.loads((Path(d) / "summary.json").read_text()) if (Path(d) / "summary.json").exists() else summarize(d)
 
 
+def _run_dirs(dirs: list[Path]) -> list[Path]:
+    """The run directories among `dirs` (those with a run.json), so `runs/agentx/*/` may also match other directories
+    (runs/agentx/slurm/ of the job logs); the others are named on stderr and skipped."""
+    keep = [Path(d) for d in dirs if (Path(d) / "run.json").exists()]
+    for d in dirs:
+        if not (Path(d) / "run.json").exists():
+            print(f"skipped {d}: no run.json (not a run directory)", file=sys.stderr)
+    return keep
+
+
 def compare(dirs: list[Path]) -> str:
     """Runs side by side: one table per (concurrency, warm-up, smoke) group, engines as rows, best req/s first.
     Only runs measured the same way are compared; failed runs are listed under their group."""
     groups: dict[tuple, list[dict]] = {}
+    dirs = _run_dirs(dirs)
     for d in dirs:
         s = _load(d)
         if "error" in s:
@@ -525,7 +575,7 @@ def compare(dirs: list[Path]) -> str:
 def table(dirs: list[Path]) -> str:
     rows = ["| run | engine | layout | GPUs | N | req/s | TTFT p50 / p90 / p99 (s) | prompt tok/s/GPU | computed tok/s/GPU "
             "| cache hit | failed |", "|" + "---|" * 11]
-    for d in dirs:
+    for d in _run_dirs(dirs):
         s = _load(d)
         if "error" in s:
             rows.append(f"| {s['run']} | {s['error']} |")
@@ -574,21 +624,13 @@ def main(argv: list[str] | None = None) -> None:
     a = ap.parse_args(argv)
     if a.cmd == "run":
         run(a)
-    elif a.cmd == "argv":
-        lay = parse_layout(a.layout)
-        port = a.port or default_port()
-        rd = Path(a.out) / "<run>"
-        ckpt = a.checkpoint or "<checkpoint>"
-        rtr = router_argv(a.engine, lay, port, rd)
-        url = f"http://127.0.0.1:{ports(port)['router' if rtr else 'server']}"
-        ssd = a.ssd_dir if a.ssd_gb else None
-        print("server:", shlex.join(server_argv(a.engine, lay, ckpt, port, rd, a.python,
-                                                [*host_kv_args(a.engine, lay, a.host_kv_gb, a.ssd_gb, ssd), *a.server_arg],
-                                                a.vllm_image, a.ssengine_image, (ssd,) if ssd else ())))
-        if rtr:
-            print("router:", shlex.join(rtr))
-        print("client:", shlex.join(client_argv(url, ckpt, a.concurrency, a.duration or DURATION_S, rd / "aiperf",
-                                                 a.smoke, a.entries, a.seed, a.warmup_per_lane)))
+    elif a.cmd == "argv":   # the commands `run` would execute (run dir and checkpoint as placeholders)
+        name = a.run_name or "<run>"
+        pl = plan(a, Path(a.out) / name, name, a.checkpoint or "<checkpoint>")
+        print("server:", shlex.join(pl.srv))
+        if pl.rtr:
+            print("router:", shlex.join(pl.rtr))
+        print("client:", shlex.join(pl.cli))
     elif a.cmd == "summarize":
         print(json.dumps(summarize(a.run_dir), indent=1))
     elif a.cmd == "compare":

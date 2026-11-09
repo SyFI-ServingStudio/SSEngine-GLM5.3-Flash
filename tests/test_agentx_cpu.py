@@ -135,3 +135,55 @@ def test_ssd_tier_args():
         assert _host_kv_gb(meta) == 100 and _ssd_gb(meta) == ssd
         if a[0] == "docker":
             assert "/nvme/r:/nvme/r" in a
+
+
+def _args(*argv):
+    import argparse
+    from benchmarks import agentx
+    seen = {}
+
+    def grab(a):
+        seen["a"] = a
+    real = agentx.run
+    agentx.run = grab
+    try:
+        agentx.main(["run", *argv])
+    finally:
+        agentx.run = real
+    return seen["a"]
+
+
+def test_plan_smoke_and_ssd_dir(tmp_path):
+    """`argv` and `run` build one Plan: smoke's short duration and 8 traces, vLLM/SGLang's per-run SSD directory."""
+    from benchmarks.agentx import plan
+    a = _args("--engine", "sglang", "--layout", "pp4", "--concurrency", "8", "--smoke", "--host-kv-gb", "100",
+              "--ssd-gb", "128", "--ssd-dir", str(tmp_path))
+    pl = plan(a, tmp_path / "r", "r", "/ck")
+    assert flag(pl.cli, "--benchmark-duration") == "300" and flag(pl.cli, "--num-dataset-entries") == "8"
+    assert pl.ssd == str(tmp_path / "r") and f'"file_storage_path": "{tmp_path / "r"}"' in " ".join(pl.srv)
+    s = _args("--engine", "ssengine", "--layout", "pp4", "--concurrency", "8", "--host-kv-gb", "100",
+              "--ssd-gb", "128", "--ssd-dir", str(tmp_path))
+    assert plan(s, tmp_path / "r", "r", "/ck").ssd == str(tmp_path)   # SSEngine: the shard set itself
+
+
+def test_argv_prints_the_plan(capsys):
+    from benchmarks.agentx import main
+    main(["argv", "--engine", "vllm", "--layout", "dp4-ep", "--concurrency", "8", "--smoke"])
+    out = capsys.readouterr().out
+    assert "router:" in out and "--benchmark-duration 300" in out and "--num-dataset-entries 8" in out
+
+
+def test_run_name_outside_slurm(monkeypatch):
+    from benchmarks.agentx import run_name
+    monkeypatch.delenv("SLURM_JOB_ID", raising=False)
+    a = _args("--engine", "vllm", "--layout", "tp4", "--concurrency", "8")
+    assert run_name(a, parse_layout("tp4")).startswith("vllm_tp4_c8_local-")
+    monkeypatch.setenv("SLURM_JOB_ID", "123")
+    assert run_name(a, parse_layout("tp4")) == "vllm_tp4_c8_123"
+
+
+def test_compare_skips_non_run_dirs(tmp_path, capsys):
+    from benchmarks.agentx import compare, table
+    (tmp_path / "slurm").mkdir()
+    assert compare([tmp_path / "slurm"]) == "" and table([tmp_path / "slurm"]).count("\n") == 1
+    assert "skipped" in capsys.readouterr().err
